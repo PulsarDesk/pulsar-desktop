@@ -70,6 +70,11 @@ pub fn install(dir: &Path, desktop_shortcut: bool, tx: &Sender<Msg>) {
 		for i in 0..total {
 			let mut entry = zip.by_index(i).map_err(|e| format!("paket okunamadı: {e}"))?;
 			let Some(rel) = entry.enclosed_name() else { continue };
+			// zip 9: the stored name is a fallible decode; only used for progress/errors here.
+			let name = entry
+				.name()
+				.map(|n| n.into_owned())
+				.unwrap_or_else(|_| rel.display().to_string());
 			let out = dir.join(rel);
 			if entry.is_dir() {
 				std::fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
@@ -80,10 +85,10 @@ pub fn install(dir: &Path, desktop_shortcut: bool, tx: &Sender<Msg>) {
 				let mut buf = Vec::with_capacity(entry.size() as usize);
 				entry
 					.read_to_end(&mut buf)
-					.map_err(|e| format!("{}: {e}", entry.name()))?;
+					.map_err(|e| format!("{name}: {e}"))?;
 				std::fs::write(&out, &buf).map_err(|e| format!("{}: {e}", out.display()))?;
 			}
-			let _ = tx.send(Msg::Entry(i, entry.name().to_string()));
+			let _ = tx.send(Msg::Entry(i, name));
 		}
 
 		let _ = tx.send(Msg::Finishing);

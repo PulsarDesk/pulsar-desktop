@@ -129,7 +129,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # Layout-aware keyboard forwarding (WYSIWYG): resolve a grabbed evdev keycode → the Unicode
 # char the user's OWN active layout (e.g. Turkish-Q) produces, via libxkbcommon, so the host
 # types the exact char regardless of ITS layout. Links the system libxkbcommon (libxkbcommon-dev).
-xkbcommon = "0.7"
+xkbcommon = "0.9"
 # Single-surface renderer: libmpv RENDER API (client API v1 → links the system libmpv.so.1,
 # NOT libmpv2-sys) draws rkmpp-decoded frames into a GtkGLArea; the webview composites on
 # top. GL fns are resolved at runtime from libepoxy via the existing `libloading` dep.

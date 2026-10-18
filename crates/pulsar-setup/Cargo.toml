@@ -27,7 +27,7 @@ path = "src/main.rs"
 [dependencies]
 # Same eframe the render overlay uses (0.29) → shared workspace build cache.
 eframe = { version = "0.29", default-features = false, features = ["glow", "default_fonts"] }
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
