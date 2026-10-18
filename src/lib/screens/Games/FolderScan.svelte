@@ -1,9 +1,9 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
-	import Icon from '$lib/Icon.svelte';
-	import { api, type ScannedApp } from '$lib/api';
-	import { gameStore, addScanned, addFolder, removeFolder, saveGames } from '$lib/games.svelte';
-	import { t } from '$lib/i18n.svelte';
+	import Icon from '#lib/Icon.svelte';
+	import { api, type ScannedApp } from '#lib/api.js';
+	import { gameStore, addScanned, addFolder, removeFolder, saveGames } from '#lib/games.svelte.js';
+	import { t } from '#lib/i18n.svelte.js';
 
 	let newFolder = $state('');
 	let scanning = $state(false);

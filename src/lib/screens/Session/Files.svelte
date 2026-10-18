@@ -1,8 +1,8 @@
 <script lang="ts">
-	import Icon from '$lib/Icon.svelte';
-	import { t } from '$lib/i18n.svelte';
-	import { api, onFsEntries, onFileRecv, onFileBegin, type FsEntry } from '$lib/api';
-	import { listenScope } from '$lib/api.events';
+	import Icon from '#lib/Icon.svelte';
+	import { t } from '#lib/i18n.svelte.js';
+	import { api, onFsEntries, onFileRecv, onFileBegin, type FsEntry } from '#lib/api.js';
+	import { listenScope } from '#lib/api.events.js';
 
 	// Two-pane (AnyDesk-style) file manager inside the session menu: LEFT = this
 	// device (local_ls), RIGHT = the host (fsList over the session; replies arrive

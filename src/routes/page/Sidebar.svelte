@@ -1,8 +1,8 @@
 <script lang="ts">
-	import PulsarMark from '$lib/PulsarMark.svelte';
-	import Icon from '$lib/Icon.svelte';
-	import { api } from '$lib/api';
-	import { t } from '$lib/i18n.svelte';
+	import PulsarMark from '#lib/PulsarMark.svelte';
+	import Icon from '#lib/Icon.svelte';
+	import { api } from '#lib/api.js';
+	import { t } from '#lib/i18n.svelte.js';
 
 	type View = 'home' | 'devices' | 'gaming' | 'settings';
 	type Props = {

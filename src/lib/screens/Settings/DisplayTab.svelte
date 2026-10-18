@@ -1,8 +1,8 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import Icon from '$lib/Icon.svelte';
-	import { api } from '$lib/api';
-	import type { Config } from '$lib/types';
+	import Icon from '#lib/Icon.svelte';
+	import { api } from '#lib/api.js';
+	import type { Config } from '#lib/types.js';
 	import {
 		ui,
 		saveUi,
@@ -10,10 +10,10 @@
 		encodersForPlatform,
 		type VideoCodec,
 		type Encoder
-	} from '$lib/settings.svelte';
-	import { caps, decodeAvailable, encoderAvailable } from '$lib/caps.svelte';
-	import { gameStore, saveGames } from '$lib/games.svelte';
-	import { t } from '$lib/i18n.svelte';
+	} from '#lib/settings.svelte.js';
+	import { caps, decodeAvailable, encoderAvailable } from '#lib/caps.svelte.js';
+	import { gameStore, saveGames } from '#lib/games.svelte.js';
+	import { t } from '#lib/i18n.svelte.js';
 
 	let {
 		config = $bindable(),

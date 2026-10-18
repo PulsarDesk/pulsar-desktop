@@ -11,9 +11,9 @@
 	import { onMount, onDestroy } from 'svelte';
 	import GamingHome from './GamingHome.svelte';
 	import GamesScreen from './GamesScreen.svelte';
-	import { GamepadNav } from '$lib/gamepadNav.svelte';
-	import { api, onGamepadNav, type GameInfo } from '$lib/api';
-	import { t } from '$lib/i18n.svelte';
+	import { GamepadNav } from '#lib/gamepadNav.svelte.js';
+	import { api, onGamepadNav, type GameInfo } from '#lib/api.js';
+	import { t } from '#lib/i18n.svelte.js';
 
 	type Target = { name: string; id: string };
 	type Props = {

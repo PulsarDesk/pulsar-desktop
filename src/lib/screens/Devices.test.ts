@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/svelte';
 import Devices from './Devices.svelte';
-import { _reset } from '$lib/peers.svelte';
-import { modalCount } from '$lib/overlayModals.svelte';
+import { _reset } from '#lib/peers.svelte.js';
+import { modalCount } from '#lib/overlayModals.svelte.js';
 
 describe('Devices screen', () => {
 	beforeEach(() => _reset());

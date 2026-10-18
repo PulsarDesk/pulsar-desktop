@@ -4,8 +4,8 @@
 // platform's families, DISABLE the platform-native-but-unavailable ones, and keep
 // software always available as the universal fallback.
 
-import { api, onLocalCaps } from '$lib/api';
-import type { LocalCaps } from '$lib/api.types';
+import { api, onLocalCaps } from '#lib/api.js';
+import type { LocalCaps } from '#lib/api.types.js';
 
 export const caps = $state<{ v: LocalCaps | null }>({ v: null });
 

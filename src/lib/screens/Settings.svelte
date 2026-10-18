@@ -1,11 +1,11 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import Icon from '$lib/Icon.svelte';
-	import { api } from '$lib/api';
-	import type { Config, NetworkMode } from '$lib/types';
-	import { t } from '$lib/i18n.svelte';
-	import { saveTick, configTick } from '$lib/settings.svelte';
-	import { navContainer } from '$lib/gamepadNav.svelte';
+	import Icon from '#lib/Icon.svelte';
+	import { api } from '#lib/api.js';
+	import type { Config, NetworkMode } from '#lib/types.js';
+	import { t } from '#lib/i18n.svelte.js';
+	import { saveTick, configTick } from '#lib/settings.svelte.js';
+	import { navContainer } from '#lib/gamepadNav.svelte.js';
 	import DisplayTab from './Settings/DisplayTab.svelte';
 	import NetworkTab from './Settings/NetworkTab.svelte';
 	import SecurityTab from './Settings/SecurityTab.svelte';

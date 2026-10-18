@@ -3,9 +3,9 @@
 	// The old floating chat FAB + panel that lived here is GONE — host↔client chat
 	// moved to the connections window's per-peer message modal (Connections.svelte);
 	// an inbound message now opens that window instead of popping a panel here.
-	import Icon from '$lib/Icon.svelte';
-	import { copyText, onClipboardIn, onFileRecv } from '$lib/api';
-	import { t } from '$lib/i18n.svelte';
+	import Icon from '#lib/Icon.svelte';
+	import { copyText, onClipboardIn, onFileRecv } from '#lib/api.js';
+	import { t } from '#lib/i18n.svelte.js';
 
 	type Toast = { id: number; kind: 'clip' | 'file' | 'fileFail'; peer: string; text: string; copied?: boolean };
 	let toasts = $state<Toast[]>([]);

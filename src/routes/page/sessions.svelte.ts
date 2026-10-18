@@ -3,11 +3,11 @@
 // the connect/disconnect lifecycle. Kept out of the route component so the shell
 // markup stays small; behavior is identical to the inline version it replaced.
 
-import { api, isTauri, onPlayEnded, onPlayReady, setFullscreen } from '$lib/api';
-import { recordConnection } from '$lib/peers.svelte';
-import { ui, saveUi } from '$lib/settings.svelte';
-import { t } from '$lib/i18n.svelte';
-import type { Game } from '$lib/games.svelte';
+import { api, isTauri, onPlayEnded, onPlayReady, setFullscreen } from '#lib/api.js';
+import { recordConnection } from '#lib/peers.svelte.js';
+import { ui, saveUi } from '#lib/settings.svelte.js';
+import { t } from '#lib/i18n.svelte.js';
+import type { Game } from '#lib/games.svelte.js';
 
 export type Target = { name: string; id: string };
 export type Session = {
@@ -33,7 +33,7 @@ export type Session = {
 	hostCodecs?: string[];
 	hostEncoders?: string[];
 	/** Host's streamable monitors (primary first); the session menu's screen picker. */
-	hostDisplays?: import('$lib/api.types').HostDisplay[];
+	hostDisplays?: import('#lib/api.types.js').HostDisplay[];
 	/** The host monitor this session STARTED on (0 = primary). Read by a sibling same-host
 	 * pane so two panes to the same host claim DIFFERENT monitors (the host's DXGI
 	 * Desktop-Duplication is single-owner per monitor). Undefined = host default (0). The
@@ -246,7 +246,7 @@ export class SessionManager {
 
 	/** The host monitors known for host `id` — read from ANY live session to that host
 	 * (they all share the same host caps). Empty until the first pane to this host is up. */
-	hostDisplaysFor(id: string): import('$lib/api.types').HostDisplay[] {
+	hostDisplaysFor(id: string): import('#lib/api.types.js').HostDisplay[] {
 		for (const s of this.#liveSessionsForHost(id)) {
 			if (s.hostDisplays && s.hostDisplays.length) return s.hostDisplays;
 		}

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/svelte';
 import Home from './Home.svelte';
-import { recordConnection, _reset } from '$lib/peers.svelte';
+import { recordConnection, _reset } from '#lib/peers.svelte.js';
 
 const noop = () => {};
 

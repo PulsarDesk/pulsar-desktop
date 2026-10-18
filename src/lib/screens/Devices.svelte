@@ -1,10 +1,10 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import Icon from '$lib/Icon.svelte';
-	import Modal from '$lib/Modal.svelte';
-	import { savedPeers, addPeer, updatePeer, removePeer, toggleFav, fmtPeerId, normalizeId } from '$lib/peers.svelte';
-	import { api, type LanDevice } from '$lib/api';
-	import { t } from '$lib/i18n.svelte';
+	import Icon from '#lib/Icon.svelte';
+	import Modal from '#lib/Modal.svelte';
+	import { savedPeers, addPeer, updatePeer, removePeer, toggleFav, fmtPeerId, normalizeId } from '#lib/peers.svelte.js';
+	import { api, type LanDevice } from '#lib/api.js';
+	import { t } from '#lib/i18n.svelte.js';
 
 	type Target = { name: string; id: string };
 	type Props = { onConnect: (t: Target, m?: 'remote' | 'game') => void };

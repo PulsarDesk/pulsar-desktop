@@ -1,10 +1,10 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import Icon from '$lib/Icon.svelte';
-	import { historyPeers, removeFromHistory, fmtPeerId, normalizeId, addPeer, isSaved } from '$lib/peers.svelte';
-	import { api, onNodePort } from '$lib/api';
-	import { t } from '$lib/i18n.svelte';
-	import { canConnectTarget, fmtTarget } from '$lib/connectTarget';
+	import Icon from '#lib/Icon.svelte';
+	import { historyPeers, removeFromHistory, fmtPeerId, normalizeId, addPeer, isSaved } from '#lib/peers.svelte.js';
+	import { api, onNodePort } from '#lib/api.js';
+	import { t } from '#lib/i18n.svelte.js';
+	import { canConnectTarget, fmtTarget } from '#lib/connectTarget.js';
 	import SelfCard from './Home/SelfCard.svelte';
 	import LanDevices from './Home/LanDevices.svelte';
 

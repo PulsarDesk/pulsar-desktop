@@ -1,6 +1,6 @@
 <script lang="ts">
-	import Icon from '$lib/Icon.svelte';
-	import { t } from '$lib/i18n.svelte';
+	import Icon from '#lib/Icon.svelte';
+	import { t } from '#lib/i18n.svelte.js';
 
 	// The non-canvas video status overlays (native-active note, error/loading/stall, and the
 	// click-to-control hint) drawn over the session canvas. The canvas itself stays in the

@@ -27,15 +27,15 @@
 		onChatMsg,
 		onPlayDims,
 		onPlayEnded
-	} from '$lib/api';
-	import { listenScope } from '$lib/api.events';
-	import { setPeerIdentity } from '$lib/peers.svelte';
+	} from '#lib/api.js';
+	import { listenScope } from '#lib/api.events.js';
+	import { setPeerIdentity } from '#lib/peers.svelte.js';
 	import { SessionInput } from './Session/input.svelte';
 	import { SessionControls } from './Session/controls.svelte';
 	import { SessionSideChannels } from './Session/sidechannels.svelte';
 	import { SessionUi } from './Session/ui.svelte';
-	import { ui, saveUi, applyCtrlSwap, type Encoder, type VideoCodec } from '$lib/settings.svelte';
-	import { t } from '$lib/i18n.svelte';
+	import { ui, saveUi, applyCtrlSwap, type Encoder, type VideoCodec } from '#lib/settings.svelte.js';
+	import { t } from '#lib/i18n.svelte.js';
 
 	type Target = { name: string; id: string };
 	type Props = {
@@ -52,7 +52,7 @@
 		hostCodecs?: string[];
 		hostEncoders?: string[];
 		/** Host's streamable monitors (primary first); the session menu's screen picker. */
-		hostDisplays?: import('$lib/api.types').HostDisplay[];
+		hostDisplays?: import('#lib/api.types.js').HostDisplay[];
 		fullscreen?: boolean;
 		/** True while this is the ACTIVE tab. Inactive session tabs stay mounted (just
 		 * CSS-hidden), so the GLOBAL keyboard/mouse capture and the payload-less combo

@@ -8,8 +8,8 @@ let fsEntriesCb:
 	| ((e: { id: number; path: string; entries: { name: string; dir: boolean; size: number }[] }) => void)
 	| undefined;
 
-vi.mock('$lib/api', async (importOriginal) => {
-	const orig = await importOriginal<typeof import('$lib/api')>();
+vi.mock('#lib/api.js', async (importOriginal) => {
+	const orig = await importOriginal<typeof import('#lib/api.js')>();
 	return {
 		...orig,
 		api: {
@@ -35,7 +35,7 @@ vi.mock('$lib/api', async (importOriginal) => {
 });
 
 import Files from './Files.svelte';
-import { api } from '$lib/api';
+import { api } from '#lib/api.js';
 
 const props = (playId: number) => ({ props: { playId, onBack: () => {} } });
 

@@ -5,10 +5,10 @@
 	// Write-only v1: it SETS the assignment (the backend map persists until pane teardown); it does
 	// not read back the current owner, so the selects reflect what was chosen in THIS modal session.
 	import { onMount } from 'svelte';
-	import { api } from '$lib/api';
-	import type { ControllerInfo } from '$lib/types';
-	import { t } from '$lib/i18n.svelte';
-	import { closeOnEscape } from '$lib/escapeStack';
+	import { api } from '#lib/api.js';
+	import type { ControllerInfo } from '#lib/types.js';
+	import { t } from '#lib/i18n.svelte.js';
+	import { closeOnEscape } from '#lib/escapeStack.js';
 
 	type Pane = { index: number; playId: number };
 	let { panes, onClose }: { panes: Pane[]; onClose: () => void } = $props();

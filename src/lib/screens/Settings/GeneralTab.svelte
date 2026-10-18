@@ -1,9 +1,9 @@
 <script lang="ts">
-	import Icon from '$lib/Icon.svelte';
-	import type { Config } from '$lib/types';
-	import { ui, saveUi } from '$lib/settings.svelte';
-	import { t } from '$lib/i18n.svelte';
-	import { api, isTauri } from '$lib/api';
+	import Icon from '#lib/Icon.svelte';
+	import type { Config } from '#lib/types.js';
+	import { ui, saveUi } from '#lib/settings.svelte.js';
+	import { t } from '#lib/i18n.svelte.js';
+	import { api, isTauri } from '#lib/api.js';
 	import pkg from '../../../../package.json';
 
 	let {

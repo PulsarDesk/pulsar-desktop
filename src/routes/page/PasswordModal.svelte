@@ -1,7 +1,7 @@
 <script lang="ts">
-	import Icon from '$lib/Icon.svelte';
-	import { t } from '$lib/i18n.svelte';
-	import { closeOnEscape } from '$lib/escapeStack';
+	import Icon from '#lib/Icon.svelte';
+	import { t } from '#lib/i18n.svelte.js';
+	import { closeOnEscape } from '#lib/escapeStack.js';
 
 	type Props = {
 		pwInput: string;

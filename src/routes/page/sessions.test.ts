@@ -5,7 +5,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // Stub the event registrations (onPlayReady / onPlayEnded) and the api surface
 // before importing SessionManager so the constructor doesn't blow up in Node.
-vi.mock('$lib/api', async () => {
+vi.mock('#lib/api.js', async () => {
 	const { vi: _vi } = await import('vitest');
 	// 3-monitor host (mirrors the real PC test host) so the same-host free-display search
 	// has monitors to assign. Each call returns a distinct play id so concurrent same-host
@@ -46,15 +46,15 @@ vi.mock('$lib/api', async () => {
 	};
 });
 
-// Stub recordConnection imported inside sessions.svelte.ts via $lib/peers.svelte
-vi.mock('$lib/peers.svelte', () => ({ recordConnection: vi.fn() }));
+// Stub recordConnection imported inside sessions.svelte.ts via #lib/peers.svelte.js
+vi.mock('#lib/peers.svelte.js', () => ({ recordConnection: vi.fn() }));
 
 // Stub i18n (t) to avoid loading JSON files in Node
-vi.mock('$lib/i18n.svelte', () => ({ t: (k: string) => k }));
+vi.mock('#lib/i18n.svelte.js', () => ({ t: (k: string) => k }));
 
-import { api } from '$lib/api';
+import { api } from '#lib/api.js';
 import { SessionManager } from './sessions.svelte';
-import { ui } from '$lib/settings.svelte';
+import { ui } from '#lib/settings.svelte.js';
 
 function makeManager(mode: 'remote' | 'game' = 'remote') {
 	return new SessionManager({ getMode: () => mode, onAuthDone: () => {} });

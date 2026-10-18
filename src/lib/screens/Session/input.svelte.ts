@@ -7,8 +7,8 @@
 // Instantiated once at component init so its $effect() scopes to + tears down with the
 // component (canvas/playId are read lazily through getters).
 
-import { api } from '$lib/api';
-import { evdevCode } from '$lib/keymap';
+import { api } from '#lib/api.js';
+import { evdevCode } from '#lib/keymap.js';
 
 // Confine the OS cursor to the app window while controlling (best-effort; no-op where
 // unsupported). Rust command, NOT window.setCursorGrab(): tao's Linux set_cursor_grab

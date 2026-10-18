@@ -5,14 +5,14 @@
 	// Fully pad-navigable: the modal root carries `data-navmodal` so GamepadNav confines
 	// focus to it, and it pushes its close handler so B / Esc dismiss the pop-up.
 	import { onMount, onDestroy } from 'svelte';
-	import Icon from '$lib/Icon.svelte';
+	import Icon from '#lib/Icon.svelte';
 	import Numpad from './Numpad.svelte';
-	import { t } from '$lib/i18n.svelte';
-	import { canConnectTarget, fmtTarget } from '$lib/connectTarget';
-	import { portal } from '$lib/portal';
-	import { openModal, closeModal } from '$lib/overlayModals.svelte';
-	import { closeOnEscape } from '$lib/escapeStack';
-	import type { GamepadNav } from '$lib/gamepadNav.svelte';
+	import { t } from '#lib/i18n.svelte.js';
+	import { canConnectTarget, fmtTarget } from '#lib/connectTarget.js';
+	import { portal } from '#lib/portal.js';
+	import { openModal, closeModal } from '#lib/overlayModals.svelte.js';
+	import { closeOnEscape } from '#lib/escapeStack.js';
+	import type { GamepadNav } from '#lib/gamepadNav.svelte.js';
 
 	type Props = {
 		nav: GamepadNav;

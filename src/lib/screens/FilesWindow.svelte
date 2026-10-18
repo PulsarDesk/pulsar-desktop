@@ -3,9 +3,9 @@
 	// window with `window.__FILES__={id,peer}` set). One window per remote-play
 	// session — the header names the peer so multiple sessions stay tellable apart;
 	// Rust force-closes it when that session ends (play/hold.rs).
-	import Icon from '$lib/Icon.svelte';
+	import Icon from '#lib/Icon.svelte';
 	import Files from './Session/Files.svelte';
-	import { t } from '$lib/i18n.svelte';
+	import { t } from '#lib/i18n.svelte.js';
 
 	type Props = { playId: number; peer: string };
 	let { playId, peer }: Props = $props();

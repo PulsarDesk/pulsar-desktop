@@ -15,18 +15,18 @@
 		"fetch:drivers": "node scripts/fetch-drivers.mjs"
 	},
 	"devDependencies": {
-		"@sveltejs/adapter-static": "^3.0.10",
-		"@sveltejs/kit": "^2.70.3",
+		"@sveltejs/adapter-static": "^4.0.0",
+		"@sveltejs/kit": "^3.1.0",
 		"@sveltejs/vite-plugin-svelte": "^7.3.1",
 		"@tauri-apps/cli": "^2.12.3",
-		"@testing-library/jest-dom": "^6.10.0",
+		"@testing-library/jest-dom": "^7.0.1",
 		"@testing-library/svelte": "^5.4.2",
-		"jsdom": "^29.1.1",
+		"jsdom": "^30.1.3",
 		"svelte": "^5.57.2",
 		"svelte-check": "^4.7.7",
 		"typescript": "^6.0.3",
 		"vite": "^8.3.4",
-		"vitest": "^4.1.12"
+		"vitest": "^5.0.5"
 	},
 	"dependencies": {
 		"@tauri-apps/api": "^2.12.4",
@@ -34,10 +34,11 @@
 		"@tauri-apps/plugin-updater": "^2.14.0"
 	},
 	"overrides": {
-		"undici": "^7.28.0",
-		"esbuild": "^0.28.1",
-		"@sveltejs/kit": {
-			"cookie": "^0.7.2"
-		}
+		"undici": "^8.12.1",
+		"esbuild": "^0.28.1"
+	},
+	"imports": {
+		"#lib": "./src/lib/index.js",
+		"#lib/*": "./src/lib/*"
 	}
 }

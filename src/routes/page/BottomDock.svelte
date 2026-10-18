@@ -3,13 +3,13 @@
 	// personality is a pure client (no host), so the dock carries only Bağlan + Ayarlar
 	// (no Devices / Connections), an identity+status chip, and a live controller count.
 	import { onMount, onDestroy, tick } from 'svelte';
-	import Icon from '$lib/Icon.svelte';
-	import Modal from '$lib/Modal.svelte';
-	import Controllers from '$lib/Controllers.svelte';
-	import { api } from '$lib/api';
-	import { t } from '$lib/i18n.svelte';
+	import Icon from '#lib/Icon.svelte';
+	import Modal from '#lib/Modal.svelte';
+	import Controllers from '#lib/Controllers.svelte';
+	import { api } from '#lib/api.js';
+	import { t } from '#lib/i18n.svelte.js';
 	import type { Action } from 'svelte/action';
-	import type { GamepadNav } from '$lib/gamepadNav.svelte';
+	import type { GamepadNav } from '#lib/gamepadNav.svelte.js';
 
 	type GView = 'home' | 'settings' | 'games';
 	type Props = {

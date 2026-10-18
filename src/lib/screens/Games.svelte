@@ -1,10 +1,10 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import Icon from '$lib/Icon.svelte';
-	import Controllers from '$lib/Controllers.svelte';
-	import GameForm from '$lib/screens/Games/GameForm.svelte';
-	import FolderScan from '$lib/screens/Games/FolderScan.svelte';
-	import { api } from '$lib/api';
+	import Icon from '#lib/Icon.svelte';
+	import Controllers from '#lib/Controllers.svelte';
+	import GameForm from '#lib/screens/Games/GameForm.svelte';
+	import FolderScan from '#lib/screens/Games/FolderScan.svelte';
+	import { api } from '#lib/api.js';
 	import {
 		gameStore,
 		removeGame,
@@ -12,8 +12,8 @@
 		ensureSteamDefault,
 		type Game,
 		type GameType
-	} from '$lib/games.svelte';
-	import { t } from '$lib/i18n.svelte';
+	} from '#lib/games.svelte.js';
+	import { t } from '#lib/i18n.svelte.js';
 
 	type Props = { onStream: (game: Game) => void };
 	let { onStream }: Props = $props();

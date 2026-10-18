@@ -7,7 +7,7 @@
 // component. Cross-cutting actions (release control, end the tab, toggle fullscreen, reset the
 // menu's active panel) are passed in as callbacks; `playId` is a getter.
 
-import { api } from '$lib/api';
+import { api } from '#lib/api.js';
 
 type Inputs = {
 	playId: () => number;

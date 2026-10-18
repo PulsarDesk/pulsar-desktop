@@ -2,9 +2,9 @@
 	// On-screen numeric / IP keypad for entering a host target with a controller in
 	// gaming mode. Edits the bound target string through the shared `fmtTarget` so the
 	// value stays canonical (relay IDs grouped in threes; IP/IP:port kept literal).
-	import { fmtTarget } from '$lib/connectTarget';
-	import Icon from '$lib/Icon.svelte';
-	import { t } from '$lib/i18n.svelte';
+	import { fmtTarget } from '#lib/connectTarget.js';
+	import Icon from '#lib/Icon.svelte';
+	import { t } from '#lib/i18n.svelte.js';
 	import type { Action } from 'svelte/action';
 
 	type Props = {

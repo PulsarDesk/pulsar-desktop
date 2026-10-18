@@ -5,13 +5,13 @@
 	// dock in place of the left sidebar. No host UI (devices / connections) — gaming mode
 	// is a pure client and this device refuses inbound while it is on.
 	import { onMount, onDestroy } from 'svelte';
-	import GamingHome from '$lib/screens/Gaming/GamingHome.svelte';
-	import GamesScreen from '$lib/screens/Gaming/GamesScreen.svelte';
-	import Settings from '$lib/screens/Settings.svelte';
+	import GamingHome from '#lib/screens/Gaming/GamingHome.svelte';
+	import GamesScreen from '#lib/screens/Gaming/GamesScreen.svelte';
+	import Settings from '#lib/screens/Settings.svelte';
 	import BottomDock from './BottomDock.svelte';
-	import { gamingNav } from '$lib/gamepadNav.svelte';
-	import { api, onGamepadNav, type GameInfo } from '$lib/api';
-	import { t } from '$lib/i18n.svelte';
+	import { gamingNav } from '#lib/gamepadNav.svelte.js';
+	import { api, onGamepadNav, type GameInfo } from '#lib/api.js';
+	import { t } from '#lib/i18n.svelte.js';
 	import type { Target } from './sessions.svelte';
 
 	type Props = {

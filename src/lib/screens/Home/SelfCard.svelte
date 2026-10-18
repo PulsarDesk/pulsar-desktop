@@ -1,8 +1,8 @@
 <script lang="ts">
-	import Icon from '$lib/Icon.svelte';
-	import { api, copyText } from '$lib/api';
-	import { fmtPeerId } from '$lib/peers.svelte';
-	import { t } from '$lib/i18n.svelte';
+	import Icon from '#lib/Icon.svelte';
+	import { api, copyText } from '#lib/api.js';
+	import { fmtPeerId } from '#lib/peers.svelte.js';
+	import { t } from '#lib/i18n.svelte.js';
 
 	type Props = {
 		selfId: string;

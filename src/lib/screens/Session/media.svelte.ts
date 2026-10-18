@@ -11,16 +11,16 @@
 // Video is rendered NATIVELY in-app on every platform now (pulsar-render: rkmpp on Linux,
 // Media Foundation+D3D11 on Windows; mpv/VideoToolbox on macOS) — the webview WebCodecs
 // video path was removed (too slow). Only audio still decodes in the webview (WebAudio).
-import { startOpusAudio } from '$lib/opus-audio';
-import { onPlayDecoder, onPlayRtt, onPlayStats, onPlayVStats } from '$lib/api';
-import { t } from '$lib/i18n.svelte';
+import { startOpusAudio } from '#lib/opus-audio.js';
+import { onPlayDecoder, onPlayRtt, onPlayStats, onPlayVStats } from '#lib/api.js';
+import { t } from '#lib/i18n.svelte.js';
 
 // First-frame watchdog: seconds without ANY video after the stream was requested before
 // the session says so (instead of a silent black canvas). Generous: a cold HW encoder +
 // the host's own encoder fallback chain (4 s per dead candidate) can legitimately take
 // this long; the host's verdict ("!" Stats) overrides the generic text when it arrives.
 const NO_VIDEO_SECS = 12;
-import { listenScope } from '$lib/api.events';
+import { listenScope } from '#lib/api.events.js';
 
 type Inputs = {
 	playId: () => number;

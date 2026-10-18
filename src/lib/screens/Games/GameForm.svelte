@@ -1,7 +1,7 @@
 <script lang="ts">
-	import Modal from '$lib/Modal.svelte';
-	import { addGame, updateGame, type Game, type GameType } from '$lib/games.svelte';
-	import { t } from '$lib/i18n.svelte';
+	import Modal from '#lib/Modal.svelte';
+	import { addGame, updateGame, type Game, type GameType } from '#lib/games.svelte.js';
+	import { t } from '#lib/i18n.svelte.js';
 
 	type Props = { open?: (g?: Game) => void };
 	let { open = $bindable() }: Props = $props();

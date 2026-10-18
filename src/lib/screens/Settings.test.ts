@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/svelte';
 import Settings from './Settings.svelte';
-import { api } from '$lib/api';
+import { api } from '#lib/api.js';
 
 describe('Settings screen', () => {
 	it('exposes the relay server as an editable field on the Ağ tab', async () => {

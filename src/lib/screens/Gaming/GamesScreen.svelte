@@ -3,11 +3,11 @@
 	// host on the home: a connecting/loading state while the host's library is fetched, then
 	// the games as big cards (Desktop pinned first). Back (button / B / Esc) returns home.
 	import { tick } from 'svelte';
-	import Icon from '$lib/Icon.svelte';
-	import { type GameInfo } from '$lib/api';
-	import { t } from '$lib/i18n.svelte';
-	import { fmtPeerId } from '$lib/peers.svelte';
-	import type { GamepadNav } from '$lib/gamepadNav.svelte';
+	import Icon from '#lib/Icon.svelte';
+	import { type GameInfo } from '#lib/api.js';
+	import { t } from '#lib/i18n.svelte.js';
+	import { fmtPeerId } from '#lib/peers.svelte.js';
+	import type { GamepadNav } from '#lib/gamepadNav.svelte.js';
 
 	type Props = {
 		nav: GamepadNav;

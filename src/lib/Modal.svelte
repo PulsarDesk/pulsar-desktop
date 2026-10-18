@@ -1,11 +1,11 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
-	import Icon from '$lib/Icon.svelte';
-	import { t } from '$lib/i18n.svelte';
-	import { gamingNav } from '$lib/gamepadNav.svelte';
-	import { portal } from '$lib/portal';
-	import { openModal, closeModal } from '$lib/overlayModals.svelte';
-	import { closeOnEscape } from '$lib/escapeStack';
+	import Icon from '#lib/Icon.svelte';
+	import { t } from '#lib/i18n.svelte.js';
+	import { gamingNav } from '#lib/gamepadNav.svelte.js';
+	import { portal } from '#lib/portal.js';
+	import { openModal, closeModal } from '#lib/overlayModals.svelte.js';
+	import { closeOnEscape } from '#lib/escapeStack.js';
 
 	let {
 		title,

@@ -1,9 +1,9 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import Icon from '$lib/Icon.svelte';
-	import type { Config, NetworkMode } from '$lib/types';
-	import { api, onNodePort } from '$lib/api';
-	import { t } from '$lib/i18n.svelte';
+	import Icon from '#lib/Icon.svelte';
+	import type { Config, NetworkMode } from '#lib/types.js';
+	import { api, onNodePort } from '#lib/api.js';
+	import { t } from '#lib/i18n.svelte.js';
 
 
 	let {

@@ -1,6 +1,6 @@
 <script lang="ts">
-	import Icon from '$lib/Icon.svelte';
-	import { t } from '$lib/i18n.svelte';
+	import Icon from '#lib/Icon.svelte';
+	import { t } from '#lib/i18n.svelte.js';
 
 	type Tab = {
 		tabId: number;

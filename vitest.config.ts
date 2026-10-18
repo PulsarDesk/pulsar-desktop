@@ -1,11 +1,18 @@
 import { defineConfig } from 'vitest/config';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
-import { fileURLToPath } from 'node:url';
 
+// `#lib/*` resolves through the `imports` field of package.json (SvelteKit 3 dropped `$lib`).
 export default defineConfig({
-	plugins: [svelte()],
+	plugins: [
+		svelte({
+			// Mirrors vite.config.ts (there is no svelte.config.js to pick this up from).
+			compilerOptions: {
+				runes: ({ filename }) =>
+					filename.split(/[/\\]/).includes('node_modules') ? undefined : true
+			}
+		})
+	],
 	resolve: {
-		alias: { $lib: fileURLToPath(new URL('./src/lib', import.meta.url)) },
 		conditions: ['browser']
 	},
 	test: {

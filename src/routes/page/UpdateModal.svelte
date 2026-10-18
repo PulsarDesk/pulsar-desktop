@@ -1,9 +1,9 @@
 <script lang="ts">
-	import Icon from '$lib/Icon.svelte';
-	import { t } from '$lib/i18n.svelte';
-	import { update } from '$lib/update.svelte';
-	import { installUpdate } from '$lib/updater';
-	import { closeOnEscape } from '$lib/escapeStack';
+	import Icon from '#lib/Icon.svelte';
+	import { t } from '#lib/i18n.svelte.js';
+	import { update } from '#lib/update.svelte.js';
+	import { installUpdate } from '#lib/updater.js';
+	import { closeOnEscape } from '#lib/escapeStack.js';
 
 	// Close is allowed in every phase except the terminal restart (the app is about
 	// to relaunch anyway); an in-flight download keeps running in the background and

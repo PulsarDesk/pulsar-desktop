@@ -4,11 +4,11 @@
 	// every pad via gilrs (XInput/DInput/IOKit/evdev) with its name + connected
 	// state, so the user can see which controllers are available to forward.
 	import { onMount, onDestroy } from 'svelte';
-	import Icon from '$lib/Icon.svelte';
-	import { api } from '$lib/api';
-	import type { ControllerInfo } from '$lib/types';
-	import { t } from '$lib/i18n.svelte';
-	import { ui, saveUi, slotOf } from '$lib/settings.svelte';
+	import Icon from '#lib/Icon.svelte';
+	import { api } from '#lib/api.js';
+	import type { ControllerInfo } from '#lib/types.js';
+	import { t } from '#lib/i18n.svelte.js';
+	import { ui, saveUi, slotOf } from '#lib/settings.svelte.js';
 	import type { Action } from 'svelte/action';
 
 	// Seg-button options (dark-mode styled, pad-operable) — replaces the native <select>s,

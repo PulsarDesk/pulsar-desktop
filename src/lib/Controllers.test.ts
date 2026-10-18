@@ -13,7 +13,7 @@ vi.stubGlobal('localStorage', {
 	removeItem: (k: string) => { delete lsStore[k]; }
 });
 
-import { ui, saveUi } from '$lib/settings.svelte';
+import { ui, saveUi } from '#lib/settings.svelte.js';
 
 // ---- helpers that mirror the component's moveUp / moveDown logic --------
 

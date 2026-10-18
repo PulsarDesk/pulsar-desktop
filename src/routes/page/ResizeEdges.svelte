@@ -5,7 +5,7 @@
 	// minWidth/minHeight. On Windows/macOS tao keeps native resizing for undecorated windows, so
 	// this is Linux-only. Hidden in fullscreen and while maximized (nothing to resize then).
 	import { onMount } from 'svelte';
-	import { isTauri, isWindowMaximized, startWindowResize, type ResizeEdge } from '$lib/api';
+	import { isTauri, isWindowMaximized, startWindowResize, type ResizeEdge } from '#lib/api.js';
 
 	let { fullscreen = false }: { fullscreen?: boolean } = $props();
 

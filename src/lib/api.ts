@@ -5,7 +5,7 @@
 //
 // This file is a barrel: the implementation lives in cohesive sibling modules
 // (`api.types`, `api.invoke`, `api.commands`, `api.events`, `api.dom`) and is
-// re-exported here so every `import { … } from '$lib/api'` is unaffected.
+// re-exported here so every `import { … } from '#lib/api'` is unaffected.
 
 export type {
 	ScannedApp,

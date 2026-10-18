@@ -15,7 +15,7 @@
 // via pushBack) instead of the shell's — so the pop-up is fully pad-navigable and the
 // background can't be reached behind it.
 
-import type { NavInput } from '$lib/api';
+import type { NavInput } from '#lib/api.js';
 
 /** Standard-mapping button indices (Gamepad API "standard" layout). X = West (□ / X). */
 const BTN = { A: 0, B: 1, X: 2, LB: 4, RB: 5, UP: 12, DOWN: 13, LEFT: 14, RIGHT: 15 } as const;

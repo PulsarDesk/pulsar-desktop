@@ -7,8 +7,8 @@
 // Instantiated at component init so the persisted frame-pacing one-shot $effect scopes to the
 // component. `playId`/`native` are read through getters.
 
-import { api } from '$lib/api';
-import { ui, saveUi, type Encoder, type VideoCodec } from '$lib/settings.svelte';
+import { api } from '#lib/api.js';
+import { ui, saveUi, type Encoder, type VideoCodec } from '#lib/settings.svelte.js';
 
 type Inputs = {
 	playId: () => number;

@@ -1,10 +1,10 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import Icon from '$lib/Icon.svelte';
-	import Modal from '$lib/Modal.svelte';
+	import Icon from '#lib/Icon.svelte';
+	import Modal from '#lib/Modal.svelte';
 	import ConnectModal from './ConnectModal.svelte';
-	import { t } from '$lib/i18n.svelte';
-	import { api, type LanDevice } from '$lib/api';
+	import { t } from '#lib/i18n.svelte.js';
+	import { api, type LanDevice } from '#lib/api.js';
 	import {
 		gameHistoryPeers,
 		removeFromGameHistory,
@@ -13,8 +13,8 @@
 		fmtPeerId,
 		normalizeId,
 		avatarFor
-	} from '$lib/peers.svelte';
-	import type { GamepadNav } from '$lib/gamepadNav.svelte';
+	} from '#lib/peers.svelte.js';
+	import type { GamepadNav } from '#lib/gamepadNav.svelte.js';
 
 	type Props = {
 		/** The shared GamepadNav (our items + the connect modal register against it). */

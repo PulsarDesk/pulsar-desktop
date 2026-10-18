@@ -1,14 +1,14 @@
 <script lang="ts">
-	import Icon from '$lib/Icon.svelte';
-	import { ui } from '$lib/settings.svelte';
-	import { t } from '$lib/i18n.svelte';
-	import Home from '$lib/screens/Home.svelte';
-	import Devices from '$lib/screens/Devices.svelte';
-	import Settings from '$lib/screens/Settings.svelte';
-	import Games from '$lib/screens/Games.svelte';
+	import Icon from '#lib/Icon.svelte';
+	import { ui } from '#lib/settings.svelte.js';
+	import { t } from '#lib/i18n.svelte.js';
+	import Home from '#lib/screens/Home.svelte';
+	import Devices from '#lib/screens/Devices.svelte';
+	import Settings from '#lib/screens/Settings.svelte';
+	import Games from '#lib/screens/Games.svelte';
 	import Sidebar from './Sidebar.svelte';
 	import GamingShell from './GamingShell.svelte';
-	import type { Game } from '$lib/games.svelte';
+	import type { Game } from '#lib/games.svelte.js';
 	import type { Target } from './sessions.svelte';
 
 	type View = 'home' | 'devices' | 'gaming' | 'settings';

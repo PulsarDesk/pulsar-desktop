@@ -7,9 +7,9 @@
 // component. `playId`/`menuOpen` are read through getters (the inbound unread-count logic and
 // the API calls track them as they did inline).
 
-import { api, copyText, readClipboard, onChatMsg, onDataClip } from '$lib/api';
-import { listenScope } from '$lib/api.events';
-import { t } from '$lib/i18n.svelte';
+import { api, copyText, readClipboard, onChatMsg, onDataClip } from '#lib/api.js';
+import { listenScope } from '#lib/api.events.js';
+import { t } from '#lib/i18n.svelte.js';
 
 type Panel = 'menu' | 'chat' | 'files';
 type ChatMsg = { me: boolean; text: string };

@@ -1,8 +1,8 @@
 <script lang="ts">
-	import PulsarMark from '$lib/PulsarMark.svelte';
-	import Icon from '$lib/Icon.svelte';
-	import { api, windowControl } from '$lib/api';
-	import { t } from '$lib/i18n.svelte';
+	import PulsarMark from '#lib/PulsarMark.svelte';
+	import Icon from '#lib/Icon.svelte';
+	import { api, windowControl } from '#lib/api.js';
+	import { t } from '#lib/i18n.svelte.js';
 
 	type Props = { id: number; peer: string; pw: string };
 	let { id, peer, pw }: Props = $props();

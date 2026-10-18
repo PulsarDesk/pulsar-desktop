@@ -1,7 +1,7 @@
 <script lang="ts">
-	import { ui, saveUi } from '$lib/settings.svelte';
-	import { t } from '$lib/i18n.svelte';
-	import type { Config } from '$lib/types';
+	import { ui, saveUi } from '#lib/settings.svelte.js';
+	import { t } from '#lib/i18n.svelte.js';
+	import type { Config } from '#lib/types.js';
 
 	// Unattended access + the custom connect password are backed by the core Config
 	// (the host honors both). The twofa/record toggles below are UI-only scaffolding

@@ -1,8 +1,8 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import PulsarMark from '$lib/PulsarMark.svelte';
-	import { silentUpdateCheck, checkForUpdateUi } from '$lib/updater';
-	import { update as updateStore } from '$lib/update.svelte';
+	import PulsarMark from '#lib/PulsarMark.svelte';
+	import { silentUpdateCheck, checkForUpdateUi } from '#lib/updater.js';
+	import { update as updateStore } from '#lib/update.svelte.js';
 	import {
 		api,
 		isTauri,
@@ -19,35 +19,35 @@
 		onNodeId,
 		onNodeVersionError,
 		onSessionPassword
-	} from '$lib/api';
-	import { onRelayE2e } from '$lib/api';
-	import { setPeerIdentity } from '$lib/peers.svelte';
+	} from '#lib/api.js';
+	import { onRelayE2e } from '#lib/api.js';
+	import { setPeerIdentity } from '#lib/peers.svelte.js';
 	import {
 		relayAuth,
 		promptRelayAuth,
 		markRelayAuthFailed,
 		clearRelayAuth
-	} from '$lib/relayAuth.svelte';
-	import { gameStore } from '$lib/games.svelte';
-	import { ui, configTick, saveUi } from '$lib/settings.svelte';
-	import { modalCount } from '$lib/overlayModals.svelte';
-	import { initCaps } from '$lib/caps.svelte';
-	import { t, i18n, i18nReady } from '$lib/i18n.svelte';
-	import { theme, toggleTheme } from '$lib/theme.svelte';
-	import type { Config } from '$lib/types';
-	import Connecting from '$lib/screens/Connecting.svelte';
-	import SessionView from '$lib/screens/Session.svelte';
-	import Home from '$lib/screens/Home.svelte';
-	import PaneGameConnect from '$lib/screens/Gaming/PaneGameConnect.svelte';
-	import InputAssign from '$lib/screens/Gaming/InputAssign.svelte';
+	} from '#lib/relayAuth.svelte.js';
+	import { gameStore } from '#lib/games.svelte.js';
+	import { ui, configTick, saveUi } from '#lib/settings.svelte.js';
+	import { modalCount } from '#lib/overlayModals.svelte.js';
+	import { initCaps } from '#lib/caps.svelte.js';
+	import { t, i18n, i18nReady } from '#lib/i18n.svelte.js';
+	import { theme, toggleTheme } from '#lib/theme.svelte.js';
+	import type { Config } from '#lib/types.js';
+	import Connecting from '#lib/screens/Connecting.svelte';
+	import SessionView from '#lib/screens/Session.svelte';
+	import Home from '#lib/screens/Home.svelte';
+	import PaneGameConnect from '#lib/screens/Gaming/PaneGameConnect.svelte';
+	import InputAssign from '#lib/screens/Gaming/InputAssign.svelte';
 	import SplitPicker from './page/SplitPicker.svelte';
-	import Approve from '$lib/screens/Approve.svelte';
-	import Connections from '$lib/screens/Connections.svelte';
-	import FilesWindow from '$lib/screens/FilesWindow.svelte';
-	import HostChat from '$lib/screens/HostChat.svelte';
+	import Approve from '#lib/screens/Approve.svelte';
+	import Connections from '#lib/screens/Connections.svelte';
+	import FilesWindow from '#lib/screens/FilesWindow.svelte';
+	import HostChat from '#lib/screens/HostChat.svelte';
 	import Chrome from './page/Chrome.svelte';
 	import ResizeEdges from './page/ResizeEdges.svelte';
-	import Icon from '$lib/Icon.svelte';
+	import Icon from '#lib/Icon.svelte';
 	import Tabs from './page/Tabs.svelte';
 	import HomeView from './page/HomeView.svelte';
 	import PasswordModal from './page/PasswordModal.svelte';
@@ -503,7 +503,7 @@
 		if (isTauri) {
 			api.forceAc()
 				.then((on) => {
-					if (on) import('$lib/acKeepalive').then((m) => m.startAcKeepalive());
+					if (on) import('#lib/acKeepalive.js').then((m) => m.startAcKeepalive());
 				})
 				.catch(() => {});
 			// Flag the root when the webview is software-painted (AC off) so the gaming-mode CSS

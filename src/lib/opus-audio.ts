@@ -6,7 +6,7 @@
 // into a WebAudio `AudioContext` with a small jitter buffer. Best-effort: if the
 // webview lacks `AudioDecoder` we degrade to silence (the video still plays).
 
-import { t } from '$lib/i18n.svelte';
+import { t } from '#lib/i18n.svelte.js';
 
 export type AudioSink = {
 	/** Feed one RTP packet. */

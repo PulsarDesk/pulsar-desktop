@@ -6,13 +6,13 @@ Rules the code relies on that are easy to break. Each has a regression test.
 
 ## Modals
 
-- **Use `$lib/Modal.svelte`** for a generic dialog (title, ×, body). It portals to `<body>`,
+- **Use `#lib/Modal.svelte`** for a generic dialog (title, ×, body). It portals to `<body>`,
   sits above its backdrop (`z-index` 71 over 70) and registers with the two shared stacks below.
 - **`overlayModals.svelte.ts`** counts open modals so the split-mode shell can hide every pane's
   native render window (it composites OVER the webview on Linux). `openModal`/`closeModal` run
   inside `$effect`s, so their read of the counter is `untrack`ed — otherwise the effect depends on
   what it writes and loops (`effect_update_depth_exceeded`, issue #1; `Devices.test.ts`).
-- **Escape closes the topmost modal — every modal must register with `$lib/escapeStack`**
+- **Escape closes the topmost modal — every modal must register with `#lib/escapeStack.js`**
   (`$effect(() => closeOnEscape(() => onClose()))`, or `onMount`/`onDestroy` for the gaming
   modals). One capture-phase listener runs only the newest entry and stops the event, so a
   stacked dialog never closes the one beneath it and the gaming nav's Escape→back doesn't fire a
@@ -27,7 +27,7 @@ The app is not drag-selectable: `body` has `user-select: none`; inputs, textarea
 contenteditable stay selectable. **Opt a displayed value in with `class="selectable"`** —
 IDs, addresses, OTP, chat lines, error/diagnostic text, paths, release notes. Never inside a
 `<button>` (the drag would also click); give such text a copy button (`copyText` from
-`$lib/api`) instead.
+`#lib/api.js`) instead.
 
 ## Frameless window (Linux)
 
@@ -35,7 +35,7 @@ IDs, addresses, OTP, chat lines, error/diagnostic text, paths, release notes. Ne
 child windows). Two consequences:
 
 - **GTK's maximized flag goes stale** (KWin maximizes, GTK never sees it) → use
-  `isWindowMaximized()` from `$lib/api`, never `toggleMaximize()`. The title bar's max button
+  `isWindowMaximized()` from `#lib/api`, never `toggleMaximize()`. The title bar's max button
   exits fullscreen first (the same `sm.toggleFullscreen` as the fullscreen button / F11).
 - **No native resize border** → `routes/page/ResizeEdges.svelte` draws edge/corner grips that
   call `startResizeDragging` (permission `core:window:allow-start-resize-dragging`); the WM

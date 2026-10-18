@@ -1,10 +1,10 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import Icon from '$lib/Icon.svelte';
-	import { isTauri, isWindowMaximized } from '$lib/api';
-	import { t, i18n, setLang, LANGS, type Lang } from '$lib/i18n.svelte';
-	import { gamingNav } from '$lib/gamepadNav.svelte';
-	import { update } from '$lib/update.svelte';
+	import Icon from '#lib/Icon.svelte';
+	import { isTauri, isWindowMaximized } from '#lib/api.js';
+	import { t, i18n, setLang, LANGS, type Lang } from '#lib/i18n.svelte.js';
+	import { gamingNav } from '#lib/gamepadNav.svelte.js';
+	import { update } from '#lib/update.svelte.js';
 
 	type Props = {
 		title: string;

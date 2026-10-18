@@ -3,10 +3,10 @@
 	// button. Three layouts (2 side-by-side, 2 stacked, 2×2) → enterSplit(layout). While
 	// already split it also offers a "böl modundan çık" affordance to leave split mode.
 	import { onMount, onDestroy } from 'svelte';
-	import Icon from '$lib/Icon.svelte';
-	import { t } from '$lib/i18n.svelte';
-	import { closeOnEscape } from '$lib/escapeStack';
-	import { gamingNav } from '$lib/gamepadNav.svelte';
+	import Icon from '#lib/Icon.svelte';
+	import { t } from '#lib/i18n.svelte.js';
+	import { closeOnEscape } from '#lib/escapeStack.js';
+	import { gamingNav } from '#lib/gamepadNav.svelte.js';
 
 	type Layout = 'h2' | 'v2' | 'grid4';
 	type Props = {

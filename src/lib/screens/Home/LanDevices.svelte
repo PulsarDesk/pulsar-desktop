@@ -1,8 +1,8 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { addPeer, avatarFor, isSaved } from '$lib/peers.svelte';
-	import { api, type LanDevice } from '$lib/api';
-	import { t } from '$lib/i18n.svelte';
+	import { addPeer, avatarFor, isSaved } from '#lib/peers.svelte.js';
+	import { api, type LanDevice } from '#lib/api.js';
+	import { t } from '#lib/i18n.svelte.js';
 
 	type Target = { name: string; id: string };
 	type Props = {

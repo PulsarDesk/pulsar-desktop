@@ -4,11 +4,11 @@
 	// lets the host disconnect each — the single place to manage all connections.
 	// Opens forward for a Remote connection, hidden for a Game one (decided host-side).
 	import { onMount } from 'svelte';
-	import Icon from '$lib/Icon.svelte';
-	import { api, onHostChat, onPeerAvatar, onPeerName, onPeerId, onSessionEvent } from '$lib/api';
-	import { fmtPeerId } from '$lib/peers.svelte';
-	import { t } from '$lib/i18n.svelte';
-	import { closeOnEscape } from '$lib/escapeStack';
+	import Icon from '#lib/Icon.svelte';
+	import { api, onHostChat, onPeerAvatar, onPeerName, onPeerId, onSessionEvent } from '#lib/api.js';
+	import { fmtPeerId } from '#lib/peers.svelte.js';
+	import { t } from '#lib/i18n.svelte.js';
+	import { closeOnEscape } from '#lib/escapeStack.js';
 
 	// One row PER SESSION (keyed by sid), not per device: a single client device can hold
 	// several concurrent sessions (couch co-op / split panes), each its own row. `peer`

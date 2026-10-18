@@ -1,7 +1,7 @@
 <script lang="ts">
-	import PulsarMark from '$lib/PulsarMark.svelte';
-	import { onConnPhase } from '$lib/api';
-	import { t } from '$lib/i18n.svelte';
+	import PulsarMark from '#lib/PulsarMark.svelte';
+	import { onConnPhase } from '#lib/api.js';
+	import { t } from '#lib/i18n.svelte.js';
 
 	type Target = { name: string; id: string };
 	type Props = {

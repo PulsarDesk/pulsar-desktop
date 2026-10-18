@@ -1,8 +1,8 @@
 <script lang="ts">
-	import Icon from '$lib/Icon.svelte';
-	import { t } from '$lib/i18n.svelte';
-	import { relayAuth } from '$lib/relayAuth.svelte';
-	import { closeOnEscape } from '$lib/escapeStack';
+	import Icon from '#lib/Icon.svelte';
+	import { t } from '#lib/i18n.svelte.js';
+	import { relayAuth } from '#lib/relayAuth.svelte.js';
+	import { closeOnEscape } from '#lib/escapeStack.js';
 
 	// The relay-authentication prompt. It appears only when a relay actually demands a
 	// credential (go_online replied RELAY_AUTH_REQUIRED) — there is no permanent password
