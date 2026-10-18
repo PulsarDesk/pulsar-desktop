@@ -245,6 +245,45 @@ pub(crate) async fn connect_target(
 	network_mode: pulsar_core::config::NetworkMode,
 	relay: &str,
 ) -> Result<(pulsar_core::Session, String), String> {
+	let res = connect_target_inner(app, node, discovery, target, network_mode, relay).await;
+	if let Err(e) = &res {
+		// Every failed connect lands in the log with the path that produced it — the UI only
+		// shows the friendly mapping, which can't tell the paths apart.
+		tracing::warn!(target, ?network_mode, error = %e, "connect failed");
+	}
+	res
+}
+
+/// `ConnError::P2pFailed` reads "direct P2P connection failed and relay fallback is
+/// disabled" — true ONLY in P2P-only mode. The core also returns it for a handshake that never
+/// completed (and the direct-IP path, which has no relay at all), so outside P2P-only report
+/// what the user can act on instead of pointing them at a Network setting that is already on.
+fn describe_conn_error(
+	e: &pulsar_core::ConnError,
+	id: Option<DeviceId>,
+	network_mode: pulsar_core::config::NetworkMode,
+) -> String {
+	use pulsar_core::config::NetworkMode;
+	match (e, id) {
+		(pulsar_core::ConnError::P2pFailed, Some(id)) if network_mode != NetworkMode::P2pOnly => {
+			pulsar_core::ConnError::TargetUnreachable(id).to_string()
+		}
+		// Direct IP: no relay is involved, so "relay disabled" is never the reason.
+		(pulsar_core::ConnError::P2pFailed, None) => {
+			"the device did not answer at that address (timed out)".into()
+		}
+		_ => e.to_string(),
+	}
+}
+
+async fn connect_target_inner(
+	app: &AppHandle,
+	node: &Arc<Node>,
+	discovery: Option<Arc<pulsar_core::discovery::Discovery>>,
+	target: &str,
+	network_mode: pulsar_core::config::NetworkMode,
+	relay: &str,
+) -> Result<(pulsar_core::Session, String), String> {
 	let s = target.trim();
 	if let Some(addr) = resolve_direct_target(s).await {
 		// An explicit IP/host target IS a direct connect by definition — honored even
@@ -253,7 +292,7 @@ pub(crate) async fn connect_target(
 		let sess = node
 			.connect_direct(addr, None)
 			.await
-			.map_err(|e| e.to_string())?;
+			.map_err(|e| describe_conn_error(&e, None, network_mode))?;
 		return Ok((sess, addr.to_string()));
 	}
 	let id = DeviceId::parse(s).ok_or_else(|| crate::i18n::t("err.badTarget").to_string())?;
@@ -314,7 +353,7 @@ pub(crate) async fn connect_target(
 			if matches!(e, pulsar_core::ConnError::IdentityChanged(_)) {
 				format!("IDENTITY_CHANGED:{}", id.grouped())
 			} else {
-				e.to_string()
+				describe_conn_error(&e, Some(id), network_mode)
 			}
 		})?;
 	if let Some(k) = sess.peer_pubkey().await {
@@ -564,4 +603,38 @@ pub(crate) fn is_executable(p: &std::path::Path) -> bool {
 	std::fs::metadata(p)
 		.map(|m| m.permissions().mode() & 0o111 != 0)
 		.unwrap_or(false)
+}
+
+#[cfg(test)]
+mod conn_error_tests {
+	use super::describe_conn_error;
+	use pulsar_core::config::NetworkMode;
+	use pulsar_core::proto::DeviceId;
+	use pulsar_core::ConnError;
+
+	#[test]
+	fn p2p_failed_only_blames_the_relay_setting_in_p2p_only_mode() {
+		let id = DeviceId::new(123_456_789).unwrap();
+		let unreachable = ConnError::TargetUnreachable(id).to_string();
+		for mode in [NetworkMode::Auto, NetworkMode::RelayOnly] {
+			assert_eq!(
+				describe_conn_error(&ConnError::P2pFailed, Some(id), mode),
+				unreachable
+			);
+		}
+		assert_eq!(
+			describe_conn_error(&ConnError::P2pFailed, Some(id), NetworkMode::P2pOnly),
+			ConnError::P2pFailed.to_string()
+		);
+		// Direct IP never involves the relay; the text must hit the UI's "unreachable" mapping.
+		assert!(
+			describe_conn_error(&ConnError::P2pFailed, None, NetworkMode::Auto)
+				.contains("timed out")
+		);
+		// Everything else passes through untouched.
+		assert_eq!(
+			describe_conn_error(&ConnError::RelayTimeout, Some(id), NetworkMode::Auto),
+			ConnError::RelayTimeout.to_string()
+		);
+	}
 }
