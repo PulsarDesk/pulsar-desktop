@@ -44,9 +44,9 @@ const BTBN = 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest';
 const SOURCES = {
 	'windows/x64': { url: `${BTBN}/ffmpeg-master-latest-win64-gpl.zip`, member: /\/bin\/ffplay\.exe$/i, out: 'ffplay.exe' },
 	'windows/arm64': { url: `${BTBN}/ffmpeg-master-latest-winarm64-gpl.zip`, member: /\/bin\/ffplay\.exe$/i, out: 'ffplay.exe' },
-	// evermeet.cx (Intel) / Martin Riedl (Apple Silicon): single ffplay binary in the zip,
-	// same sources fetch-ffmpeg.mjs uses for ffmpeg.
-	'macos/x64': { url: 'https://evermeet.cx/ffmpeg/getrelease/ffplay/zip', member: /(^|\/)ffplay$/, out: 'ffplay' },
+	// Martin Riedl build server (Intel + Apple Silicon): single ffplay binary in the zip, same
+	// source fetch-ffmpeg.mjs uses for ffmpeg (evermeet.cx's endpoint went 410 Gone, 2026-10).
+	'macos/x64': { url: 'https://ffmpeg.martin-riedl.de/redirect/latest/macos/amd64/release/ffplay.zip', member: /(^|\/)ffplay$/, out: 'ffplay' },
 	'macos/arm64': { url: 'https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/ffplay.zip', member: /(^|\/)ffplay$/, out: 'ffplay' }
 };
 

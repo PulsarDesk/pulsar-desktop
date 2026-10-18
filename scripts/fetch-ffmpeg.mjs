@@ -9,7 +9,7 @@
 //   - Windows arm64: gdigrab    + libx264 + h264_mf (BtbN GPL, winarm64)
 //   - Linux  x64  : x11grab     + libx264   (BtbN GPL)
 //   - Linux  arm64: x11grab     + libx264   (BtbN GPL)
-//   - macOS  x64  : avfoundation+ libx264   (evermeet.cx)
+//   - macOS  x64  : avfoundation+ libx264   (Martin Riedl)
 //   - macOS  arm64: avfoundation+ libx264   (Martin Riedl)
 //
 // Output name: resources/ffmpeg  (or ffmpeg.exe on Windows).
@@ -98,10 +98,10 @@ const SOURCES = {
     kind: "tar.xz",
     member: /\/bin\/ffmpeg$/,
   },
-  // evermeet.cx: stable "getrelease" endpoint, always-latest, Intel x86_64,
-  // single ffmpeg binary inside the zip (avfoundation + libx264).
+  // Martin Riedl build server, Intel x86_64 (avfoundation + libx264). Was evermeet.cx's
+  // "getrelease" endpoint until it started answering 410 Gone (2026-10).
   "macos/x64": {
-    url: "https://evermeet.cx/ffmpeg/getrelease/zip",
+    url: "https://ffmpeg.martin-riedl.de/redirect/latest/macos/amd64/release/ffmpeg.zip",
     kind: "zip",
     member: /(^|\/)ffmpeg$/,
   },
