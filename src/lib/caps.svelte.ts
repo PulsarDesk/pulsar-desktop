@@ -21,7 +21,9 @@ export function initCaps() {
 			if (c) caps.v = c;
 		})
 		.catch(() => {});
-	onLocalCaps((c) => (caps.v = c));
+	onLocalCaps((c) => {
+		caps.v = c;
+	});
 }
 
 /** Is this encoder family usable on this machine? Unknown caps (probe still

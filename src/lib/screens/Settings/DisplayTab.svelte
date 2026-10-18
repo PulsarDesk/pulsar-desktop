@@ -159,7 +159,7 @@
 	</select>
 </div>
 {#if detected.length}
-	<div class="detnote mono">
+	<div class="detnote mono selectable">
 		{t('settings.detected', {
 			list: detected.filter((d) => d !== 'software').join(', ') || t('settings.detectedNone')
 		})}

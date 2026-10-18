@@ -159,7 +159,7 @@
 			<GeneralTab bind:config {saveConfig} {setAvatar} />
 		{/if}
 		{#if saveErr}
-			<div class="saveerr" role="alert">{t('settings.saveFailed')} · {saveErr}</div>
+			<div class="saveerr selectable" role="alert">{t('settings.saveFailed')} · {saveErr}</div>
 		{/if}
 	</div>
 </div>
@@ -211,12 +211,12 @@
 	}
 	.tab.on {
 		font-weight: 600;
-		color: var(--accent-press);
+		color: var(--accent-ink);
 		background: var(--accent-soft);
 	}
 	.saveerr {
 		font-size: 12.5px;
-		color: var(--danger);
+		color: var(--danger-text);
 		padding-top: 12px;
 		word-break: break-word;
 	}

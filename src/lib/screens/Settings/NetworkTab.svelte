@@ -97,11 +97,11 @@
 		<span>
 			{t('settings.localRelayDesc')}
 			{#if config?.use_local_relay && relayLocal.running && relayLocal.lanAddr}
-				<span class="lanaddr mono">{relayLocal.lanAddr}</span>
+				<span class="lanaddr mono selectable">{relayLocal.lanAddr}</span>
 			{/if}
 		</span>
 		{#if relayLocalErr}
-			<span class="lrerr">{relayLocalErr}</span>
+			<span class="lrerr selectable">{relayLocalErr}</span>
 		{/if}
 	</div>
 	<button
@@ -181,7 +181,7 @@
 		display: block;
 		margin-top: 4px;
 		font-size: 12px;
-		color: oklch(0.55 0.2 25);
+		color: var(--danger-text);
 	}
 	.srow {
 		display: flex;

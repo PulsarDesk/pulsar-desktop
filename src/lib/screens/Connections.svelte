@@ -8,6 +8,7 @@
 	import { api, onHostChat, onPeerAvatar, onPeerName, onPeerId, onSessionEvent } from '$lib/api';
 	import { fmtPeerId } from '$lib/peers.svelte';
 	import { t } from '$lib/i18n.svelte';
+	import { closeOnEscape } from '$lib/escapeStack';
 
 	// One row PER SESSION (keyed by sid), not per device: a single client device can hold
 	// several concurrent sessions (couch co-op / split panes), each its own row. `peer`
@@ -165,6 +166,9 @@
 		msgRow = null;
 		sendErr = null;
 	}
+	$effect(() => {
+		if (msgRow) return closeOnEscape(closeMsg);
+	});
 	// A failed send (session gone, channel closed) must be VISIBLE: only a confirmed
 	// send lands in the history; on failure the composer gets the text back and the
 	// modal shows the backend's reason (e.g. "cihaz bağlı değil").
@@ -219,7 +223,7 @@
 								{names[r.peer] ?? t('home.remoteDevice')}
 								{#if sessionLabel(r)}<span class="psub">· {sessionLabel(r)}</span>{/if}
 							</span>
-							<span class="ptime mono">{idFor(r.peer)} · {elapsed(r.since)}</span>
+							<span class="ptime mono selectable">{idFor(r.peer)} · {elapsed(r.since)}</span>
 						</div>
 						<!-- Icon-only actions; the labels live in tooltips (they didn't fit). -->
 						<div class="acts">
@@ -267,7 +271,7 @@
 						{#if avatars[msgRow.peer]}<img src={avatars[msgRow.peer]} alt="" />{:else}{idFor(msgRow.peer).slice(0, 2)}{/if}
 					</span>
 					<b>{names[msgRow.peer] ?? t('home.remoteDevice')}</b>
-					<span class="mid mono">{idFor(msgRow.peer)}</span>
+					<span class="mid mono selectable">{idFor(msgRow.peer)}</span>
 					<button class="mclose" onclick={closeMsg} title={t('host.toastClose')}>
 						<Icon name="x" size={14} />
 					</button>
@@ -277,12 +281,12 @@
 						<div class="mempty">{t('host.chatEmpty')}</div>
 					{:else}
 						{#each history[msgRow.peer] ?? [] as m, i (i)}
-							<div class="mline" class:me={m.me}>{m.text}</div>
+							<div class="mline selectable" class:me={m.me}>{m.text}</div>
 						{/each}
 					{/if}
 				</div>
 				{#if sendErr}
-					<div class="merr" role="alert">{sendErr}</div>
+					<div class="merr selectable" role="alert">{sendErr}</div>
 				{/if}
 				<form class="msgrow" onsubmit={(e) => { e.preventDefault(); if (msgRow) sendMsg(msgRow); }}>
 					<input
@@ -290,7 +294,6 @@
 						bind:value={msgText}
 						placeholder={t('host.msgPlaceholder')}
 						aria-label={t('host.msgPlaceholder')}
-						onkeydown={(e) => e.key === 'Escape' && closeMsg()}
 						{@attach (el) => el.focus()}
 					/>
 					<button class="msgsend" type="submit" disabled={!msgText.trim()}>{t('host.msgSend')}</button>
@@ -331,7 +334,7 @@
 	.count {
 		margin-left: auto;
 		background: var(--accent-soft);
-		color: var(--accent-press);
+		color: var(--accent-ink);
 		border-radius: 999px;
 		font-size: 12px;
 		font-weight: 700;
@@ -371,7 +374,7 @@
 		height: 32px;
 		border-radius: 50%;
 		background: var(--accent-soft);
-		color: var(--accent-press);
+		color: var(--accent-ink);
 		display: grid;
 		place-items: center;
 		font-size: 12px;
@@ -427,19 +430,19 @@
 	}
 	.act:hover {
 		background: var(--accent-soft);
-		color: var(--accent-press);
+		color: var(--accent-ink);
 	}
 	.act.on {
 		background: var(--accent-soft);
-		color: var(--accent-press);
+		color: var(--accent-ink);
 		border-color: var(--accent-soft-2);
 	}
 	.act.kick {
-		color: var(--danger, oklch(0.55 0.2 25));
+		color: var(--danger-text);
 	}
 	.act.kick:hover {
 		background: color-mix(in oklch, var(--danger, red) 10%, transparent);
-		color: var(--danger, oklch(0.55 0.2 25));
+		color: var(--danger-text);
 	}
 	/* inline message composer under the row */
 	.msgrow {
@@ -575,6 +578,6 @@
 	}
 	.merr {
 		font-size: 12px;
-		color: var(--danger, oklch(0.55 0.2 25));
+		color: var(--danger-text);
 	}
 </style>

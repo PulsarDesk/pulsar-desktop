@@ -3,11 +3,17 @@
 	import { t } from '$lib/i18n.svelte';
 	import { update } from '$lib/update.svelte';
 	import { installUpdate } from '$lib/updater';
+	import { closeOnEscape } from '$lib/escapeStack';
 
 	// Close is allowed in every phase except the terminal restart (the app is about
 	// to relaunch anyway); an in-flight download keeps running in the background and
 	// the badge stays lit, so reopening shows live progress.
 	const busy = $derived(update.phase === 'downloading' || update.phase === 'installing');
+
+	// Escape = the × button.
+	$effect(() => {
+		if (update.open && update.available) return closeOnEscape(() => (update.open = false));
+	});
 
 	function fmtMB(bytes: number): string {
 		return (bytes / (1024 * 1024)).toFixed(1);
@@ -25,7 +31,7 @@
 				</button>
 			</div>
 
-			<div class="uver mono">
+			<div class="uver mono selectable">
 				v{update.from}
 				<Icon name="arrowRight" size={14} />
 				<strong>v{update.to}</strong>
@@ -33,7 +39,7 @@
 
 			{#if update.notes}
 				<div class="usect">{t('update.notes')}</div>
-				<div class="unotes">{update.notes}</div>
+				<div class="unotes selectable">{update.notes}</div>
 			{/if}
 
 			{#if !update.installable}
@@ -43,7 +49,7 @@
 			{/if}
 
 			{#if update.phase === 'error'}
-				<div class="uerr">{t('update.error')}: {update.error}</div>
+				<div class="uerr selectable">{t('update.error')}: {update.error}</div>
 			{/if}
 
 			{#if update.phase === 'downloading'}
@@ -118,7 +124,7 @@
 		gap: 9px;
 		font-weight: 700;
 		font-size: 15px;
-		color: var(--accent);
+		color: var(--accent-fg);
 	}
 	.uhdr span {
 		color: var(--text);
@@ -181,7 +187,7 @@
 	.uerr {
 		margin-top: 12px;
 		font-size: 12.5px;
-		color: oklch(0.55 0.2 25);
+		color: var(--danger-text);
 		word-break: break-word;
 	}
 	.uprog {

@@ -57,7 +57,7 @@
 		<div class="avatar"><Icon name="monitor" size={20} /></div>
 		<div>
 			<div class="lab">{t('approve.deviceId')}</div>
-			<div class="id mono">{grouped}</div>
+			<div class="id mono selectable">{grouped}</div>
 		</div>
 	</div>
 
@@ -120,7 +120,7 @@
 		height: 38px;
 		border-radius: 9px;
 		background: var(--accent-soft);
-		color: var(--accent);
+		color: var(--accent-fg);
 		display: grid;
 		place-items: center;
 		flex: none;
@@ -148,7 +148,7 @@
 		color: var(--ok);
 	}
 	.pw.bad {
-		color: var(--danger);
+		color: var(--danger-text);
 	}
 	.pw.none {
 		color: var(--text-faint);

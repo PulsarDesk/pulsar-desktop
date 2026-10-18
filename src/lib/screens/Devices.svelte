@@ -74,11 +74,15 @@
 	const isOnline = (id: string) =>
 		lan.some((d) => (d.id && normalizeId(d.id) === id) || d.addr === id || addrHost(d.addr) === addrHost(id));
 
-	// Display id input as-is (IPs welcome); a pure 9-digit relay id gets grouped.
+	// Display id input as-is (IPs welcome); an all-digit relay id is capped at its 9 digits
+	// and grouped (a 10th digit used to drop it out of the id form, ungrouped and unlimited).
 	const tidyId = (v: string) => {
 		const despaced = v.replace(/\s/g, '');
-		return /^\d{1,9}$/.test(despaced)
-			? despaced.replace(/(\d{3})(?=\d)/g, '$1 ').trim()
+		return /^\d+$/.test(despaced)
+			? despaced
+					.slice(0, 9)
+					.replace(/(\d{3})(?=\d)/g, '$1 ')
+					.trim()
 			: v.trim();
 	};
 
@@ -150,38 +154,61 @@
 {#if adding}
 	<Modal title={editing ? t('devices.editTitle') : t('devices.add')} onClose={closeForm}>
 		<div class="addform">
-			<span class="fl">{t('devices.name')}</span>
-			<div class="field"><input bind:value={newName} placeholder={t('devices.name')} aria-label={t('devices.name')} /></div>
-			<span class="fl">{t('devices.idOrIp')}</span>
-			<div class="field">
-				<Icon name="connect" size={15} />
-				<input
-					value={newId}
-					oninput={(e) => (newId = tidyId(e.currentTarget.value))}
-					placeholder="000 000 000 · 192.168.1.42"
-					aria-label={t('devices.idOrIp')}
-					style="font-family:var(--font-mono)"
-				/>
-			</div>
-			<span class="fl">{t('devices.image')}</span>
-			<div class="imgrow">
-				{#each ICONS as ic (ic)}
+			<div class="addgrid">
+				<!-- Left: the device's picture. The big tile previews the pick and opens the file
+				     picker; the chips below swap between the built-in icons. -->
+				<div class="imgcol">
 					<button
-						class="imgopt"
-						class:active={newImage === 'icon:' + ic}
-						aria-label={ic}
-						onclick={() => (newImage = 'icon:' + ic)}><Icon name={ic} size={20} /></button
+						class="preview"
+						class:photo={!newImage.startsWith('icon:')}
+						onclick={() => fileInput?.click()}
+						title={t('devices.imageHint')}
+						aria-label={t('devices.imageHint')}
 					>
-				{/each}
-				<button class="imgopt upload" class:active={!newImage.startsWith('icon:')} onclick={() => fileInput?.click()}>
-					{#if !newImage.startsWith('icon:')}
-						<img class="uimg" src={newImage} alt="" />
-					{:else}
-						<Icon name="upload" size={18} />
-					{/if}
-				</button>
-				<input type="file" accept="image/*" bind:this={fileInput} onchange={onPickImage} style="display:none" />
-				<span class="imghint">{t('devices.imageHint')}</span>
+						{#if newImage.startsWith('icon:')}
+							<Icon name={newImage.slice(5)} size={44} />
+						{:else}
+							<img class="uimg" src={newImage} alt="" />
+						{/if}
+						<span class="pv-up"><Icon name="edit" size={14} /></span>
+					</button>
+					<div class="imgrow" role="group" aria-label={t('devices.image')}>
+						{#each ICONS as ic (ic)}
+							<button
+								class="imgopt"
+								class:active={newImage === 'icon:' + ic}
+								aria-label={ic}
+								aria-pressed={newImage === 'icon:' + ic}
+								onclick={() => (newImage = 'icon:' + ic)}><Icon name={ic} size={17} /></button
+							>
+						{/each}
+					</div>
+					<input type="file" accept="image/*" bind:this={fileInput} onchange={onPickImage} style="display:none" />
+				</div>
+
+				<!-- Right: what the device is called and how to reach it. -->
+				<div class="fieldcol">
+					<label class="fl" for="dev-name">{t('devices.name')}</label>
+					<div class="field">
+						<input id="dev-name" bind:value={newName} placeholder={t('devices.name')} aria-label={t('devices.name')} />
+					</div>
+					<label class="fl" for="dev-id">{t('devices.idOrIp')}</label>
+					<div class="field">
+						<Icon name="connect" size={15} />
+						<input
+							id="dev-id"
+							value={newId}
+							oninput={(e) => {
+								// Write back too: at the 9-digit cap `newId` doesn't change, so Svelte wouldn't
+								// touch the field and the extra digit would stay on screen.
+								newId = e.currentTarget.value = tidyId(e.currentTarget.value);
+							}}
+							placeholder="000 000 000 · 192.168.1.42"
+							aria-label={t('devices.idOrIp')}
+							style="font-family:var(--font-mono)"
+						/>
+					</div>
+				</div>
 			</div>
 			<div class="factions">
 				<button class="btn btn-ghost" onclick={closeForm}>{t('devices.cancel')}</button>
@@ -230,7 +257,7 @@
 						>
 						<span class="dname">{d.name}</span>
 					</div>
-					<div class="did mono">{fmtPeerId(d.id)}</div>
+					<div class="did mono selectable">{fmtPeerId(d.id)}</div>
 					<div class="dstatus">
 						<span class="dot" class:on={isOnline(d.id)}></span>
 						{isOnline(d.id) ? t('devices.online') : t('devices.offline')} · {relTime(d.lastConnected)}
@@ -271,42 +298,79 @@
 	.addform {
 		display: flex;
 		flex-direction: column;
-		gap: 6px;
 	}
-	.addform .fl {
-		display: block;
-		font-size: 12px;
-		font-weight: 600;
-		color: var(--text-muted);
-		margin-top: 8px;
+	.addgrid {
+		display: grid;
+		grid-template-columns: auto 1fr;
+		gap: 22px;
+		align-items: start;
 	}
-	.addform .factions {
+	.imgcol {
 		display: flex;
-		justify-content: flex-end;
+		flex-direction: column;
+		align-items: center;
 		gap: 10px;
-		margin-top: 18px;
+	}
+	.preview {
+		position: relative;
+		width: 124px;
+		height: 124px;
+		border-radius: var(--r-lg);
+		border: 1px solid var(--border);
+		background: var(--accent-soft);
+		color: var(--accent-fg);
+		display: grid;
+		place-items: center;
+		overflow: hidden;
+		padding: 0;
+		cursor: pointer;
+		transition: border-color var(--dur);
+	}
+	.preview:hover {
+		border-color: var(--accent);
+	}
+	.preview.photo {
+		background: var(--surface-2);
+	}
+	/* "Change picture" badge, pinned bottom-right; always visible so the tile reads as clickable. */
+	.pv-up {
+		position: absolute;
+		right: 7px;
+		bottom: 7px;
+		width: 28px;
+		height: 28px;
+		border-radius: 50%;
+		display: grid;
+		place-items: center;
+		background: var(--surface);
+		color: var(--text-muted);
+		border: 1px solid var(--border);
+		box-shadow: var(--shadow-sm);
+	}
+	.preview:hover .pv-up {
+		color: var(--accent-fg);
+		border-color: var(--accent);
 	}
 	.imgrow {
-		display: flex;
-		align-items: center;
-		gap: 8px;
+		display: grid;
+		grid-template-columns: repeat(4, 1fr);
+		gap: 6px;
+		width: 124px;
 	}
 	.imgopt {
-		width: 42px;
-		height: 42px;
+		aspect-ratio: 1;
 		border: 1px solid var(--border);
-		border-radius: 10px;
+		border-radius: 8px;
 		background: var(--surface);
 		color: var(--text-muted);
 		cursor: pointer;
 		display: grid;
 		place-items: center;
-		overflow: hidden;
 		padding: 0;
 	}
 	.imgopt.active {
 		border-color: var(--accent);
-		color: var(--accent);
+		color: var(--accent-fg);
 		background: var(--accent-soft);
 	}
 	.uimg {
@@ -314,10 +378,27 @@
 		height: 100%;
 		object-fit: cover;
 	}
-	.imghint {
-		font-size: 11.5px;
-		color: var(--text-faint);
-		margin-left: 4px;
+	.fieldcol {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		min-width: 0;
+	}
+	.fieldcol .fl {
+		font-size: 12px;
+		font-weight: 600;
+		color: var(--text-muted);
+	}
+	.fieldcol .fl + .field {
+		margin-bottom: 8px;
+	}
+	.addform .factions {
+		display: flex;
+		justify-content: flex-end;
+		gap: 10px;
+		margin-top: 22px;
+		padding-top: 16px;
+		border-top: 1px solid var(--border);
 	}
 	.toolbar {
 		display: flex;
@@ -362,7 +443,7 @@
 		display: grid;
 		place-items: center;
 		background: var(--accent-soft);
-		color: var(--accent);
+		color: var(--accent-fg);
 		overflow: hidden;
 	}
 	.timg {
@@ -448,7 +529,7 @@
 		place-items: center;
 	}
 	.rm:hover {
-		color: var(--danger);
+		color: var(--danger-text);
 		border-color: var(--danger);
 	}
 </style>

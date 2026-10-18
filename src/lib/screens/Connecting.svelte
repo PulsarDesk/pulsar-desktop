@@ -86,7 +86,7 @@
 		<PulsarMark size={48} />
 	</div>
 	<h2>{target.name}</h2>
-	<div class="tid mono">{target.id} · {mode === 'game' ? t('connecting.modeGame') : t('connecting.modeRemote')}</div>
+	<div class="tid mono selectable">{target.id} · {mode === 'game' ? t('connecting.modeGame') : t('connecting.modeRemote')}</div>
 	<div class="steps">
 		{#each steps as s, i (i)}
 			<div class="step" class:done={s.state === 'done'} class:dim={s.state === 'pending'}>

@@ -356,7 +356,7 @@
 					{:else}
 						<div class="row file">
 							<Icon name="file" size={14} />
-							<span class="nm">{e.name}</span>
+							<span class="nm selectable">{e.name}</span>
 							<span class="sz mono">{fmtSize(e.size)}</span>
 							<button
 								class="act"
@@ -408,7 +408,7 @@
 			)}
 		</section>
 	</div>
-	{#if note}<div class="files-note">{note}</div>{/if}
+	{#if note}<div class="files-note selectable">{note}</div>{/if}
 </div>
 
 <style>

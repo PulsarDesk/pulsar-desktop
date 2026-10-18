@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import Icon from '$lib/Icon.svelte';
-	import { isTauri } from '$lib/api';
+	import { isTauri, isWindowMaximized } from '$lib/api';
 	import { t, i18n, setLang, LANGS, type Lang } from '$lib/i18n.svelte';
 	import { gamingNav } from '$lib/gamepadNav.svelte';
 	import { update } from '$lib/update.svelte';
@@ -59,9 +59,9 @@
 			try {
 				const { getCurrentWindow } = await import('@tauri-apps/api/window');
 				const w = getCurrentWindow();
-				maximized = await w.isMaximized();
+				maximized = await isWindowMaximized();
 				unlistenResize = await w.onResized(async () => {
-					maximized = await w.isMaximized();
+					maximized = await isWindowMaximized();
 				});
 			} catch {
 				/* not in Tauri / API unavailable */
@@ -70,17 +70,22 @@
 		return () => unlistenResize?.();
 	});
 
-	// Frameless window controls — minimize / toggle-maximize / close via the Tauri window API.
+	// Frameless window controls — minimize / maximize-restore / close via the Tauri window API.
 	async function winCtl(action: 'min' | 'max' | 'close') {
 		if (!isTauri) return;
 		try {
 			const { getCurrentWindow } = await import('@tauri-apps/api/window');
 			const w = getCurrentWindow();
 			if (action === 'min') await w.minimize();
-			else if (action === 'max') await w.toggleMaximize();
-			else await w.close();
-		} catch {
-			/* ignore */
+			else if (action === 'max') {
+				// In fullscreen this is the way back out — through the SAME toggle as the
+				// fullscreen button / F11, so the app's fullscreen state stays in sync.
+				if (fullscreen && onToggleFullscreen) onToggleFullscreen();
+				else if (await isWindowMaximized()) await w.unmaximize();
+				else await w.maximize();
+			} else await w.close();
+		} catch (e) {
+			console.warn(`[winctl] ${action} failed`, e);
 		}
 	}
 
@@ -188,7 +193,7 @@
 					<Icon name="winmin" size={15} />
 				</button>
 				<button class="wc" onclick={() => winCtl('max')} title={t('chrome.maximize')} aria-label={t('chrome.maximize')}>
-					<Icon name={maximized ? 'winrestore' : 'winmax'} size={14} />
+					<Icon name={maximized || fullscreen ? 'winrestore' : 'winmax'} size={14} />
 				</button>
 				<button class="wc close" onclick={() => winCtl('close')} title={t('chrome.close')} aria-label={t('chrome.close')}>
 					<Icon name="x" size={15} />
@@ -233,7 +238,7 @@
 	}
 	.upd {
 		position: relative;
-		color: var(--accent);
+		color: var(--accent-fg);
 	}
 	.upd-dot {
 		position: absolute;
@@ -281,7 +286,7 @@
 	.game-btn.on {
 		background: var(--accent-soft);
 		border-color: var(--accent);
-		color: var(--accent-press);
+		color: var(--accent-ink);
 	}
 	.lang-select {
 		position: relative;

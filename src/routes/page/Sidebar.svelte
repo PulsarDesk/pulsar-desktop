@@ -128,7 +128,7 @@
 	}
 	.navlink.on {
 		font-weight: 600;
-		color: var(--accent-press);
+		color: var(--accent-ink);
 		background: var(--accent-soft);
 	}
 	/* live-connection count pill on "Bağlantılar" (only rendered when ≥1) */
@@ -162,7 +162,7 @@
 		height: 32px;
 		border-radius: 8px;
 		background: var(--accent-soft);
-		color: var(--accent);
+		color: var(--accent-fg);
 		display: grid;
 		place-items: center;
 		font-weight: 700;
@@ -205,7 +205,7 @@
 		margin-top: 6px;
 		font-size: 11.5px;
 		font-weight: 600;
-		color: var(--accent-press);
+		color: var(--accent-ink);
 		background: var(--accent-soft);
 		border: 1px solid var(--accent-soft-2);
 		border-radius: var(--r-sm);
@@ -218,7 +218,7 @@
 	.connerr {
 		margin-top: 5px;
 		font-size: 10.5px;
-		color: var(--danger);
+		color: var(--danger-text);
 		max-width: 180px;
 		line-height: 1.35;
 		word-break: break-word;

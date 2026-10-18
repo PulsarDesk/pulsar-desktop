@@ -95,7 +95,7 @@
 	</div>
 	<div class="lab">{primaryLabel}</div>
 	<div class="row">
-		<span class="bigid mono">{primaryValue}</span>
+		<span class="bigid mono selectable">{primaryValue}</span>
 		<button class="icon-btn push" onclick={copyId} title={t('home.copy')} aria-label={t('home.copyId')}>
 			<Icon name={copied ? 'check' : 'copy'} size={17} />
 		</button>
@@ -119,7 +119,7 @@
 	<div class="sep"></div>
 	<div class="lab">{t('home.otp')}</div>
 	<div class="row">
-		<span class="pw mono">{unattended ? '—' : online ? selfPw || '—' : '—'}</span>
+		<span class="pw mono selectable">{unattended ? '—' : online ? selfPw || '—' : '—'}</span>
 		<button
 			class="icon-btn push"
 			title={t('home.copy')}
@@ -157,7 +157,7 @@
 	{:else}
 		{#each hostSessions as s (s.sid)}
 			<div class="connrow">
-				<span class="cdot"></span><span class="mono">{peerLabel(s.peer)}</span>
+				<span class="cdot"></span><span class="mono selectable">{peerLabel(s.peer)}</span>
 				<button class="kick" onclick={() => onDisconnect(s.sid)} title={t('home.kick')}>
 					<Icon name="x" size={12} />{t('home.kickLabel')}
 				</button>
@@ -166,7 +166,7 @@
 	{/if}
 	{#if debug && activity.length > 0}
 		<div class="actlog">
-			{#each activity as line, i (i)}<div class="actline">{line}</div>{/each}
+			{#each activity as line, i (i)}<div class="actline selectable">{line}</div>{/each}
 		</div>
 	{/if}
 </div>
@@ -202,7 +202,7 @@
 		cursor: pointer;
 	}
 	.addr:hover {
-		color: var(--accent-press);
+		color: var(--accent-ink);
 	}
 	.eyebrow {
 		font-size: 11px;
@@ -294,7 +294,7 @@
 		border-radius: var(--r-sm);
 		border: 1px solid color-mix(in oklch, var(--danger) 35%, var(--border));
 		background: color-mix(in oklch, var(--danger) 10%, transparent);
-		color: var(--danger);
+		color: var(--danger-text);
 		cursor: pointer;
 	}
 	.kick:hover {

@@ -67,7 +67,7 @@
 		<button class="back" use:navItem onclick={onBack} aria-label={t('gaming.back')}>
 			<Icon name="arrowRight" size={16} class="flip" />
 		</button>
-		<span class="htitle mono">{fmtPeerId(target)}</span>
+		<span class="htitle mono selectable">{fmtPeerId(target)}</span>
 	</div>
 
 	{#if loading}
@@ -76,7 +76,7 @@
 			<span>{t('home.fetching')}</span>
 		</div>
 	{:else if err}
-		<div class="state err">{err}</div>
+		<div class="state err selectable">{err}</div>
 		<button class="btn" use:navItem onclick={onBack}>{t('gaming.back')}</button>
 	{:else}
 		<div class="games">
@@ -156,7 +156,7 @@
 		padding: 40px 0;
 	}
 	.state.err {
-		color: var(--danger);
+		color: var(--danger-text);
 		word-break: break-word;
 		text-align: center;
 		max-width: 480px;
@@ -208,7 +208,7 @@
 		height: 40px;
 		border-radius: 10px;
 		background: var(--accent-soft);
-		color: var(--accent);
+		color: var(--accent-fg);
 		display: grid;
 		place-items: center;
 		font-weight: 700;

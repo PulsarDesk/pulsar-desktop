@@ -8,9 +8,12 @@
 	import { api } from '$lib/api';
 	import type { ControllerInfo } from '$lib/types';
 	import { t } from '$lib/i18n.svelte';
+	import { closeOnEscape } from '$lib/escapeStack';
 
 	type Pane = { index: number; playId: number };
 	let { panes, onClose }: { panes: Pane[]; onClose: () => void } = $props();
+
+	$effect(() => closeOnEscape(() => onClose()));
 
 	let pads = $state<ControllerInfo[]>([]);
 	let kbms = $state<string[]>([]);
@@ -113,7 +116,7 @@
 	.ia-hdr b {
 		font-size: 16px;
 		font-weight: 700;
-		color: var(--accent-press);
+		color: var(--accent-ink);
 		display: block;
 	}
 	.ia-hdr span {

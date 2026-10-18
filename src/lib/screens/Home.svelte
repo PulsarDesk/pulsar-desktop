@@ -173,7 +173,7 @@
 					<button
 						type="button"
 						onclick={() => (showAllHistory = !showAllHistory)}
-						style="margin-left:auto;background:none;border:none;color:var(--accent-press);font:inherit;font-size:12px;cursor:pointer"
+						style="margin-left:auto;background:none;border:none;color: var(--accent-ink);font:inherit;font-size:12px;cursor:pointer"
 					>
 						{showAllHistory ? t('home.showLess') : t('home.seeAll')}
 					</button>
@@ -337,7 +337,7 @@
 	}
 	.rdel:hover {
 		background: var(--accent-soft);
-		color: var(--accent);
+		color: var(--accent-fg);
 	}
 	.ravatar {
 		overflow: hidden;
@@ -352,7 +352,7 @@
 		height: 30px;
 		border-radius: 8px;
 		background: var(--accent-soft);
-		color: var(--accent);
+		color: var(--accent-fg);
 		display: grid;
 		place-items: center;
 		font-weight: 700;

@@ -25,6 +25,16 @@
 	--accent-ring: oklch(0.555 0.205 272 / 0.35);
 	--cyan: oklch(0.62 0.15 215);
 	--cyan-soft: oklch(0.955 0.035 215);
+	/* Logo (PulsarMark) and text-selection colours — themed separately from --accent because
+	   the accent tone that reads on white sinks into the dark surfaces. */
+	--mark: var(--accent);
+	--selection-bg: var(--accent-soft-2);
+	--selection-text: var(--accent-press);
+	/* Accent / danger used as TEXT (links, active labels, error messages). Light theme: the
+	   accent shades themselves; dark theme lifts them so they read on the dark surfaces. */
+	--accent-fg: var(--accent);
+	--accent-ink: var(--accent-press);
+	--danger-text: var(--danger);
 
 	--ok: oklch(0.63 0.15 158);
 	--ok-soft: oklch(0.95 0.04 158);
@@ -76,6 +86,10 @@
 :root[data-gaming][data-theme='dark'] {
 	--accent-soft: oklch(0.32 0.07 215);
 	--accent-soft-2: oklch(0.4 0.1 215);
+	--mark: oklch(0.78 0.13 215);
+	--selection-bg: oklch(0.6 0.13 215 / 0.5);
+	--accent-fg: oklch(0.8 0.12 215);
+	--accent-ink: oklch(0.8 0.12 215);
 }
 
 /* Controller / keyboard roving focus (gaming mode). `gamepadNav` toggles the
@@ -104,6 +118,17 @@
 	--text-faint: oklch(0.56 0.012 265);
 	--accent-soft: oklch(0.32 0.07 272);
 	--accent-soft-2: oklch(0.4 0.1 272);
+	--ok-soft: oklch(0.3 0.06 158);
+	--warn-soft: oklch(0.32 0.06 75);
+	--danger-soft: oklch(0.3 0.07 25);
+	--mark: oklch(0.74 0.15 272);
+	/* Translucent accent wash + the normal text colour: the light theme's dark-indigo-on-indigo
+	   pair was unreadable here. */
+	--selection-bg: oklch(0.55 0.17 272 / 0.5);
+	--selection-text: var(--text);
+	--accent-fg: oklch(0.76 0.14 272);
+	--accent-ink: oklch(0.76 0.14 272);
+	--danger-text: oklch(0.74 0.15 25);
 	--shadow-xs: 0 1px 2px oklch(0 0 0 / 0.3);
 	--shadow-sm: 0 1px 2px oklch(0 0 0 / 0.3), 0 2px 6px oklch(0 0 0 / 0.3);
 	--shadow: 0 2px 4px oklch(0 0 0 / 0.3), 0 8px 24px oklch(0 0 0 / 0.4);
@@ -127,6 +152,17 @@ body {
 	background: var(--surface);
 	overflow: hidden;
 	-webkit-font-smoothing: antialiased;
+	/* An app, not a page: nothing is drag-selectable unless it opts in with `.selectable`.
+	   Text fields stay editable/selectable. (-webkit- prefix for WebKitGTK / WKWebView.) */
+	-webkit-user-select: none;
+	user-select: none;
+}
+input,
+textarea,
+[contenteditable]:not([contenteditable='false']),
+.selectable {
+	-webkit-user-select: text;
+	user-select: text;
 }
 h1,
 h2,
@@ -142,8 +178,8 @@ h4 {
 	font-family: var(--font-mono);
 }
 ::selection {
-	background: var(--accent-soft-2);
-	color: var(--accent-press);
+	background: var(--selection-bg);
+	color: var(--selection-text);
 }
 
 /* buttons */
@@ -271,7 +307,7 @@ h4 {
 	font-size: 26px;
 	font-weight: 600;
 	letter-spacing: 0.04em;
-	color: var(--accent);
+	color: var(--accent-fg);
 }
 @keyframes splash-pulse {
 	0%,
@@ -357,13 +393,17 @@ h4 {
    and modals/dialogs get a smooth scale+fade entrance and backdrops fade in. Gated to
    :not([data-sw-ui]) so the software-painted opi5/AC-off path stays animation-free + cheap. */
 @keyframes pulsar-modal-in {
+	/* The individual `translate`/`scale` properties compose with each dialog's own `transform`
+	   (e.g. the translate(-50%, -50%) centring) — animating `transform` would override it. */
 	from {
 		opacity: 0;
-		transform: translateY(10px) scale(0.96);
+		translate: 0 10px;
+		scale: 0.96;
 	}
 	to {
 		opacity: 1;
-		transform: translateY(0) scale(1);
+		translate: 0 0;
+		scale: 1;
 	}
 }
 @keyframes pulsar-backdrop-in {
@@ -523,11 +563,11 @@ h4 {
 }
 .badge.accent {
 	background: var(--accent-soft);
-	color: var(--accent-press);
+	color: var(--accent-ink);
 }
 .badge.pending {
 	background: var(--accent-soft);
-	color: var(--accent-press);
+	color: var(--accent-ink);
 }
 .badge.off {
 	background: var(--surface-3);
@@ -637,4 +677,8 @@ button:focus-visible,
 input:focus-visible {
 	outline: 2px solid var(--accent);
 	outline-offset: 2px;
+}
+/* A `.field` draws its own ring (:focus-within) — no second outline on the bare input inside. */
+.field input:focus-visible {
+	outline: none;
 }

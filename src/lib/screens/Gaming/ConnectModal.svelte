@@ -11,6 +11,7 @@
 	import { canConnectTarget, fmtTarget } from '$lib/connectTarget';
 	import { portal } from '$lib/portal';
 	import { openModal, closeModal } from '$lib/overlayModals.svelte';
+	import { closeOnEscape } from '$lib/escapeStack';
 	import type { GamepadNav } from '$lib/gamepadNav.svelte';
 
 	type Props = {
@@ -36,7 +37,9 @@
 		onPick(id);
 	}
 
+	let unEscape = () => {};
 	onMount(() => {
+		unEscape = closeOnEscape(() => onClose());
 		// Hide every pane's native render while this numpad is up, so a neighbour pane's live
 		// video (composited over the webview on Linux) can't occlude it (split-mode #8).
 		openModal();
@@ -49,6 +52,7 @@
 		});
 	});
 	onDestroy(() => {
+		unEscape();
 		closeModal();
 		nav.popBack(onClose);
 		nav.focusFirst(); // return focus to the shell
@@ -153,7 +157,7 @@
 		background: var(--surface-2);
 		border: 1px solid var(--border-strong);
 		border-radius: var(--r-lg);
-		color: var(--accent);
+		color: var(--accent-fg);
 	}
 	.idfield input {
 		flex: 1;

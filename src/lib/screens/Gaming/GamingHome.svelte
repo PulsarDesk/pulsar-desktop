@@ -261,7 +261,7 @@
 		font-size: 11px;
 		letter-spacing: 0.16em;
 		text-transform: uppercase;
-		color: var(--accent);
+		color: var(--accent-fg);
 	}
 	h1 {
 		font-size: 34px;
@@ -387,7 +387,7 @@
 		height: 38px;
 		border-radius: 10px;
 		background: var(--accent-soft);
-		color: var(--accent);
+		color: var(--accent-fg);
 		display: grid;
 		place-items: center;
 		font-weight: 700;
@@ -449,11 +449,11 @@
 	}
 	.redit:hover {
 		background: var(--accent-soft);
-		color: var(--accent);
+		color: var(--accent-fg);
 	}
 	.rdel:hover {
 		background: var(--accent-soft);
-		color: var(--accent);
+		color: var(--accent-fg);
 	}
 
 	/* Recents edit modal form — mirrors the Devices add/edit form. */
@@ -496,7 +496,7 @@
 	}
 	.imgopt.active {
 		border-color: var(--accent);
-		color: var(--accent);
+		color: var(--accent-fg);
 		background: var(--accent-soft);
 	}
 	.uimg {

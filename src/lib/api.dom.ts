@@ -70,12 +70,39 @@ export async function readClipboard(): Promise<string> {
 	return '';
 }
 
-/** Control the frameless OS window (no-op outside Tauri, e.g. browser dev). */
+/** Is the OS window maximized? GTK's own flag goes stale on Linux (the app runs under
+ * XWayland, GDK_BACKEND=x11): KWin maximizes the window but GTK never sees the state change,
+ * so `isMaximized()` stays false — and `toggleMaximize()`, which trusts it, never restores.
+ * So a window that fills its monitor's work area also counts as maximized. */
+export async function isWindowMaximized(): Promise<boolean> {
+	if (!isTauri) return false;
+	const { getCurrentWindow, currentMonitor } = await import('@tauri-apps/api/window');
+	const w = getCurrentWindow();
+	if (await w.isMaximized()) return true;
+	const [m, size] = await Promise.all([currentMonitor(), w.outerSize()]);
+	if (!m) return false;
+	const area = m.workArea.size;
+	return size.width >= area.width - 2 && size.height >= area.height - 2;
+}
+
+/** Control the frameless OS window (no-op outside Tauri, e.g. browser dev). `maximize`
+ * toggles maximize ↔ restore. */
 export async function windowControl(action: 'minimize' | 'maximize' | 'close') {
 	if (!isTauri) return;
 	const { getCurrentWindow } = await import('@tauri-apps/api/window');
 	const w = getCurrentWindow();
 	if (action === 'minimize') await w.minimize();
-	else if (action === 'maximize') await w.toggleMaximize();
+	else if (action === 'maximize') await ((await isWindowMaximized()) ? w.unmaximize() : w.maximize());
 	else await w.close();
+}
+
+/** An edge of the frameless window, for `startWindowResize`. */
+export type ResizeEdge = 'North' | 'South' | 'East' | 'West' | 'NorthEast' | 'NorthWest' | 'SouthEast' | 'SouthWest';
+
+/** Hand an edge drag to the window manager (frameless window → no native resize border). The
+ * WM still enforces the configured minimum size (tauri.conf `minWidth`/`minHeight`). */
+export async function startWindowResize(edge: ResizeEdge): Promise<void> {
+	if (!isTauri) return;
+	const { getCurrentWindow } = await import('@tauri-apps/api/window');
+	await getCurrentWindow().startResizeDragging(edge);
 }

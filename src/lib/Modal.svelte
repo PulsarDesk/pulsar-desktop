@@ -5,6 +5,7 @@
 	import { gamingNav } from '$lib/gamepadNav.svelte';
 	import { portal } from '$lib/portal';
 	import { openModal, closeModal } from '$lib/overlayModals.svelte';
+	import { closeOnEscape } from '$lib/escapeStack';
 
 	let {
 		title,
@@ -15,16 +16,13 @@
 		navModal = false
 	}: { title: string; onClose: () => void; children: Snippet; navModal?: boolean } = $props();
 
-	function onKey(e: KeyboardEvent) {
-		if (e.key === 'Escape') onClose();
-	}
-
 	// While this modal is up, occlude every pane's native render (split-mode #8): on Linux the
 	// native video composites OVER the webview, so without this a live pane would hide the modal.
 	$effect(() => {
 		openModal();
 		return closeModal;
 	});
+	$effect(() => closeOnEscape(() => onClose()));
 
 	// Register the close (×) button with the gaming nav when this is a controller-navigable
 	// popup, so the pad can reach it (otherwise the × at the top was unreachable). No-op for
@@ -34,8 +32,6 @@
 		return gamingNav.item(node);
 	}
 </script>
-
-<svelte:window onkeydown={onKey} />
 
 <div class="backdrop" use:portal onclick={onClose} role="presentation"></div>
 <div class="modal" use:portal role="dialog" aria-modal="true" aria-label={title} data-navmodal={navModal ? '' : undefined}>
@@ -68,7 +64,6 @@
 		border: 1px solid var(--border);
 		border-radius: var(--r-lg);
 		box-shadow: var(--shadow-lg);
-		z-index: 21;
 	}
 	.mhead {
 		display: flex;

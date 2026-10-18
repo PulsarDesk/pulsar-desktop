@@ -116,13 +116,13 @@
 <div class="srow">
 	<div class="st">
 		<b>{t('settings.logs')}</b>
-		<span>{t('settings.logsDesc')}{#if logDir} <span class="mono path">{logDir}</span>{/if}</span>
+		<span>{t('settings.logsDesc')}{#if logDir} <span class="mono path selectable">{logDir}</span>{/if}</span>
 	</div>
 	<button class="act" onclick={openLogs}>{t('settings.openLogs')}</button>
 </div>
 <div class="srow">
 	<div class="st"><b>{t('settings.version')}</b><span>{t('settings.versionDesc')}</span></div>
-	<span class="mono ver">Pulsar v{version}</span>
+	<span class="mono ver selectable">Pulsar v{version}</span>
 </div>
 
 <style>
@@ -139,7 +139,7 @@
 	}
 	.act:hover {
 		border-color: var(--accent);
-		color: var(--accent);
+		color: var(--accent-fg);
 	}
 	.path {
 		word-break: break-all;
@@ -173,7 +173,7 @@
 		color: var(--text-muted);
 	}
 	.restart {
-		color: var(--accent);
+		color: var(--accent-fg);
 		font-weight: 600;
 	}
 </style>

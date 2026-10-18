@@ -46,8 +46,8 @@
 	<div class="ghost">
 		<Icon name={mode === 'game' ? 'gaming' : 'monitor'} size={46} />
 		<div class="gname">{target.name}</div>
-		<div class="gid mono">{target.id}</div>
-		<div class="note err">{videoErr}</div>
+		<div class="gid mono selectable">{target.id}</div>
+		<div class="note err selectable">{videoErr}</div>
 	</div>
 {:else if !hasVideo && !embedded}
 	<!-- Connected, but the host hasn't started sending frames yet (it may be choosing a
@@ -104,7 +104,7 @@
 		color: oklch(0.62 0.02 265);
 	}
 	.note.err {
-		color: var(--danger);
+		color: var(--danger-text);
 	}
 	/* "waiting for the host's first frame" — animated pulse rings (the Pulsar mark
 	   motif) so it clearly reads as connecting/loading, not an error or a dead screen. */

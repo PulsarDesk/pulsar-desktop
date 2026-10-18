@@ -2,6 +2,7 @@
 	import Icon from '$lib/Icon.svelte';
 	import { t } from '$lib/i18n.svelte';
 	import { relayAuth } from '$lib/relayAuth.svelte';
+	import { closeOnEscape } from '$lib/escapeStack';
 
 	// The relay-authentication prompt. It appears only when a relay actually demands a
 	// credential (go_online replied RELAY_AUTH_REQUIRED) — there is no permanent password
@@ -30,8 +31,15 @@
 
 	function onKey(e: KeyboardEvent) {
 		if (e.key === 'Enter') submit();
-		else if (e.key === 'Escape' && !relayAuth.busy) relayAuth.open = false;
 	}
+
+	// Escape dismisses the prompt from anywhere in it — except while the credential is in flight.
+	$effect(() => {
+		if (relayAuth.open)
+			return closeOnEscape(() => {
+				if (!relayAuth.busy) relayAuth.open = false;
+			});
+	});
 </script>
 
 {#if relayAuth.open}
@@ -50,7 +58,7 @@
 				</button>
 			</div>
 
-			<div class="rrelay mono">{relayAuth.relay}</div>
+			<div class="rrelay mono selectable">{relayAuth.relay}</div>
 			<p class="rdesc">{t('relayAuth.desc')}</p>
 
 			{#if relayAuth.failed}
@@ -131,7 +139,7 @@
 		gap: 9px;
 		font-weight: 700;
 		font-size: 15px;
-		color: var(--accent);
+		color: var(--accent-fg);
 	}
 	.rhdr span {
 		color: var(--text);
@@ -167,7 +175,7 @@
 		border-radius: var(--r-sm);
 		background: oklch(0.55 0.2 25 / 0.12);
 		border: 1px solid oklch(0.55 0.2 25 / 0.35);
-		color: oklch(0.55 0.2 25);
+		color: var(--danger-text);
 	}
 	.rlabel {
 		display: block;

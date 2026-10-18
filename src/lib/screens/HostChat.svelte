@@ -64,7 +64,7 @@
 				<div class="tbody">
 					{#if toa.kind === 'clip'}
 						<div class="ttitle">{t('host.clipboardRecv', { peer: toa.peer })}</div>
-						<div class="tprev mono">{toa.text.slice(0, 80)}</div>
+						<div class="tprev mono selectable">{toa.text.slice(0, 80)}</div>
 					{:else if toa.kind === 'file'}
 						<div class="ttitle">{t('host.fileRecv', { peer: toa.peer, name: toa.text })}</div>
 						<div class="tprev">{t('host.fileSaved')}</div>
@@ -119,7 +119,7 @@
 		place-items: center;
 		border-radius: 8px;
 		background: var(--accent-soft);
-		color: var(--accent);
+		color: var(--accent-fg);
 	}
 	.tbody {
 		flex: 1;
@@ -145,7 +145,7 @@
 		border-radius: var(--r-sm);
 		border: 1px solid var(--accent-soft-2);
 		background: var(--accent-soft);
-		color: var(--accent-press);
+		color: var(--accent-ink);
 		cursor: pointer;
 	}
 	.tx {

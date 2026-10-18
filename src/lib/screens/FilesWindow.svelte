@@ -15,7 +15,7 @@
 	<header class="fhead">
 		<span class="fmark"><Icon name="file" size={15} /></span>
 		<div>
-			<div class="fpeer">{peer}</div>
+			<div class="fpeer selectable">{peer}</div>
 			<div class="fsub">{t('files.windowTitle')}</div>
 		</div>
 	</header>

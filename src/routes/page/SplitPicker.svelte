@@ -5,6 +5,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import Icon from '$lib/Icon.svelte';
 	import { t } from '$lib/i18n.svelte';
+	import { closeOnEscape } from '$lib/escapeStack';
 	import { gamingNav } from '$lib/gamepadNav.svelte';
 
 	type Layout = 'h2' | 'v2' | 'grid4';
@@ -39,12 +40,15 @@
 	// close it, and land focus inside on open — mirrors ConnectModal. Without it the pad kept
 	// navigating the gaming home BEHIND the picker (and the picker itself wasn't reachable).
 	const navItem = gamingNav.item;
+	let unEscape = () => {};
 	onMount(() => {
 		gamingNav.pushBack(onClose);
+		unEscape = closeOnEscape(() => onClose());
 		requestAnimationFrame(() => gamingNav.focusFirst());
 	});
 	onDestroy(() => {
 		gamingNav.popBack(onClose);
+		unEscape();
 		gamingNav.focusFirst(); // return focus to the shell
 	});
 </script>
@@ -168,7 +172,7 @@
 	.layout.on {
 		background: var(--accent-soft);
 		border-color: var(--accent);
-		color: var(--accent-press);
+		color: var(--accent-ink);
 	}
 	.ltext {
 		font-size: 12.5px;

@@ -1,6 +1,7 @@
 <script lang="ts">
 	import Icon from '$lib/Icon.svelte';
 	import { t } from '$lib/i18n.svelte';
+	import { closeOnEscape } from '$lib/escapeStack';
 
 	type Props = {
 		pwInput: string;
@@ -16,6 +17,8 @@
 		onSubmit,
 		onCancel
 	}: Props = $props();
+
+	$effect(() => closeOnEscape(() => onCancel()));
 </script>
 
 <div class="pwmodal">
@@ -23,7 +26,7 @@
 		<div class="pwhdr"><Icon name="shield" size={18} /><span>{t('pw.title')}</span></div>
 		<!-- eslint-disable-next-line svelte/no-at-html-tags -->
 		<p class="pwlead">{@html t('pw.lead')}</p>
-		{#if pwError}<div class="pwerr">{pwError}</div>{/if}
+		{#if pwError}<div class="pwerr selectable">{pwError}</div>{/if}
 		<!-- svelte-ignore a11y_autofocus -->
 		<!-- Raw value: the persistent connect password can be any string (case/symbols/length), so the
 		     field must NOT reformat it. The one-time password is matched case- and dash-insensitively
@@ -75,7 +78,7 @@
 		gap: 9px;
 		font-size: 16px;
 		font-weight: 700;
-		color: var(--accent-press);
+		color: var(--accent-ink);
 	}
 	.pwlead {
 		margin: 9px 0 14px;
@@ -86,7 +89,7 @@
 	.pwerr {
 		margin-bottom: 10px;
 		font-size: 12.5px;
-		color: var(--danger);
+		color: var(--danger-text);
 		font-weight: 600;
 	}
 	.pwfield {

@@ -128,7 +128,7 @@
 		background: var(--surface-3);
 	}
 	.tab.on {
-		color: var(--accent-press);
+		color: var(--accent-ink);
 		border-bottom-color: var(--accent);
 		background: var(--surface);
 	}

@@ -124,7 +124,7 @@
 		<span class="every">{t('games.every')}
 			<input class="num" type="number" min="1" max="1440" bind:value={gameStore.scan.intervalMin} onchange={() => { saveGames(); if (gameStore.scan.autoScan) startAuto(); }} aria-label={t('games.intervalAria')} />
 			{t('games.minutes')}</span>
-		{#if scanMsg}<span class="scanmsg">{scanMsg}</span>{/if}
+		{#if scanMsg}<span class="scanmsg selectable">{scanMsg}</span>{/if}
 	</div>
 	{#if scanResults.length > 0}
 		<div class="results">
@@ -135,7 +135,7 @@
 			{#each scanResults as a (a.path)}
 				<div class="resrow">
 					<span class="rname">{a.name}</span>
-					<span class="rpath mono">{a.path}</span>
+					<span class="rpath mono selectable">{a.path}</span>
 					<button class="btn btn-ghost sm" onclick={() => addFound(a)}>{t('games.addOne')}</button>
 				</div>
 			{/each}

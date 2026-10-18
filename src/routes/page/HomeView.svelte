@@ -107,7 +107,7 @@
 		{#if connectErr}
 			<div class="flash" role="alert">
 				<Icon name="shield" size={16} />
-				<span>{connectErr}</span>
+				<span class="selectable">{connectErr}</span>
 				<button class="flashx" aria-label={t('flash.close')} onclick={onClearConnectErr}>
 					<Icon name="x" size={14} />
 				</button>
@@ -156,7 +156,7 @@
 		border-radius: var(--r-sm);
 		background: color-mix(in oklch, var(--danger) 12%, var(--surface));
 		border: 1px solid color-mix(in oklch, var(--danger) 40%, var(--border));
-		color: var(--danger);
+		color: var(--danger-text);
 		font-size: 13px;
 		line-height: 1.4;
 	}
@@ -168,7 +168,7 @@
 		flex: none;
 		border: none;
 		background: transparent;
-		color: var(--danger);
+		color: var(--danger-text);
 		cursor: pointer;
 		padding: 2px;
 		display: grid;

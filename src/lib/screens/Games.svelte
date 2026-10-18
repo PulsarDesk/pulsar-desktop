@@ -128,7 +128,7 @@
 		font-weight: 700;
 		flex: none;
 		background: var(--accent-soft);
-		color: var(--accent);
+		color: var(--accent-fg);
 	}
 	.gmeta {
 		flex: 1;

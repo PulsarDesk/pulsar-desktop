@@ -152,7 +152,7 @@
 		height: 34px;
 		border-radius: 9px;
 		background: var(--accent-soft);
-		color: var(--accent);
+		color: var(--accent-fg);
 		display: grid;
 		place-items: center;
 		font-weight: 700;
@@ -200,7 +200,7 @@
 		margin-left: 4px;
 		font-size: 11.5px;
 		font-weight: 600;
-		color: var(--accent-press);
+		color: var(--accent-ink);
 		background: var(--accent-soft);
 		border: 1px solid var(--accent-soft-2);
 		border-radius: var(--r-sm);
@@ -233,7 +233,7 @@
 		color: var(--text);
 	}
 	.navlink.on {
-		color: var(--accent-press);
+		color: var(--accent-ink);
 		background: var(--accent-soft);
 	}
 	.right {
@@ -261,7 +261,7 @@
 	.fsbtn.on {
 		background: var(--accent-soft);
 		border-color: var(--accent);
-		color: var(--accent-press);
+		color: var(--accent-ink);
 	}
 	.pads {
 		display: flex;

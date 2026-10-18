@@ -46,6 +46,7 @@
 	import FilesWindow from '$lib/screens/FilesWindow.svelte';
 	import HostChat from '$lib/screens/HostChat.svelte';
 	import Chrome from './page/Chrome.svelte';
+	import ResizeEdges from './page/ResizeEdges.svelte';
 	import Icon from '$lib/Icon.svelte';
 	import Tabs from './page/Tabs.svelte';
 	import HomeView from './page/HomeView.svelte';
@@ -873,6 +874,7 @@
 	{/if}
 	<div class="desktop">
 	<div class="window" class:fullscreen={sm.fullscreen}>
+		<ResizeEdges fullscreen={sm.fullscreen} />
 		{#if splashOn}
 			<div class="splash" class:gone={!booting} aria-hidden="true">
 				<div class="splash-mark"><PulsarMark size={76} /></div>

@@ -324,7 +324,7 @@
 		font-size: 11.5px;
 		font-family: inherit;
 		font-weight: 600;
-		color: var(--accent);
+		color: var(--accent-fg);
 		background: var(--accent-soft);
 		border: 1px solid var(--accent);
 		border-radius: var(--r-sm, 4px);
@@ -398,7 +398,7 @@
 	}
 	.slot-label {
 		font-size: 11.5px;
-		color: var(--accent);
+		color: var(--accent-fg);
 		font-weight: 600;
 		min-width: 7ch;
 		flex: none;

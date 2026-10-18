@@ -55,7 +55,7 @@
 					</span>
 					<div class="lmeta">
 						<div class="lname">{d.name}</div>
-						<div class="lsub mono">{d.id || d.addr}</div>
+						<div class="lsub mono selectable">{d.id || d.addr}</div>
 					</div>
 					{#if d.has_id}
 						<div class="lactions">
@@ -127,7 +127,7 @@
 		height: 30px;
 		border-radius: 8px;
 		background: var(--accent-soft);
-		color: var(--accent);
+		color: var(--accent-fg);
 		display: grid;
 		place-items: center;
 		font-weight: 700;
