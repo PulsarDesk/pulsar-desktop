@@ -1298,6 +1298,10 @@ pub(crate) async fn go_online(
 					// without this a held Shift/Ctrl or mouse button (drag-select) stays
 					// stuck on the host until teardown.
 					let mut was_view_only = false;
+					// Wayland: the portal capture knows where the streamed monitor sits in the
+					// output layout; absolute moves are confined to it (see DesktopInput::set_region).
+					#[cfg(target_os = "linux")]
+					let input_cap = cap_slot.clone();
 					// Input is injected WITHOUT any pointer rotation. The host video is always presented
 					// UPRIGHT (the native capture bakes the display rotation into the frame, or a rotated
 					// ffmpeg stream is un-rotated by the client), and Windows SendInput addresses the same
@@ -1542,6 +1546,11 @@ pub(crate) async fn go_online(
 													// unchanged so the next PointerMotion retries the resolve.
 												}
 											}
+											// Re-read per move (a re-stream can pick another monitor); cheap.
+											#[cfg(target_os = "linux")]
+											d.set_region(
+												input_cap.lock().unwrap().as_ref().and_then(|c| c.pointer_region()),
+											);
 											d.pointer(x, y)
 										}
 										InputEvent::PointerRelative { dx, dy } => {
