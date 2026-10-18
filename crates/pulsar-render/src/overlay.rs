@@ -295,13 +295,13 @@ use crate::i18n::t;
 /// frame while a monitor/codec switch waits for the new stream's first keyframe. Keeps
 /// the user informed that the change is loading, not hung.
 pub fn draw_switching(ctx: &egui::Context) {
-	egui::Area::new(egui::Id::new("switching"))
+	egui::Area::new(egui::Id::unique("switching"))
 		.anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
 		.show(ctx, |ui| {
-			egui::Frame::none()
+			egui::Frame::NONE
 				.fill(egui::Color32::from_rgba_unmultiplied(18, 20, 26, 230))
-				.rounding(12.0)
-				.inner_margin(egui::Margin::symmetric(22.0, 18.0))
+				.corner_radius(12.0)
+				.inner_margin(egui::Margin::symmetric(22, 18))
 				.show(ui, |ui| {
 					ui.vertical_centered(|ui| {
 						ui.add(egui::Spinner::new().size(28.0));
@@ -321,17 +321,17 @@ pub fn draw_switching(ctx: &egui::Context) {
 /// webview's `.stall` div that is permanently occluded by the native renderer window;
 /// this surfaces the same message inside the renderer where the user can see it.
 pub fn draw_stalled(ctx: &egui::Context) {
-	egui::Area::new(egui::Id::new("stalled"))
+	egui::Area::new(egui::Id::unique("stalled"))
 		.anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
 		.show(ctx, |ui| {
-			egui::Frame::none()
+			egui::Frame::NONE
 				.fill(egui::Color32::from_rgba_unmultiplied(44, 18, 18, 230))
 				.stroke(egui::Stroke::new(
 					1.0,
 					egui::Color32::from_rgba_unmultiplied(200, 60, 60, 180),
 				))
-				.rounding(12.0)
-				.inner_margin(egui::Margin::symmetric(22.0, 18.0))
+				.corner_radius(12.0)
+				.inner_margin(egui::Margin::symmetric(22, 18))
 				.show(ui, |ui| {
 					ui.set_max_width(320.0);
 					ui.vertical_centered(|ui| {
@@ -401,11 +401,23 @@ pub fn apply_theme(ctx: &egui::Context) {
 	// `apply_theme` on its fresh `egui::Context`, so all three get the icons. `add_to_fonts`
 	// inserts "phosphor" at index 1 of the Proportional family, i.e. as a fallback for our
 	// proportional text — so `PHOSPHOR_*` glyph constants render wherever we draw normal text.
+	// Done by hand rather than via `egui_phosphor::add_to_fonts`: the newest egui-phosphor
+	// (0.14) is built against egui 0.36, so its `FontDefinitions` is a different type from
+	// our egui 0.37 one. Only the font bytes + the icon `&str` constants are used from it.
 	let mut fonts = egui::FontDefinitions::default();
-	egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+	fonts.font_data.insert(
+		"phosphor".into(),
+		std::sync::Arc::new(egui::FontData::from_static(
+			egui_phosphor::Variant::Regular.font_bytes(),
+		)),
+	);
+	if let Some(keys) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+		keys.insert(1, "phosphor".into());
+	}
 	ctx.set_fonts(fonts);
 
 	let mut v = egui::Visuals::dark();
+	pin_egui_029_look(&mut v);
 	v.panel_fill = egui::Color32::from_rgba_premultiplied(13, 14, 20, 235);
 	v.window_fill = egui::Color32::from_rgb(18, 20, 28);
 	v.widgets.inactive.bg_fill = egui::Color32::from_rgb(28, 30, 42);
@@ -422,10 +434,49 @@ pub fn apply_theme(ctx: &egui::Context) {
 	v.selection.bg_fill = ACCENT;
 	v.override_text_color = Some(egui::Color32::from_rgb(228, 230, 240));
 	ctx.set_visuals(v);
-	let mut style = (*ctx.style()).clone();
+	let mut style = (*ctx.global_style()).clone();
 	style.spacing.item_spacing = egui::vec2(10.0, 10.0);
 	style.spacing.button_padding = egui::vec2(10.0, 6.0);
-	ctx.set_style(style);
+	// egui 0.29 defaults that later releases changed (the overlay was designed on 0.29):
+	// faster animations, 18 pt widget rows, 12.5 pt body/button text, no ScrollArea edge fade.
+	style.animation_time = 1.0 / 12.0;
+	style.spacing.interact_size = egui::vec2(40.0, 18.0);
+	style.spacing.scroll.fade.strength = 0.0;
+	for (ts, size) in [
+		(egui::TextStyle::Body, 12.5),
+		(egui::TextStyle::Button, 12.5),
+		(egui::TextStyle::Monospace, 12.0),
+	] {
+		if let Some(f) = style.text_styles.get_mut(&ts) {
+			f.size = size;
+		}
+	}
+	ctx.set_global_style(style);
+}
+
+/// Restore egui 0.29's dark-theme widget visuals (corner radii, fills, strokes, hover/press
+/// expansion) that egui 0.37 changed, so the overlay keeps the look it was designed with.
+/// `apply_theme` then layers the Pulsar colours on top, exactly as before the upgrade.
+fn pin_egui_029_look(v: &mut egui::Visuals) {
+	use egui::{Color32, CornerRadius, Stroke};
+	let wv = |weak: u8, bg: u8, bg_stroke: Stroke, fg_stroke: Stroke, r: u8, expansion: f32| {
+		egui::style::WidgetVisuals {
+			weak_bg_fill: Color32::from_gray(weak),
+			bg_fill: Color32::from_gray(bg),
+			bg_stroke,
+			fg_stroke,
+			corner_radius: CornerRadius::same(r),
+			expansion,
+		}
+	};
+	let gray = |w: f32, g: u8| Stroke::new(w, Color32::from_gray(g));
+	v.widgets.noninteractive = wv(27, 27, gray(1.0, 60), gray(1.0, 140), 2, 0.0);
+	v.widgets.inactive = wv(60, 60, Stroke::NONE, gray(1.0, 180), 2, 0.0);
+	v.widgets.hovered = wv(70, 70, gray(1.0, 150), gray(1.5, 240), 3, 1.0);
+	let white = |w: f32| Stroke::new(w, Color32::WHITE);
+	v.widgets.active = wv(55, 55, white(1.0), white(2.0), 2, 1.0);
+	v.widgets.open = wv(45, 27, gray(1.0, 60), gray(1.0, 210), 2, 0.0);
+	v.handle_shape = egui::style::HandleShape::Circle;
 }
 
 /// Draw the overlay for this frame; returns the commands the user triggered.
@@ -460,15 +511,15 @@ pub fn draw(ctx: &egui::Context, st: &OverlayState, ui_state: &mut UiState) -> V
 		}
 	}
 	// Dim scrim behind the panel; clicking it closes the overlay.
-	egui::Area::new("scrim".into())
+	egui::Area::new(egui::Id::unique("scrim"))
 		.order(egui::Order::Background)
 		.fixed_pos(egui::pos2(0.0, 0.0))
 		.show(ctx, |ui| {
-			let r = ctx.screen_rect();
+			let r = ctx.viewport_rect();
 			ui.painter()
 				.rect_filled(r, 0.0, egui::Color32::from_rgba_premultiplied(0, 0, 0, 120));
 			if ui
-				.interact(r, egui::Id::new("scrim_click"), egui::Sense::click())
+				.interact(r, egui::Id::unique("scrim_click"), egui::Sense::click())
 				.clicked()
 			{
 				cmds.push(OverlayCmd::Close);
@@ -479,13 +530,16 @@ pub fn draw(ctx: &egui::Context, st: &OverlayState, ui_state: &mut UiState) -> V
 	// sub-views keep every page short (tallest ≈ 340 pt — under a 576 pt 720p
 	// surface), so no scroll container is needed (an auto-height egui Window
 	// collapses a ScrollArea to its first row).
+	let frame = egui::Frame::window(&ctx.global_style()).inner_margin(egui::Margin::same(14));
 	egui::Window::new("pulsar_overlay")
 		.title_bar(false)
 		.resizable(false)
 		.collapsible(false)
 		.anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-		.fixed_size(egui::vec2(360.0, 0.0))
-		.frame(egui::Frame::window(&ctx.style()).inner_margin(egui::Margin::same(14.0)))
+		// 360 pt of CONTENT width: in egui 0.37 `fixed_size` is the OUTER size (margins +
+		// stroke included), so add the frame's margins back to keep the 0.29 layout.
+		.fixed_size(egui::vec2(360.0 + frame.total_margin().sum().x, 0.0))
+		.frame(frame)
 		.show(ctx, |ui| {
 			// Header: brand + mode + back arrow when inside a section.
 			ui.horizontal(|ui| {
@@ -549,13 +603,13 @@ pub fn draw(ctx: &egui::Context, st: &OverlayState, ui_state: &mut UiState) -> V
 				ui_state.anim_view = ui_state.view;
 				ui_state.anim_gen = ui_state.anim_gen.wrapping_add(1);
 				ui.ctx().animate_value_with_time(
-					egui::Id::new(("ov-view-fade", ui_state.anim_gen)),
+					egui::Id::unique(("ov-view-fade", ui_state.anim_gen)),
 					0.0,
 					0.0,
 				);
 			}
 			let fade = ui.ctx().animate_value_with_time(
-				egui::Id::new(("ov-view-fade", ui_state.anim_gen)),
+				egui::Id::unique(("ov-view-fade", ui_state.anim_gen)),
 				1.0,
 				0.16,
 			);
@@ -931,7 +985,7 @@ fn draw_display(
 		choice_row_i(ui, s == row, nav, t("display.adapt"), adapt_cur, &onoff, row, pending, Some(t("info.adapt")))
 	{
 		if v == "on" {
-			let sr = ui.ctx().screen_rect();
+			let sr = ui.ctx().viewport_rect();
 			let ppp = ui.ctx().pixels_per_point();
 			let w = (sr.width() * ppp).round() as u32;
 			let h = (sr.height() * ppp).round() as u32;
@@ -1053,6 +1107,7 @@ fn draw_tools(
 /// the focus-gated combos).
 fn draw_chat(ui: &mut egui::Ui, st: &OverlayState, input: &mut String, cmds: &mut Vec<OverlayCmd>) {
 	egui::ScrollArea::vertical()
+		.scroll_source(egui::scroll_area::ScrollSource::ALL) // 0.29 default: drag-to-scroll with the mouse too
 		.max_height(230.0)
 		.auto_shrink([false, false])
 		.stick_to_bottom(true)
@@ -1078,10 +1133,10 @@ fn draw_chat(ui: &mut egui::Ui, st: &OverlayState, input: &mut String, cmds: &mu
 					} else {
 						egui::Color32::from_rgb(34, 36, 50)
 					};
-					egui::Frame::none()
+					egui::Frame::NONE
 						.fill(fill)
-						.rounding(9.0)
-						.inner_margin(egui::Margin::symmetric(10.0, 6.0))
+						.corner_radius(9.0)
+						.inner_margin(egui::Margin::symmetric(10, 6))
 						.show(ui, |ui| {
 							ui.set_max_width(250.0);
 							ui.label(
@@ -1099,7 +1154,12 @@ fn draw_chat(ui: &mut egui::Ui, st: &OverlayState, input: &mut String, cmds: &mu
 	ui.horizontal(|ui| {
 		let resp = ui.add_sized(
 			egui::vec2(ui.available_width() - 76.0, 28.0),
-			egui::TextEdit::singleline(input).hint_text(t("chat.placeholder")),
+			egui::TextEdit::singleline(input)
+				.hint_text(t("chat.placeholder"))
+				// egui 0.29's text placement (top-left, 5×3 incl. the 1 px stroke); 0.37
+				// centres single-line text in the box with a theme margin instead.
+				.margin(egui::Margin::symmetric(5, 3))
+				.align(egui::Align2::LEFT_TOP),
 		);
 		// Keep the composer focused while this view is up so relayed Text events land.
 		resp.request_focus();
@@ -1140,6 +1200,7 @@ fn draw_files(ui: &mut egui::Ui, st: &OverlayState, us: &mut UiState, cmds: &mut
 			let mut nav: Option<String> = None;
 			let mut send: Option<String> = None;
 			egui::ScrollArea::vertical()
+				.scroll_source(egui::scroll_area::ScrollSource::ALL) // 0.29 default: drag-to-scroll with the mouse too
 				.id_salt("fs_local")
 				.max_height(220.0)
 				.auto_shrink([false, false])
@@ -1187,6 +1248,7 @@ fn draw_files(ui: &mut egui::Ui, st: &OverlayState, us: &mut UiState, cmds: &mut
 				.color(egui::Color32::GRAY),
 			);
 			egui::ScrollArea::vertical()
+				.scroll_source(egui::scroll_area::ScrollSource::ALL) // 0.29 default: drag-to-scroll with the mouse too
 				.id_salt("fs_remote")
 				.max_height(220.0)
 				.auto_shrink([false, false])
@@ -1713,7 +1775,7 @@ fn choice_row_i(
 	if let Some((text, ic, irect)) = info_icon {
 		let popup_id = ui.make_persistent_id(("crow-info-popup", row));
 		let iresp = ui.interact(irect, ui.make_persistent_id(("crow-info-hit", row)), egui::Sense::click());
-		let open = ui.memory(|m| m.is_popup_open(popup_id));
+		let open = egui::Popup::is_id_open(ui.ctx(), popup_id);
 		let col = if iresp.hovered() || open {
 			CYAN
 		} else {
@@ -1728,20 +1790,17 @@ fn choice_row_i(
 				egui::Stroke::new(1.5, col),
 			);
 		}
-		if iresp.clicked() {
-			ui.memory_mut(|m| m.toggle_popup(popup_id));
-		}
 		iresp.clone().on_hover_text(egui::RichText::new(text).size(12.0));
-		egui::popup_below_widget(
-			ui,
-			popup_id,
-			&iresp,
-			egui::PopupCloseBehavior::CloseOnClickOutside,
-			|ui| {
+		// A click toggles the popup (egui 0.37 `Popup` API; `popup_below_widget` and
+		// `Memory::toggle_popup` are gone).
+		egui::Popup::from_response(&iresp)
+			.id(popup_id)
+			.open_memory(iresp.clicked().then_some(egui::SetOpenCommand::Toggle))
+			.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+			.show(|ui| {
 				ui.set_max_width(240.0);
 				ui.label(egui::RichText::new(text).size(12.0));
-			},
-		);
+			});
 	}
 	confirmed
 }
@@ -1788,10 +1847,10 @@ fn paint_tri(painter: &egui::Painter, center: egui::Pos2, half: f32, right: bool
 }
 
 fn stat_tile(ui: &mut egui::Ui, value: &str, icon: &str, label: &str) {
-	egui::Frame::none()
+	egui::Frame::NONE
 		.fill(egui::Color32::from_rgb(22, 24, 34))
-		.rounding(8.0)
-		.inner_margin(egui::Margin::symmetric(10.0, 8.0))
+		.corner_radius(8.0)
+		.inner_margin(egui::Margin::symmetric(10, 8))
 		.show(ui, |ui| {
 			ui.vertical(|ui| {
 				ui.label(egui::RichText::new(value).size(18.0).strong().color(CYAN));
@@ -1820,14 +1879,14 @@ fn stat_tile(ui: &mut egui::Ui, value: &str, icon: &str, label: &str) {
 /// pass-through), so this is display-only by construction.
 pub fn draw_hud(ctx: &egui::Context, st: &OverlayState) {
 	let bw = fmt_mbps(st.mbps);
-	egui::Area::new("pulsar_hud".into())
+	egui::Area::new(egui::Id::unique("pulsar_hud"))
 		.order(egui::Order::Foreground)
 		.anchor(egui::Align2::RIGHT_TOP, egui::vec2(-10.0, 10.0))
 		.show(ctx, |ui| {
-			egui::Frame::none()
+			egui::Frame::NONE
 				.fill(egui::Color32::from_rgba_premultiplied(10, 11, 16, 200))
-				.rounding(6.0)
-				.inner_margin(egui::Margin::symmetric(10.0, 6.0))
+				.corner_radius(6.0)
+				.inner_margin(egui::Margin::symmetric(10, 6))
 				.show(ui, |ui| {
 					ui.add(
 						egui::Label::new(
@@ -1876,9 +1935,9 @@ pub fn btn_rect(pos: (f32, f32), screen: egui::Rect) -> egui::Rect {
 /// matching invisible hotspot instead).
 pub fn draw_open_button(ctx: &egui::Context, st: &OverlayState) -> bool {
 	let mut clicked = false;
-	egui::Area::new("pulsar_ovbtn".into())
+	egui::Area::new(egui::Id::unique("pulsar_ovbtn"))
 		.order(egui::Order::Foreground)
-		.fixed_pos(btn_rect(st.btn_pos, ctx.screen_rect()).min)
+		.fixed_pos(btn_rect(st.btn_pos, ctx.viewport_rect()).min)
 		.show(ctx, |ui| {
 			let size = egui::vec2(BTN_SIZE, BTN_SIZE);
 			let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
@@ -1929,15 +1988,15 @@ pub fn draw_open_button(ctx: &egui::Context, st: &OverlayState) -> bool {
 /// (1→0 over the final stretch) for a smooth fade-out. One wide line — the label is
 /// explicitly non-wrapping so the text never folds into a narrow column.
 pub fn draw_hint(ctx: &egui::Context, text: &str, alpha: f32) {
-	egui::Area::new("pulsar_hint".into())
+	egui::Area::new(egui::Id::unique("pulsar_hint"))
 		.order(egui::Order::Foreground)
 		.anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -28.0))
 		.show(ctx, |ui| {
 			ui.set_opacity(alpha.clamp(0.0, 1.0));
-			egui::Frame::none()
+			egui::Frame::NONE
 				.fill(egui::Color32::from_rgba_premultiplied(10, 11, 16, 215))
-				.rounding(8.0)
-				.inner_margin(egui::Margin::symmetric(14.0, 8.0))
+				.corner_radius(8.0)
+				.inner_margin(egui::Margin::symmetric(14, 8))
 				.show(ui, |ui| {
 					ui.add(
 						egui::Label::new(
@@ -2019,7 +2078,7 @@ fn info(ui: &mut egui::Ui, text: &str) {
 	// /touch-driven overlay hover tooltips never appear, so clicking did nothing before.
 	let (rect, resp) = ui.allocate_exact_size(egui::vec2(15.0, 15.0), egui::Sense::click());
 	let popup_id = ui.make_persistent_id(("info-popup", rect.left() as i32, rect.top() as i32));
-	let open = ui.memory(|m| m.is_popup_open(popup_id));
+	let open = egui::Popup::is_id_open(ui.ctx(), popup_id);
 	let col = if resp.hovered() || open {
 		CYAN
 	} else {
@@ -2035,20 +2094,15 @@ fn info(ui: &mut egui::Ui, text: &str) {
 			egui::Stroke::new(1.5, col),
 		);
 	}
-	if resp.clicked() {
-		ui.memory_mut(|m| m.toggle_popup(popup_id));
-	}
 	resp.clone().on_hover_text(egui::RichText::new(text).size(12.0));
-	egui::popup_below_widget(
-		ui,
-		popup_id,
-		&resp,
-		egui::PopupCloseBehavior::CloseOnClickOutside,
-		|ui| {
+	egui::Popup::from_response(&resp)
+		.id(popup_id)
+		.open_memory(resp.clicked().then_some(egui::SetOpenCommand::Toggle))
+		.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+		.show(|ui| {
 			ui.set_max_width(240.0);
 			ui.label(egui::RichText::new(text).size(12.0));
-		},
-	);
+		});
 }
 
 #[cfg(test)]
@@ -2063,7 +2117,7 @@ mod focus_tests {
 	fn tab_walks_the_menu_boxes() {
 		let ctx = egui::Context::default();
 		let run = |events: Vec<egui::Event>| {
-			ctx.run(
+			ctx.run_ui(
 				egui::RawInput {
 					events,
 					screen_rect: Some(egui::Rect::from_min_size(
@@ -2072,14 +2126,17 @@ mod focus_tests {
 					)),
 					..Default::default()
 				},
-				|ctx| {
-					egui::CentralPanel::default().show(ctx, |ui| {
+				|ui| {
+					egui::CentralPanel::default().show(ui, |ui| {
 						cat_box(ui, icon::BROADCAST, "one", false);
 						cat_box(ui, icon::MONITOR, "two", false);
 						cat_box(ui, icon::CHART_BAR, "three", false);
 					});
 				},
-			);
+			)
+			// No painter here: discard the font-atlas upload (egui 0.37 debug-asserts on a
+			// dropped, unapplied TexturesDelta).
+			.drop_without_applying_deltas();
 		};
 		let tab = || egui::Event::Key {
 			key: egui::Key::Tab,

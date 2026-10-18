@@ -1,6 +1,6 @@
-//! Minimal D3D11 painter for egui (egui 0.29 / windows 0.58) — vendored instead of
-//! egui-directx11 (which forces egui 0.31 + windows 0.61, conflicting with our versions and the
-//! Linux egui_glow 0.29 path).
+//! Minimal D3D11 painter for egui (egui 0.37 / windows 0.62) — vendored instead of
+//! egui-directx11 (which pins its own egui + windows versions, conflicting with ours and the
+//! Linux egui_glow path).
 //!
 //! Consumes egui's tessellated output (`ClippedPrimitive` meshes + a `TexturesDelta`) and draws
 //! it onto a D3D11 render target with alpha blending + per-primitive scissor, matching egui's
@@ -10,9 +10,8 @@
 //!
 //! egui's `epaint::Vertex.color` and the texture pixels we upload are **sRGBA with premultiplied
 //! alpha** (see `epaint::mesh::Vertex` doc: "sRGBA with premultiplied alpha"). The font atlas is
-//! turned into premultiplied sRGBA via `FontImage::srgba_pixels(None)` (gamma `None` → egui's
-//! default `GAMMA = 0.55` coverage-to-alpha curve), and `ColorImage` pixels are already
-//! premultiplied `Color32`.
+//! a premultiplied `ColorImage` like any other texture (egui 0.37 has no separate `FontImage`;
+//! glyph coverage is rasterized straight to premultiplied `Color32`, uploaded as-is like egui_glow).
 //!
 //! We follow the **`egui_glow` "framebuffer is sRGB-but-treated-as-linear" convention**: the GPU
 //! treats the stored sRGB bytes *as if* they were linear (we use a plain `R8G8B8A8_UNORM` target,
@@ -147,7 +146,7 @@ fn compile(entry: &str, target: &str) -> Result<ID3DBlob> {
 		)
 	};
 	hr?;
-	blob.ok_or_else(|| windows::core::Error::from_win32())
+	blob.ok_or_else(windows::core::Error::from_thread)
 }
 
 fn blob_bytes(blob: &ID3DBlob) -> &[u8] {
@@ -310,17 +309,23 @@ impl EguiPaint {
 		&mut self,
 		device: &ID3D11Device,
 		ctx: &ID3D11DeviceContext,
-		delta: &egui::TexturesDelta,
+		delta: &mut egui::TexturesDelta,
 	) -> Result<()> {
-		for (id, image_delta) in &delta.set {
-			// Build premultiplied sRGBA8 pixels (see module gamma note).
+		// Take the deltas out up front: egui 0.37 debug-asserts if a `TexturesDelta` is dropped
+		// with unapplied entries, which an early `?` below would otherwise leave behind.
+		let set = std::mem::take(&mut delta.set);
+		let free = std::mem::take(&mut delta.free);
+		// egui 0.37 can queue several ordered deltas per texture id in one frame.
+		for (id, image_delta) in set
+			.iter()
+			.flat_map(|(id, ds)| ds.iter().map(move |d| (id, d)))
+		{
+			// Build premultiplied sRGBA8 pixels (see module gamma note). The font atlas is an
+			// ordinary premultiplied `ColorImage` too in egui 0.37 (no separate `FontImage`).
 			let [w, h] = image_delta.image.size();
 			let pixels: Vec<u8> = match &image_delta.image {
 				egui::ImageData::Color(image) => {
 					image.pixels.iter().flat_map(|c| c.to_array()).collect()
-				}
-				egui::ImageData::Font(font) => {
-					font.srgba_pixels(None).flat_map(|c| c.to_array()).collect()
 				}
 			};
 
@@ -356,7 +361,7 @@ impl EguiPaint {
 			}
 		}
 
-		for id in &delta.free {
+		for id in &free {
 			self.textures.remove(id);
 		}
 		Ok(())

@@ -9,7 +9,7 @@ use super::encoder::Encoder;
 use super::nvenc;
 use crate::Frame;
 use windows::core::Interface; // `.as_raw()` for the cached-input-view source-pointer key (B3)
-use windows::Win32::Foundation::BOOL;
+use windows::core::BOOL;
 use windows::Win32::Graphics::Direct3D11::{
 	ID3D11Texture2D, ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView,
 	D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_TEX2D_VPOV,

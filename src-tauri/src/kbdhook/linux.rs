@@ -11,7 +11,7 @@
 //! click re-engages). Full teardown is `disable()` (session end).
 
 use super::*;
-use evdev::{InputEventKind, Key, RelativeAxisType};
+use evdev::{EventSummary, KeyCode, RelativeAxisCode};
 use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tauri::Emitter;
@@ -217,17 +217,17 @@ const KEY_Z: u16 = 44; // release combo Ctrl+Alt+Z (Parsec's detach shortcut)
 fn wanted(dev: &evdev::Device, mouse: bool) -> bool {
 	let keys = dev.supported_keys();
 	// BTN_SOUTH (== BTN_GAMEPAD) marks a gamepad — those go through gilrs, skip them.
-	if keys.map_or(false, |k| k.contains(Key::BTN_SOUTH)) {
+	if keys.map_or(false, |k| k.contains(KeyCode::BTN_SOUTH)) {
 		return false;
 	}
 	let is_kbd = keys.map_or(false, |k| {
-		k.contains(Key::KEY_A) || k.contains(Key::KEY_ESC)
+		k.contains(KeyCode::KEY_A) || k.contains(KeyCode::KEY_ESC)
 	});
 	let is_mouse = mouse
 		&& dev
 			.supported_relative_axes()
-			.map_or(false, |r| r.contains(RelativeAxisType::REL_X))
-		&& keys.map_or(false, |k| k.contains(Key::BTN_LEFT));
+			.map_or(false, |r| r.contains(RelativeAxisCode::REL_X))
+		&& keys.map_or(false, |k| k.contains(KeyCode::BTN_LEFT));
 	is_kbd || is_mouse
 }
 
@@ -245,10 +245,10 @@ fn chord_mods(devs: &[evdev::Device]) -> (bool, bool, bool) {
 	let (mut ctrl, mut shift, mut alt) = (false, false, false);
 	for d in devs {
 		if let Ok(st) = d.get_key_state() {
-			ctrl |= st.contains(Key::KEY_LEFTCTRL) || st.contains(Key::KEY_RIGHTCTRL);
-			shift |= st.contains(Key::KEY_LEFTSHIFT) || st.contains(Key::KEY_RIGHTSHIFT);
+			ctrl |= st.contains(KeyCode::KEY_LEFTCTRL) || st.contains(KeyCode::KEY_RIGHTCTRL);
+			shift |= st.contains(KeyCode::KEY_LEFTSHIFT) || st.contains(KeyCode::KEY_RIGHTSHIFT);
 			// LeftAlt only — RightAlt is AltGr (a char-composition modifier, not a chord key).
-			alt |= st.contains(Key::KEY_LEFTALT);
+			alt |= st.contains(KeyCode::KEY_LEFTALT);
 		}
 	}
 	(ctrl, shift, alt)
@@ -267,11 +267,11 @@ fn chord_mods(devs: &[evdev::Device]) -> (bool, bool, bool) {
 fn shortcut_held(devs: &[evdev::Device]) -> bool {
 	devs.iter().any(|d| {
 		d.get_key_state().map_or(false, |st| {
-			st.contains(Key::KEY_LEFTCTRL)
-				|| st.contains(Key::KEY_RIGHTCTRL)
-				|| st.contains(Key::KEY_LEFTALT)
-				|| st.contains(Key::KEY_LEFTMETA)
-				|| st.contains(Key::KEY_RIGHTMETA)
+			st.contains(KeyCode::KEY_LEFTCTRL)
+				|| st.contains(KeyCode::KEY_RIGHTCTRL)
+				|| st.contains(KeyCode::KEY_LEFTALT)
+				|| st.contains(KeyCode::KEY_LEFTMETA)
+				|| st.contains(KeyCode::KEY_RIGHTMETA)
 		})
 	})
 }
@@ -677,8 +677,8 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, star
 				let tx = kbm_route(&app, &dev_key_of(&grabbed[i]), &tx);
 				for ev in events {
 					diag_events += 1;
-					match ev.kind() {
-						InputEventKind::Key(key) => {
+					match ev.destructure() {
+						EventSummary::Key(_, key, _) => {
 							let code = key.code();
 							let down = ev.value() != 0; // 1 down / 2 repeat → down
 							match code {
@@ -920,18 +920,18 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, star
 						}
 						// While suspended, drop pointer motion + scroll too (the local OS
 						// drives the cursor over the overlay).
-						InputEventKind::RelAxis(rel) if !want_suspend => match rel {
-							RelativeAxisType::REL_X => adx += ev.value() as f64,
-							RelativeAxisType::REL_Y => ady += ev.value() as f64,
+						EventSummary::RelativeAxis(_, rel, _) if !want_suspend => match rel {
+							RelativeAxisCode::REL_X => adx += ev.value() as f64,
+							RelativeAxisCode::REL_Y => ady += ev.value() as f64,
 							// evdev wheel notch (+1 = up/right); the host scales /100 like a
 							// browser wheel delta and inverts dy, so up → dy negative.
-							RelativeAxisType::REL_WHEEL => {
+							RelativeAxisCode::REL_WHEEL => {
 								let _ = tx.try_send(InputEvent::Scroll {
 									dx: 0.0,
 									dy: -(ev.value() as f64) * 100.0,
 								});
 							}
-							RelativeAxisType::REL_HWHEEL => {
+							RelativeAxisCode::REL_HWHEEL => {
 								let _ = tx.try_send(InputEvent::Scroll {
 									dx: ev.value() as f64 * 100.0,
 									dy: 0.0,

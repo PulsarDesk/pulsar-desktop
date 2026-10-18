@@ -45,7 +45,7 @@
 //! the generic NAL split below.
 
 use crate::Codec;
-use rand::Rng;
+use rand::RngExt;
 use std::collections::VecDeque;
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
@@ -155,17 +155,17 @@ impl RtpSender {
 		// Best-effort: the OS may clamp the request; never fail construction over a socket tweak.
 		let _ = socket2::SockRef::from(&socket).set_send_buffer_size(4 * 1024 * 1024);
 
-		let mut rng = rand::thread_rng();
+		let mut rng = rand::rng();
 		// SSRC is any 32-bit value; the client doesn't demux by it but uses it as
 		// an opaque per-stream id. Avoid 0 (some stacks treat it specially).
 		let ssrc = loop {
-			let s: u32 = rng.gen();
+			let s: u32 = rng.random();
 			if s != 0 {
 				break s;
 			}
 		};
 		// RFC 3550 recommends a random starting sequence number.
-		let seq: u16 = rng.gen();
+		let seq: u16 = rng.random();
 
 		Ok(Self {
 			socket,

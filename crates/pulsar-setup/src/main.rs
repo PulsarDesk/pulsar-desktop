@@ -49,6 +49,17 @@ fn main() {
 		opts,
 		Box::new(move |cc| {
 			cc.egui_ctx.set_visuals(visuals());
+			// Keep egui 0.29's default sizes (later releases bumped body/button text to 13 pt,
+			// widget rows to 20 pt and doubled the animation time) so the installer looks as before.
+			cc.egui_ctx.global_style_mut(|s| {
+				s.animation_time = 1.0 / 12.0;
+				s.spacing.interact_size = egui::vec2(40.0, 18.0);
+				for ts in [egui::TextStyle::Body, egui::TextStyle::Button] {
+					if let Some(f) = s.text_styles.get_mut(&ts) {
+						f.size = 12.5;
+					}
+				}
+			});
 			Ok(Box::new(SetupApp::new(uninstall)))
 		}),
 	);
@@ -60,6 +71,18 @@ fn visuals() -> egui::Visuals {
 	v.override_text_color = Some(TEXT);
 	v.selection.bg_fill = ACCENT;
 	v.widgets.hovered.bg_fill = SURFACE;
+	// egui 0.29 widget shapes: 0.37 rounds widgets more (4–6 pt) and dropped the hover/press grow.
+	let w = &mut v.widgets;
+	for (wv, r, grow) in [
+		(&mut w.noninteractive, 2, 0.0),
+		(&mut w.inactive, 2, 0.0),
+		(&mut w.hovered, 3, 1.0),
+		(&mut w.active, 2, 1.0),
+		(&mut w.open, 2, 0.0),
+	] {
+		wv.corner_radius = egui::CornerRadius::same(r);
+		wv.expansion = grow;
+	}
 	v
 }
 
@@ -151,11 +174,12 @@ impl SetupApp {
 }
 
 impl eframe::App for SetupApp {
-	fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+	fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+		let ctx = ui.ctx().clone();
 		self.pump();
 		ctx.request_repaint_after(std::time::Duration::from_millis(33)); // ring anim + progress
 
-		egui::CentralPanel::default().show(ctx, |ui| {
+		egui::CentralPanel::default().show(ui, |ui| {
 			ui.add_space(18.0);
 			ui.vertical_centered(|ui| {
 				self.logo(ui);
@@ -196,7 +220,7 @@ impl eframe::App for SetupApp {
 							)
 							.fill(ACCENT)
 							.min_size(egui::vec2(220.0, 40.0))
-							.rounding(8.0);
+							.corner_radius(8);
 							if ui.add(btn).clicked() {
 								self.start_install();
 							}
@@ -247,7 +271,7 @@ impl eframe::App for SetupApp {
 						)
 						.fill(ACCENT)
 						.min_size(egui::vec2(220.0, 40.0))
-						.rounding(8.0);
+						.corner_radius(8);
 						if ui.add(btn).clicked() {
 							install::launch_app(&self.dir);
 							ctx.send_viewport_cmd(egui::ViewportCommand::Close);

@@ -401,7 +401,10 @@ impl eframe::App for Overlay {
 		[0.0, 0.0, 0.0, 0.0] // transparent so the video/desktop below shows through
 	}
 
-	fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+	// eframe 0.37 split the old `update` into `logic` (runs every tick, ALSO while the window is
+	// hidden) + `ui` (only while visible). The idle hide/show lives in `logic` so a `show` line
+	// still un-hides the window — `ui` is never called while it is hidden.
+	fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
 		// Session-idle: hide the whole overlay window until `show` (post-disconnect). While idle
 		// we draw nothing and just keep ticking so the next `show` brings it straight back.
 		let idle = IDLE.load(Ordering::SeqCst);
@@ -411,6 +414,12 @@ impl eframe::App for Overlay {
 		}
 		if idle {
 			ctx.request_repaint_after(std::time::Duration::from_millis(100));
+		}
+	}
+
+	fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+		let ctx = &ui.ctx().clone();
+		if self.was_idle {
 			return;
 		}
 

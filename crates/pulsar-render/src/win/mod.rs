@@ -41,8 +41,8 @@ use windows::Win32::Graphics::Dxgi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
 	CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, PeekMessageW, RegisterClassW,
-	SetWindowPos, TranslateMessage, CW_USEDEFAULT, HMENU, HWND_TOP, MSG, PM_REMOVE,
-	SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WNDCLASSW, WS_CHILD, WS_VISIBLE,
+	SetWindowPos, TranslateMessage, CW_USEDEFAULT, HWND_TOP, MSG, PM_REMOVE, SWP_NOACTIVATE,
+	SWP_NOMOVE, SWP_NOSIZE, WNDCLASSW, WS_CHILD, WS_VISIBLE,
 };
 
 // ---- shared control state (host → renderer over stdin) ---------------------------------
@@ -166,7 +166,7 @@ fn decode_cursor_png(b64: &str, w: usize, h: usize) -> Option<Vec<u8>> {
 	if hw as usize != w || hh as usize != h {
 		return None;
 	}
-	let mut buf = vec![0u8; reader.output_buffer_size()];
+	let mut buf = vec![0u8; reader.output_buffer_size()?];
 	let info = reader.next_frame(&mut buf).ok()?;
 	if info.color_type != png::ColorType::Rgba
 		|| info.width as usize != w
@@ -532,7 +532,7 @@ fn paint_side_cursor(ctx: &egui::Context, draw: Option<(egui::Pos2, egui::Textur
 	if let Some((pos, id, size)) = draw {
 		let painter = ctx.layer_painter(egui::LayerId::new(
 			egui::Order::Foreground,
-			egui::Id::new("pulsar-cursor-layer"),
+			egui::Id::unique("pulsar-cursor-layer"),
 		));
 		painter.image(
 			id,
@@ -700,6 +700,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
 				ev.push(egui::Event::MouseWheel {
 					unit: egui::MouseWheelUnit::Line,
 					delta: egui::vec2(0.0, delta),
+					phase: egui::TouchPhase::Move,
+					source: egui::MouseWheelSource::Wheel,
 					modifiers: m,
 				});
 			}
@@ -781,7 +783,7 @@ impl Renderer {
 		D3D11CreateDevice(
 			None,
 			D3D_DRIVER_TYPE_HARDWARE,
-			None,
+			Default::default(),
 			D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
 			Some(&[D3D_FEATURE_LEVEL_11_0]),
 			D3D11_SDK_VERSION,
@@ -958,7 +960,7 @@ impl Renderer {
 		ostate.controllers_locked = CONTROLLERS_LOCKED.lock().unwrap().iter().cloned().collect();
 		let ov_ui = &mut self.ov_ui;
 		let mut cmds = Vec::new();
-		let out = self.egui_ctx.run(raw, |ctx| {
+		let mut out = self.egui_ctx.run_pass(raw, |ctx| {
 			cmds = crate::overlay::draw(ctx, ostate, ov_ui);
 			// Show the "stream stopped" indicator even while the overlay is open so the
 			// user sees the state change regardless of whether the overlay is up.
@@ -1098,7 +1100,7 @@ impl Renderer {
 		let _ = std::io::stdout().flush();
 
 		// Upload texture deltas, then paint the tessellated primitives over the video.
-		let _ = painter.update_textures(&self.device, &self.context, &out.textures_delta);
+		let _ = painter.update_textures(&self.device, &self.context, &mut out.textures_delta);
 		let prims = self
 			.egui_ctx
 			.tessellate(out.shapes, self.egui_ctx.pixels_per_point());
@@ -1270,7 +1272,7 @@ impl Renderer {
 		};
 		self.ostate.chat_unread = CHAT_UNREAD.load(Ordering::SeqCst);
 		let ostate = &self.ostate;
-		let out = self.egui_ctx.run(raw, |ctx| {
+		let mut out = self.egui_ctx.run_pass(raw, |ctx| {
 			// Stream-stopped indicator: surfaces the stall state that the webview's .stall
 			// div cannot show because the native renderer window occludes it.
 			if stalled {
@@ -1287,7 +1289,7 @@ impl Renderer {
 			}
 			paint_side_cursor(ctx, cursor_draw);
 		});
-		let _ = painter.update_textures(&self.device, &self.context, &out.textures_delta);
+		let _ = painter.update_textures(&self.device, &self.context, &mut out.textures_delta);
 		let prims = self
 			.egui_ctx
 			.tessellate(out.shapes, self.egui_ctx.pixels_per_point());
@@ -1535,7 +1537,7 @@ impl Renderer {
 		// screen — the "connected but nothing renders" Windows bug. No-op when already top.
 		let _ = SetWindowPos(
 			self.hwnd,
-			HWND_TOP,
+			Some(HWND_TOP),
 			x,
 			y,
 			w as i32,
@@ -1673,15 +1675,23 @@ unsafe fn event_loop(
 		0,
 		w0 as i32,
 		h0 as i32,
-		parent,
-		HMENU::default(),
-		hinstance,
+		Some(parent),
+		None,
+		Some(hinstance.into()),
 		None,
 	)?;
 	let _ = CW_USEDEFAULT; // (kept for reference; child uses explicit geometry)
 	// Raise above the webview sibling NOW — track_parent only re-asserts on resize, and a
 	// child left below WRY_WEBVIEW renders invisibly behind the session screen.
-	let _ = SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOMOVE);
+	let _ = SetWindowPos(
+		hwnd,
+		Some(HWND_TOP),
+		0,
+		0,
+		0,
+		0,
+		SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOMOVE,
+	);
 
 	// `Option` so a GPU device-loss (below) can drop the whole renderer — releasing its
 	// swapchain from the HWND — and rebuild a fresh one in place.
@@ -1812,7 +1822,7 @@ unsafe fn event_loop(
 				cursor_hidden = true;
 			} else if cursor_hidden {
 				if let Ok(arrow) = LoadCursorW(None, IDC_ARROW) {
-					SetCursor(arrow);
+					SetCursor(Some(arrow));
 				}
 				cursor_hidden = false;
 			}

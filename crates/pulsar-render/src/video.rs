@@ -1144,7 +1144,7 @@ impl Presenter {
 				0,
 				fmt,
 				glow::UNSIGNED_BYTE,
-				Some(tight),
+				glow::PixelUnpackData::Slice(Some(tight)),
 			);
 		} else {
 			gl.tex_sub_image_2d(
@@ -1156,7 +1156,7 @@ impl Presenter {
 				h,
 				fmt,
 				glow::UNSIGNED_BYTE,
-				glow::PixelUnpackData::Slice(tight),
+				glow::PixelUnpackData::Slice(Some(tight)),
 			);
 		}
 	}

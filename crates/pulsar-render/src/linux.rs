@@ -229,7 +229,7 @@ fn decode_cursor_png(b64: &str, w: usize, h: usize) -> Option<Vec<u8>> {
 	if hw as usize != w || hh as usize != h {
 		return None;
 	}
-	let mut buf = vec![0u8; reader.output_buffer_size()];
+	let mut buf = vec![0u8; reader.output_buffer_size()?];
 	let info = reader.next_frame(&mut buf).ok()?;
 	if info.color_type != png::ColorType::Rgba
 		|| info.width as usize != w
@@ -1263,6 +1263,8 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 									6 => egui::vec2(1.0, 0.0),
 									_ => egui::vec2(-1.0, 0.0),
 								},
+								phase: egui::TouchPhase::Move,
+								source: egui::MouseWheelSource::Wheel,
 								modifiers: egui::Modifiers::default(),
 							});
 							None
@@ -1404,7 +1406,7 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 			if let Some((pos, id, size)) = cursor_draw {
 				let painter = ctx.layer_painter(egui::LayerId::new(
 					egui::Order::Foreground,
-					egui::Id::new("pulsar-cursor-layer"),
+					egui::Id::unique("pulsar-cursor-layer"),
 				));
 				painter.image(
 					id,
@@ -1440,7 +1442,7 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 				..Default::default()
 			};
 			let mut cmds: Vec<OverlayCmd> = Vec::new();
-			let full = egui_ctx.run(raw_input, |ctx| {
+			let mut full = egui_ctx.run_pass(raw_input, |ctx| {
 				cmds = overlay::draw(ctx, &state, &mut ov_ui);
 				// "Switching screen…" or "stream stopped" indicator over the held last frame.
 				if video::SWITCHING.load(Ordering::Relaxed) {
@@ -1459,7 +1461,7 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 				[w, h],
 				full.pixels_per_point,
 				&prims,
-				&full.textures_delta,
+				&mut full.textures_delta,
 			);
 		} else {
 			// Expire the transient helper hint after its window; fade it out smoothly
@@ -1496,7 +1498,7 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 					events: Vec::new(),
 					..Default::default()
 				};
-				let full = egui_ctx.run(raw_input, |ctx| {
+				let mut full = egui_ctx.run_pass(raw_input, |ctx| {
 					if switching {
 						overlay::draw_switching(ctx);
 					} else if stalled {
@@ -1521,7 +1523,7 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 					[w, h],
 					full.pixels_per_point,
 					&prims,
-					&full.textures_delta,
+					&mut full.textures_delta,
 				);
 			}
 		}

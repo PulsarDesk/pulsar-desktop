@@ -147,7 +147,7 @@ async fn relay(
 				loop {
 					match rx.recv().await {
 						Ok(pkt) => {
-							if sink.send(Message::Binary(pkt)).await.is_err() {
+							if sink.send(Message::Binary(pkt.into())).await.is_err() {
 								break;
 							}
 						}
@@ -196,7 +196,7 @@ mod tests {
 			.expect("a forwarded message in time")
 			.expect("stream open")
 			.expect("valid frame");
-		assert_eq!(msg.into_data(), b"rtp-payload");
+		assert_eq!(msg.into_data(), &b"rtp-payload"[..]);
 		v.stop();
 	}
 }

@@ -36,18 +36,18 @@ tracing-appender = { workspace = true }
 # Load the (bundled) Interception driver's user-mode DLL at runtime, for keyboard
 # capture below the OS hook layer (works where WH_KEYBOARD_LL is bypassed, e.g.
 # ASTER multiseat). Optional at runtime — falls back to WH_KEYBOARD_LL if absent.
-libloading = "0.8"
+libloading = "0.9"
 # OS clipboard read/write from Rust. The webview's navigator.clipboard is DEAD on the
 # Linux native-video path (the occluded/unfocused WebKitGTK denies DOM clipboard access),
 # so the session's clipboard push ("Panoyu karşıya gönder") and the inbound apply must
 # run app-side (io_cmds.rs read/write_clipboard_text).
 arboard = { version = "3", default-features = false }
 # Local UDP(RTP) → WebSocket relay that feeds the webview's WebCodecs decoder.
-tokio-tungstenite = "0.21"
+tokio-tungstenite = "0.30"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 # Peer avatars arrive as raw PNG bytes over the session side channel; the webview
 # renders them from a `data:image/png;base64,…` URL (avatar.rs::data_url).
-base64 = "0.22"
+base64 = "0.23"
 # Constant-time secret comparison for the connect/one-time password check
 # (auth.rs): a remote peer can flood Auth guesses, and a data-dependent `==` on
 # the secret leaks the shared-prefix length via reject latency. We hash both
@@ -61,7 +61,7 @@ subtle = "2"
 # by WebView2/WebKitGTK. rfd opens the picker Rust-side (no activation needed),
 # then streams the chosen file straight via the session data channel (no roundtrip
 # through the webview). Uses Win32 IFileOpenDialog on Windows; GTK3/portal on Linux.
-rfd = "0.14"
+rfd = "0.17"
 # Client-side controller RUMBLE via SDL3's gamepad HID drivers — raw FFI to the SDL3 C
 # API (the same SDL_RumbleGamepad Moonlight calls), NOT a higher-level wrapper crate.
 # SDL3 drives force-feedback over its own HIDAPI drivers (DualSense/DS4/Switch/Xbox),
@@ -71,14 +71,14 @@ rfd = "0.14"
 # so there's NO runtime libSDL3 to install or bundle. Needs CMake + a C compiler at build
 # time (CI runners + the Pi have them). Lives in the app crate only, so `cargo test
 # -p pulsar-core` (the fast headless loop) never compiles SDL.
-sdl3-sys = { version = "0.6", default-features = false, features = ["build-from-source", "link-static"] }
+sdl3-sys = { version = "0.7", default-features = false, features = ["build-from-source", "link-static"] }
 
 # Raw Win32 for true taskbar-covering fullscreen (borderless-fullscreen via SetWindowPos).
 [target.'cfg(windows)'.dependencies]
 # Native host capture+encode (DXGI Desktop Duplication + NVENC SDK → RTP, Sunshine-technique).
 # Replaces the ffmpeg ddagrab hot path on Windows/NVENC; ffmpeg stays as the fallback.
 pulsar-capture = { path = "../crates/pulsar-capture" }
-windows-sys = { version = "0.59", features = [
+windows-sys = { version = "0.61", features = [
 	"Win32_Foundation",
 	"Win32_Graphics_Gdi",
 	"Win32_Graphics_Dwm", # io_cmds: kill the 1px border + rounded corners on the frameless fullscreen cover
@@ -109,9 +109,10 @@ libc = "0.2"
 
 # Linux client-side input capture: grab the local keyboard+mouse (evdev) and forward to
 # the host while the embedded native renderer covers the webview (the Linux analog of the
-# Windows kbdhook/Interception path). evdev/libc are already in Cargo.lock via pulsar-core.
+# Windows kbdhook/Interception path). evdev 0.13; pulsar-core still uses evdev 0.12 (a
+# separate copy — no evdev types cross the crate boundary).
 [target.'cfg(target_os = "linux")'.dependencies]
-evdev = "0.12"
+evdev = "0.13"
 # In-process libav host encode path (host/libav.rs, adaptive streaming): x11grab capture
 # → libavfilter scale/format → libavcodec encoder (x264 / NVENC / VA-API) → libavformat RTP,
 # all inside the app so the bitrate changes live and keyframes can be forced on request —

@@ -27,7 +27,8 @@ pub type WindowDesc = (isize, String);
 /// caller then advertises no window picker.
 #[cfg(windows)]
 pub fn list_windows() -> Vec<WindowDesc> {
-	use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
+	use windows::core::BOOL;
+	use windows::Win32::Foundation::{HWND, LPARAM, RECT};
 	use windows::Win32::UI::WindowsAndMessaging::{
 		EnumWindows, GetWindow, GetWindowLongW, GetWindowRect, GetWindowTextLengthW,
 		GetWindowTextW, IsWindowVisible, GWL_EXSTYLE, GW_OWNER, WS_EX_TOOLWINDOW,
@@ -153,7 +154,8 @@ pub fn window_pid(_hwnd: isize) -> Option<u32> {
 /// (by area) so a game's main window wins over an incidental small splash/helper window.
 #[cfg(windows)]
 fn find_top_window_for_pids(pids: &[u32]) -> Option<isize> {
-	use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
+	use windows::core::BOOL;
+	use windows::Win32::Foundation::{HWND, LPARAM, RECT};
 	use windows::Win32::UI::WindowsAndMessaging::{
 		EnumWindows, GetWindow, GetWindowLongW, GetWindowRect, GetWindowTextLengthW,
 		GetWindowThreadProcessId, IsWindowVisible, GWL_EXSTYLE, GW_OWNER, WS_EX_TOOLWINDOW,

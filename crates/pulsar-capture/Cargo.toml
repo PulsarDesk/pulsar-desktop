@@ -23,20 +23,21 @@ publish = false
 
 [dependencies]
 # Random SSRC + initial sequence number for the pure-Rust RTP packetizer (rtp.rs).
-# Workspace pin (rand 0.8) — same as pulsar-core. The only cross-platform dep:
+# Workspace pin (rand 0.10; pulsar-core is still on 0.8 — separate copies, no shared
+# types). The only cross-platform dep:
 # encode.rs (NVENC) is Windows-only and links nothing at build time (the NVENC
 # SDK is runtime-loaded via libloading below — no ffmpeg / pkg-config / SDK).
 rand.workspace = true
 # Cross-platform setsockopt for SO_SNDBUF on the RTP socket (rtp.rs): a large send
 # buffer absorbs the keyframe/IDR packet burst so a blocking send() never stalls the
 # capture thread (the ~110 ms periodic delivery gap — "fix B"). Already in the lock.
-socket2 = "0.5"
+socket2 = "0.6"
 
-# Windows GPU stack (DXGI duplication + D3D11 + high-res pacing). Same `windows`
-# 0.59 pin used elsewhere in the desktop app (pulsar-core).
+# Windows GPU stack (DXGI duplication + D3D11 + high-res pacing). `windows` 0.62, same as
+# pulsar-render (pulsar-core still pins 0.59 — a separate copy; no windows types cross crates).
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.59", features = [
-	"Win32_Foundation",                 # HANDLE, RECT, BOOL, CloseHandle, WAIT_OBJECT_0, GetLastError
+windows = { version = "0.62", features = [
+	"Win32_Foundation",                 # HANDLE, RECT, CloseHandle, WAIT_OBJECT_0, GetLastError
 	"Win32_Graphics_Dxgi",              # IDXGIFactory1/Adapter1/Output/Output1/Output5/Output6,
 	                                    #   IDXGIOutputDuplication, IDXGIResource/Resource1,
 	                                    #   IDXGIKeyedMutex, DXGI_OUTDUPL_*, DXGI_ERROR_*
@@ -52,7 +53,7 @@ windows = { version = "0.59", features = [
 	                                    #   CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS,
 	                                    #   SetThreadPriority, GetCurrentThread
 	"Win32_Security",                   # SECURITY_ATTRIBUTES — CreateWaitableTimerExW's first arg
-	                                    #   is gated behind this feature in windows 0.59
+	                                    #   is gated behind this feature (windows ≥0.59)
 	"Win32_System_Performance",         # QueryPerformanceCounter/Frequency (QPC→Instant for pacing)
 	"Win32_System_Power",               # SetThreadExecutionState (keep display awake)
 	"Win32_Graphics_Gdi",               # HMONITOR in DXGI_OUTPUT_DESC → IDXGIOutput::GetDesc()
@@ -81,8 +82,8 @@ windows = { version = "0.59", features = [
 ] }
 # Interface (.cast::<T>()), Result, Error, GUID — used pervasively in the unsafe FFI
 # (GUID is reused for the NVENC codec/preset/profile GUID literals).
-windows-core = "0.59"
+windows-core = "0.62"
 # Runtime-load nvEncodeAPI64.dll (no NVIDIA SDK / link step). encode.rs resolves
 # NvEncodeAPICreateInstance and fills the fn-pointer table; a missing DLL / driver
 # is just an Err → the host falls back to ffmpeg.
-libloading = "0.8"
+libloading = "0.9"

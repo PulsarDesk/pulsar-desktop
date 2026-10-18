@@ -130,7 +130,7 @@ pub(super) unsafe fn build_video_processor(
 	let vp_enum = vdevice
 		.CreateVideoProcessorEnumerator(&content)
 		.map_err(|e| format!("CreateVideoProcessorEnumerator: {e}"))?;
-	// windows 0.59 returns the processor directly (no out-param).
+	// windows ≥0.59 returns the processor directly (no out-param).
 	let vproc = vdevice
 		.CreateVideoProcessor(&vp_enum, 0)
 		.map_err(|e| format!("CreateVideoProcessor: {e}"))?;
