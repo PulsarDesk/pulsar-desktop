@@ -3,6 +3,8 @@
 //! (moves/clips/stacks with it — no separate top-level, no compositor desync). Decode on a
 //! worker thread → DRM_PRIME mailbox; the main thread imports the newest frame as an
 //! `EGL_LINUX_DMA_BUF_EXT` EGLImage → `GL_TEXTURE_EXTERNAL_OES` → draws a letterboxed quad.
+//! Desktop GPUs take the same road when the decoder sits on the display GPU: VAAPI's
+//! two-layer NV12 dmabuf as two TEXTURE_2D EGLImages, CUDA frames via CUDA↔GL interop.
 
 use ffmpeg_sys_next as ff;
 use std::collections::VecDeque;
@@ -25,6 +27,11 @@ const MOD_HI_EXT: [i32; 3] = [0x3444, 0x3446, 0x3448];
 const EGL_NONE_I: i32 = 0x3038;
 pub const GL_TEXTURE_EXTERNAL_OES: u32 = 0x8D65;
 const DRM_FORMAT_MOD_INVALID: u64 = 0x00ff_ffff_ffff_ffff;
+// DRM fourccs of the per-plane layers VAAPI exports for NV12 / P010 (separate layers).
+const DRM_FORMAT_R8: u32 = 0x2020_3852; // 'R8  '
+const DRM_FORMAT_GR88: u32 = 0x3838_5247; // 'GR88'
+const DRM_FORMAT_R16: u32 = 0x2036_3152; // 'R16 '
+const DRM_FORMAT_GR1616: u32 = 0x3233_5247; // 'GR32'
 
 // --- DRM_PRIME frame queue (decode thread → render thread) ---
 struct FramePtr(*mut ff::AVFrame);
@@ -200,6 +207,14 @@ pub static VID_H: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::n
 /// Human label of the ACTUAL decoder in use (e.g. "h264_rkmpp (HW)") — the egui
 /// overlay displays it read-only; selection is always automatic.
 pub static DEC_LABEL: Mutex<String> = Mutex::new(String::new());
+/// Presenter → decode thread: the decoder GENERATION whose zero-copy frame (DRM_PRIME
+/// import or CUDA↔GL interop) could not be shown on this GL; 0 = none. The decode loop
+/// reads that decoder's frames back to system memory for the rest of its life. Tagged by
+/// generation (each frame carries its decoder's in `AVFrame.opaque`) so a queued frame of
+/// the PREVIOUS decoder failing after a switch can't disable zero-copy for the new one.
+static ZC_FAILED_GEN: AtomicU64 = AtomicU64::new(0);
+/// Generation counter, bumped every time the decode loop opens a decoder.
+static DEC_GEN: AtomicU64 = AtomicU64::new(0);
 
 /// The video's on-screen letterbox rectangle in framebuffer PIXELS — `[x, y, w, h]`, updated
 /// every `draw()`. The cursor side-channel overlay (linux.rs) reads it to map a normalized host
@@ -580,19 +595,14 @@ unsafe fn decode_once(sdp: &CString) {
 				break 'decode;
 			}
 			announce_decoder(&sel);
-			// Tier-1 zero-copy: try av_hwframe_map → DRM_PRIME once; on the first failure
-			// fall back to readback (av_hwframe_transfer_data → NV12 upload) permanently.
-			//
-			// VAAPI is forced onto the readback path: AMD's Mesa VAAPI exports NV12 as a
-			// MULTI-LAYER DRM_PRIME descriptor (layer0 = R8 luma, layer1 = GR88 chroma),
-			// unlike rkmpp's single composed NV12 layer. The EGLImage import only reads
-			// layers[0], so it grabbed the Y plane as an R8 image → the external sampler
-			// returned (Y,0,0,1) → a red grayscale screen. Readback (vaGetImage → NV12 CPU
-			// buffer → the known-good NV12 upload path) sidesteps the multi-layer import and
-			// still HW-decodes (the H.264 work stays on the GPU; only a per-frame NV12 copy
-			// is added, sub-ms at 1080p). Zero-copy stays on for rkmpp/others.
-			let mut force_readback =
-				sel.hwdev == Some(ff::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI);
+			// Tier-1 zero-copy, only when the decoder sits on the DISPLAY GPU (decode.rs):
+			// VAAPI frames are av_hwframe_map'ped to DRM_PRIME (the presenter imports
+			// Mesa's multi-layer R8 + GR88 descriptor as two EGLImages), CUDA frames go to
+			// the presenter as-is for CUDA↔GL interop. A decoder on another GPU — or a
+			// failed map/import (`ZC_FAILED_GEN`, set by the presenter) — reads back instead
+			// (av_hwframe_transfer_data → NV12 upload), permanently for this decoder.
+			let mut gen = DEC_GEN.fetch_add(1, Ordering::Relaxed) + 1;
+			let mut force_readback = !sel.zero_copy;
 			let mut map_failed = false;
 			let mut readback_warned = false;
 			let pkt = ff::av_packet_alloc();
@@ -691,11 +701,29 @@ unsafe fn decode_once(sdp: &CString) {
 					{
 						nf = ff::av_frame_alloc();
 						ff::av_frame_move_ref(nf, frame);
+					} else if sel.tier == crate::decode::Tier::HwAccel
+						&& f == sel.hw_fmt as c_int
+						&& f == ff::AVPixelFormat::AV_PIX_FMT_CUDA as c_int
+						&& !force_readback
+						&& ZC_FAILED_GEN.load(Ordering::Relaxed) != gen
+						// Interop copies 8-bit NV12 only; a 10-bit (P010) stream reads back.
+						&& cuda_frame_ctx(frame)
+							.is_some_and(|c| c.sw_format == ff::AVPixelFormat::AV_PIX_FMT_NV12)
+					{
+						// CUDA on an NVIDIA display: hand the device frame to the presenter, which
+						// copies it GPU-side into the GL textures (CUDA↔GL interop).
+						nf = ff::av_frame_alloc();
+						ff::av_frame_move_ref(nf, frame);
 					} else if sel.tier == crate::decode::Tier::HwAccel && f == sel.hw_fmt as c_int {
 						// Zero-copy first: a VAAPI/DRM frame usually maps straight to a
-						// DRM_PRIME dmabuf the EGL path imports with no copy.
+						// DRM_PRIME dmabuf the EGL path imports with no copy. (CUDA has no DRM
+						// mapping — it is either the interop branch above or a readback.)
 						let mut mapped: *mut ff::AVFrame = ptr::null_mut();
-						if !map_failed && !force_readback {
+						if !map_failed
+							&& !force_readback
+							&& ZC_FAILED_GEN.load(Ordering::Relaxed) != gen
+							&& f != ff::AVPixelFormat::AV_PIX_FMT_CUDA as c_int
+						{
 							let mf = ff::av_frame_alloc();
 							(*mf).format = ff::AVPixelFormat::AV_PIX_FMT_DRM_PRIME as c_int;
 							if ff::av_hwframe_map(mf, frame, ff::AV_HWFRAME_MAP_READ as c_int) == 0
@@ -768,6 +796,8 @@ unsafe fn decode_once(sdp: &CString) {
 					}
 					{
 						let mut q = MBX.lock().unwrap();
+						// Tag with the decoder generation (see ZC_FAILED_GEN).
+						(*nf).opaque = gen as usize as *mut c_void;
 						q.push_back(FramePtr(nf));
 						// Bound the queue: if the consumer falls behind, drop the OLDEST frame so
 						// latency stays capped (pacing ON) and newest-wins still works (pacing OFF).
@@ -797,7 +827,7 @@ unsafe fn decode_once(sdp: &CString) {
 				// this the session stayed black forever while the bitrate tile said video
 				// was flowing — the Linux twin of the Windows renderer's sync-MFT rebuild.
 				if au_since_open >= 120 && frames_since_open == 0 && !fallback_exhausted {
-					skip.push(sel.name.clone());
+					skip.push(sel.key());
 					eprintln!(
 						"pulsar-render: decoder {} consumed {au_since_open} AUs with zero output — trying the next candidate",
 						sel.name
@@ -809,13 +839,13 @@ unsafe fn decode_once(sdp: &CString) {
 								ff::avcodec_free_context(&mut dc);
 								dc = open_decoder(st, codec_id, &p.sel);
 								if dc.is_null() {
-									skip.push(p.sel.name.clone());
+									skip.push(p.sel.key());
 									continue;
 								}
 								sel = p.sel;
 								announce_decoder(&sel);
-								force_readback = sel.hwdev
-									== Some(ff::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI);
+								force_readback = !sel.zero_copy;
+								gen = DEC_GEN.fetch_add(1, Ordering::Relaxed) + 1;
 								map_failed = false;
 								seen_key = false;
 								au_since_open = 0;
@@ -888,7 +918,7 @@ unsafe fn open_decoder(
 	(*dc).get_format = Some(crate::decode::get_format);
 	(*dc).extra_hw_frames = 8;
 	if let Some(dev) = sel.hwdev {
-		let hwctx = crate::decode::create_hwdevice(dev);
+		let hwctx = crate::decode::create_hwdevice(dev, sel.node.as_deref());
 		if hwctx.is_null() {
 			eprintln!("pulsar-render: hw device ctx failed at stream open ({})", sel.name);
 			ff::avcodec_free_context(&mut dc);
@@ -917,7 +947,13 @@ fn announce_decoder(sel: &crate::decode::Selected) {
 	} else {
 		"hw"
 	};
-	eprintln!("pulsar-render: decoder={} tier={}", sel.name, sel.tier.as_str());
+	eprintln!(
+		"pulsar-render: decoder={} tier={} node={} zero_copy={}",
+		sel.name,
+		sel.tier.as_str(),
+		sel.node.as_deref().unwrap_or("-"),
+		sel.zero_copy
+	);
 	println!("vidsink-dec {} {hw} {}", sel.name, sel.tier.as_str());
 	let _ = std::io::stdout().flush();
 	*DEC_LABEL.lock().unwrap() =
@@ -944,6 +980,134 @@ type EglCreateImage =
 type EglDestroyImage = unsafe extern "C" fn(*mut c_void, *mut c_void) -> u32;
 type GlEglImageTargetTexture2DOES = unsafe extern "C" fn(u32, *mut c_void);
 
+// --- CUDA↔GL interop (NVIDIA display + CUDA decode) ---
+// libcuda is dlopen'ed (never linked): machines without the NVIDIA driver must still run.
+type CuResult = c_int;
+#[repr(C)]
+struct CudaMemcpy2D {
+	src_x_in_bytes: usize,
+	src_y: usize,
+	src_memory_type: u32,
+	src_host: *const c_void,
+	src_device: u64,
+	src_array: *mut c_void,
+	src_pitch: usize,
+	dst_x_in_bytes: usize,
+	dst_y: usize,
+	dst_memory_type: u32,
+	dst_host: *mut c_void,
+	dst_device: u64,
+	dst_array: *mut c_void,
+	dst_pitch: usize,
+	width_in_bytes: usize,
+	height: usize,
+}
+const CU_MEMORYTYPE_DEVICE: u32 = 2;
+const CU_MEMORYTYPE_ARRAY: u32 = 3;
+const CU_GRAPHICS_REGISTER_FLAGS_WRITE_DISCARD: u32 = 2;
+
+/// The libcuda entry points the interop needs, plus the two registered GL textures
+/// (Y as LUMINANCE, UV as LUMINANCE_ALPHA — the same layout the NV12 upload path uses).
+struct CudaGl {
+	push: unsafe extern "C" fn(*mut c_void) -> CuResult,
+	pop: unsafe extern "C" fn(*mut *mut c_void) -> CuResult,
+	register: unsafe extern "C" fn(*mut *mut c_void, u32, u32, u32) -> CuResult,
+	unregister: unsafe extern "C" fn(*mut c_void) -> CuResult,
+	map: unsafe extern "C" fn(u32, *mut *mut c_void, *mut c_void) -> CuResult,
+	unmap: unsafe extern "C" fn(u32, *mut *mut c_void, *mut c_void) -> CuResult,
+	array: unsafe extern "C" fn(*mut *mut c_void, *mut c_void, u32, u32) -> CuResult,
+	copy: unsafe extern "C" fn(*const CudaMemcpy2D) -> CuResult,
+	/// Registered resources for the current texture allocation (null = not registered).
+	res: [*mut c_void; 2],
+	/// The CUDA context `res` were registered under, a reference on the device that owns
+	/// it (so a decoder switch can't free the context under live registrations), and the
+	/// Y size the textures were allocated at.
+	ctx: *mut c_void,
+	dev: *mut ff::AVBufferRef,
+	dims: (i32, i32),
+}
+
+impl CudaGl {
+	unsafe fn load() -> Option<CudaGl> {
+		let h = libc::dlopen(b"libcuda.so.1\0".as_ptr().cast(), libc::RTLD_NOW | libc::RTLD_LOCAL);
+		if h.is_null() {
+			return None;
+		}
+		let sym = |n: &[u8]| {
+			let p = libc::dlsym(h, n.as_ptr().cast());
+			(!p.is_null()).then_some(p)
+		};
+		Some(CudaGl {
+			push: std::mem::transmute(sym(b"cuCtxPushCurrent_v2\0")?),
+			pop: std::mem::transmute(sym(b"cuCtxPopCurrent_v2\0")?),
+			register: std::mem::transmute(sym(b"cuGraphicsGLRegisterImage\0")?),
+			unregister: std::mem::transmute(sym(b"cuGraphicsUnregisterResource\0")?),
+			map: std::mem::transmute(sym(b"cuGraphicsMapResources\0")?),
+			unmap: std::mem::transmute(sym(b"cuGraphicsUnmapResources\0")?),
+			array: std::mem::transmute(sym(b"cuGraphicsSubResourceGetMappedArray\0")?),
+			copy: std::mem::transmute(sym(b"cuMemcpy2D_v2\0")?),
+			res: [ptr::null_mut(); 2],
+			ctx: ptr::null_mut(),
+			dev: ptr::null_mut(),
+			dims: (0, 0),
+		})
+	}
+
+	/// Drop the current registrations under the context they were made in, then let that
+	/// context go. Leaves no CUDA context pushed.
+	unsafe fn release(&mut self) {
+		if !self.ctx.is_null() && (self.push)(self.ctx) == 0 {
+			for r in self.res {
+				if !r.is_null() {
+					(self.unregister)(r);
+				}
+			}
+			let mut popped: *mut c_void = ptr::null_mut();
+			(self.pop)(&mut popped);
+		}
+		self.res = [ptr::null_mut(); 2];
+		self.ctx = ptr::null_mut();
+		ff::av_buffer_unref(&mut self.dev);
+	}
+}
+
+/// Where an AV_PIX_FMT_CUDA frame lives: its CUDA context (AVCUDADeviceContext's first
+/// field), the device buffer that owns that context, and the frames' software layout.
+struct CudaFrameCtx {
+	ctx: *mut c_void,
+	device_ref: *mut ff::AVBufferRef,
+	sw_format: ff::AVPixelFormat,
+}
+
+/// None for a frame without a CUDA frames context.
+unsafe fn cuda_frame_ctx(f: *const ff::AVFrame) -> Option<CudaFrameCtx> {
+	let fr = (*f).hw_frames_ctx;
+	if fr.is_null() {
+		return None;
+	}
+	let fctx = (*fr).data as *const ff::AVHWFramesContext;
+	let dctx = (*fctx).device_ctx;
+	if dctx.is_null() || (*dctx).hwctx.is_null() {
+		return None;
+	}
+	Some(CudaFrameCtx {
+		ctx: *((*dctx).hwctx as *const *mut c_void),
+		device_ref: (*fctx).device_ref,
+		sw_format: (*fctx).sw_format,
+	})
+}
+
+/// How the current frame reaches GL — logged on change, so a session log shows whether
+/// it really runs without a copy.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PresentPath {
+	DmabufComposed,
+	DmabufLayers,
+	CudaInterop,
+	Nv12Upload,
+	YuvUpload,
+}
+
 pub struct Presenter {
 	dpy: *mut c_void,
 	create_image: EglCreateImage,
@@ -960,6 +1124,15 @@ pub struct Presenter {
 	sw_dims: (i32, i32, c_int), // allocated Y-plane size + pixel format; (0,0,-1) = unallocated
 	vid_dims: (i32, i32), // last STREAM size reported on stdout (`vidsink-dims`); (0,0) = none yet
 	sw_scratch: Vec<u8>,  // row-repack buffer when an AVFrame linesize is padded
+	// Zero-copy multi-layer dmabuf (VAAPI NV12/P010: R8|R16 luma + GR88|GR1616 chroma
+	// layers, each its own EGLImage on a TEXTURE_2D) → NV12 shader reading UV from .rg.
+	rg_prog: glow::Program,
+	zc_tex: [glow::Texture; 2],
+	// CUDA↔GL interop targets (LUMINANCE + LUMINANCE_ALPHA) — the NV12 shader.
+	cuda_tex: [glow::Texture; 2],
+	cuda: Option<CudaGl>,
+	cuda_load_tried: bool,
+	path: Option<PresentPath>,
 	last: *mut ff::AVFrame, // most-recent frame, RE-PRESENTED every vsync (no flicker on empty)
 	last_t: f64,
 	frames: u64,
@@ -979,6 +1152,8 @@ const FRAG: &str = "#extension GL_OES_EGL_image_external : require\nprecision me
 const FRAG_YUV: &str = "precision mediump float;\nvarying vec2 uv;\nuniform sampler2D ty;\nuniform sampler2D tu;\nuniform sampler2D tv;\nvoid main(){\n  float y = (texture2D(ty, uv).r - 0.0627) * 1.1644;\n  float u = texture2D(tu, uv).r - 0.5;\n  float v = texture2D(tv, uv).r - 0.5;\n  gl_FragColor = vec4(y + 1.5748*v, y - 0.1873*u - 0.4681*v, y + 1.8556*u, 1.0);\n}\n";
 // NV12 (2-plane, interleaved UV) → RGB, BT.709 limited. The UV plane uploads as
 // LUMINANCE_ALPHA: U lands in .r (=L), V in .a.
+// The same for a dmabuf chroma layer imported as GR88/GR1616: U in .r, V in .g.
+const FRAG_NV12_RG: &str = "precision mediump float;\nvarying vec2 uv;\nuniform sampler2D ty;\nuniform sampler2D tuv;\nvoid main(){\n  float y = (texture2D(ty, uv).r - 0.0627) * 1.1644;\n  float u = texture2D(tuv, uv).r - 0.5;\n  float v = texture2D(tuv, uv).g - 0.5;\n  gl_FragColor = vec4(y + 1.5748*v, y - 0.1873*u - 0.4681*v, y + 1.8556*u, 1.0);\n}\n";
 const FRAG_NV12: &str = "precision mediump float;\nvarying vec2 uv;\nuniform sampler2D ty;\nuniform sampler2D tuv;\nvoid main(){\n  float y = (texture2D(ty, uv).r - 0.0627) * 1.1644;\n  float u = texture2D(tuv, uv).r - 0.5;\n  float v = texture2D(tuv, uv).a - 0.5;\n  gl_FragColor = vec4(y + 1.5748*v, y - 0.1873*u - 0.4681*v, y + 1.8556*u, 1.0);\n}\n";
 
 impl Presenter {
@@ -1013,6 +1188,7 @@ impl Presenter {
 		let prog = build(VERT, FRAG);
 		let sw_prog = build(VERT, FRAG_YUV);
 		let nv_prog = build(VERT, FRAG_NV12);
+		let rg_prog = build(VERT, FRAG_NV12_RG);
 		// Bind the samplers to fixed texture units once — program state persists.
 		gl.use_program(Some(sw_prog));
 		for (i, name) in ["ty", "tu", "tv"].iter().enumerate() {
@@ -1020,10 +1196,12 @@ impl Presenter {
 				gl.uniform_1_i32(Some(&loc), i as i32);
 			}
 		}
-		gl.use_program(Some(nv_prog));
-		for (i, name) in ["ty", "tuv"].iter().enumerate() {
-			if let Some(loc) = gl.get_uniform_location(nv_prog, name) {
-				gl.uniform_1_i32(Some(&loc), i as i32);
+		for p in [nv_prog, rg_prog] {
+			gl.use_program(Some(p));
+			for (i, name) in ["ty", "tuv"].iter().enumerate() {
+				if let Some(loc) = gl.get_uniform_location(p, name) {
+					gl.uniform_1_i32(Some(&loc), i as i32);
+				}
 			}
 		}
 		gl.use_program(None);
@@ -1051,7 +1229,7 @@ impl Presenter {
 			glow::TEXTURE_WRAP_T,
 			glow::CLAMP_TO_EDGE as i32,
 		);
-		let sw_tex = [(); 3].map(|_| {
+		let tex2d = || {
 			let t = gl.create_texture().unwrap();
 			gl.bind_texture(glow::TEXTURE_2D, Some(t));
 			gl.tex_parameter_i32(
@@ -1075,7 +1253,10 @@ impl Presenter {
 				glow::CLAMP_TO_EDGE as i32,
 			);
 			t
-		});
+		};
+		let sw_tex = [(); 3].map(|_| tex2d());
+		let zc_tex = [(); 2].map(|_| tex2d());
+		let cuda_tex = [(); 2].map(|_| tex2d());
 
 		Presenter {
 			dpy,
@@ -1091,6 +1272,12 @@ impl Presenter {
 			sw_dims: (0, 0, -1),
 			vid_dims: (0, 0),
 			sw_scratch: Vec::new(),
+			rg_prog,
+			zc_tex,
+			cuda_tex,
+			cuda: None,
+			cuda_load_tried: false,
+			path: None,
 			last: ptr::null_mut(),
 			last_t: now_s(),
 			frames: 0,
@@ -1196,6 +1383,204 @@ impl Presenter {
 		VID_H.store(0, Ordering::Relaxed);
 	}
 
+	/// Unregister the CUDA↔GL interop textures while the GL context is still current: a
+	/// registration outliving its context invalidates the CUDA context the decode thread
+	/// is still using ("cuCtxPushCurrent failed" spam during shutdown).
+	pub unsafe fn release(&mut self) {
+		if let Some(cu) = self.cuda.as_mut() {
+			cu.release();
+		}
+	}
+
+	/// EGLImage for layer `li` of a DRM_PRIME descriptor at `w`×`h` (null on failure).
+	unsafe fn dmabuf_image(
+		&self,
+		d: *const ff::AVDRMFrameDescriptor,
+		li: usize,
+		w: i32,
+		h: i32,
+	) -> *mut c_void {
+		let layer = &(*d).layers[li];
+		let mut a: Vec<i32> = Vec::with_capacity(64);
+		a.push(EGL_LINUX_DRM_FOURCC_EXT);
+		a.push(layer.format as i32);
+		a.push(EGL_WIDTH);
+		a.push(w);
+		a.push(EGL_HEIGHT);
+		a.push(h);
+		// Crash hardening: the EXT attribute tables are fixed [i32; 3] and the
+		// descriptor's object array is fixed-capacity, so a malformed/exotic DRM
+		// descriptor (>3 planes, or a plane whose object_index points past the
+		// reported objects) would index out of bounds and PANIC. Clamp the plane
+		// count to the 3 attribute slots we have, and skip any plane with a bad
+		// object_index instead of dereferencing it. Log once if we ever clamp so a
+		// real multi-plane format isn't silently truncated unnoticed.
+		let nb_planes = layer.nb_planes as usize;
+		if nb_planes > FD_EXT.len() {
+			static WARNED: AtomicBool = AtomicBool::new(false);
+			if !WARNED.swap(true, Ordering::Relaxed) {
+				eprintln!(
+					"pulsar-render: DRM descriptor has {nb_planes} planes; clamping to {} (rest ignored)",
+					FD_EXT.len()
+				);
+			}
+		}
+		let nb_objects = (*d).nb_objects as usize;
+		for i in 0..nb_planes.min(FD_EXT.len()) {
+			let p = &layer.planes[i];
+			let oi = p.object_index as usize;
+			if oi >= nb_objects || oi >= (*d).objects.len() {
+				// Bad object_index → skip this plane rather than OOB-deref.
+				continue;
+			}
+			let o = &(*d).objects[oi];
+			a.push(FD_EXT[i]);
+			a.push(o.fd);
+			a.push(OFFSET_EXT[i]);
+			a.push(p.offset as i32);
+			a.push(PITCH_EXT[i]);
+			a.push(p.pitch as i32);
+			if o.format_modifier != DRM_FORMAT_MOD_INVALID {
+				a.push(MOD_LO_EXT[i]);
+				a.push((o.format_modifier & 0xFFFF_FFFF) as i32);
+				a.push(MOD_HI_EXT[i]);
+				a.push((o.format_modifier >> 32) as i32);
+			}
+		}
+		a.push(EGL_NONE_I);
+		(self.create_image)(
+			self.dpy,
+			ptr::null_mut(),
+			EGL_LINUX_DMA_BUF_EXT,
+			ptr::null_mut(),
+			a.as_ptr(),
+		)
+	}
+
+	/// A zero-copy frame could not be shown on this GL: drop it (and any half-made images),
+	/// tell the decode thread to read back from now on, and report "no frame" for this draw.
+	unsafe fn zero_copy_failed(&mut self, imgs: &[*mut c_void], what: &str) -> bool {
+		for &img in imgs {
+			if !img.is_null() {
+				(self.destroy_image)(self.dpy, img);
+			}
+		}
+		let gen = (*self.last).opaque as usize as u64;
+		if ZC_FAILED_GEN.swap(gen, Ordering::Relaxed) != gen {
+			// hwaccel decoders read back from here on; a SoC decoder (rkmpp) has no
+			// readback — its frames keep being dropped, as before.
+			eprintln!("pulsar-render: {what} failed — hwaccel decode switches to readback");
+		}
+		let mut cur = self.last;
+		ff::av_frame_free(&mut cur);
+		self.last = ptr::null_mut(); // critical: drop the dangling pointer so it can't be re-freed/derefed next frame
+		false
+	}
+
+	/// Copy an NV12 CUDA frame into `cuda_tex` without leaving the GPU (CUDA↔GL interop).
+	/// False when this GL isn't the CUDA device's (e.g. a Mesa context on a hybrid laptop),
+	/// libcuda is missing, or the frames aren't 8-bit NV12 — the caller falls back.
+	unsafe fn cuda_copy(&mut self, gl: &glow::Context, f: *mut ff::AVFrame, w: i32, h: i32) -> bool {
+		use glow::HasContext;
+		if !self.cuda_load_tried {
+			self.cuda_load_tried = true;
+			self.cuda = CudaGl::load();
+		}
+		let Some(fc) = cuda_frame_ctx(f) else { return false };
+		if fc.sw_format != ff::AVPixelFormat::AV_PIX_FMT_NV12 {
+			return false;
+		}
+		let ctx = fc.ctx;
+		let (cw, ch) = ((w + 1) / 2, (h + 1) / 2);
+		let tex = self.cuda_tex;
+		let Some(cu) = self.cuda.as_mut() else { return false };
+		// (Re)allocate + register the targets on a size or context change; the old
+		// registrations go first, under their own (still referenced) context.
+		let fresh = cu.dims != (w, h) || cu.ctx != ctx || cu.res[0].is_null();
+		if fresh {
+			cu.release();
+		}
+		if (cu.push)(ctx) != 0 {
+			return false;
+		}
+		let ok = 'copy: {
+			if fresh {
+				let planes = [(w, h, glow::LUMINANCE), (cw, ch, glow::LUMINANCE_ALPHA)];
+				for (i, (pw, ph, fmt)) in planes.into_iter().enumerate() {
+					gl.bind_texture(glow::TEXTURE_2D, Some(tex[i]));
+					gl.tex_image_2d(
+						glow::TEXTURE_2D,
+						0,
+						fmt as i32,
+						pw,
+						ph,
+						0,
+						fmt,
+						glow::UNSIGNED_BYTE,
+						glow::PixelUnpackData::Slice(None),
+					);
+					let r = (cu.register)(
+						&mut cu.res[i],
+						tex[i].0.get(),
+						glow::TEXTURE_2D,
+						CU_GRAPHICS_REGISTER_FLAGS_WRITE_DISCARD,
+					);
+					if r != 0 {
+						eprintln!("pulsar-render: cuGraphicsGLRegisterImage failed ({r})");
+						if i == 1 {
+							(cu.unregister)(cu.res[0]);
+						}
+						cu.res = [ptr::null_mut(); 2];
+						break 'copy false;
+					}
+				}
+				cu.dims = (w, h);
+				cu.ctx = ctx;
+				cu.dev = ff::av_buffer_ref(fc.device_ref);
+			}
+			if (cu.map)(2, cu.res.as_mut_ptr(), ptr::null_mut()) != 0 {
+				break 'copy false;
+			}
+			let mut ok = true;
+			for (i, (bytes, rows)) in [(w, h), (cw * 2, ch)].into_iter().enumerate() {
+				let mut arr: *mut c_void = ptr::null_mut();
+				if (cu.array)(&mut arr, cu.res[i], 0, 0) != 0 {
+					ok = false;
+					break;
+				}
+				let m = CudaMemcpy2D {
+					src_x_in_bytes: 0,
+					src_y: 0,
+					src_memory_type: CU_MEMORYTYPE_DEVICE,
+					src_host: ptr::null(),
+					src_device: (*f).data[i] as u64,
+					src_array: ptr::null_mut(),
+					src_pitch: (*f).linesize[i] as usize,
+					dst_x_in_bytes: 0,
+					dst_y: 0,
+					dst_memory_type: CU_MEMORYTYPE_ARRAY,
+					dst_host: ptr::null_mut(),
+					dst_device: 0,
+					dst_array: arr,
+					dst_pitch: 0,
+					width_in_bytes: bytes as usize,
+					height: rows as usize,
+				};
+				let r = (cu.copy)(&m);
+				if r != 0 {
+					eprintln!("pulsar-render: CUDA→GL copy failed ({r})");
+					ok = false;
+					break;
+				}
+			}
+			(cu.unmap)(2, cu.res.as_mut_ptr(), ptr::null_mut());
+			ok
+		};
+		let mut popped: *mut c_void = ptr::null_mut();
+		(cu.pop)(&mut popped);
+		ok
+	}
+
 	pub unsafe fn draw(&mut self, gl: &glow::Context, w: i32, h: i32) -> bool {
 		use glow::HasContext;
 		// Take the newest decoded frame if there is one; else RE-PRESENT the last frame. The
@@ -1280,79 +1665,61 @@ impl Presenter {
 			let _ = std::io::stdout().flush();
 		}
 		let is_prime = (*cur).format == ff::AVPixelFormat::AV_PIX_FMT_DRM_PRIME as c_int;
+		let is_cuda = (*cur).format == ff::AVPixelFormat::AV_PIX_FMT_CUDA as c_int;
 
-		// Bind the right source: DRM_PRIME → zero-copy EGLImage on the external sampler;
-		// anything else → planar YUV 4:2:0 plane upload (desktop decoders, AV1 fallback).
-		let mut img: *mut c_void = ptr::null_mut();
+		// Bind the right source: DRM_PRIME → zero-copy EGLImage(s); CUDA → interop copy into
+		// GL textures on the GPU; anything else → plane upload (readback, software decode).
+		// EGLImages created for this draw, destroyed after it.
+		let mut imgs: [*mut c_void; 2] = [ptr::null_mut(); 2];
+		let path;
 		if is_prime {
 			let d = (*cur).data[0] as *const ff::AVDRMFrameDescriptor;
-			let layer = &(*d).layers[0];
-
-			let mut a: Vec<i32> = Vec::with_capacity(64);
-			a.push(EGL_LINUX_DRM_FOURCC_EXT);
-			a.push(layer.format as i32);
-			a.push(EGL_WIDTH);
-			a.push(vw);
-			a.push(EGL_HEIGHT);
-			a.push(vh);
-			// Crash hardening: the EXT attribute tables are fixed [i32; 3] and the
-			// descriptor's object array is fixed-capacity, so a malformed/exotic DRM
-			// descriptor (>3 planes, or a plane whose object_index points past the
-			// reported objects) would index out of bounds and PANIC. Clamp the plane
-			// count to the 3 attribute slots we have, and skip any plane with a bad
-			// object_index instead of dereferencing it. Log once if we ever clamp so a
-			// real multi-plane format isn't silently truncated unnoticed.
-			let nb_planes = layer.nb_planes as usize;
-			if nb_planes > FD_EXT.len() {
-				static WARNED: AtomicBool = AtomicBool::new(false);
-				if !WARNED.swap(true, Ordering::Relaxed) {
-					eprintln!(
-						"pulsar-render: DRM descriptor has {nb_planes} planes; clamping to {} (rest ignored)",
-						FD_EXT.len()
-					);
+			if (*d).nb_layers >= 2 {
+				// Separate layers (VAAPI): luma + interleaved-chroma as two TEXTURE_2D images.
+				let (l0, l1) = (&(*d).layers[0], &(*d).layers[1]);
+				let pair_ok = matches!(
+					(l0.format, l1.format),
+					(DRM_FORMAT_R8, DRM_FORMAT_GR88) | (DRM_FORMAT_R16, DRM_FORMAT_GR1616)
+				);
+				let dims = [(vw, vh), ((vw + 1) / 2, (vh + 1) / 2)];
+				if pair_ok {
+					for i in 0..2 {
+						imgs[i] = self.dmabuf_image(d, i, dims[i].0, dims[i].1);
+					}
 				}
-			}
-			let nb_objects = (*d).nb_objects as usize;
-			for i in 0..nb_planes.min(FD_EXT.len()) {
-				let p = &layer.planes[i];
-				let oi = p.object_index as usize;
-				if oi >= nb_objects || oi >= (*d).objects.len() {
-					// Bad object_index → skip this plane rather than OOB-deref.
-					continue;
+				if imgs.iter().any(|i| i.is_null()) {
+					return self.zero_copy_failed(&imgs, "multi-layer dmabuf import");
 				}
-				let o = &(*d).objects[oi];
-				a.push(FD_EXT[i]);
-				a.push(o.fd);
-				a.push(OFFSET_EXT[i]);
-				a.push(p.offset as i32);
-				a.push(PITCH_EXT[i]);
-				a.push(p.pitch as i32);
-				if o.format_modifier != DRM_FORMAT_MOD_INVALID {
-					a.push(MOD_LO_EXT[i]);
-					a.push((o.format_modifier & 0xFFFF_FFFF) as i32);
-					a.push(MOD_HI_EXT[i]);
-					a.push((o.format_modifier >> 32) as i32);
+				gl.use_program(Some(self.rg_prog));
+				for i in 0..2 {
+					gl.active_texture(glow::TEXTURE0 + i as u32);
+					gl.bind_texture(glow::TEXTURE_2D, Some(self.zc_tex[i]));
+					(self.image_target)(glow::TEXTURE_2D, imgs[i]);
 				}
+				path = PresentPath::DmabufLayers;
+			} else {
+				// One composed layer (rkmpp NV12, single-plane RGB): the external sampler
+				// does the YUV→RGB conversion.
+				imgs[0] = self.dmabuf_image(d, 0, vw, vh);
+				if imgs[0].is_null() {
+					return self.zero_copy_failed(&imgs, "dmabuf import");
+				}
+				gl.use_program(Some(self.prog));
+				gl.active_texture(glow::TEXTURE0);
+				gl.bind_texture(GL_TEXTURE_EXTERNAL_OES, Some(self.tex));
+				(self.image_target)(GL_TEXTURE_EXTERNAL_OES, imgs[0]);
+				path = PresentPath::DmabufComposed;
 			}
-			a.push(EGL_NONE_I);
-
-			img = (self.create_image)(
-				self.dpy,
-				ptr::null_mut(),
-				EGL_LINUX_DMA_BUF_EXT,
-				ptr::null_mut(),
-				a.as_ptr(),
-			);
-			if img.is_null() {
-				let mut cur = cur; // cur is *mut, already a copy of self.last
-				ff::av_frame_free(&mut cur);
-				self.last = ptr::null_mut(); // critical: drop the dangling pointer so it can't be re-freed/derefed next frame
-				return false;
+		} else if is_cuda {
+			if !self.cuda_copy(gl, cur, vw, vh) {
+				return self.zero_copy_failed(&imgs, "CUDA-GL interop");
 			}
-			gl.use_program(Some(self.prog));
-			gl.active_texture(glow::TEXTURE0);
-			gl.bind_texture(GL_TEXTURE_EXTERNAL_OES, Some(self.tex));
-			(self.image_target)(GL_TEXTURE_EXTERNAL_OES, img);
+			gl.use_program(Some(self.nv_prog));
+			for i in 0..2 {
+				gl.active_texture(glow::TEXTURE0 + i as u32);
+				gl.bind_texture(glow::TEXTURE_2D, Some(self.cuda_tex[i]));
+			}
+			path = PresentPath::CudaInterop;
 		} else if (*cur).format == ff::AVPixelFormat::AV_PIX_FMT_NV12 as c_int {
 			// NV12 (hwaccel readback): full-res Y + half-res interleaved UV.
 			let fmt = (*cur).format;
@@ -1385,6 +1752,7 @@ impl Presenter {
 				self.sw_dims = (vw, vh, fmt);
 			}
 			gl.use_program(Some(self.nv_prog));
+			path = PresentPath::Nv12Upload;
 		} else {
 			// Planar YUV: full-res Y + per-format chroma planes (half for 4:2:0, full for
 			// 4:4:4 …). (Re)allocate on size/format change, then per-frame tex_sub uploads.
@@ -1407,6 +1775,11 @@ impl Presenter {
 			gl.use_program(Some(self.sw_prog));
 			// upload_plane left each plane bound on its unit (0/1/2), matching the sampler
 			// uniforms set at init.
+			path = PresentPath::YuvUpload;
+		}
+		if self.path != Some(path) {
+			eprintln!("pulsar-render: present path {path:?}");
+			self.path = Some(path);
 		}
 
 		// View fit (AnyDesk-style): FIT letterboxes (keep aspect), STRETCH fills the
@@ -1445,8 +1818,10 @@ impl Presenter {
 		gl.enable_vertex_attrib_array(1);
 		gl.draw_arrays(glow::TRIANGLES, 0, 6);
 
-		if !img.is_null() {
-			(self.destroy_image)(self.dpy, img);
+		for img in imgs {
+			if !img.is_null() {
+				(self.destroy_image)(self.dpy, img);
+			}
 		}
 		// Restore the egui-expected active unit (it manages TEXTURE0 itself, but be tidy).
 		gl.active_texture(glow::TEXTURE0);

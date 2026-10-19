@@ -29,6 +29,8 @@ fn apply_lang() {
 #[cfg(all(unix, not(target_os = "macos")))]
 mod decode;
 #[cfg(all(unix, not(target_os = "macos")))]
+mod gpu;
+#[cfg(all(unix, not(target_os = "macos")))]
 mod linux;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod video;

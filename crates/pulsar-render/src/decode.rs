@@ -7,9 +7,11 @@
 //! - **Tier 0 — zero-copy SoC decoders**: any ffmpeg decoder with `AV_CODEC_CAP_HARDWARE`
 //!   whose `pix_fmts` include `DRM_PRIME` (rkmpp, v4l2m2m-drm, future SoCs — found by
 //!   capability, not by name). Output feeds the existing dmabuf→EGLImage zero-copy path.
-//! - **Tier 1 — generic hwaccels**: the stock decoder + a hw device context
-//!   (VAAPI → CUDA → Vulkan → DRM). Frames are either `av_hwframe_map`ped to DRM_PRIME
-//!   (zero-copy) or `av_hwframe_transfer_data` read back (NV12 upload) by the caller.
+//! - **Tier 1 — generic hwaccels**: the stock decoder + a hw device context, the DISPLAY
+//!   GPU first (gpu.rs): VAAPI on the display GPU → CUDA → VAAPI elsewhere → Vulkan → DRM.
+//!   A decoder on the display GPU presents without a system-memory copy (VAAPI frames
+//!   `av_hwframe_map`ped to DRM_PRIME, CUDA frames via CUDA↔GL interop); any other is
+//!   `av_hwframe_transfer_data` read back (NV12 upload) by the caller.
 //! - **Tier 2 — software**: the stock decoder, planar/NV12 GL upload. Always present —
 //!   the absolute fallback on every platform.
 //!
@@ -81,6 +83,27 @@ pub struct Selected {
 	pub hwdev: Option<ff::AVHWDeviceType>,
 	/// The hwaccel pixel format frames will arrive in for Tier::HwAccel.
 	pub hw_fmt: ff::AVPixelFormat,
+	/// The DRM render node the hw device is opened on (VAAPI only; `None` = the device
+	/// type's default, or for VAAPI "any node but the display GPU's").
+	pub node: Option<String>,
+	/// The decoder runs on the DISPLAY GPU, so its frames can reach GL without a copy
+	/// through system memory: VAAPI → dmabuf → EGLImage, CUDA → CUDA↔GL interop. Only an
+	/// attempt — the presenter falls back to readback if the import fails (`ZC_FAILED`).
+	pub zero_copy: bool,
+}
+
+impl Selected {
+	/// Identity for the runtime skip list: two VAAPI candidates share a name but not a node.
+	pub fn key(&self) -> String {
+		key_of(&self.name, self.node.as_deref())
+	}
+}
+
+fn key_of(name: &str, node: Option<&str>) -> String {
+	match node {
+		Some(n) => format!("{name}@{n}"),
+		None => name.to_string(),
+	}
 }
 
 struct Candidate {
@@ -89,6 +112,8 @@ struct Candidate {
 	tier: Tier,
 	hwdev: Option<ff::AVHWDeviceType>,
 	hw_fmt: ff::AVPixelFormat,
+	node: Option<String>,
+	zero_copy: bool,
 }
 
 /// The hwaccel pixel format produced under a device type.
@@ -175,45 +200,76 @@ unsafe fn candidates(codec_id: ff::AVCodecID) -> Vec<Candidate> {
 				tier: Tier::ZeroCopyHw,
 				hwdev: None,
 				hw_fmt: ff::AVPixelFormat::AV_PIX_FMT_DRM_PRIME,
+				node: None,
+				zero_copy: true,
 			});
 		}
 	}
 
-	// Tier 1: the stock decoder's hwaccel configs, preferred device order.
+	// Tier 1: the stock decoder's hwaccel configs, display GPU first.
+	//
+	// Order (each entry still has to decode the canned keyframe to win):
+	//   1. VAAPI on the DISPLAY GPU's node — dmabuf straight into this GL, no copy. Covers
+	//      a lone AMD/Intel iGPU or dGPU, nouveau, the iGPU of a hybrid laptop, and an
+	//      NVIDIA display with nvidia-vaapi-driver installed.
+	//   2. CUDA — zero-copy (CUDA↔GL interop) when the display GPU is NVIDIA, otherwise a
+	//      readback; NVDEC is at least as capable as an iGPU's VAAPI block.
+	//   3. VAAPI on any OTHER node (another GPU → readback).
+	//   4. Vulkan, DRM.
+	// With the display GPU unknown this is the old CUDA → VAAPI(any) → … order, all readback.
 	let stock = ff::avcodec_find_decoder(codec_id);
 	if !stock.is_null() {
 		use ff::AVHWDeviceType::*;
-		// CUDA before VAAPI: a creatable CUDA device means a discrete NVIDIA GPU is
-		// present, whose NVDEC is at least as capable as the iGPU's VAAPI block —
-		// and on hybrid systems the VAAPI default node is often the wrong GPU anyway.
-		for want in [
-			AV_HWDEVICE_TYPE_CUDA,
-			AV_HWDEVICE_TYPE_VAAPI,
-			AV_HWDEVICE_TYPE_VULKAN,
-			AV_HWDEVICE_TYPE_DRM,
-		] {
+		// A SoC zero-copy decoder (tier 0, e.g. rkmpp on the Orange Pi 5) already won the
+		// order: keep its hwaccel fallbacks in the old order instead of opening a second EGL
+		// display on the fragile Mali stack just to rank them.
+		static UNKNOWN: crate::gpu::DisplayGpu = crate::gpu::DisplayGpu {
+			render_node: None,
+			vendor: None,
+		};
+		let disp = if out.is_empty() {
+			crate::gpu::display_gpu()
+		} else {
+			&UNKNOWN
+		};
+		// `PULSAR_ZEROCOPY=0`: same decoder order, but every frame takes the readback path
+		// (A/B against zero-copy, or a driver whose dmabuf/interop import misrenders).
+		let zc_allowed = std::env::var("PULSAR_ZEROCOPY").map_or(true, |v| v != "0");
+		let has = |want: ff::AVHWDeviceType| {
 			let mut i = 0;
 			loop {
 				let cfg = ff::avcodec_get_hw_config(stock, i);
 				if cfg.is_null() {
-					break;
+					return false;
 				}
-				let methods = (*cfg).methods;
 				if (*cfg).device_type == want
-					&& methods & (ff::AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX as c_int) != 0
+					&& (*cfg).methods & (ff::AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX as c_int) != 0
 				{
-					out.push(Candidate {
-						dec: stock,
-						name: format!("{}+{}", decoder_name(stock), hwdev_name(want)),
-						tier: Tier::HwAccel,
-						hwdev: Some(want),
-						hw_fmt: hw_fmt_for(want),
-					});
-					break;
+					return true;
 				}
 				i += 1;
 			}
+		};
+		let mut push = |want: ff::AVHWDeviceType, node: Option<String>, zero_copy: bool| {
+			if has(want) {
+				out.push(Candidate {
+					dec: stock,
+					name: format!("{}+{}", decoder_name(stock), hwdev_name(want)),
+					tier: Tier::HwAccel,
+					hwdev: Some(want),
+					hw_fmt: hw_fmt_for(want),
+					node,
+					zero_copy: zero_copy && zc_allowed,
+				});
+			}
+		};
+		if let Some(node) = &disp.render_node {
+			push(AV_HWDEVICE_TYPE_VAAPI, Some(node.clone()), true);
 		}
+		push(AV_HWDEVICE_TYPE_CUDA, None, disp.is_nvidia());
+		push(AV_HWDEVICE_TYPE_VAAPI, None, false);
+		push(AV_HWDEVICE_TYPE_VULKAN, None, false);
+		push(AV_HWDEVICE_TYPE_DRM, None, false);
 		// Tier 2: software (the stock decoder without hwaccel) — always last, always there.
 		if (*stock).capabilities & (ff::AV_CODEC_CAP_HARDWARE as c_int) == 0 {
 			out.push(Candidate {
@@ -222,6 +278,8 @@ unsafe fn candidates(codec_id: ff::AVCodecID) -> Vec<Candidate> {
 				tier: Tier::Software,
 				hwdev: None,
 				hw_fmt: ff::AVPixelFormat::AV_PIX_FMT_NONE,
+				node: None,
+				zero_copy: false,
 			});
 		}
 	}
@@ -240,21 +298,43 @@ fn hwdev_name(dev: ff::AVHWDeviceType) -> &'static str {
 	}
 }
 
-/// Create a hwaccel device context for `dev`. VAAPI's default device is
-/// `/dev/dri/renderD128`, which on an Optimus/hybrid laptop is the NVIDIA node — it has
-/// no VA driver, so the default fails while the AMD iGPU's `radeonsi` VA driver lives on a
-/// higher-numbered render node that libva never tries. So for VAAPI: try the default,
-/// then EACH `/dev/dri/renderD*` node, and use the first that initialises — hardware
-/// decode then lands on whichever GPU actually provides VAAPI. Other device types
-/// (CUDA/Vulkan/DRM) use their own default. Returns null when no device could be created.
-pub(crate) unsafe fn create_hwdevice(dev: ff::AVHWDeviceType) -> *mut ff::AVBufferRef {
+/// Create a hwaccel device context for `dev`, on `node` when one is given (VAAPI on the
+/// display GPU). Without a node, VAAPI's default device is `/dev/dri/renderD128`, which on
+/// an Optimus/hybrid laptop is the NVIDIA node — it has no VA driver, so the default fails
+/// while the AMD iGPU's `radeonsi` VA driver lives on a higher-numbered render node that
+/// libva never tries. So for VAAPI without a node: try the default, then EACH
+/// `/dev/dri/renderD*` node except the display GPU's (that one has its own candidate), and
+/// use the first that initialises. Other device types (CUDA/Vulkan/DRM) use their own
+/// default. Returns null when no device could be created.
+pub(crate) unsafe fn create_hwdevice(
+	dev: ff::AVHWDeviceType,
+	node: Option<&str>,
+) -> *mut ff::AVBufferRef {
 	use ff::AVHWDeviceType::*;
-	let mut hwctx: *mut ff::AVBufferRef = ptr::null_mut();
-	if ff::av_hwdevice_ctx_create(&mut hwctx, dev, ptr::null(), ptr::null_mut(), 0) >= 0 {
-		return hwctx;
+	let open = |path: Option<&str>| -> *mut ff::AVBufferRef {
+		let c = path.and_then(|p| CString::new(p).ok());
+		let p = c.as_ref().map_or(ptr::null(), |c| c.as_ptr());
+		let mut hwctx: *mut ff::AVBufferRef = ptr::null_mut();
+		if ff::av_hwdevice_ctx_create(&mut hwctx, dev, p, ptr::null_mut(), 0) >= 0 {
+			hwctx
+		} else {
+			ptr::null_mut()
+		}
+	};
+	if node.is_some() {
+		return open(node);
 	}
 	if dev != AV_HWDEVICE_TYPE_VAAPI {
-		return ptr::null_mut();
+		return open(None);
+	}
+	// Only skip the display GPU's node when the walk ranked it (decode.rs candidates).
+	let display = crate::gpu::known().and_then(|g| g.render_node.as_deref());
+	// libva's default node — unless that IS the display GPU's (it has its own candidate).
+	if display != Some("/dev/dri/renderD128") {
+		let h = open(None);
+		if !h.is_null() {
+			return h;
+		}
 	}
 	// VAAPI default node had no driver — walk the render nodes and use the first that works.
 	if let Ok(rd) = std::fs::read_dir("/dev/dri") {
@@ -268,12 +348,14 @@ pub(crate) unsafe fn create_hwdevice(dev: ff::AVHWDeviceType) -> *mut ff::AVBuff
 			.collect();
 		nodes.sort();
 		for node in nodes {
-			if let Ok(c) = std::ffi::CString::new(node.to_string_lossy().as_bytes()) {
-				let mut hwctx: *mut ff::AVBufferRef = ptr::null_mut();
-				if ff::av_hwdevice_ctx_create(&mut hwctx, dev, c.as_ptr(), ptr::null_mut(), 0) >= 0 {
-					eprintln!("pulsar-render: VAAPI device {}", node.display());
-					return hwctx;
-				}
+			let path = node.to_string_lossy();
+			if Some(path.as_ref()) == display {
+				continue;
+			}
+			let h = open(Some(&path));
+			if !h.is_null() {
+				eprintln!("pulsar-render: VAAPI device {}", node.display());
+				return h;
 			}
 		}
 	}
@@ -408,7 +490,7 @@ unsafe fn validate(cand: &Candidate, fixture: &std::path::Path) -> bool {
 		(*dc).get_format = Some(get_format);
 		let mut hwdev_ok = true;
 		if let Some(dev) = cand.hwdev {
-			let hwctx = create_hwdevice(dev);
+			let hwctx = create_hwdevice(dev, cand.node.as_deref());
 			if hwctx.is_null() {
 				hwdev_ok = false;
 			} else {
@@ -485,17 +567,22 @@ pub fn select_skipping(codec_id: ff::AVCodecID, skip: &[String]) -> Option<Probe
 	let baseline_path = write_fixture(baseline)?;
 	unsafe {
 		for cand in candidates(codec_id) {
-			if skip.iter().any(|s| *s == cand.name) {
+			if skip.iter().any(|s| *s == key_of(&cand.name, cand.node.as_deref())) {
 				continue;
 			}
 			if !validate(&cand, &baseline_path) {
-				eprintln!("pulsar-render: decoder {} failed validation", cand.name);
+				eprintln!(
+					"pulsar-render: decoder {} failed validation",
+					key_of(&cand.name, cand.node.as_deref())
+				);
 				continue;
 			}
 			eprintln!(
-				"pulsar-render: selected decoder {} ({})",
+				"pulsar-render: selected decoder {} ({}{}{})",
 				cand.name,
-				cand.tier.as_str()
+				cand.tier.as_str(),
+				cand.node.as_deref().map_or(String::new(), |n| format!(", {n}")),
+				if cand.zero_copy { ", zero-copy" } else { "" }
 			);
 			// The winner decodes conformant input — now check the real encoder families.
 			let mut incompatible_with = Vec::new();
@@ -515,6 +602,8 @@ pub fn select_skipping(codec_id: ff::AVCodecID, skip: &[String]) -> Option<Probe
 					tier: cand.tier,
 					hwdev: cand.hwdev,
 					hw_fmt: cand.hw_fmt,
+					node: cand.node,
+					zero_copy: cand.zero_copy,
 				},
 				incompatible_with,
 			});
@@ -555,6 +644,8 @@ pub fn probe_json() -> String {
 			Some(p) => {
 				// Back-compat: `incompatible_with` is an additive array (older consumers
 				// ignore it; empty = no known-bad encoder family for this decoder).
+				// `zero_copy` is additive too: the decoder sits on the display GPU, so frames
+				// should reach GL without a system-memory copy (still verified at runtime).
 				let incompat = p
 					.incompatible_with
 					.iter()
@@ -562,10 +653,11 @@ pub fn probe_json() -> String {
 					.collect::<Vec<_>>()
 					.join(",");
 				entries.push(format!(
-					r#"{{"codec":"{label}","ok":true,"decoder":"{}","tier":"{}","hw":{},"incompatible_with":[{}]}}"#,
+					r#"{{"codec":"{label}","ok":true,"decoder":"{}","tier":"{}","hw":{},"zero_copy":{},"incompatible_with":[{}]}}"#,
 					p.sel.name,
 					p.sel.tier.as_str(),
 					p.sel.tier != Tier::Software,
+					p.sel.zero_copy,
 					incompat
 				));
 			}

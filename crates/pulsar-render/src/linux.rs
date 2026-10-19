@@ -1552,6 +1552,7 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 	// The render loop has exited, so the main thread no longer holds MBX: do the real
 	// drain+free here (the SIGINT/SIGTERM handler only set the atomic — see on_stop).
 	video::stop_decode();
+	presenter.release();
 	painter.destroy();
 	egl.make_current(display, None, None, None).ok();
 	xlib::XDestroyWindow(xd, win);

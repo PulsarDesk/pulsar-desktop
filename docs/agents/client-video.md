@@ -36,6 +36,29 @@ audio still decodes in the webview** (`src/lib/opus-audio.ts`, fed by
   `src/lib/updater.ts`, `routes/page/UpdateModal.svelte`,
   `scripts/gen-update-manifest.mjs` (consent-based: badge, changelog, progress).
 
+## Linux desktop GPUs — zero-copy needs the decoder on the DISPLAY GPU
+
+`crates/pulsar-render/src/gpu.rs` asks EGL (`EGL_EXT_device_query`) which render node
+the renderer's GL runs on; `decode.rs` then ranks the hwaccels display-GPU-first:
+VAAPI on that node → CUDA → VAAPI on any other node → Vulkan → DRM (each still
+validated on the canned keyframe). How frames reach GL (`present path …` in the log):
+
+| Decoder | Display GPU | Path |
+| --- | --- | --- |
+| VAAPI (Mesa AMD/Intel, nouveau, nvidia-vaapi-driver) | same GPU | `DmabufLayers` — two-layer R8+GR88 dmabuf, two TEXTURE_2D EGLImages |
+| CUDA | NVIDIA | `CudaInterop` — GPU-side copy into GL textures (libcuda dlopen'ed) |
+| any | another GPU / unknown | `Nv12Upload` — readback (the old path) |
+
+- Hybrid laptops (iGPU + NVIDIA) decode on the iGPU now; under PRIME offload the GL is on
+  NVIDIA and CUDA interop wins. A dmabuf can't cross GPUs (tiled layouts), and interop
+  only exists inside an NVIDIA GL — so "use the stronger NVDEC" means a copy there.
+- A failed import/interop sets `ZC_FAILED` → readback for that decoder (no black screen).
+- `PULSAR_ZEROCOPY=0` keeps the order but forces readback (A/B, driver bugs).
+- Tier-0 SoC decoders (rkmpp) skip the display-GPU detection entirely (Mali EGL is fragile).
+- Measured 2026-10-19 (debug build, local 1080p60 NVENC→RTP, Ryzen/Vega + RTX 3050 Ti laptop),
+  renderer CPU: AMD zero-copy 13 % vs readback 31 %; NVIDIA (PRIME offload) interop 15 % vs
+  readback 22 %; all 60 fps, colours checked. Not run: Intel, nvidia-vaapi-driver, 10-bit.
+
 ## Gaming overlay (in-session, game mode)
 
 Hidden by default, opened with a key combo. Drawn **natively by pulsar-render
