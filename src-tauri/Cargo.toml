@@ -138,3 +138,7 @@ libmpv-sys = "3.1.0"
 # Pinned to wry 0.55's resolved version so PlatformWebview::inner() is the same WebView type
 # (for set_background_color transparency over the GLArea).
 webkit2gtk = "=2.0.2"
+# Tray backend: Tauri's default libappindicator drops left-click (no TrayIconEvent) and the
+# tooltip on Linux. Turning on tray-icon's `ksni` feature (unified with Tauri's own dep)
+# switches it to a pure StatusNotifierItem tray: Activate → left-click event, title + tooltip.
+tray-icon = { version = "0.25", default-features = false, features = ["ksni"] }

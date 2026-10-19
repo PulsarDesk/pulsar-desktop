@@ -388,7 +388,6 @@ pub fn run() {
 				MenuItem::with_id(app, "quit", crate::i18n::t("tray.quit"), true, None::<&str>)?;
 			let menu = Menu::with_items(app, &[&show, &quit])?;
 			let mut tray = TrayIconBuilder::with_id("main")
-				.tooltip("Pulsar")
 				.menu(&menu)
 				.show_menu_on_left_click(false)
 				.on_menu_event(|app, event| match event.id.as_ref() {
@@ -424,6 +423,17 @@ pub fn run() {
 				});
 			if let Some(icon) = app.default_window_icon().cloned() {
 				tray = tray.icon(icon);
+			}
+			// The StatusNotifierItem tray (tray-icon `ksni`) shows its title as the tooltip
+			// heading (a tooltip would repeat it underneath); on macOS a title would be text
+			// beside the menu-bar icon, so the title is Linux only and the tooltip everywhere else.
+			#[cfg(target_os = "linux")]
+			{
+				tray = tray.title("Pulsar");
+			}
+			#[cfg(not(target_os = "linux"))]
+			{
+				tray = tray.tooltip("Pulsar");
 			}
 			tray.build(app)?;
 			Ok(())
