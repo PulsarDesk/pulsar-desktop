@@ -171,6 +171,44 @@ jobs:
             console.log("endpoint ->", c.plugins.updater.endpoints[0]);
           '
 
+      # AppImage: the binary links libgstreamer 1.20 (pulsar-core's in-process Wayland
+      # capture) and linuxdeploy bundles it, but NO plugins — and a distro's newer plugins
+      # can't load into the old core, so on every non-Debian Wayland host the pipeline had
+      # no elements and the viewer stayed black. Bundle the plugins the pipelines use
+      # (pulsar-core pipeline/gst.rs) from this 22.04 runner and gst-launch/gst-inspect
+      # (process.rs probes the Wayland encoders with the same stack). pipewiresrc runs on
+      # the SYSTEM libpipewire (linuxdeploy's excludelist keeps it out; ABI-stable soname).
+      # linuxdeploy-plugin-gstreamer copies EVERY file of GSTREAMER_PLUGINS_DIR, hence the
+      # curated dir. nvcodec is optional (dlopens the NVIDIA driver; absent on some arches).
+      # vaapi (vaapih264enc, AMD/Intel) needs the HOST's libva — main.rs::appimage_host_libva.
+      - name: Stage GStreamer + libjack for the AppImage
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          sudo apt-get install -y gstreamer1.0-tools gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
+            gstreamer1.0-pipewire gstreamer1.0-vaapi
+          MA="$(uname -m)-linux-gnu"
+          SRC="/usr/lib/$MA/gstreamer-1.0"
+          DST="$RUNNER_TEMP/gst-plugins"
+          mkdir -p "$DST"
+          for p in coreelements videoconvert videotestsrc pipewire x264 videoparsersbad rtp udp vaapi; do
+            cp "$SRC/libgst$p.so" "$DST/"
+          done
+          cp "$SRC/libgstnvcodec.so" "$DST/" || echo "no nvcodec plugin on $MA"
+          echo "GSTREAMER_PLUGINS_DIR=$DST" >> "$GITHUB_ENV"
+          # libjack is on linuxdeploy's excludelist, yet libavdevice/libmpv link it — a host
+          # without JACK couldn't even start the app. Pulsar never talks to JACK, so ship it.
+          # (libva stays bundled; main.rs::appimage_host_libva swaps in the host's at start.)
+          JACK="$(readlink -f "/usr/lib/$MA/libjack.so.0")"
+          cat > "$RUNNER_TEMP/appimage.conf.json" <<EOF
+          {"bundle":{"linux":{"appimage":{"bundleMediaFramework":true,"files":{
+            "/usr/bin/gst-launch-1.0":"/usr/bin/gst-launch-1.0",
+            "/usr/bin/gst-inspect-1.0":"/usr/bin/gst-inspect-1.0",
+            "/usr/lib/libjack.so.0":"$JACK"
+          }}}}}
+          EOF
+          cat "$RUNNER_TEMP/appimage.conf.json"
+
       - name: Build app bundles
         id: tauri
         uses: tauri-apps/tauri-action@v0
@@ -180,7 +218,21 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: .
-          args: ${{ matrix.args }}
+          args: ${{ matrix.args }} ${{ startsWith(matrix.os, 'ubuntu') && format('--config {0}/appimage.conf.json', runner.temp) || '' }}
+
+      # The AppImage must start and stream on distros other than the 22.04 it was built on:
+      # run its `--selftest` (bundled gst encode, pulsar-render libs, ffmpeg) in clean
+      # containers — once without libva/libjack (bundled copies) and once with them.
+      # A FAIL here stops the release before anything is published.
+      - name: Smoke-test the AppImage on other distros
+        if: startsWith(matrix.os, 'ubuntu')
+        shell: bash
+        run: |
+          img="$(echo '${{ steps.tauri.outputs.artifactPaths }}' | jq -r '.[]' | grep '\.AppImage$' | head -1)"
+          distros="fedora:41 ubuntu:24.04 debian:12 opensuse/tumbleweed"
+          # archlinux has no arm64 image.
+          [ "$(uname -m)" = x86_64 ] && distros="$distros archlinux:latest"
+          scripts/appimage/smoke.sh "$img" $distros
 
       # Copy ONLY the distributable installers (from artifactPaths), not the bundle
       # internals (the macOS .app tree, shared libs, helper scripts, …).

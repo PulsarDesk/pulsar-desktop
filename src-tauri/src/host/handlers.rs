@@ -1513,6 +1513,7 @@ pub(super) fn make_on_stream(
 					tracing::info!(
 						bitrate_kbps = req.bitrate_kbps,
 						applied,
+						in_process = cap.is_in_process(),
 						recovery = ?req.loss_recovery,
 						"wayland restream applied live on the in-process pipeline"
 					);
@@ -1765,6 +1766,8 @@ pub(super) fn make_on_stream(
 				crate::i18n::t("stream.mbitTarget")
 			)));
 			let token = restore_token.lock().unwrap().clone();
+			// AppImage: an encoder that only validated on the system gst runs there.
+			let system_gst = crate::process::gst_on_system(genc, gcodec);
 			let restore_token = restore_token.clone();
 			let cap_slot = cap_slot.clone();
 			// This (re-)stream's generation: capture::start can sit in the portal
@@ -1776,6 +1779,7 @@ pub(super) fn make_on_stream(
 			// synchronous audio+host-mute below (and FnMut re-calls) can still use it.
 			let app_h_task = app_h.clone();
 			let peer = peer.clone();
+			let stats_task = stats_out.clone();
 			tokio::spawn(async move {
 				use std::sync::atomic::Ordering;
 				// Already superseded before we even started (overlapping re-streams):
@@ -1799,7 +1803,7 @@ pub(super) fn make_on_stream(
 				// instead of leaving the dialog up — capture.rs's SessionCloseGuard
 				// then closes the portal session and dismisses the picker.
 				let started = {
-					let start_fut = pulsar_core::capture::start(&ip, port, &fragment, token);
+					let start_fut = pulsar_core::capture::start(&ip, port, &fragment, token, system_gst);
 					tokio::pin!(start_fut);
 					loop {
 						tokio::select! {
@@ -1839,9 +1843,36 @@ pub(super) fn make_on_stream(
 							"session",
 							SessionEvent {
 								kind: "stream".into(),
-								peer,
+								peer: peer.clone(),
 								sid,
 								detail: "Wayland · ekran + kontrol".into(),
+							},
+						);
+						// Nothing else notices a pipeline that dies mid-stream (gst error/EOS,
+						// the gst-launch fallback exiting): the viewer would sit on its last
+						// frame or black. Report it once, like a failed start.
+						loop {
+							tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+							if cap_gen.load(Ordering::SeqCst) != gen {
+								return;
+							}
+							let alive = cap_slot.lock().unwrap().as_ref().map(|c| c.is_alive());
+							match alive {
+								Some(true) => continue,
+								None => return,
+								Some(false) => break,
+							}
+						}
+						tracing::error!("wayland capture pipeline died mid-stream");
+						let msg = crate::i18n::t("host.captureStopped").to_string();
+						let _ = stats_task.try_send(DataMsg::Stats(format!("!{msg}")));
+						let _ = app_h_task.emit(
+							"session",
+							SessionEvent {
+								kind: "stream".into(),
+								peer,
+								sid,
+								detail: msg,
 							},
 						);
 					}
@@ -1849,13 +1880,17 @@ pub(super) fn make_on_stream(
 						// LOG it (not just the UI event): a headless/CLI host has no webview for the
 						// toast, so a Wayland capture failure (portal/pipewire/gst) was otherwise invisible.
 						tracing::error!(err = %e, "wayland capture::start failed");
+						// And tell the CLIENT ("!" = stream error, see on_failed below): the
+						// viewer otherwise waited on a black screen with no hint why.
+						let msg = format!("{}: {e}", crate::i18n::t("host.captureFailed"));
+						let _ = stats_task.try_send(DataMsg::Stats(format!("!{msg}")));
 						let _ = app_h_task.emit(
 							"session",
 							SessionEvent {
 								kind: "stream".into(),
 								peer,
 								sid,
-								detail: format!("Wayland yakalama başarısız: {e}"),
+								detail: msg,
 							},
 						);
 					}
@@ -2913,6 +2948,7 @@ fn spawn_gst_paced_locked(
 ) -> Result<(u32, Arc<std::sync::atomic::AtomicBool>), String> {
 	use std::os::unix::process::CommandExt;
 	let mut cmd = std::process::Command::new(crate::process::gst_launch_bin());
+	pulsar_core::capture::use_system_gst_env(&mut cmd);
 	cmd.arg("-v").args(pipeline.split_whitespace());
 	cmd.stdout(std::process::Stdio::piped());
 	// stderr to a per-host scratch file (truncated each spawn): gst dying at start
@@ -3014,6 +3050,7 @@ fn spawn_gst_paced_locked(
 fn spawn_gst_tracked(procs: &Arc<Mutex<Vec<Child>>>, pipeline: &str) -> Result<(), String> {
 	use std::os::unix::process::CommandExt;
 	let mut cmd = std::process::Command::new(crate::process::gst_launch_bin());
+	pulsar_core::capture::use_system_gst_env(&mut cmd);
 	cmd.arg("-q").args(pipeline.split_whitespace());
 	unsafe {
 		cmd.pre_exec(|| {

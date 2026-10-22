@@ -97,6 +97,12 @@ use session_cmds::{
 mod relay_mode;
 pub use relay_mode::run_relay;
 
+// Headless `pulsar --selftest` (bundled media stack check; CI runs it on the AppImage).
+mod selftest;
+pub fn selftest() -> i32 {
+	selftest::run()
+}
+
 /// Per-window focus map driving the global input-capture gate (`kbdhook::set_focused`),
 /// OR-ed across ALL Pulsar windows so an app-internal focus handoff (main → approval
 /// popup / connections window) isn't treated as "unfocused" (that cleared the ENGAGED

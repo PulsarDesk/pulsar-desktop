@@ -25,6 +25,8 @@
 	"host.gstFailed": "(gst failed to start)",
 	"host.ffmpegFailed": "(ffmpeg failed to start)",
 	"host.encodeFailed": "Video encoder failed to start — no encoder worked; tried",
+	"host.captureFailed": "Screen capture failed to start",
+	"host.captureStopped": "Screen capture stopped",
 	"err.identityChanged": "The identity behind this device has changed. Accept the new identity and reconnect?",
 	"err.localRelayBind": "Could not start the in-app relay (the port may be in use)"
 }

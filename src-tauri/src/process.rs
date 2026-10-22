@@ -325,41 +325,98 @@ pub fn validated_encoders(ffmpeg: &str, vaapi_device: &str) -> Vec<HwEncoder> {
 /// when both the element exists (`gst-inspect-1.0 --exists`) and the probe exits 0;
 /// X264 is included whenever gst itself is present. Cached per (family, codec) for
 /// the process lifetime. Empty when gst-launch isn't installed.
+///
+/// Inside an AppImage on Wayland the bundled gst is probed first (the pipeline runs on it
+/// in-process); a pair that fails there is retried on the SYSTEM gst, and if that works
+/// the stream runs under the system `gst-launch-1.0` ([`gst_on_system`]). That's how an
+/// AppImage reaches `vah264enc` (gst ≥1.22 only) or a NVENC plugin new enough for the
+/// installed driver (the bundled 1.20 `nvh264enc` fails on 5xx+ drivers).
+///
+/// Families sharing a wire id (`Vaapi`/`Va`) appear once: the first that validates.
 #[cfg(target_os = "linux")]
 pub fn validated_gst_encoders() -> Vec<(pipeline::gst::GstEncoder, Vec<VCodec>)> {
-	use pipeline::gst::{self, GstEncoder};
-	use std::collections::HashMap;
-	use std::sync::{Mutex, OnceLock};
-	static CACHE: OnceLock<Mutex<HashMap<(GstEncoder, VCodec), bool>>> = OnceLock::new();
+	use pipeline::gst::GstEncoder;
 	if !gst_available() {
 		return Vec::new();
 	}
-	let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-	let mut out = Vec::new();
+	let mut out: Vec<(GstEncoder, Vec<VCodec>)> = Vec::new();
 	for enc in GstEncoder::PRIORITY {
-		let mut codecs = Vec::new();
-		for &codec in enc.codecs() {
-			if let Some(&hit) = cache.lock().unwrap().get(&(enc, codec)) {
-				if hit {
-					codecs.push(codec);
-				}
-				continue;
-			}
-			let ok = enc.element(codec).is_some_and(|el| {
-				gst_element_exists(el)
-					&& gst::encoder_fragment(enc, codec, 4000, 30)
-						.is_some_and(|frag| probe_gst_pipeline(&gst::probe_pipeline(&frag)))
-			});
-			cache.lock().unwrap().insert((enc, codec), ok);
-			if ok {
-				codecs.push(codec);
-			}
+		if out.iter().any(|(e, _)| e.wire_id() == enc.wire_id()) {
+			continue;
 		}
+		let codecs: Vec<VCodec> = enc
+			.codecs()
+			.iter()
+			.copied()
+			.filter(|&codec| gst_probe(enc, codec).is_some())
+			.collect();
 		if !codecs.is_empty() {
 			out.push((enc, codecs));
 		}
 	}
 	out
+}
+
+/// Whether a validated (family, codec) only works on the SYSTEM gst (see
+/// [`validated_gst_encoders`]) — the Wayland capture must then run as a system child.
+#[cfg(target_os = "linux")]
+pub fn gst_on_system(enc: pipeline::gst::GstEncoder, codec: VCodec) -> bool {
+	gst_probe(enc, codec) == Some(GstStack::System)
+}
+
+/// Which GStreamer a validated encoder runs on.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GstStack {
+	/// The in-process one: the AppImage's bundled gst, or the system's elsewhere.
+	Default,
+	/// The system gst, run as a `gst-launch-1.0` child (AppImage only).
+	System,
+}
+
+/// The cached one-frame probe of one (family, codec): `None` = doesn't work anywhere.
+#[cfg(target_os = "linux")]
+fn gst_probe(enc: pipeline::gst::GstEncoder, codec: VCodec) -> Option<GstStack> {
+	use pipeline::gst::{self, GstEncoder};
+	use std::collections::HashMap;
+	use std::sync::{Mutex, OnceLock};
+	static CACHE: OnceLock<Mutex<HashMap<(GstEncoder, VCodec), Option<GstStack>>>> =
+		OnceLock::new();
+	let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+	if let Some(&hit) = cache.lock().unwrap().get(&(enc, codec)) {
+		return hit;
+	}
+	let probe = |inspect: std::process::Command, launch: std::process::Command| {
+		enc.element(codec).is_some_and(|el| {
+			gst_element_exists(inspect, el)
+				&& gst::encoder_fragment(enc, codec, 4000, 30)
+					.is_some_and(|frag| probe_gst_pipeline(launch, &gst::probe_pipeline(&frag)))
+		})
+	};
+	let system = || {
+		probe(
+			system_gst_tool("gst-inspect-1.0"),
+			system_gst_tool(gst_launch_bin()),
+		)
+	};
+	let res = match (
+		bundled_gst_tool("gst-inspect-1.0"),
+		bundled_gst_tool("gst-launch-1.0"),
+	) {
+		(Some(inspect), Some(launch)) => {
+			if probe(inspect, launch) {
+				Some(GstStack::Default)
+			} else if system() {
+				Some(GstStack::System)
+			} else {
+				None
+			}
+		}
+		_ => system().then_some(GstStack::Default),
+	};
+	tracing::info!(?enc, ?codec, ?res, "gst encoder probe");
+	cache.lock().unwrap().insert((enc, codec), res);
+	res
 }
 
 /// Pick a (family, codec) from the validated gst set: an explicit wire-id request
@@ -383,7 +440,10 @@ pub fn pick_gst(
 		}
 	};
 	if let Some(explicit) = pipeline::gst::from_wire_id(enc_pref) {
-		if let Some((enc, codecs)) = validated.iter().find(|(e, _)| *e == explicit) {
+		if let Some((enc, codecs)) = validated
+			.iter()
+			.find(|(e, _)| e.wire_id() == explicit.wire_id())
+		{
 			return pick_codec(codecs).map(|c| (*enc, c));
 		}
 	}
@@ -424,16 +484,65 @@ pub fn kms_encode_ok(enc: pipeline::gst::GstEncoder, codec: VCodec) -> bool {
 	if let Some(&hit) = cache.lock().unwrap().get(&(enc, codec)) {
 		return hit;
 	}
-	let ok = pipeline::gst::encoder_fragment(enc, codec, 4000, 30)
-		.is_some_and(|frag| probe_gst_pipeline(&pipeline::gst::kms_probe_pipeline(&frag)));
+	let ok = pipeline::gst::encoder_fragment(enc, codec, 4000, 30).is_some_and(|frag| {
+		probe_gst_pipeline(
+			system_gst_tool(gst_launch_bin()),
+			&pipeline::gst::kms_probe_pipeline(&frag),
+		)
+	});
 	tracing::info!(?enc, ?codec, ok, "kms zero-copy probe");
 	cache.lock().unwrap().insert((enc, codec), ok);
 	ok
 }
 
+/// The AppImage's own `gst-*-1.0` tool, when this is a Wayland host inside an AppImage that
+/// bundles GStreamer (the CI release build, `release.yml`). The Wayland pipeline then runs
+/// IN-PROCESS on the bundled 1.20 core + plugins, so its encoders must be probed with that
+/// same stack — the system tools would vouch for plugins the app can't load (an AMD host's
+/// AppImage advertised x264 from the distro's gst, then streamed nothing: black screen).
+/// `None` elsewhere (X11/KMS pipelines run under the system `gst-launch-1.0`).
+#[cfg(target_os = "linux")]
+fn bundled_gst_tool(name: &str) -> Option<std::process::Command> {
+	if !pulsar_core::capture::is_wayland() {
+		return None;
+	}
+	let appdir = std::path::PathBuf::from(std::env::var_os("APPDIR").filter(|d| !d.is_empty())?);
+	let bin = appdir.join("usr/bin").join(name);
+	if !bin.is_file() || !appdir.join("usr/lib/gstreamer-1.0").is_dir() {
+		return None;
+	}
+	// The tools carry no RUNPATH into the AppImage: hand them its libs explicitly.
+	let lib = appdir.join("usr/lib");
+	let ld_path = match std::env::var_os("LD_LIBRARY_PATH").filter(|v| !v.is_empty()) {
+		Some(cur) => {
+			let mut v = lib.into_os_string();
+			v.push(":");
+			v.push(cur);
+			v
+		}
+		None => lib.into_os_string(),
+	};
+	let mut cmd = std::process::Command::new(bin);
+	cmd.env("LD_LIBRARY_PATH", ld_path);
+	Some(cmd)
+}
+
+/// A SYSTEM GStreamer tool, with the AppImage's bundled-GStreamer env stripped.
+#[cfg(target_os = "linux")]
+fn system_gst_tool(bin: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+	let mut cmd = std::process::Command::new(bin);
+	pulsar_core::capture::use_system_gst_env(&mut cmd);
+	cmd
+}
+
+#[cfg(target_os = "linux")]
+fn gst_tool(name: &str) -> std::process::Command {
+	bundled_gst_tool(name).unwrap_or_else(|| system_gst_tool(name))
+}
+
 #[cfg(target_os = "linux")]
 fn gst_available() -> bool {
-	std::process::Command::new("gst-launch-1.0")
+	gst_tool("gst-launch-1.0")
 		.arg("--version")
 		.stdout(std::process::Stdio::null())
 		.stderr(std::process::Stdio::null())
@@ -443,11 +552,11 @@ fn gst_available() -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn gst_element_exists(element: &str) -> bool {
+fn gst_element_exists(mut inspect: std::process::Command, element: &str) -> bool {
 	// Plain inspect, NOT `--exists`: on Ubuntu 22.04's gst 1.20 `--exists` exits 1
 	// even for elements that ARE present (verified live on the Orange Pi — mpph264enc
 	// and x264enc both "missing" per --exists, both exit 0 via plain inspect).
-	std::process::Command::new("gst-inspect-1.0")
+	inspect
 		.arg(element)
 		.stdout(std::process::Stdio::null())
 		.stderr(std::process::Stdio::null())
@@ -457,8 +566,7 @@ fn gst_element_exists(element: &str) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn probe_gst_pipeline(pipeline: &str) -> bool {
-	let mut cmd = std::process::Command::new(gst_launch_bin());
+fn probe_gst_pipeline(mut cmd: std::process::Command, pipeline: &str) -> bool {
 	cmd.arg("-q").args(pipeline.split_whitespace());
 	cmd.stdout(std::process::Stdio::null());
 	cmd.stderr(std::process::Stdio::null());
@@ -1181,31 +1289,40 @@ pub fn apply_nvidia_prime_env(_cmd: &mut std::process::Command) {}
 pub fn apply_render_lib_env(cmd: &mut std::process::Command) {
 	#[cfg(target_os = "linux")]
 	{
-		let on = match std::env::var("PULSAR_PREFER_SYSTEM_FFMPEG").as_deref() {
-			Ok("0") | Ok("off") | Ok("false") => return,
+		let appdir = std::env::var_os("APPDIR").filter(|d| !d.is_empty());
+		let mut dirs: Vec<std::ffi::OsString> = Vec::new();
+		let prefer_system = match std::env::var("PULSAR_PREFER_SYSTEM_FFMPEG").as_deref() {
+			Ok("0") | Ok("off") | Ok("false") => false,
 			Ok("1") | Ok("on") | Ok("true") => true,
 			// Auto: the documented RK3588 appliance case — inside an AppImage, on a
 			// Rockchip SoC, where the bundled ffmpeg is the rkmpp-less generic build.
-			_ => {
-				std::env::var_os("APPDIR").is_some()
-					&& std::path::Path::new("/dev/mpp_service").exists()
+			_ => appdir.is_some() && std::path::Path::new("/dev/mpp_service").exists(),
+		};
+		if prefer_system {
+			// Debian/Ubuntu multiarch layout. The soname (`.58`) must match the ffmpeg major
+			// `pulsar-render` is linked against (ffmpeg-sys-next); if the host has a different
+			// major the guard fails and this stays a safe no-op (bundled libs are kept).
+			let sysdir = format!("/usr/lib/{}-linux-gnu", std::env::consts::ARCH);
+			if std::path::Path::new(&format!("{sysdir}/libavcodec.so.58")).exists() {
+				dirs.push(sysdir.into());
 			}
-		};
-		if !on {
+		}
+		// AppImage: linuxdeploy gives the sidecar (usr/lib/Pulsar/resources/) a bare `$ORIGIN`
+		// RUNPATH, so without this its libav*.58 resolve from the HOST — absent on every
+		// distro but Ubuntu 22.04, and the renderer dies at load (black viewer).
+		if let Some(appdir) = &appdir {
+			let lib = std::path::Path::new(appdir).join("usr/lib");
+			if lib.join("libavcodec.so.58").exists() {
+				dirs.push(lib.into_os_string());
+			}
+		}
+		if dirs.is_empty() {
 			return;
 		}
-		// Debian/Ubuntu multiarch layout. The soname (`.58`) must match the ffmpeg major
-		// `pulsar-render` is linked against (ffmpeg-sys-next); if the host has a different
-		// major the guard fails and this stays a safe no-op (bundled libs are kept).
-		let sysdir = format!("/usr/lib/{}-linux-gnu", std::env::consts::ARCH);
-		if !std::path::Path::new(&format!("{sysdir}/libavcodec.so.58")).exists() {
-			return;
+		if let Some(cur) = std::env::var_os("LD_LIBRARY_PATH").filter(|v| !v.is_empty()) {
+			dirs.push(cur);
 		}
-		let new_val = match std::env::var("LD_LIBRARY_PATH") {
-			Ok(cur) if !cur.is_empty() => format!("{sysdir}:{cur}"),
-			_ => sysdir,
-		};
-		cmd.env("LD_LIBRARY_PATH", new_val);
+		cmd.env("LD_LIBRARY_PATH", dirs.join(std::ffi::OsStr::new(":")));
 	}
 	#[cfg(not(target_os = "linux"))]
 	{

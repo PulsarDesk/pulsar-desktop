@@ -23,6 +23,30 @@ Part of the pulsar-desktop agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
   plugins); leaky queue bounds latency. **Input injection is uinput**
   (`DesktopInput`), NOT the RemoteDesktop portal (its `Start` hangs on this KDE);
   needs the user in the `input` group.
+  **AppImage:** the binary links libgstreamer, so linuxdeploy bundles Ubuntu 22.04's
+  1.20 core — a distro's newer plugins can't load into it (no elements → black screen on
+  every non-Debian Wayland host). `release.yml` therefore bundles the pipeline's plugins
+  (`bundleMediaFramework` + curated `GSTREAMER_PLUGINS_DIR`) and `gst-launch`/
+  `gst-inspect`; `pipewiresrc` uses the SYSTEM libpipewire (linuxdeploy excludes it — a
+  bundled 0.3.48 client hangs without its Debian-path SPA plugins). `main.rs::appimage_env`
+  gives the bundled gst its own registry, and `process.rs::bundled_gst_tool`
+  probes the Wayland encoders with that same stack. System gst tools get the bundled env
+  stripped (`pulsar_core::capture::use_system_gst_env`). **libva comes from the HOST**
+  when it has one: 22.04's 2.14 loader can't open a newer Mesa driver
+  (`__vaDriverInit_1_24`), so `main.rs::appimage_host_libva` re-execs once with the host's
+  libva in `LD_PRELOAD` (bundled copy stays as the no-libva fallback) — that is what makes
+  the bundled `vaapih264enc` and pulsar-render's VA-API decode work. libjack is bundled by
+  hand (on linuxdeploy's excludelist, but libavdevice/libmpv need it to load at all).
+  An encoder the bundled stack can't open is re-probed on the SYSTEM gst
+  (`process.rs::gst_probe`); if it works there the stream runs as a system `gst-launch-1.0`
+  child (`gst_on_system` → `capture::start(.., system_gst)`, no live bitrate) — that's how
+  an AppImage gets `vah264enc` (gst ≥1.22) or an `nvh264enc` new enough for 5xx+ NVIDIA
+  drivers (the bundled 1.20 one fails: "Could not configure supporting library").
+  pulsar-render gets `$APPDIR/usr/lib` via `apply_render_lib_env` (linuxdeploy gives it a
+  bare `$ORIGIN` RUNPATH → its libav*.58 resolved from the host). A capture that fails to
+  start or dies mid-stream is sent to the client as a `!` stats line (its video error).
+  **Check:** `Pulsar.AppImage --selftest` (`src-tauri/src/selftest.rs`); CI runs it in
+  clean distro containers (`scripts/appimage/smoke.sh`) before publishing.
 
 All paths emit **RTP/H.264(+HEVC/AV1) over UDP**.
 

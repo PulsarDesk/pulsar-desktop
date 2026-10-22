@@ -162,7 +162,8 @@ export class SessionMedia {
 				onPlayStats((e) => {
 					if (e.id !== playId) return;
 					// A leading "!" marks a stream ERROR from the host (every encoder candidate
-					// died): it is the session's video error, not a stats row.
+					// died, or its screen capture failed/stopped): the session's video error,
+					// not a stats row.
 					if (e.label.startsWith('!')) {
 						this.videoErr = e.label.slice(1);
 						return;

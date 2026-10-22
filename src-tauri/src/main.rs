@@ -2,6 +2,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
+	// Linux AppImage: swap in the host's libva before anything loads a VA driver.
+	#[cfg(target_os = "linux")]
+	appimage_host_libva();
 	// Linux: GTK derives WM_CLASS from g_get_prgname() (= argv[0]); force the brand
 	// name so taskbars/Alt-Tab show "Pulsar" regardless of how the binary was named
 	// or launched (plain `cargo run`, symlinks, renamed AppImage). Must run before
@@ -19,6 +22,9 @@ fn main() {
 	if std::env::var_os("GDK_BACKEND").is_none() {
 		std::env::set_var("GDK_BACKEND", "x11");
 	}
+	// Linux AppImage: give the bundled GStreamer its own plugin registry.
+	#[cfg(target_os = "linux")]
+	appimage_env();
 	// APP-UI hardware acceleration (the WebKitGTK webview's accelerated/GPU compositing) — NOT
 	// the video stream's encode/decode (those are separate per-session codec settings). Decided
 	// ONCE here, before the webview is created (the WebKitGTK env can't change at runtime → the
@@ -68,6 +74,10 @@ fn main() {
 		pulsar_tauri::run_relay(&args);
 		return;
 	}
+	// `pulsar --selftest`: check the bundled media stack headless, print a report, exit.
+	if args.iter().any(|a| a == "--selftest") {
+		std::process::exit(pulsar_tauri::selftest());
+	}
 	// Diagnostic: exercise the SDL3 client rumble path standalone (no host session).
 	if std::env::var_os("PULSAR_RUMBLE_TEST").is_some() {
 		pulsar_tauri::rumble_selftest();
@@ -89,6 +99,96 @@ fn main() {
 	}
 
 	pulsar_tauri::run()
+}
+
+/// (Linux AppImage) The release AppImage bundles GStreamer 1.20 + plugins from Ubuntu 22.04
+/// (`release.yml`) for the in-process Wayland capture — a distro's own, newer plugins can't
+/// load into the bundled core. linuxdeploy's AppRun hook points GStreamer at the bundled
+/// plugins; give them their own registry file too, so the system's GStreamer and the bundled
+/// one don't rebuild each other's cache on every launch. (`pipewiresrc` uses the SYSTEM
+/// libpipewire — linuxdeploy's excludelist keeps it out — so PipeWire needs nothing here.)
+/// An explicit env wins; system gst tools spawned later get it stripped again
+/// (`pulsar_core::capture::use_system_gst_env`).
+#[cfg(target_os = "linux")]
+fn appimage_env() {
+	let Some(appdir) = std::env::var_os("APPDIR").filter(|d| !d.is_empty()) else {
+		return;
+	};
+	let appdir = std::path::PathBuf::from(appdir);
+	if appdir.join("usr/lib/gstreamer-1.0").is_dir() && std::env::var_os("GST_REGISTRY_1_0").is_none() {
+		let cache = std::env::var_os("XDG_CACHE_HOME")
+			.filter(|d| !d.is_empty())
+			.map(std::path::PathBuf::from)
+			.or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache")));
+		if let Some(cache) = cache {
+			let file = format!(
+				"{}{}.bin",
+				pulsar_core::capture::APPIMAGE_REGISTRY_PREFIX,
+				std::env::consts::ARCH
+			);
+			std::env::set_var("GST_REGISTRY_1_0", cache.join("pulsar").join(file));
+		}
+	}
+}
+
+/// (Linux AppImage) Re-exec once with the HOST's libva preloaded, when the host has one.
+///
+/// The bundled libva is Ubuntu 22.04's 2.14 loader, and a VA driver only exports the init
+/// symbol of the libva it was built against (Mesa 25: `__vaDriverInit_1_24`) — so on any newer
+/// distro the bundled loader opens no driver: no VA-API encode (`vaapih264enc`) and no VA-API
+/// decode in pulsar-render/libmpv. libva's soname is ABI-stable, so the host's own loader
+/// (always matched to its drivers) slots in for the bundled one; `LD_PRELOAD` makes the
+/// bundled copies unused without shadowing every other bundled lib the way an
+/// `LD_LIBRARY_PATH=/usr/lib…` would. It has to be set before the process starts, hence the
+/// exec. A host without libva keeps the bundled one, so the app still starts everywhere.
+/// `PULSAR_HOST_LIBVA=0` opts out; children inherit the preload (it's the host's own lib).
+#[cfg(target_os = "linux")]
+fn appimage_host_libva() {
+	use std::os::unix::process::CommandExt;
+	if std::env::var_os("APPDIR").is_none() || std::env::var_os("PULSAR_HOST_LIBVA").is_some() {
+		return;
+	}
+	let arch = std::env::consts::ARCH;
+	let mut dirs = vec![
+		format!("/usr/lib/{arch}-linux-gnu"),
+		format!("/lib/{arch}-linux-gnu"),
+		"/usr/lib64".to_string(),
+	];
+	// Plain /usr/lib holds 64-bit libs only where lib64 is not its own dir (Arch & co.).
+	let lib64_is_dir = std::fs::symlink_metadata("/usr/lib64")
+		.map(|m| m.is_dir())
+		.unwrap_or(false);
+	if !lib64_is_dir {
+		dirs.push("/usr/lib".to_string());
+	}
+	let host_lib = |name: &str| {
+		dirs.iter()
+			.map(|d| std::path::Path::new(d).join(name))
+			.find(|p| p.exists())
+	};
+	let Some(libva) = host_lib("libva.so.2") else {
+		return;
+	};
+	let mut preload = vec![libva.into_os_string()];
+	preload.extend(
+		["libva-drm.so.2", "libva-x11.so.2", "libva-wayland.so.2"]
+			.iter()
+			.filter_map(|n| host_lib(n))
+			.map(|p| p.into_os_string()),
+	);
+	if let Some(cur) = std::env::var_os("LD_PRELOAD").filter(|v| !v.is_empty()) {
+		preload.push(cur);
+	}
+	let Ok(exe) = std::env::current_exe() else {
+		return;
+	};
+	let err = std::process::Command::new(exe)
+		.args(std::env::args_os().skip(1))
+		.env("LD_PRELOAD", preload.join(std::ffi::OsStr::new(":")))
+		.env("PULSAR_HOST_LIBVA", "1")
+		.exec();
+	// Only reached when exec failed: carry on with the bundled libva.
+	eprintln!("pulsar: re-exec with the host libva failed: {err}");
 }
 
 /// (Windows) Read the persisted `request_admin` preference BEFORE Tauri starts. Defaults to `true`
