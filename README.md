@@ -5,7 +5,7 @@
 <h1 align="center">Pulsar Desktop</h1>
 
 <p align="center">
-  Remote desktop and game streaming for <b>Windows, macOS and Linux</b>. Free, open source, no account. ⚡
+  Remote desktop and game streaming for <b>Windows, macOS and Linux</b>. A free, open-source alternative to TeamViewer, AnyDesk and Parsec. ⚡
 </p>
 
 <p align="center">
