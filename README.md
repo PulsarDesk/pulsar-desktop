@@ -21,6 +21,11 @@
 **Current Status:** Alpha (0.x). Connecting, remote control, game streaming, file transfer, clipboard and chat work.
 Expect rough edges and [report what you find](#-reporting-a-bug).
 
+<p align="center">
+  <img src="docs/screenshots/connect.png" width="49%" alt="Connect screen">
+  <img src="docs/screenshots/game-mode.png" width="49%" alt="Game mode">
+</p>
+
 One app does both jobs: connect to another computer, or share this one. Connections go peer-to-peer when they can
 and through a relay when they can't, always end-to-end encrypted.
 
