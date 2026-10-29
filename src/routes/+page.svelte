@@ -54,6 +54,7 @@
 	import UpdateModal from './page/UpdateModal.svelte';
 	import RelayAuthModal from './page/RelayAuthModal.svelte';
 	import { SessionManager } from './page/sessions.svelte';
+	import { setLivePeers } from '#lib/presence.svelte.js';
 
 	// When opened as the Allow/Deny approval popup (a separate window), render only
 	// that prompt and skip all the main-app logic (don't re-register with the relay).
@@ -146,6 +147,8 @@
 	// Multiple concurrent host connections (tabs), the active tab, fullscreen, and the
 	// connect/disconnect lifecycle live in the session manager.
 	const sm = new SessionManager({ getMode: () => mode, onAuthDone: (target) => closePwFor(target) });
+	// Hosts with a live session read as online in the recents / devices dots.
+	$effect(() => setLivePeers(sm.sessions.filter((s) => s.phase === 'active').map((s) => s.target.id)));
 	// The split panes that have a LIVE session, so each input device can be locked to one (couch
 	// co-op). Drives the input-assign button/modal — shown with ≥2 live game panes.
 	const assignPanes = $derived(

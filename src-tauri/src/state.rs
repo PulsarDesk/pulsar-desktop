@@ -313,6 +313,9 @@ pub(crate) struct PlaySession {
 	/// Live stream re-configuration from the session menu (resolution / encoder): each
 	/// message re-requests the stream so the host restarts ffmpeg with the new setting.
 	pub(crate) restream_tx: tokio::sync::mpsc::Sender<Restream>,
+	/// The negotiated codec set (host encodes ∩ this client decodes). A live codec switch is
+	/// resolved against it, so the renderer's SDP always matches what the host will send.
+	pub(crate) codecs: Vec<String>,
 	/// Native renderer (ffplay) child, when the native player is in use — killed on
 	/// stop so the fullscreen window closes.
 	pub(crate) ffplay: Option<Child>,

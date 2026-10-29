@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import Icon from '#lib/Icon.svelte';
 	import { historyPeers, removeFromHistory, fmtPeerId, normalizeId, addPeer, isSaved } from '#lib/peers.svelte.js';
+	import { isLive } from '#lib/presence.svelte.js';
 	import { api, onNodePort } from '#lib/api.js';
 	import { t } from '#lib/i18n.svelte.js';
 	import { canConnectTarget, fmtTarget } from '#lib/connectTarget.js';
@@ -59,10 +60,10 @@
 	let localIp = $state('');
 	let nodePort = $state(0);
 	// LAN-discovered device keys (normalized ids + addresses), polled so the recents list
-	// can show which saved peers are reachable RIGHT NOW (a green/grey dot). LAN-based: a
-	// peer reachable only via the relay (not on this LAN) reads as offline here.
+	// can show which saved peers are reachable RIGHT NOW (a green dot). A peer neither on this
+	// LAN nor in a live session reads as "unknown", not offline — see presence.svelte.ts.
 	let lanKeys = $state<Set<string>>(new Set());
-	const isOnline = (id: string) => lanKeys.has(normalizeId(id)) || lanKeys.has(id);
+	const isOnline = (id: string) => lanKeys.has(normalizeId(id)) || lanKeys.has(id) || isLive(id);
 	onMount(() => {
 		api.localIp().then((ip) => (localIp = ip)).catch(() => {});
 		api.nodePort().then((p) => (nodePort = p)).catch(() => {});
@@ -190,7 +191,7 @@
 						</span>
 						<span class="rmeta">
 							<span class="rname">
-								<span class="rdot" class:on={isOnline(r.id)} title={isOnline(r.id) ? t('home.online') : t('home.offline')}></span>
+								<span class="rdot" class:on={isOnline(r.id)} title={isOnline(r.id) ? t('home.online') : t('home.unknown')}></span>
 								{r.name}
 							</span>
 							<span class="rid mono">{fmtPeerId(r.id)}</span>

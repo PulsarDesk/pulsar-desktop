@@ -89,12 +89,17 @@ pub(crate) async fn set_play_codec(
 	id: u64,
 	codec: String,
 ) -> Result<(), String> {
-	let tx = state
+	let (tx, codecs) = state
 		.plays
 		.lock()
 		.unwrap()
 		.get(&id)
-		.map(|p| p.restream_tx.clone());
+		.map(|p| (Some(p.restream_tx.clone()), p.codecs.clone()))
+		.unwrap_or_default();
+	// Resolve against the negotiated set BEFORE the respawn writes the SDP: "auto" or a codec
+	// the host can't send would otherwise give the renderer a depacketizer for a stream that
+	// never comes (the host degrades it on its side) → black until the session ends.
+	let codec = crate::play::resolve_codec(&codec, &codecs);
 	if let Some(tx) = tx {
 		tx.send(Restream::Codec(codec.clone()))
 			.await
@@ -299,10 +304,6 @@ async fn respawn_render_for_codec(
 		return;
 	}
 	if let Some(c) = rc.as_mut() {
-		// Fresh renderer's PID — needed to re-assert an open overlay on Linux (SIGUSR1)
-		// below, since the new process starts with OPEN=false (see the re-assert block).
-		#[cfg(all(unix, not(target_os = "macos")))]
-		let new_pid = c.id();
 		if let Some(out) = c.stdout.take() {
 			// Pass the live_id Arc (same one the fresh-spawn path uses) so this reader
 			// is updateable on future reconnects — without this the reader's id was fixed
@@ -428,8 +429,10 @@ async fn respawn_render_for_codec(
 			// (state.overlay_open still holds this id). But the new process starts with
 			// OPEN=false, so without this it would never draw the overlay — the user is
 			// "stuck" (no video control, no menu) until they toggle Ctrl+Shift+M twice.
-			// Mirror set_overlay's open path: SIGUSR1 + pass-through off on Linux, an `open`
-			// stdin line elsewhere (Windows / future native macOS).
+			// The open state goes over stdin (`open`) on every platform, NOT SIGUSR1: the signal
+			// lands microseconds after spawn(), before the child installed its handler, and
+			// SIGUSR1's default action terminates it — the fresh renderer died silently and the
+			// session sat on "restarting the stream" forever. A stdin line waits in the pipe.
 			if state.overlay_open.lock().unwrap().contains(&id) {
 				// Re-assert the INPUT routing too, not just the renderer's draw state — mirror
 				// set_overlay's open path. Without this, after a codec switch the keyboard/mouse hook
@@ -439,13 +442,7 @@ async fn respawn_render_for_codec(
 				kbdhook::overlay_suspend(true);
 				kbdhook::release(app);
 				#[cfg(all(unix, not(target_os = "macos")))]
-				{
-					crate::render::set_container_pass_through(app, id, false);
-					unsafe {
-						libc::kill(new_pid as i32, libc::SIGUSR1);
-					}
-				}
-				#[cfg(not(all(unix, not(target_os = "macos"))))]
+				crate::render::set_container_pass_through(app, id, false);
 				{
 					use std::io::Write as _;
 					if let Some(si) = stdin.lock().unwrap().as_mut() {

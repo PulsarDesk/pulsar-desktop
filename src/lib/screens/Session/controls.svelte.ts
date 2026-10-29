@@ -31,7 +31,7 @@ export class SessionControls {
 
 	// Stream resolution requested from the host, changed live from the menu.
 	// 'auto' = let the host use its own configured size.
-	streamRes = $state<'auto' | '1080p' | '1440p' | '4K'>('auto');
+	streamRes = $state<'auto' | '720p' | '1080p' | '1440p' | '4K'>('auto');
 	// Live frame-rate switch ('auto' = host default). The host restarts ffmpeg with it.
 	streamFps = $state<'auto' | '30' | '60' | '120'>('auto');
 	// Live bitrate switch in Mbit (0 = auto / host default). Persisted via ui.bitrate.
@@ -87,10 +87,10 @@ export class SessionControls {
 		});
 	}
 
-	// Accepts a preset ('auto'/'1080p'/'1440p'/'4K') OR an explicit "WxH" string (the overlay's
+	// Accepts a preset ('auto'/'720p'/'1080p'/'1440p'/'4K') OR an explicit "WxH" string (the overlay's
 	// per-display real-mode list emits the latter) — both resolve to a width/height for the host.
 	setRes = (v: string) => {
-		this.streamRes = v as 'auto' | '1080p' | '1440p' | '4K';
+		this.streamRes = v as 'auto' | '720p' | '1080p' | '1440p' | '4K';
 		const playId = this.#in.playId();
 		if (playId < 0) return;
 		// The host kills its current encoder and rebuilds capture at the new geometry
@@ -106,7 +106,9 @@ export class SessionControls {
 					? [2560, 1440]
 					: v === '1080p'
 						? [1920, 1080]
-						: [0, 0];
+						: v === '720p'
+							? [1280, 720]
+							: [0, 0];
 		api.setPlayResolution(playId, w, h).catch(() => {});
 	};
 	// Screen adaptation (overlay "Ekran uyarlama"): `on` with the pane's pixel size (w,h) asks

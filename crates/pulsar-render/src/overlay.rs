@@ -261,9 +261,10 @@ fn encoders_opts() -> [(&'static str, &'static str); 8] {
 		("software", t("software")),
 	]
 }
-fn res_opts() -> [(&'static str, &'static str); 4] {
+fn res_opts() -> [(&'static str, &'static str); 5] {
 	[
 		("auto", t("auto")),
+		("720p", "720p"),
 		("1080p", "1080p"),
 		("1440p", "1440p"),
 		("4K", "4K"),
@@ -272,9 +273,10 @@ fn res_opts() -> [(&'static str, &'static str); 4] {
 fn fps_opts() -> [(&'static str, &'static str); 4] {
 	[("auto", t("auto")), ("30", "30"), ("60", "60"), ("120", "120")]
 }
-fn bitrate_opts() -> [(&'static str, &'static str); 6] {
+fn bitrate_opts() -> [(&'static str, &'static str); 7] {
 	[
 		("0", t("auto")),
+		("5", "5 Mbit"),
 		("10", "10 Mbit"),
 		("20", "20 Mbit"),
 		("30", "30 Mbit"),

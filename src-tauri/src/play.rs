@@ -285,31 +285,7 @@ pub(crate) async fn start_remote_play(
 		})
 		.cloned()
 		.collect();
-	let auto_pick = || {
-		["av1", "h265", "h264"]
-			.iter()
-			.find(|c| allowed.iter().any(|a| a == **c))
-			.map(|c| c.to_string())
-			.unwrap_or_else(|| "h264".to_string())
-	};
-	let forced = std::env::var("PULSAR_FORCE_CODEC").is_ok();
-	let codec = if codec.is_empty() || codec == "auto" {
-		auto_pick()
-	} else if !forced && !allowed.is_empty() && !allowed.iter().any(|a| *a == codec) {
-		// An explicit (session-menu-persisted) codec outside the negotiated set means the
-		// host can't encode it or this client can't decode the host's bitstream for it.
-		// Honoring it verbatim puts one codec in the renderer's SDP and another on the
-		// wire → the decoder consumes AUs forever without emitting a frame (permanent
-		// black screen). Degrade to the auto pick instead; PULSAR_FORCE_CODEC still
-		// bypasses this for testing. An EMPTY `allowed` means we learned nothing (caps
-		// timed out / old host), not "nothing is supported" — honor the request then and
-		// let the host's own validate+degrade do its job, as it did before this clamp.
-		let picked = auto_pick();
-		tracing::warn!(requested = %codec, ?allowed, %picked, "requested codec not in negotiated set — degraded");
-		picked
-	} else {
-		codec
-	};
+	let codec = resolve_codec(&codec, &allowed);
 	tracing::info!(%codec, ?allowed, "stream codec resolved");
 
 	// Same machine? (loopback P2P) → control would feed back, so flag it.
@@ -957,6 +933,11 @@ pub(crate) async fn start_remote_play(
 	// once the Pi runs a zero-copy mpv build. Webview clients defer to the host (0).
 	// "Auto" fps targets the client's display refresh (nearest of 30/60/120).
 	let auto_fps = client_auto_fps(&app).await;
+	// A host with no hardware encoder (x264 on the CPU) can't encode a high-refresh stream in
+	// real time: its frames queue up and the picture stutters at any bitrate. Start such a
+	// host at ≤ 60 fps; the adaptive ladder goes lower if it still can't keep up.
+	let host_sw_only = !host_caps.encoders.is_empty() && host_caps.encoders.iter().all(|e| e == "software");
+	let auto_fps = if host_sw_only { auto_fps.min(60) } else { auto_fps };
 	let (req_w, req_h, req_fps, req_kbps) = if native && cfg!(target_os = "linux") {
 		let g = |k: &str, d: u32| {
 			std::env::var(k)
@@ -1033,18 +1014,31 @@ pub(crate) async fn start_remote_play(
 	// 0 (host default) means the cap is unknown: assume a generous LAN-class cap and let the
 	// controller find the path's real budget.
 	let cap_for_ctl = if req_kbps > 0 { req_kbps } else { 15_000 };
+	// The memory seeds 60 % of the last clean rate, but never under ~2 Mbit: one bad session
+	// (e.g. a host that couldn't keep up) must not start every later one at the floor.
 	let hint = crate::adapt_memory::hint(&app, &peer_key)
-		.map(|k| (k * 3 / 5).clamp(pulsar_core::adapt::FLOOR_KBPS, cap_for_ctl));
+		.map(|k| (k * 3 / 5).max(2_000).clamp(pulsar_core::adapt::FLOOR_KBPS, cap_for_ctl));
 	let mut acfg = pulsar_core::adapt::Config::new(pulsar_core::adapt::codec_from_wire(&codec_h), cap_for_ctl);
 	acfg.native = native_dims;
 	acfg.start_kbps = hint.unwrap_or(0);
 	// Only the Linux libav renderer can resume on a partially intra-refreshed picture; the
 	// Windows/macOS depacketizer waits for an IDR and gets a short GOP instead.
 	acfg.ir_capable = cfg!(target_os = "linux");
-	// Resolution and fps are FIXED for the session (settings / display) — maintainer's
-	// decision: only the bitrate adapts within them (the ladder stays available, off).
-	acfg.ladder = false;
+	// The resolution/fps ladder is ON: when the budget (or a host that can't keep up) no
+	// longer buys a clean picture at the current point, the controller steps to a lighter
+	// one instead of starving the encoder. A resolution or fps picked in the session menu
+	// still pins that dimension (hold.rs → `set_manual_point`).
+	acfg.ladder = true;
 	let ctl = pulsar_core::adapt::Controller::new(acfg);
+	// A low start rate (the per-peer hint) starts on a lower rung: request that point, not the
+	// native size the rate can't buy. The top rung keeps the original request (0 = host default).
+	let (req_w, req_h, req_fps) = match ctl.points().first() {
+		Some(top) if *top != ctl.point() => {
+			let p = ctl.point();
+			(p.width, p.height, p.fps)
+		}
+		_ => (req_w, req_h, req_fps),
+	};
 	// Media-over-session carries the per-packet measurements the controller runs on; the
 	// first request already uses its start rate (the per-peer memory hint, or the cap).
 	let req_kbps = if mos { ctl.encoder_kbps() } else { req_kbps };
@@ -1870,6 +1864,7 @@ pub(crate) async fn start_remote_play(
 			mic,
 			running,
 			restream_tx,
+			codecs: allowed.clone(),
 			ffplay: native_child,
 			audio_native,
 			mpv_ipc: mpv_ipc_sock,
@@ -2165,4 +2160,56 @@ pub(crate) async fn stop_stream(
 	}
 	let _ = &app; // used by teardown on Linux; silence unused elsewhere
 	Ok(())
+}
+
+/// The codec to actually stream for a requested one against the negotiated set. "auto" (or
+/// empty) picks by quality (av1 > h265 > h264). An explicit codec outside the set (the host
+/// can't encode it, or this client can't decode the host's bitstream for it) degrades to that
+/// pick: honoring it verbatim puts one codec in the renderer's SDP and another on the wire →
+/// the decoder consumes AUs forever without a frame (permanent black). `PULSAR_FORCE_CODEC`
+/// bypasses the clamp for testing. An EMPTY set means we learned nothing (caps timed out / old
+/// host), not "nothing is supported" — the request is honored and the host degrades it.
+pub(crate) fn resolve_codec(requested: &str, allowed: &[String]) -> String {
+	let auto_pick = || {
+		["av1", "h265", "h264"]
+			.iter()
+			.find(|c| allowed.iter().any(|a| a == **c))
+			.map(|c| c.to_string())
+			.unwrap_or_else(|| "h264".to_string())
+	};
+	let forced = std::env::var("PULSAR_FORCE_CODEC").is_ok();
+	if requested.is_empty() || requested == "auto" {
+		auto_pick()
+	} else if !forced && !allowed.is_empty() && !allowed.iter().any(|a| a == requested) {
+		let picked = auto_pick();
+		tracing::warn!(requested, ?allowed, %picked, "requested codec not in negotiated set — degraded");
+		picked
+	} else {
+		requested.to_string()
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::resolve_codec;
+
+	fn set(v: &[&str]) -> Vec<String> {
+		v.iter().map(|s| s.to_string()).collect()
+	}
+
+	#[test]
+	fn auto_picks_the_best_negotiated_codec() {
+		assert_eq!(resolve_codec("auto", &set(&["h264", "h265"])), "h265");
+		assert_eq!(resolve_codec("", &set(&["h264"])), "h264");
+		assert_eq!(resolve_codec("auto", &set(&[])), "h264");
+	}
+
+	#[test]
+	fn a_codec_the_host_cannot_send_degrades_instead_of_going_black() {
+		// The 2026-10-29 session: an h264-only software host, h265 picked in the menu.
+		assert_eq!(resolve_codec("h265", &set(&["h264"])), "h264");
+		assert_eq!(resolve_codec("h264", &set(&["h264", "h265"])), "h264");
+		// Nothing learned (old host / caps timeout): honored, the host degrades it.
+		assert_eq!(resolve_codec("av1", &set(&[])), "av1");
+	}
 }

@@ -14,6 +14,7 @@
 		normalizeId,
 		avatarFor
 	} from '#lib/peers.svelte.js';
+	import { isLive } from '#lib/presence.svelte.js';
 	import type { GamepadNav } from '#lib/gamepadNav.svelte.js';
 
 	type Props = {
@@ -37,7 +38,7 @@
 			lan.flatMap((d) => [d.id ? normalizeId(d.id) : '', d.addr, d.addr?.split(':')[0]]).filter(Boolean)
 		)
 	);
-	const isOnline = (id: string) => lanKeys.has(normalizeId(id)) || lanKeys.has(id);
+	const isOnline = (id: string) => lanKeys.has(normalizeId(id)) || lanKeys.has(id) || isLive(id);
 	onMount(() => {
 		const refresh = () => api.lanDevices().then((d) => (lan = d)).catch(() => {});
 		refresh();
@@ -162,7 +163,7 @@
 							</span>
 							<span class="rmeta">
 								<span class="rname">
-									<span class="rdot" class:on={isOnline(r.id)} title={isOnline(r.id) ? t('home.online') : t('home.offline')}></span>
+									<span class="rdot" class:on={isOnline(r.id)} title={isOnline(r.id) ? t('home.online') : t('home.unknown')}></span>
 									{r.name}
 								</span>
 								<span class="rid mono">{fmtPeerId(r.id)}</span>

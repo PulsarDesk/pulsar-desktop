@@ -1445,6 +1445,12 @@ pub(super) fn make_on_stream(
 	// (ffmpeg fallback) — then a monitor change falls through to the normal restart.
 	#[cfg(windows)]
 	let mut last_native_req: Option<StreamReq> = None;
+	// The request the running ffmpeg CLI encode (Windows/macOS software/fallback path) was
+	// started with, and when: ffmpeg can't change its bitrate live, so every ABR step used to
+	// restart capture (a visible gap + keyframe each time → stutter, and the gap itself read as
+	// congestion → more steps). Small/rapid bitrate-only steps are absorbed instead.
+	#[cfg(not(target_os = "linux"))]
+	let mut last_ff_req: Option<(StreamReq, std::time::Instant)> = None;
 	// Cancel flag for the current stream's G2 native encode-stats reporter thread (spawned per
 	// native (re)stream below). Held across restreams so a slow-path restream/teardown can stop
 	// the PRIOR reporter before a new one starts — binding the reporter to its stream generation
@@ -1570,6 +1576,31 @@ pub(super) fn make_on_stream(
 			}
 			// The native handle is gone (a prior restream fell back to ffmpeg) — fall through to
 			// the normal restart below.
+		}
+		// FFMPEG BITRATE-ONLY: restart only for a large step (≥ 30 % down / 40 % up) and at most
+		// once per 6 s; anything else keeps the running encode at its rate. A deferred step is not
+		// lost — the client keeps adapting, and a later request compares against what ffmpeg is
+		// actually streaming. A recovery-mode flip still restarts (short GOP needs a new encoder).
+		#[cfg(not(target_os = "linux"))]
+		if let Some((prev, at)) = last_ff_req.as_ref() {
+			let mut probe = prev.clone();
+			probe.bitrate_kbps = req.bitrate_kbps;
+			if probe == req && req.bitrate_kbps > 0 && prev.bitrate_kbps > 0 {
+				let ratio = req.bitrate_kbps as f32 / prev.bitrate_kbps as f32;
+				let large = !(0.7..=1.4).contains(&ratio);
+				if !large || at.elapsed() < std::time::Duration::from_secs(6) {
+					tracing::info!(
+						from = prev.bitrate_kbps,
+						to = req.bitrate_kbps,
+						"ffmpeg restream: bitrate-only step absorbed (a restart is a visible gap)"
+					);
+					return;
+				}
+			}
+		}
+		#[cfg(not(target_os = "linux"))]
+		{
+			last_ff_req = Some((req.clone(), std::time::Instant::now()));
 		}
 		let cfg = stream_cfg.lock().unwrap().clone();
 		// A (re-)stream supersedes any prior cursor poller; the (maybe) new KMS branch below

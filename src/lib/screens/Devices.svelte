@@ -3,6 +3,7 @@
 	import Icon from '#lib/Icon.svelte';
 	import Modal from '#lib/Modal.svelte';
 	import { savedPeers, addPeer, updatePeer, removePeer, toggleFav, fmtPeerId, normalizeId } from '#lib/peers.svelte.js';
+	import { isLive } from '#lib/presence.svelte.js';
 	import { api, type LanDevice } from '#lib/api.js';
 	import { t } from '#lib/i18n.svelte.js';
 
@@ -72,6 +73,7 @@
 		return i > a.indexOf(']') ? a.slice(0, i) : a; // keep IPv6 (":"-rich) intact unless :port follows
 	};
 	const isOnline = (id: string) =>
+		isLive(id) ||
 		lan.some((d) => (d.id && normalizeId(d.id) === id) || d.addr === id || addrHost(d.addr) === addrHost(id));
 
 	// Display id input as-is (IPs welcome); an all-digit relay id is capped at its 9 digits
@@ -260,7 +262,7 @@
 					<div class="did mono selectable">{fmtPeerId(d.id)}</div>
 					<div class="dstatus">
 						<span class="dot" class:on={isOnline(d.id)}></span>
-						{isOnline(d.id) ? t('devices.online') : t('devices.offline')} · {relTime(d.lastConnected)}
+						{isOnline(d.id) ? t('devices.online') : t('devices.unknown')} · {relTime(d.lastConnected)}
 					</div>
 				</div>
 				<div class="actions">

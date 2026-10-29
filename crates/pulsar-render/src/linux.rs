@@ -376,6 +376,10 @@ pub fn run() {
 				// Session ended: hide the video window (reveal the webview) + idle, WITHOUT
 				// exiting — keeps our EGL context alive so WebKit's shared Mali GL isn't corrupted.
 				Some("hide") => IDLE.store(true, Ordering::SeqCst),
+				// Overlay open/close, the race-free twin of SIGUSR1/SIGUSR2 — used right after a
+				// respawn, when a signal could arrive before the handler above is installed.
+				Some("open") => OPEN.store(true, Ordering::SeqCst),
+				Some("close") => OPEN.store(false, Ordering::SeqCst),
 				Some("show") => {
 					IDLE.store(false, Ordering::SeqCst);
 					// `show` is sent only when the resident renderer is reused for a NEW host
