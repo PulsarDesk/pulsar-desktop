@@ -68,6 +68,10 @@
 	<div class="st"><b>{t('settings.record')}</b><span>{t('settings.recordDesc')}</span></div>
 	<button class="toggle" aria-label={t('settings.record')} class:on={ui.record} aria-pressed={ui.record} onclick={() => { ui.record = !ui.record; saveUi(); }}><span class="knob"></span></button>
 </div>
+<div class="srow">
+	<div class="st"><b>{t('settings.remoteCursor')}</b><span>{t('settings.remoteCursorDesc')}</span></div>
+	<button class="toggle" aria-label={t('settings.remoteCursor')} class:on={config?.show_remote_cursor ?? true} aria-pressed={config?.show_remote_cursor ?? true} onclick={() => { if (config) { config.show_remote_cursor = !(config.show_remote_cursor ?? true); saveConfig?.(); } }}><span class="knob"></span></button>
+</div>
 {#if IS_WINDOWS}
 	<div class="srow">
 		<div class="st"><b>{t('settings.requestAdmin')}</b><span>{t('settings.requestAdminDesc')}</span></div>

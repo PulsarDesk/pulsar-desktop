@@ -342,6 +342,8 @@ jobs:
         if: steps.semrel.outputs.new_release_published == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The release's changelog → the in-app update modal's "What's new".
+          NOTES: ${{ steps.semrel.outputs.new_release_notes }}
         shell: bash
         run: |
           if [ "${{ github.ref_name }}" = "dev" ]; then CH="latest-dev.json"; CTAG="updater-dev";
@@ -352,7 +354,7 @@ jobs:
             "${{ steps.semrel.outputs.new_release_version }}" \
             "$BASE" \
             "$CH" \
-            "Pulsar ${{ steps.semrel.outputs.new_release_version }}"
+            "${NOTES:-Pulsar ${{ steps.semrel.outputs.new_release_version }}}"
           cat "$CH"
           # Fixed-tag channel release holds ONLY the rolling manifest, so its asset
           # download URL is STABLE (the app's updater endpoint points here).

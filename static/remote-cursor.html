@@ -1,0 +1,54 @@
+<!doctype html>
+<!-- Host: a connected client's labelled pointer while it can't control this machine
+     (src-tauri/src/remote_cursor.rs; Linux draws the same natively). A transparent, click-through
+     window whose top-left is the arrow's tip; Rust moves it and calls window.setName(). -->
+<html>
+	<head>
+		<meta charset="utf-8" />
+		<title>Pulsar</title>
+		<style>
+			html,
+			body {
+				margin: 0;
+				background: transparent;
+				overflow: hidden;
+				user-select: none;
+				-webkit-user-select: none;
+			}
+			svg {
+				position: absolute;
+				left: 0;
+				top: 0;
+			}
+			#pill {
+				position: absolute;
+				left: 14px;
+				top: 18px;
+				display: inline-block;
+				max-width: 260px;
+				padding: 5px 10px;
+				border-radius: 999px;
+				background: oklch(0.555 0.205 272 / 0.96);
+				color: #fff;
+				font: 600 13px 'Hanken Grotesk', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+				white-space: nowrap;
+				overflow: hidden;
+				text-overflow: ellipsis;
+			}
+			#pill:empty {
+				display: none;
+			}
+		</style>
+	</head>
+	<body>
+		<svg width="16" height="24" viewBox="0 0 16 24" aria-hidden="true">
+			<path d="M1 1V18L5.5 14L8.5 21L11 20L8 13.5H13.5Z" fill="oklch(0.555 0.205 272)" stroke="#fff" stroke-width="1.5" stroke-linejoin="round" />
+		</svg>
+		<span id="pill"></span>
+		<script>
+			window.setName = function (n) {
+				document.getElementById('pill').textContent = n;
+			};
+		</script>
+	</body>
+</html>

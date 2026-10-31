@@ -42,6 +42,9 @@ static HOST_ENC: Mutex<String> = Mutex::new(String::new());
 /// Always-on mini stats HUD while the overlay is closed (frontend-persisted toggle; synced via
 /// stdin `statshud 0|1` / the caps line, and flippable from the overlay row).
 static STATS_HUD: AtomicBool = AtomicBool::new(false);
+/// "Show my pointer with my name on the host" (remote mode; synced via stdin `curlabel 0|1`
+/// and the caps line, flippable from the Yayın row). Default ON, like the app's config.
+static CUR_LABEL: AtomicBool = AtomicBool::new(true);
 /// Parsec-style overlay-open button while the overlay is closed (default ON; frontend-persisted,
 /// synced via stdin `ovbtn 0|1` / the caps line).
 static OVERLAY_BTN: AtomicBool = AtomicBool::new(true);
@@ -74,6 +77,8 @@ const HINT_FADE: f32 = 0.5;
 static CHAT_LOG: Mutex<Vec<(bool, String)>> = Mutex::new(Vec::new());
 /// Host messages not yet seen in the overlay Chat view — badge on the open button.
 static CHAT_UNREAD: AtomicUsize = AtomicUsize::new(0);
+/// Recent host messages + arrival, for the closed-state bubbles (overlay::draw_chat_bubbles).
+static CHAT_TOASTS: Mutex<Vec<(String, std::time::Instant)>> = Mutex::new(Vec::new());
 /// Files view, REMOTE pane: (HOME-relative path, rows) from `fsjson …` (same one-line JSON as
 /// linux.rs) — copied into the overlay state each frame.
 static FS_REMOTE: Mutex<(String, Vec<overlay::FsRow>)> = Mutex::new((String::new(), Vec::new()));
@@ -162,6 +167,11 @@ fn stdin_control() {
 					STATS_HUD.store(v == "1" || v == "on" || v == "true", Ordering::SeqCst);
 				}
 			}
+			Some("curlabel") => {
+				if let Some(v) = it.next() {
+					CUR_LABEL.store(v == "1" || v == "on" || v == "true", Ordering::SeqCst);
+				}
+			}
 			// Overlay-open button toggle (frontend setting / overlay row).
 			Some("ovbtn") => {
 				if let Some(v) = it.next() {
@@ -195,6 +205,8 @@ fn stdin_control() {
 								*DISPLAYS.lock().unwrap() = crate::overlay::parse_displays(v)
 							}
 							"statshud" => STATS_HUD
+								.store(v == "1" || v == "on" || v == "true", Ordering::SeqCst),
+							"curlabel" => CUR_LABEL
 								.store(v == "1" || v == "on" || v == "true", Ordering::SeqCst),
 							// Persisted overlay-button state rides the caps line so a respawn
 							// (live codec switch) re-seeds it with everything else.
@@ -241,6 +253,10 @@ fn stdin_control() {
 					}
 					if dir != "out" {
 						CHAT_UNREAD.fetch_add(1, Ordering::SeqCst);
+						let mut t = CHAT_TOASTS.lock().unwrap();
+						t.push((log.last().map(|m| m.1.clone()).unwrap_or_default(), std::time::Instant::now()));
+						let over = t.len().saturating_sub(overlay::BUBBLE_MAX);
+						t.drain(..over);
 					}
 				}
 			}
@@ -376,6 +392,7 @@ impl Overlay {
 		}
 		self.state.pace = PACE.load(Ordering::SeqCst);
 		self.state.stats_hud = STATS_HUD.load(Ordering::SeqCst);
+		self.state.cur_label = CUR_LABEL.load(Ordering::SeqCst);
 		self.state.overlay_btn = OVERLAY_BTN.load(Ordering::SeqCst);
 		self.state.btn_pos = *OVBTN_POS.lock().unwrap();
 		self.state.audio_tx = AUDIO_TX.load(Ordering::SeqCst);
@@ -384,10 +401,18 @@ impl Overlay {
 		self.state.chat = CHAT_LOG.lock().unwrap().clone();
 		// Reading the chat clears the unread badge (the badge shows on the closed-state open
 		// button); new arrivals while the Chat view is on screen count as read immediately.
-		if self.state.open && self.ov_ui.view == overlay::View::Chat {
-			CHAT_UNREAD.store(0, Ordering::SeqCst);
+		let in_chat = self.state.open && self.ov_ui.view == overlay::View::Chat;
+		let seen = if in_chat { CHAT_UNREAD.swap(0, Ordering::SeqCst) } else { 0 };
+		if in_chat {
+			CHAT_TOASTS.lock().unwrap().clear();
 		}
+		overlay::mark_new_chat(&mut self.ov_ui, in_chat, self.state.chat.len(), seen);
 		self.state.chat_unread = CHAT_UNREAD.load(Ordering::SeqCst);
+		self.state.chat_toasts = {
+			let mut t = CHAT_TOASTS.lock().unwrap();
+			t.retain(|(_, at)| at.elapsed().as_secs_f32() < overlay::BUBBLE_SECS);
+			t.iter().map(|(m, at)| (m.clone(), at.elapsed().as_secs_f32())).collect()
+		};
 		{
 			let (p, rows) = &*FS_REMOTE.lock().unwrap();
 			self.state.fs_remote_path = p.clone();
@@ -486,11 +511,17 @@ impl eframe::App for Overlay {
 			if let Some((text, alpha)) = hint {
 				overlay::draw_hint(ctx, &text, alpha);
 			}
+			overlay::draw_chat_bubbles(ctx, &self.state);
 		}
 		// Repaint continuously while open (live menu) or whenever there is closed-state chrome to
 		// animate (HUD ticks, hint fade); otherwise a slow idle tick keeps stdin-driven state
 		// (e.g. a freshly-armed toast or a new unread badge) appearing promptly.
-		if open || self.state.stats_hud || self.state.overlay_btn || HINT.lock().unwrap().is_some() {
+		if open
+			|| self.state.stats_hud
+			|| self.state.overlay_btn
+			|| HINT.lock().unwrap().is_some()
+			|| !self.state.chat_toasts.is_empty()
+		{
 			ctx.request_repaint();
 		} else {
 			ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -546,6 +577,10 @@ impl Overlay {
 					"statshud" => {
 						self.state.stats_hud = val == "on";
 						STATS_HUD.store(val == "on", Ordering::SeqCst);
+					}
+					"curlabel" => {
+						self.state.cur_label = val == "on";
+						CUR_LABEL.store(val == "on", Ordering::SeqCst);
 					}
 					"ovbtn" => {
 						self.state.overlay_btn = val == "on";

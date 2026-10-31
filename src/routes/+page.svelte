@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import PulsarMark from '#lib/PulsarMark.svelte';
-	import { silentUpdateCheck, checkForUpdateUi } from '#lib/updater.js';
+	import { silentUpdateCheck, checkForUpdateUi, startPeriodicUpdateCheck } from '#lib/updater.js';
 	import { update as updateStore } from '#lib/update.svelte.js';
 	import {
 		api,
@@ -426,13 +426,12 @@
 		}
 	}
 
-	// Launch splash: the window starts hidden (tauri.conf `visible:false`); we paint the
-	// branded splash, REVEAL the window onto it (never an empty frame), and only fade to
-	// the UI after the splash has been shown for a visible moment. The fade timer starts
-	// AFTER the window is actually shown (not at mount) so the splash is never skipped by
-	// a slow `show()`.
+	// Launch splash. In the app it is a SEPARATE native window (src-tauri splash.rs) that
+	// appears the moment the process starts, while this (hidden) main window loads; once the
+	// UI is ready `splashDone` swaps them. The in-window splash below is only for the
+	// browser preview (`bun run dev`), where there is no splash window.
 	let booting = $state(true);
-	let splashOn = $state(true);
+	let splashOn = $state(!isTauri);
 	// Resolves once the launch splash has fully faded out. The CLI `--connect` auto-connect
 	// awaits this before kicking off the actual network connect, so the Connecting screen
 	// (with the real P2P/relay milestone) is shown AFTER the splash instead of a fast LAN
@@ -457,23 +456,22 @@
 	// wrong-password re-fire (or a second connect) falls through to the normal modal.
 	let autoPw: { id: string; pw: string } | null = null;
 	const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
-	const nextPaint = () =>
-		new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())));
 
 	async function boot() {
 		if (typeof window === 'undefined') {
 			splashGone();
 			return;
 		}
-		await nextPaint(); // ensure the splash is on screen before the window appears
-		if (isTauri) {
+		if (isPopup && isTauri) {
+			// Popups (approve / connections) are created visible-on-demand by Rust; just make
+			// sure they're up and focused.
 			try {
 				const { getCurrentWindow } = await import('@tauri-apps/api/window');
 				const w = getCurrentWindow();
 				await w.show();
 				await w.setFocus();
 			} catch {
-				/* show failed — the Rust fallback reveals the window; carry on */
+				/* carry on */
 			}
 		}
 		if (isPopup) {
@@ -486,11 +484,29 @@
 		// Window is up now → keep the splash visible a beat AND until the startup
 		// capability probe + the active language dictionary land (≤5 s cap each), then
 		// cross-fade to the UI (so the first real paint is never a flash of raw keys).
+		// Splash milestones (local startup only — relay + update check run in parallel and
+		// never hold the splash): mounted → the language → then the encoder probe, if it's
+		// still running.
+		if (isTauri) {
+			let capsDone = false;
+			void capsReady.then(() => (capsDone = true));
+			void api.splashUi().catch(() => {});
+			void Promise.race([i18nReady, wait(5000)]).then(() => {
+				if (!capsDone) void api.splashEncoder().catch(() => {});
+			});
+		}
 		await Promise.all([
-			wait(1300),
+			// The splash window is already up in the app; the browser preview's in-window
+			// splash keeps its short minimum so it doesn't just blink.
+			isTauri ? Promise.resolve() : wait(1300),
 			Promise.race([capsReady, wait(5000)]),
 			Promise.race([i18nReady, wait(5000)])
 		]);
+		if (isTauri) {
+			// No rAF here: WebKitGTK doesn't run animation frames for a HIDDEN window, so
+			// waiting on one stalls until the Rust fallback (that was the old slow launch).
+			await api.splashDone().catch(() => {});
+		}
 		booting = false; // start the opacity fade
 		await wait(500);
 		splashOn = false; // unmount once faded
@@ -710,6 +726,8 @@
 				// (default OFF) restores the silent install, still session-guarded.
 				void checkForUpdateUi(() => sm.sessions.length > 0 || hostSessions.length > 0);
 			}, 3000);
+			// The boot check runs once; a launch left open for days re-checks hourly (idle only).
+			startPeriodicUpdateCheck(() => sm.sessions.length > 0 || hostSessions.length > 0);
 		}
 	});
 
@@ -743,6 +761,14 @@
 		const occluded =
 			sm.splitMode === 'off' && !!s && !!s.native && s.phase === 'active' && !!s.ready;
 		document.documentElement.toggleAttribute('data-occluded', occluded);
+	});
+
+	// The next launch's splash window paints in the look (and language) the app was last left in.
+	$effect(() => {
+		if (!isTauri || isPopup) return;
+		void api
+			.setSplashTheme((theme.dark ? 'dark' : 'light') + (mode === 'game' ? ' game' : '') + ' lang=' + i18n.lang)
+			.catch(() => {});
 	});
 
 	// Give the whole app a gaming look (cyan accent) while the app is in gaming mode OR

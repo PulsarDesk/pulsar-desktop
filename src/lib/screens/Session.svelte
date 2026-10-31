@@ -14,6 +14,7 @@
 		onKbdLeave,
 		onKbdEngaged,
 		onKbdReleased,
+		onKbdDetach,
 		onOverlayToggle,
 		onOverlayCmd,
 		onOverlayEnd,
@@ -227,6 +228,11 @@
 				// Always sent (even while the overlay is open): the renderer also derives the
 				// CURSOR visibility from this edge, not just the tooltip.
 				if (native && playId >= 0) api.renderHint(playId, 'click').catch(() => {});
+			}),
+			// Only an explicit user detach drops the canvas control (cursor back, pointer
+			// unconfined) — a transient focus-loss release must keep the confinement.
+			onKbdDetach(() => {
+				if (active) input.detach();
 			})
 		);
 		return scope.dispose;
@@ -639,6 +645,8 @@
 				case 'quality': controls.setQuality(val as 'latency' | 'quality'); break;
 				case 'pace': controls.setFramePacing(val === 'on' || val === '1' || val === 'true'); break;
 				case 'statshud': controls.setStatsHud(val === 'on' || val === '1' || val === 'true'); break;
+				// "Show my name on my pointer" (Yayın row): saved + sent to the host Rust-side.
+				case 'curlabel': api.setCursorLabel(playId, val === 'on').catch(() => {}); break;
 				case 'ovbtn': controls.setOverlayButton(val === 'on' || val === '1' || val === 'true'); break;
 				// Renderer-side button drag (Windows: the webview hotspot is buried under
 				// the video child): mirror + persist the new position, like the hotspot drag.

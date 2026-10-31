@@ -36,7 +36,7 @@ use pulsar_core::service::LossRecovery;
 pub enum Source {
 	/// `x11grab` of `display` (e.g. `:0.0` or `:0.0+1920,0`).
 	X11 { display: String },
-	/// `lavfi testsrc2` — headless, for tests.
+	/// `lavfi testsrc2` — headless, for tests and `PULSAR_MOCK_CAPTURE` (super::mock_capture).
 	Test,
 }
 
@@ -63,12 +63,12 @@ impl Params {
 		}
 		let dest = plan.dest.strip_prefix("rtp://").unwrap_or(&plan.dest).to_string();
 		Some(Self {
-			source: Source::X11 { display: plan.display.clone() },
+			source: if super::mock_capture() { Source::Test } else { Source::X11 { display: plan.display.clone() } },
 			width: plan.width.max(2) & !1,
 			height: plan.height.max(2) & !1,
 			fps: plan.fps.max(1),
 			bitrate_kbps: plan.bitrate_kbps.max(200),
-			encoder: plan.encoder,
+			encoder: if super::mock_capture() { HwEncoder::Software } else { plan.encoder },
 			codec: plan.codec,
 			low_latency: plan.low_latency,
 			recovery: plan.loss_recovery,
@@ -84,6 +84,10 @@ impl Params {
 /// Can the in-process path take this plan? (X11 capture, a software or NVENC encoder that
 /// takes CPU frames, SDR 4:2:0, and not disabled by `PULSAR_LIBAV_HOST=0`.)
 pub fn supported(plan: &StreamPlan) -> bool {
+	if super::mock_capture() {
+		// The test pattern always encodes in software (see `from_plan`).
+		return HwEncoder::Software.ffmpeg_name(plan.codec).is_some();
+	}
 	if std::env::var("PULSAR_LIBAV_HOST").map(|v| v == "0").unwrap_or(false) {
 		return false;
 	}
@@ -263,7 +267,9 @@ unsafe fn open_input(p: &Params) -> Result<(*mut ff::AVFormatContext, c_int), St
 			dict_set(&mut opts, "draw_mouse", "1");
 			("x11grab", display.clone())
 		}
-		Source::Test => ("lavfi", format!("testsrc2=size={}x{}:rate={}", p.width, p.height, p.fps)),
+		// lavfi generates as fast as it is read (x11grab paces itself); `realtime` holds it to
+		// wall-clock so the mock stream plays at real speed.
+		Source::Test => ("lavfi", format!("testsrc2=size={}x{}:rate={},realtime", p.width, p.height, p.fps)),
 	};
 	let fmt = ff::av_find_input_format(cstr(fmt_name).as_ptr());
 	if fmt.is_null() {

@@ -23,7 +23,9 @@ const DEFAULT_CONFIG: Config = {
 	node_port: 0,
 	avatar_mode: 'user',
 	native_player: false,
-	request_admin: true
+	request_admin: true,
+	show_remote_cursor: true,
+	share_cursor_label: true
 };
 
 let mockConfig: Config = { ...DEFAULT_CONFIG };
@@ -160,6 +162,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 		case 'set_play_monitor':
 		case 'set_frame_pacing':
 		case 'set_stats_hud':
+		case 'set_cursor_label':
 		case 'set_overlay_button':
 		case 'set_overlay_button_pos':
 		case 'reverse_play':

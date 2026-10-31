@@ -42,6 +42,7 @@ export {
 	onKbdLeave,
 	onKbdEngaged,
 	onKbdReleased,
+	onKbdDetach,
 	onOverlayToggle,
 	onFullscreenToggle,
 	onOverlayCmd,

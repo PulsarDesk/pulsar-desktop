@@ -221,6 +221,9 @@ pub(crate) struct ConnInfo {
 	/// "Sadece izleme": the host user revoked this client's CONTROL — its input is
 	/// dropped before injection while the stream keeps running (AnyDesk-style).
 	pub(crate) view_only: bool,
+	/// The client lets its pointer be shown with its name on this screen
+	/// (`DataMsg::CursorLabel`; on until it says otherwise). See `remote_cursor`.
+	pub(crate) cursor_label: bool,
 }
 
 /// A live stream-reconfiguration command from the session menu. Each one merges into
@@ -265,6 +268,9 @@ pub(crate) struct RenderSeed {
 	pub(crate) ovbtn_pos: Option<(f32, f32)>,
 	/// Always-on mini stats HUD ("statshud 0|1").
 	pub(crate) statshud: Option<bool>,
+	/// "Show my pointer with my name on the host" ("curlabel 0|1"); a live toggle after
+	/// spawn (the spawn-time value rides the caps line).
+	pub(crate) curlabel: Option<bool>,
 	/// Frame pacing ("pace 0|1") — `--pace` only covers the spawn-time default; a
 	/// live toggle after spawn is recorded here.
 	pub(crate) pace: Option<bool>,

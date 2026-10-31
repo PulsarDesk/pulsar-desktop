@@ -380,6 +380,9 @@ async fn respawn_render_for_codec(
 					if let Some(on) = seed.statshud {
 						let _ = writeln!(si, "statshud {}", if on { 1 } else { 0 });
 					}
+					if let Some(on) = seed.curlabel {
+						let _ = writeln!(si, "curlabel {}", if on { 1 } else { 0 });
+					}
 					if let Some(on) = seed.pace {
 						let _ = writeln!(si, "pace {}", if on { 1 } else { 0 });
 					}
@@ -958,6 +961,42 @@ pub(crate) async fn set_overlay_button(
 	Ok(())
 }
 
+/// Client: let the host show (or stop showing) this device's pointer with its name on the
+/// host screen (Pulsar menu → Yayın). Saved as the default for later sessions, sent to the
+/// host of session `id` (`DataMsg::CursorLabel`) and mirrored to its overlay row.
+#[tauri::command]
+pub(crate) async fn set_cursor_label(
+	app: tauri::AppHandle,
+	state: State<'_, AppState>,
+	id: u64,
+	on: bool,
+) -> Result<(), String> {
+	let cfg = {
+		let mut g = state.config.lock().unwrap();
+		g.share_cursor_label = on;
+		g.clone()
+	};
+	if let Err(e) = cfg.save(crate::util::config_path(&app)) {
+		tracing::warn!("cursor label: config save failed: {e}");
+	}
+	let play = state
+		.plays
+		.lock()
+		.unwrap()
+		.get(&id)
+		.map(|p| (p.data_tx.clone(), p.render_stdin.clone(), p.render_seed.clone()));
+	if let Some((tx, stdin, seed)) = play {
+		let _ = tx.send(pulsar_core::service::DataMsg::CursorLabel(on)).await;
+		seed.lock().unwrap().curlabel = Some(on);
+		use std::io::Write;
+		if let Some(si) = stdin.lock().unwrap().as_mut() {
+			let _ = writeln!(si, "curlabel {}", if on { 1 } else { 0 });
+			let _ = si.flush();
+		}
+	}
+	Ok(())
+}
+
 /// Client: move the overlay-open button ("ovbtnpos <x> <y>" stdin line, egui points
 /// from the renderer's top-left). Streamed live while the webview hotspot is dragged;
 /// the UI persists the final spot. Remembered in `render_seed` for respawns.
@@ -985,12 +1024,52 @@ pub(crate) async fn set_overlay_button_pos(
 	Ok(())
 }
 
+/// Keep every native renderer's "engaged" (cursor-hidden) state equal to the REAL capture
+/// state. The frontend relays engage/release edges (see `render_hint`), but several paths
+/// change the capture silently (a stop→start re-arm, a tab switch, a session ending while
+/// captured) and left the renderer hiding the local cursor after control was released. Sent
+/// on every change (~100 ms) and re-asserted every 2 s; a reused renderer resets to
+/// disengaged on `reopen`.
+pub(crate) fn spawn_engage_sync(app: tauri::AppHandle) {
+	use tauri::Manager;
+	std::thread::spawn(move || {
+		let mut last: Option<bool> = None;
+		let mut tick = 0u32;
+		loop {
+			std::thread::sleep(std::time::Duration::from_millis(100));
+			tick = tick.wrapping_add(1);
+			let engaged = crate::kbdhook::is_engaged();
+			if last == Some(engaged) && tick % 20 != 0 {
+				continue;
+			}
+			last = Some(engaged);
+			let stdins: Vec<_> = app
+				.state::<AppState>()
+				.plays
+				.lock()
+				.unwrap()
+				.values()
+				.map(|p| p.render_stdin.clone())
+				.collect();
+			for stdin in stdins {
+				use std::io::Write;
+				if let Some(si) = stdin.lock().unwrap().as_mut() {
+					let _ = writeln!(si, "engaged {}", if engaged { 1 } else { 0 });
+					let _ = si.flush();
+				}
+			}
+		}
+	});
+}
+
 /// Client: push a transient helper tooltip to the native renderer ("hint engage|click"
 /// stdin line, drawn bottom-center ~3 s) and sync the live engage state ("engaged 0|1"
 /// — the renderer hides the local cursor ONLY while engaged). The engage/release edges
 /// live app-side (evdev), so the frontend forwards them here. No-op without a renderer.
+/// SYNC on purpose: async commands run as concurrent tasks, so a quick engage→release pair
+/// could reach the renderer as "engaged 0" then "engaged 1" and leave the cursor hidden.
 #[tauri::command]
-pub(crate) async fn render_hint(
+pub(crate) fn render_hint(
 	state: State<'_, AppState>,
 	id: u64,
 	kind: String,

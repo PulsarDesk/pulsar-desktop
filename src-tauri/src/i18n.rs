@@ -58,7 +58,12 @@ fn en() -> &'static HashMap<&'static str, &'static str> {
 
 /// Localized string for `key` (EN → TR fallback → the key, so typos stay visible).
 pub(crate) fn t(key: &str) -> &'static str {
-	if ENGLISH.load(Ordering::Relaxed) {
+	t_in(key, ENGLISH.load(Ordering::Relaxed))
+}
+
+/// [`t`] in an explicit language instead of the active one.
+pub(crate) fn t_in(key: &str, english: bool) -> &'static str {
+	if english {
 		if let Some(s) = en().get(key) {
 			return s;
 		}

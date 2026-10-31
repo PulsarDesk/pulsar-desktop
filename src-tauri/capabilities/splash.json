@@ -1,0 +1,6 @@
+{
+	"identifier": "splash",
+	"description": "The launch splash window (Windows/macOS webview): drag to move, nothing else.",
+	"windows": ["splash"],
+	"permissions": ["core:window:allow-start-dragging"]
+}

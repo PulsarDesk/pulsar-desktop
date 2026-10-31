@@ -4866,7 +4866,7 @@ dependencies = [
 [[package]]
 name = "pulsar-core"
 version = "0.1.0-dev.27"
-source = "git+https://github.com/PulsarDesk/pulsar-core#18fa37cefccf335c567a1e6bd1cf370bfdb32892"
+source = "git+https://github.com/PulsarDesk/pulsar-core#6b72fd4c1560be8cb34b4b7f1dbeb95984a4923e"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -5165,7 +5165,7 @@ dependencies = [
 [[package]]
 name = "reed-solomon-erasure"
 version = "6.0.0"
-source = "git+https://github.com/PulsarDesk/pulsar-core#18fa37cefccf335c567a1e6bd1cf370bfdb32892"
+source = "git+https://github.com/PulsarDesk/pulsar-core#6b72fd4c1560be8cb34b4b7f1dbeb95984a4923e"
 dependencies = [
  "libm",
  "lru",
@@ -7215,7 +7215,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vigem-client"
 version = "0.1.4"
-source = "git+https://github.com/PulsarDesk/pulsar-core#18fa37cefccf335c567a1e6bd1cf370bfdb32892"
+source = "git+https://github.com/PulsarDesk/pulsar-core#6b72fd4c1560be8cb34b4b7f1dbeb95984a4923e"
 dependencies = [
  "winapi",
 ]

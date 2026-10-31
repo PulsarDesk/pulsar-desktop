@@ -46,6 +46,9 @@ pub struct OverlayState {
 	/// Always-on mini stats HUD while the overlay is CLOSED (user toggle, persisted
 	/// by the frontend; synced over stdin `statshud 0|1`).
 	pub stats_hud: bool,
+	/// Let the host show this device's pointer with its name (remote mode, the Yayın row;
+	/// synced over stdin `curlabel 0|1`).
+	pub cur_label: bool,
 	/// Parsec-style always-visible overlay-open button (Pulsar mark, top-center)
 	/// while the overlay is CLOSED. Toggleable from the overlay + Settings.
 	pub overlay_btn: bool,
@@ -71,6 +74,9 @@ pub struct OverlayState {
 	pub chat_unread: usize,
 	/// Whether the relayed Enter key fired this frame (sends the chat composer).
 	pub chat_enter: bool,
+	/// Recent host messages as (text, age in s) — drawn as bubbles beside the open button
+	/// while the overlay is CLOSED (see [`draw_chat_bubbles`]); the backend expires them.
+	pub chat_toasts: Vec<(String, f32)>,
 	/// Remote file pane: current HOME-relative path + its entries (`fsjson` stdin).
 	pub fs_remote_path: String,
 	pub fs_remote: Vec<FsRow>,
@@ -166,6 +172,22 @@ pub struct UiState {
 	/// so a freshly-opened overlay shows nothing pre-selected (mouse users never see a stray
 	/// cursor). Reset on every open edge; the first input reveals the cursor at box 0.
 	pub nav_active: bool,
+	/// Index in the chat log of the first message that was UNREAD when the Chat view was
+	/// entered — the "— New —" divider goes above it. Set once per visit (messages arriving
+	/// while the view is on screen are read on arrival and don't move it); cleared when the
+	/// Chat view isn't on screen. See [`mark_new_chat`].
+	pub chat_new_from: Option<usize>,
+}
+
+/// Per-frame bookkeeping for the chat's "— New —" divider. `in_chat`: the overlay is open
+/// on the Chat view this frame; `unread`: host messages that were unread until now (the
+/// backend's counter, which it zeroes while the Chat view is on screen).
+pub fn mark_new_chat(ui: &mut UiState, in_chat: bool, chat_len: usize, unread: usize) {
+	if !in_chat {
+		ui.chat_new_from = None;
+	} else if unread > 0 && ui.chat_new_from.is_none() {
+		ui.chat_new_from = Some(chat_len.saturating_sub(unread));
+	}
 }
 
 /// One frame's controller/keyboard nav input, read once in `draw` and handed to the active
@@ -198,6 +220,7 @@ impl Default for OverlayState {
 			display_idx: 0,
 			host_active: String::new(),
 			stats_hud: false,
+			cur_label: true,
 			overlay_btn: true,
 			btn_pos: BTN_POS_DEFAULT,
 			host_encoders: Vec::new(),
@@ -214,6 +237,7 @@ impl Default for OverlayState {
 			chat: Vec::new(),
 			chat_unread: 0,
 			chat_enter: false,
+			chat_toasts: Vec::new(),
 			fs_remote_path: String::new(),
 			fs_remote: Vec::new(),
 			controllers: Vec::new(), // Vec<(slot, kind_label, name, uuid, target, rumble)>
@@ -663,7 +687,7 @@ pub fn draw(ctx: &egui::Context, st: &OverlayState, ui_state: &mut UiState) -> V
 					View::Tools => {
 						draw_tools(ui, &mut ui_state.view, st.mode, &mut ui_state.sub_sel, nav, &mut cmds)
 					}
-					View::Chat => draw_chat(ui, st, &mut ui_state.chat_input, &mut cmds),
+					View::Chat => draw_chat(ui, st, &mut ui_state.chat_input, ui_state.chat_new_from, &mut cmds),
 					View::Files => draw_files(ui, st, ui_state, &mut cmds),
 					View::Gauges => {
 						draw_gauges(ui, st, &mut ui_state.sub_sel, nav, &mut ui_state.pending, &mut cmds)
@@ -794,7 +818,10 @@ fn draw_root(
 		.spacing(egui::vec2(8.0, 8.0))
 		.show(ui, |ui| {
 			for (i, (icon, label, v)) in boxes.iter().enumerate() {
-				let resp = cat_box(ui, icon, label, nav_active && i == *sel);
+				// Unread host messages also show on the Chat box (not only on the closed-state
+				// open button), until the Chat view is opened.
+				let badge = if *v == View::Chat { st.chat_unread } else { 0 };
+				let resp = cat_box(ui, icon, label, nav_active && i == *sel, badge);
 				if resp.clicked() || (activate && i == *sel) {
 					// Files opens the app's dedicated per-session window — the in-overlay
 					// two-pane view was too cramped (kept as code for a potential fallback).
@@ -881,14 +908,16 @@ fn draw_stream(
 	let pace = [("on", t("on")), ("off", t("off"))];
 	let pace_cur = if st.pace { "on" } else { "off" };
 
-	const ROWS: usize = 7;
+	// Remote mode adds the "show my pointer on the host" row (game sessions never label it).
+	let remote = st.mode == Mode::Remote;
+	let rows: usize = if remote { 8 } else { 7 };
 	if nav.down {
-		*sub_sel = (*sub_sel + 1).min(ROWS - 1);
+		*sub_sel = (*sub_sel + 1).min(rows - 1);
 	}
 	if nav.up {
 		*sub_sel = sub_sel.saturating_sub(1);
 	}
-	let s = (*sub_sel).min(ROWS - 1);
+	let s = (*sub_sel).min(rows - 1);
 	ui.spacing_mut().item_spacing.y = 6.0;
 	if let Some(v) = choice_row(ui, s == 0, nav, "Codec", &st.codec, &codecs, 0, pending) {
 		cmds.push(OverlayCmd::Set("codec", v));
@@ -912,6 +941,14 @@ fn draw_stream(
 		choice_row_i(ui, s == 6, nav, t("pacing"), pace_cur, &pace, 6, pending, Some(t("info.pacing")))
 	{
 		cmds.push(OverlayCmd::Set("pace", v));
+	}
+	if remote {
+		let cur = if st.cur_label { "on" } else { "off" };
+		if let Some(v) =
+			choice_row_i(ui, s == 7, nav, t("curlabel"), cur, &pace, 7, pending, Some(t("info.curlabel")))
+		{
+			cmds.push(OverlayCmd::Set("curlabel", v));
+		}
 	}
 	// Decoder is auto-selected by this renderer — display only.
 	ui.add_space(4.0);
@@ -1107,15 +1144,25 @@ fn draw_tools(
 /// key events (the app's webview captures keydowns while the overlay is open and
 /// pipes them over stdin — this child window can't take X focus without killing
 /// the focus-gated combos).
-fn draw_chat(ui: &mut egui::Ui, st: &OverlayState, input: &mut String, cmds: &mut Vec<OverlayCmd>) {
+fn draw_chat(
+	ui: &mut egui::Ui,
+	st: &OverlayState,
+	input: &mut String,
+	new_from: Option<usize>,
+	cmds: &mut Vec<OverlayCmd>,
+) {
+	// An auto-height egui Window gives a ScrollArea only its minimum scrolled height (it
+	// showed ~2 lines) — pin min = max so the conversation gets a real column. 300 pt keeps
+	// the whole Chat page (header + log + composer + shortcuts) inside a 720p surface.
 	egui::ScrollArea::vertical()
 		.scroll_source(egui::scroll_area::ScrollSource::ALL) // 0.29 default: drag-to-scroll with the mouse too
-		.max_height(230.0)
+		.min_scrolled_height(300.0)
+		.max_height(300.0)
 		.auto_shrink([false, false])
 		.stick_to_bottom(true)
 		.show(ui, |ui| {
 			if st.chat.is_empty() {
-				ui.add_space(90.0);
+				ui.add_space(130.0);
 				ui.vertical_centered(|ui| {
 					ui.label(
 						egui::RichText::new(t("chat.empty")).color(egui::Color32::from_gray(120)),
@@ -1123,7 +1170,10 @@ fn draw_chat(ui: &mut egui::Ui, st: &OverlayState, input: &mut String, cmds: &mu
 				});
 				return;
 			}
-			for (me, text) in &st.chat {
+			for (i, (me, text)) in st.chat.iter().enumerate() {
+				if new_from == Some(i) {
+					new_divider(ui);
+				}
 				let layout = if *me {
 					egui::Layout::right_to_left(egui::Align::Min)
 				} else {
@@ -1173,6 +1223,22 @@ fn draw_chat(ui: &mut egui::Ui, st: &OverlayState, input: &mut String, cmds: &mu
 			input.clear();
 		}
 	});
+}
+
+/// "———— New ————" above the first message that was unread when the Chat view opened.
+fn new_divider(ui: &mut egui::Ui) {
+	ui.add_space(4.0);
+	let red = egui::Color32::from_rgb(235, 90, 100);
+	let label = egui::WidgetText::from(egui::RichText::new(t("chat.new")).size(11.0).strong().color(red));
+	let galley = label.into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body);
+	let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), galley.size().y + 2.0), egui::Sense::hover());
+	let c = rect.center();
+	let half = galley.size().x / 2.0 + 8.0;
+	let stroke = egui::Stroke::new(1.0, red.gamma_multiply(0.6));
+	ui.painter().line_segment([egui::pos2(rect.left(), c.y), egui::pos2(c.x - half, c.y)], stroke);
+	ui.painter().line_segment([egui::pos2(c.x + half, c.y), egui::pos2(rect.right(), c.y)], stroke);
+	ui.painter().galley(c - galley.size() / 2.0, galley, red);
+	ui.add_space(4.0);
 }
 
 /// NATIVE two-pane file manager: LEFT = this machine (renderer-local std::fs,
@@ -1583,7 +1649,8 @@ fn fmt_mbps(mbps: f32) -> String {
 /// A clickable category box (the root hub's grid cells). `icon` is a Phosphor glyph
 /// (e.g. `egui_phosphor::regular::BROADCAST`) painted at the left — the Phosphor font is
 /// installed into egui's atlas in `apply_theme`, so the glyph renders on every backend.
-fn cat_box(ui: &mut egui::Ui, icon: &str, label: &str, selected: bool) -> egui::Response {
+/// One hub box; `badge` > 0 draws the unread-count disc at its right edge.
+fn cat_box(ui: &mut egui::Ui, icon: &str, label: &str, selected: bool, badge: usize) -> egui::Response {
 	let size = egui::vec2((ui.available_width() / 2.0 - 6.0).max(140.0), 40.0);
 	let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
 	// `selected` = the controller-nav cursor (UiState.sel, moved by the pad up/down) is on
@@ -1618,6 +1685,18 @@ fn cat_box(ui: &mut egui::Ui, icon: &str, label: &str, selected: bool) -> egui::
 		egui::FontId::proportional(13.0),
 		egui::Color32::from_rgb(228, 230, 240),
 	);
+	if badge > 0 {
+		let n = if badge > 9 { "9+".to_string() } else { badge.to_string() };
+		let bc = egui::pos2(rect.right() - 16.0, rect.center().y);
+		ui.painter().circle_filled(bc, 8.5, egui::Color32::from_rgb(225, 60, 70));
+		ui.painter().text(
+			bc,
+			egui::Align2::CENTER_CENTER,
+			n,
+			egui::FontId::proportional(10.0),
+			egui::Color32::WHITE,
+		);
+	}
 	resp
 }
 
@@ -1984,6 +2063,78 @@ pub fn draw_open_button(ctx: &egui::Context, st: &OverlayState) -> bool {
 	clicked
 }
 
+/// How long a chat bubble stays beside the closed-state open button (s), the last
+/// [`BUBBLE_FADE`] of it fading out; and how many are shown at once (newest kept).
+pub const BUBBLE_SECS: f32 = 8.0;
+const BUBBLE_FADE: f32 = 0.8;
+pub const BUBBLE_MAX: usize = 3;
+
+/// Incoming chat while the overlay is CLOSED: message-sized bubbles next to the open
+/// button — on its right when the button sits in the left half of the screen, on its left
+/// otherwise; stacked downward from a button in the top half, upward from one in the
+/// bottom half (oldest farthest from the button's edge). They slide in, then fade out
+/// after [`BUBBLE_SECS`]. Display-only (the closed container is input pass-through).
+pub fn draw_chat_bubbles(ctx: &egui::Context, st: &OverlayState) {
+	if st.chat_toasts.is_empty() {
+		return;
+	}
+	let screen = ctx.viewport_rect();
+	let btn = btn_rect(st.btn_pos, screen);
+	let right_side = btn.center().x < screen.center().x;
+	let downward = btn.center().y < screen.center().y;
+	let gap = 8.0;
+	// Widest a bubble may get: the room on that side of the button, capped.
+	let room = if right_side { screen.right() - btn.right() } else { btn.left() - screen.left() };
+	let max_w = (room - gap - 12.0).clamp(120.0, 340.0);
+	let font = egui::FontId::proportional(13.5);
+	let pad = egui::vec2(12.0, 8.0);
+
+	// Lay out first (sizes), then place: newest nearest the button's row.
+	let bubbles: Vec<(std::sync::Arc<egui::Galley>, f32)> = st
+		.chat_toasts
+		.iter()
+		.map(|(text, age)| {
+			let g = ctx.fonts_mut(|f| {
+				f.layout(text.clone(), font.clone(), egui::Color32::WHITE, max_w - 2.0 * pad.x)
+			});
+			(g, *age)
+		})
+		.collect();
+	let mut y = if downward { btn.top() } else { btn.bottom() };
+	// Downward: newest at the top (by the button) and older ones below; upward mirrors it.
+	for (i, (galley, age)) in bubbles.iter().rev().enumerate() {
+		let size = galley.size() + 2.0 * pad;
+		let fade_in = (age / 0.18).clamp(0.0, 1.0);
+		let fade_out = ((BUBBLE_SECS - age) / BUBBLE_FADE).clamp(0.0, 1.0);
+		let alpha = fade_in.min(fade_out);
+		let slide = (1.0 - fade_in) * 10.0 * if right_side { -1.0 } else { 1.0 };
+		let x = if right_side { btn.right() + gap } else { btn.left() - gap - size.x } + slide;
+		let top = if downward { y } else { y - size.y };
+		let rect = egui::Rect::from_min_size(egui::pos2(x, top), size);
+		let painter = ctx.layer_painter(egui::LayerId::new(
+			egui::Order::Foreground,
+			egui::Id::new(("pulsar_chat_bubble", i)),
+		));
+		painter.rect_filled(
+			rect,
+			12.0,
+			egui::Color32::from_rgba_unmultiplied(34, 36, 50, (235.0 * alpha) as u8),
+		);
+		painter.rect_stroke(
+			rect,
+			12.0,
+			egui::Stroke::new(1.0, CYAN.gamma_multiply(0.35 * alpha)),
+			egui::StrokeKind::Inside,
+		);
+		painter.galley_with_override_text_color(
+			rect.min + pad,
+			galley.clone(),
+			egui::Color32::WHITE.gamma_multiply(alpha),
+		);
+		y = if downward { rect.bottom() + 6.0 } else { rect.top() - 6.0 };
+	}
+}
+
 /// Transient helper tooltip, bottom-center over the video (drawn while the overlay is
 /// CLOSED): "click to take control" after the overlay closes, "how to release" right
 /// after control is engaged. The caller owns the ~3 s lifetime and passes `alpha`
@@ -2130,9 +2281,9 @@ mod focus_tests {
 				},
 				|ui| {
 					egui::CentralPanel::default().show(ui, |ui| {
-						cat_box(ui, icon::BROADCAST, "one", false);
-						cat_box(ui, icon::MONITOR, "two", false);
-						cat_box(ui, icon::CHART_BAR, "three", false);
+						cat_box(ui, icon::BROADCAST, "one", false, 0);
+						cat_box(ui, icon::MONITOR, "two", false, 0);
+						cat_box(ui, icon::CHART_BAR, "three", false, 0);
 					});
 				},
 			)
@@ -2154,5 +2305,64 @@ mod focus_tests {
 		let f2 = ctx.memory(|m| m.focused());
 		assert!(f1.is_some(), "Tab focused nothing — cat_box is not keyboard-focusable");
 		assert_ne!(f1, f2, "second Tab did not advance focus to the next box");
+	}
+}
+
+#[cfg(test)]
+mod bubble_tests {
+	use super::*;
+
+	/// Bubbles land beside the button on the side with room: right of a left-half button,
+	/// left of a right-half one — and never draw anything with no messages.
+	#[test]
+	fn chat_bubbles_sit_on_the_roomy_side_of_the_button() {
+		let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 720.0));
+		let shapes_for = |btn_pos: (f32, f32), toasts: Vec<(String, f32)>| {
+			let ctx = egui::Context::default();
+			let st = OverlayState { btn_pos, chat_toasts: toasts, ..OverlayState::default() };
+			let mut out = ctx.run_pass(
+				egui::RawInput { screen_rect: Some(screen), ..Default::default() },
+				|ctx| draw_chat_bubbles(ctx, &st),
+			);
+			out.textures_delta.clear(); // no painter here
+			out.shapes
+				.iter()
+				.filter_map(|c| match &c.shape {
+					egui::Shape::Rect(r) => Some(r.rect),
+					_ => None,
+				})
+				.collect::<Vec<_>>()
+		};
+		let msg = || vec![("selam, görebiliyor musun?".to_string(), 2.0)];
+		assert!(shapes_for((90.0, 70.0), Vec::new()).is_empty());
+		let left = shapes_for((90.0, 70.0), msg());
+		let btn = btn_rect((90.0, 70.0), screen);
+		assert!(!left.is_empty() && left.iter().all(|r| r.left() > btn.right()), "{left:?}");
+		let right = shapes_for((1150.0, 600.0), msg());
+		let btn = btn_rect((1150.0, 600.0), screen);
+		assert!(!right.is_empty() && right.iter().all(|r| r.right() < btn.left()), "{right:?}");
+		assert!(right.iter().all(|r| r.bottom() <= btn.bottom() + 0.5), "bottom half grows upward");
+	}
+}
+
+#[cfg(test)]
+mod new_divider_tests {
+	use super::*;
+
+	#[test]
+	fn the_new_divider_marks_what_was_unread_on_entry_and_resets_after() {
+		let mut ui = UiState::default();
+		// 5 messages, the last 2 unread → divider above index 3.
+		mark_new_chat(&mut ui, true, 5, 2);
+		assert_eq!(ui.chat_new_from, Some(3));
+		// A message arriving while the view is open is read on arrival: no move.
+		mark_new_chat(&mut ui, true, 6, 1);
+		assert_eq!(ui.chat_new_from, Some(3));
+		// Leaving the view (or closing the overlay) clears it; a visit with nothing
+		// unread shows no divider.
+		mark_new_chat(&mut ui, false, 6, 0);
+		assert_eq!(ui.chat_new_from, None);
+		mark_new_chat(&mut ui, true, 6, 0);
+		assert_eq!(ui.chat_new_from, None);
 	}
 }

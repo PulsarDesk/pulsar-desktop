@@ -153,6 +153,10 @@
 	let msgText = $state('');
 	// Per-DEVICE unread counter (badge on the row's chat button) — cleared on open.
 	let unread = $state<Record<string, number>>({});
+	// Index of the first message that was unread when the modal opened — the "— New —"
+	// divider sits above it until the modal closes (messages arriving while it is open are
+	// read on arrival and don't move it). null = nothing was unread.
+	let newFrom = $state<number | null>(null);
 	function pushMsg(peer: string, m: Msg) {
 		history = { ...history, [peer]: [...(history[peer] ?? []), m] };
 	}
@@ -160,11 +164,14 @@
 		msgRow = r;
 		msgText = '';
 		sendErr = null;
+		const u = unread[r.peer] ?? 0;
+		newFrom = u > 0 ? Math.max(0, (history[r.peer]?.length ?? 0) - u) : null;
 		unread = { ...unread, [r.peer]: 0 };
 	}
 	function closeMsg() {
 		msgRow = null;
 		sendErr = null;
+		newFrom = null;
 	}
 	$effect(() => {
 		if (msgRow) return closeOnEscape(closeMsg);
@@ -281,6 +288,9 @@
 						<div class="mempty">{t('host.chatEmpty')}</div>
 					{:else}
 						{#each history[msgRow.peer] ?? [] as m, i (i)}
+							{#if i === newFrom}
+								<div class="mnew" role="separator"><span>{t('host.msgNew')}</span></div>
+							{/if}
 							<div class="mline selectable" class:me={m.me}>{m.text}</div>
 						{/each}
 					{/if}
@@ -552,6 +562,25 @@
 		flex-direction: column;
 		gap: 6px;
 		padding: 4px 2px;
+	}
+	/* "———— New ————" above the first message that was unread when the modal opened. */
+	.mnew {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin: 4px 0;
+		color: var(--danger);
+		font-size: 11px;
+		font-weight: 700;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+	}
+	.mnew::before,
+	.mnew::after {
+		content: '';
+		flex: 1;
+		height: 1px;
+		background: color-mix(in oklch, var(--danger) 55%, transparent);
 	}
 	.mempty {
 		color: var(--text-faint);

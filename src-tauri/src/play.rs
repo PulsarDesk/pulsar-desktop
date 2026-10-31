@@ -171,6 +171,8 @@ pub(crate) async fn start_remote_play(
 	let codec = std::env::var("PULSAR_FORCE_CODEC").unwrap_or(codec);
 
 	let disc = state.discovery.lock().unwrap().clone();
+	// "Show my pointer with my name on the host" (Pulsar menu → Yayın; seeds the overlay row).
+	let cur_label = state.config.lock().unwrap().share_cursor_label;
 	let (net_mode, relay) = {
 		let cfg = state.config.lock().unwrap();
 		(cfg.network_mode, cfg.relay.clone())
@@ -429,13 +431,14 @@ pub(crate) async fn start_remote_play(
 								use std::io::Write as _;
 								let enc = if encoder.is_empty() { "auto" } else { &encoder };
 								let line = format!(
-									"caps codecs={} encoders={} codec={} encoder={} conn={} displays={}",
+									"caps codecs={} encoders={} codec={} encoder={} conn={} displays={} curlabel={}",
 									allowed.join(","),
 									host_caps.encoders.join(","),
 									codec,
 									enc,
 									if transport == "relay" { "Relay" } else { "P2P" },
-									fmt_displays(&host_caps.displays)
+									fmt_displays(&host_caps.displays),
+									u8::from(cur_label)
 								);
 								if let Some(si) = overlay_stdin.lock().unwrap().as_mut() {
 									let _ = writeln!(si, "{line}");
@@ -669,13 +672,14 @@ pub(crate) async fn start_remote_play(
 									use std::io::Write as _;
 									let enc = if encoder.is_empty() { "auto" } else { &encoder };
 									let line = format!(
-										"caps codecs={} encoders={} codec={} encoder={} conn={} displays={}",
+										"caps codecs={} encoders={} codec={} encoder={} conn={} displays={} curlabel={}",
 										allowed.join(","),
 										host_caps.encoders.join(","),
 										codec,
 										enc,
 										if transport == "relay" { "Relay" } else { "P2P" },
-										fmt_displays(&host_caps.displays)
+										fmt_displays(&host_caps.displays),
+										u8::from(cur_label)
 									);
 									if let Some(si) = overlay_stdin.lock().unwrap().as_mut() {
 										let _ = writeln!(si, "{line}");
@@ -814,13 +818,14 @@ pub(crate) async fn start_remote_play(
 									use std::io::Write as _;
 									let enc = if encoder.is_empty() { "auto" } else { &encoder };
 									let line = format!(
-										"caps codecs={} encoders={} codec={} encoder={} conn={} displays={}",
+										"caps codecs={} encoders={} codec={} encoder={} conn={} displays={} curlabel={}",
 										allowed.join(","),
 										host_caps.encoders.join(","),
 										codec,
 										enc,
 										if transport == "relay" { "Relay" } else { "P2P" },
-										fmt_displays(&host_caps.displays)
+										fmt_displays(&host_caps.displays),
+										u8::from(cur_label)
 									);
 									if let Some(si) = overlay_stdin.lock().unwrap().as_mut() {
 										let _ = writeln!(si, "{line}");
@@ -1794,6 +1799,7 @@ pub(crate) async fn start_remote_play(
 		};
 		// Name first (tiny, instant); the avatar may take a blocking decode.
 		let _ = tx.try_send(DataMsg::PeerName(name));
+		let _ = tx.try_send(DataMsg::CursorLabel(cur_label));
 		// Then our device ID, so a direct-connect host shows "641 724 395", not ip:port.
 		if let Some(id) = self_dev_id {
 			let _ = tx.try_send(DataMsg::PeerId(id.grouped()));

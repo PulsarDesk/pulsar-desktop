@@ -1,0 +1,301 @@
+<!doctype html>
+<!-- Launch splash window on Windows/macOS (src-tauri/src/splash.rs; Linux draws the same card
+     natively). Design: claude.ai/design "Pulsar Splash.html". Self-contained on purpose — no
+     bundle, no web fonts — so it paints in the first frames while the main UI still loads.
+     Rust passes ?theme=&mode=&v=&s= and advances the status with window.splashStep(). -->
+<html lang="tr">
+	<head>
+		<meta charset="utf-8" />
+		<title>Pulsar</title>
+		<script>
+			(function () {
+				var q = new URLSearchParams(location.search);
+				var theme = q.get('theme') === 'dark' ? 'dark' : 'light';
+				var mode = q.get('mode') === 'game' ? 'game' : 'remote';
+				try {
+					var t = localStorage.getItem('pulsar.theme.v1');
+					if (t === 'dark' || t === 'light') theme = t;
+					var ui = JSON.parse(localStorage.getItem('pulsar.ui.v1') || 'null');
+					if (ui && (ui.appMode === 'game' || ui.appMode === 'remote')) mode = ui.appMode;
+				} catch (_) {}
+				var r = document.documentElement;
+				r.setAttribute('data-theme', theme);
+				if (mode === 'game') r.setAttribute('data-gaming', '');
+			})();
+		</script>
+		<style>
+			/* Design tokens (app.css / the Pulsar design system). */
+			:root {
+				--surface: oklch(1 0 0);
+				--surface-3: oklch(0.962 0.007 260);
+				--border: oklch(0.918 0.006 262);
+				--text: oklch(0.235 0.018 268);
+				--text-muted: oklch(0.505 0.014 266);
+				--text-faint: oklch(0.635 0.011 264);
+				--accent: oklch(0.555 0.205 272);
+				--accent-soft: oklch(0.955 0.035 272);
+				--mark: var(--accent);
+				--ok: oklch(0.63 0.15 158);
+				--ring-outer: 0.18;
+				--ring-mid: 0.42;
+				--glow: 0.9;
+				--ease: cubic-bezier(0.22, 1, 0.36, 1);
+				--ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+				--font-display: 'Space Grotesk', ui-sans-serif, system-ui, sans-serif;
+				--font-sans: 'Hanken Grotesk', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+				--font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+			}
+			:root[data-theme='dark'] {
+				--surface: oklch(0.215 0.013 265);
+				--surface-3: oklch(0.29 0.015 265);
+				--border: oklch(0.32 0.014 265);
+				--text: oklch(0.95 0.008 265);
+				--text-muted: oklch(0.72 0.012 265);
+				--text-faint: oklch(0.56 0.012 265);
+				--accent-soft: oklch(0.29 0.07 272);
+				--mark: oklch(0.74 0.15 272);
+				--ring-outer: 0.32;
+				--ring-mid: 0.6;
+				--glow: 0.7;
+			}
+			:root[data-gaming] {
+				--accent: oklch(0.62 0.15 215);
+				--accent-soft: oklch(0.955 0.035 215);
+			}
+			:root[data-gaming][data-theme='dark'] {
+				--accent-soft: oklch(0.32 0.06 215);
+				--mark: oklch(0.78 0.13 215);
+			}
+			html,
+			body {
+				margin: 0;
+				height: 100%;
+				/* The window is transparent and exactly the card's size; only its corners show through. */
+				background: transparent;
+				overflow: hidden;
+				user-select: none;
+				-webkit-user-select: none;
+				cursor: default;
+			}
+			body {
+				display: grid;
+				place-items: center;
+				font-family: var(--font-sans);
+				color: var(--text);
+				-webkit-font-smoothing: antialiased;
+			}
+			.splash {
+				position: relative;
+				width: 520px;
+				height: 340px;
+				box-sizing: border-box;
+				border-radius: 26px;
+				background: var(--surface);
+				border: 1px solid var(--border);
+				overflow: hidden;
+				display: flex;
+				flex-direction: column;
+				align-items: center;
+				justify-content: center;
+				animation: in 0.3s var(--ease) both;
+			}
+			.splash::before {
+				content: '';
+				position: absolute;
+				inset: 0;
+				background: radial-gradient(60% 55% at 50% 38%, var(--accent-soft), transparent 70%);
+				opacity: var(--glow);
+				pointer-events: none;
+			}
+			.mark {
+				position: relative;
+				width: 88px;
+				height: 88px;
+				display: grid;
+				place-items: center;
+			}
+			.ring {
+				position: absolute;
+				left: 50%;
+				top: 50%;
+				width: 88px;
+				height: 88px;
+				margin: -44px 0 0 -44px;
+				box-sizing: border-box;
+				border: 1.5px solid var(--accent);
+				border-radius: 50%;
+				opacity: 0;
+				animation: ripple 2.4s var(--ease-out) infinite;
+			}
+			.ring:nth-child(2) {
+				animation-delay: 0.8s;
+			}
+			.ring:nth-child(3) {
+				animation-delay: 1.6s;
+			}
+			.core {
+				position: relative;
+				z-index: 1;
+				display: block;
+				animation: beat 2.4s var(--ease) infinite;
+			}
+			.word {
+				position: relative;
+				margin-top: 22px;
+				font-family: var(--font-display);
+				font-weight: 600;
+				font-size: 30px;
+				letter-spacing: -0.035em;
+			}
+			.ver {
+				position: absolute;
+				top: 16px;
+				right: 18px;
+				font-family: var(--font-mono);
+				font-size: 11px;
+				color: var(--text-faint);
+			}
+			.load {
+				position: absolute;
+				left: 36px;
+				right: 36px;
+				bottom: 30px;
+				display: flex;
+				flex-direction: column;
+				gap: 10px;
+			}
+			.row {
+				display: flex;
+				justify-content: space-between;
+				align-items: center;
+				font-size: 12px;
+				color: var(--text-muted);
+			}
+			.pct {
+				font-family: var(--font-mono);
+				font-size: 11px;
+				color: var(--text-faint);
+			}
+			.status {
+				display: flex;
+				align-items: center;
+				gap: 8px;
+			}
+			.dot {
+				width: 6px;
+				height: 6px;
+				border-radius: 50%;
+				background: var(--accent);
+			}
+			.status.ok .dot {
+				background: var(--ok);
+			}
+			.bar {
+				height: 3px;
+				border-radius: 999px;
+				background: var(--surface-3);
+				overflow: hidden;
+			}
+			.bar i {
+				display: block;
+				height: 100%;
+				width: 0;
+				border-radius: inherit;
+				background: var(--accent);
+			}
+			@keyframes in {
+				from {
+					opacity: 0;
+				}
+			}
+			@keyframes ripple {
+				0% {
+					transform: scale(0.6);
+					opacity: 0.45;
+				}
+				100% {
+					transform: scale(3.2);
+					opacity: 0;
+				}
+			}
+			@keyframes beat {
+				0%,
+				100% {
+					transform: scale(1);
+				}
+				12% {
+					transform: scale(1.06);
+				}
+				24% {
+					transform: scale(1);
+				}
+			}
+			@media (prefers-reduced-motion: reduce) {
+				.ring,
+				.core {
+					animation: none;
+				}
+			}
+		</style>
+	</head>
+	<body data-tauri-drag-region>
+		<div class="splash" role="status" aria-live="polite" data-tauri-drag-region>
+			<span class="ver" id="ver" data-tauri-drag-region></span>
+			<div class="mark" aria-hidden="true" data-tauri-drag-region>
+				<span class="ring"></span><span class="ring"></span><span class="ring"></span>
+				<svg class="core" width="72" height="72" viewBox="0 0 52 52" fill="none" data-tauri-drag-region>
+					<circle cx="26" cy="26" r="24" stroke="var(--mark)" stroke-width="1.5" style="opacity: var(--ring-outer)" />
+					<circle cx="26" cy="26" r="16" stroke="var(--mark)" stroke-width="1.75" style="opacity: var(--ring-mid)" />
+					<circle cx="26" cy="26" r="8.5" stroke="var(--mark)" stroke-width="2" />
+					<circle cx="26" cy="26" r="3.5" fill="var(--mark)" />
+				</svg>
+			</div>
+			<div class="word" data-tauri-drag-region>Pulsar</div>
+			<div class="load" data-tauri-drag-region>
+				<div class="row" data-tauri-drag-region>
+					<span class="status" id="status"><span class="dot"></span><span id="label"></span></span>
+					<span class="pct" id="pct"></span>
+				</div>
+				<div class="bar"><i id="fill"></i></div>
+			</div>
+		</div>
+		<script>
+			(function () {
+				var q = new URLSearchParams(location.search);
+				var $ = function (id) {
+					return document.getElementById(id);
+				};
+				$('ver').textContent = q.get('v') ? 'v' + q.get('v') : '';
+				// The bar creeps through each step's share (toward, never onto, the next step's
+				// start — 90 % of the way, easing off) and glides on when Rust reports the next
+				// step. Mirrors `Step::creep` in splash.rs.
+				var STEPS = [8, 40, 70, 100];
+				var TYPICAL = [1.0, 0.6, 3.0, 0.2];
+				var cur = 0, since = performance.now(), shown = 0, last = since;
+				/** Rust (splash.rs `step`) calls this as startup advances. */
+				window.splashStep = function (pct, label, ok) {
+					$('label').textContent = label;
+					$('status').classList.toggle('ok', !!ok);
+					var i = STEPS.indexOf(pct);
+					if (i > cur || (i === cur && cur === 0)) {
+						cur = i;
+						since = performance.now();
+					}
+				};
+				function frame(now) {
+					var dt = Math.min((now - last) / 1000, 0.1);
+					last = now;
+					var a = STEPS[cur], b = STEPS[Math.min(cur + 1, STEPS.length - 1)];
+					var goal = cur === STEPS.length - 1 ? 100 : a + (b - a) * 0.9 * (1 - Math.exp(-(now - since) / 1000 / TYPICAL[cur]));
+					var rate = cur === STEPS.length - 1 ? 10 : 4;
+					shown = Math.max(shown, shown + (goal - shown) * Math.min(dt * rate, 1));
+					$('fill').style.width = shown + '%';
+					$('pct').textContent = Math.round(shown) + '%';
+					requestAnimationFrame(frame);
+				}
+				window.splashStep(8, q.get('s') || '', false);
+				requestAnimationFrame(frame);
+			})();
+		</script>
+	</body>
+</html>

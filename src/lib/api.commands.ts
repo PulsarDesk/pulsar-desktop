@@ -57,6 +57,14 @@ export const api = {
 	/** Whether the webview is software-painted (AC off) this session — the root gets `data-sw-ui`
 	 * so the gaming CSS strips expensive blurred shadows only where needed. */
 	webviewSwPainted: () => invoke<boolean>('webview_sw_painted'),
+	/** The main UI is ready: reveal the (hidden) main window and close the launch splash window. */
+	splashDone: () => invoke<void>('splash_done'),
+	/** The UI bundle mounted (the splash's "preparing the interface" step). */
+	splashUi: () => invoke<void>('splash_ui'),
+	/** The UI is waiting on the startup encoder probe (the splash shows that step). */
+	splashEncoder: () => invoke<void>('splash_encoder'),
+	/** Remember the look ("dark"/"light", + " game", + " lang=xx") for the next launch's splash. */
+	setSplashTheme: (theme: string) => invoke<void>('set_splash_theme', { theme }),
 	/** This machine's primary LAN IPv4 (for "connect to me by IP"); empty if none. */
 	localIp: () => invoke<string>('local_ip'),
 	/** The node's actual bound UDP port (0 = not online yet) — shown as "ip:port". */
@@ -219,6 +227,7 @@ export const api = {
 	setFramePacing: (id: number, on: boolean) => invoke<void>('set_frame_pacing', { id, on }),
 	/** Toggle the always-on mini stats HUD on the native renderer (persisted in ui). */
 	setStatsHud: (id: number, on: boolean) => invoke<void>('set_stats_hud', { id, on }),
+	setCursorLabel: (id: number, on: boolean) => invoke<void>('set_cursor_label', { id, on }),
 	/** Toggle the always-visible overlay-open button on the native renderer. */
 	setOverlayButton: (id: number, on: boolean) => invoke<void>('set_overlay_button', { id, on }),
 	/** Move the overlay-open button (egui points from the renderer's top-left) — streamed

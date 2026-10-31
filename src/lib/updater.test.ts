@@ -79,7 +79,7 @@ describe('silentUpdateCheck', () => {
 
 // ── Consent-based flow (checkForUpdateUi / installUpdate) ─────────────────────
 
-import { checkForUpdateUi, installUpdate } from './updater';
+import { checkForUpdateUi, installUpdate, startPeriodicUpdateCheck, plainNotes } from './updater';
 import { update as updateState } from './update.svelte';
 import { ui } from './settings.svelte';
 
@@ -197,5 +197,81 @@ describe('installUpdate', () => {
 
 		expect(updateState.phase).toBe('error');
 		expect(updateState.error).toContain('net');
+	});
+});
+
+describe('startPeriodicUpdateCheck', () => {
+	it('re-checks on every tick while idle and stops when told to', async () => {
+		vi.useFakeTimers();
+		try {
+			mockCheck.mockResolvedValue(null);
+			const stop = startPeriodicUpdateCheck(() => false, 1000);
+			await vi.advanceTimersByTimeAsync(3000);
+			expect(mockCheck).toHaveBeenCalledTimes(3);
+			stop();
+			await vi.advanceTimersByTimeAsync(3000);
+			expect(mockCheck).toHaveBeenCalledTimes(3);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('skips ticks during a session, with the modal open, or mid-install', async () => {
+		vi.useFakeTimers();
+		let busy = true;
+		const stop = startPeriodicUpdateCheck(() => busy, 1000);
+		try {
+			mockCheck.mockResolvedValue(null);
+			await vi.advanceTimersByTimeAsync(1000);
+			busy = false;
+			updateState.open = true;
+			await vi.advanceTimersByTimeAsync(1000);
+			updateState.open = false;
+			updateState.phase = 'downloading';
+			await vi.advanceTimersByTimeAsync(1000);
+			expect(mockCheck).not.toHaveBeenCalled();
+			updateState.phase = 'idle';
+			await vi.advanceTimersByTimeAsync(1000);
+			expect(mockCheck).toHaveBeenCalledOnce();
+		} finally {
+			stop();
+			vi.useRealTimers();
+		}
+	});
+});
+
+describe('release notes', () => {
+	const md =
+		'## [0.13.5](https://github.com/PulsarDesk/pulsar-desktop/compare/v0.13.4...v0.13.5) (2026-10-30)\n\n' +
+		'### Bug Fixes\n\n' +
+		'* adaptive ladder on ([097f54f](https://github.com/PulsarDesk/pulsar-desktop/commit/097f54f140fc))\n' +
+		'* **deps:** bump ctutils ([2260e28](https://github.com/PulsarDesk/pulsar-desktop/commit/2260e28517de))\n';
+
+	it('turns the semantic-release changelog into plain text', () => {
+		expect(plainNotes(md)).toBe('Bug Fixes\n\n• adaptive ladder on\n• deps: bump ctutils');
+	});
+
+	it('fetches the GitHub changelog when the manifest only has the "Pulsar x.y.z" placeholder', async () => {
+		const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ body: md }) });
+		vi.stubGlobal('fetch', fetchMock);
+		try {
+			mockCheck.mockResolvedValue(freshUpdate({ body: 'Pulsar 2.0.0' }));
+			await checkForUpdateUi();
+			expect(fetchMock.mock.calls[0][0]).toMatch(/releases\/tags\/v2\.0\.0$/);
+			expect(updateState.notes).toContain('• adaptive ladder on');
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	});
+
+	it('keeps the placeholder when GitHub is unreachable', async () => {
+		vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
+		try {
+			mockCheck.mockResolvedValue(freshUpdate({ body: 'Pulsar 2.0.0' }));
+			await checkForUpdateUi();
+			expect(updateState.notes).toBe('Pulsar 2.0.0');
+		} finally {
+			vi.unstubAllGlobals();
+		}
 	});
 });

@@ -33,6 +33,8 @@ mod files_window;
 mod fs_browse;
 mod host;
 mod i18n;
+#[cfg(unix)]
+mod instance_unix;
 mod io_cmds;
 #[cfg(windows)]
 mod job;
@@ -50,6 +52,8 @@ mod render_stats;
 // see controllers.rs.
 mod controllers;
 mod session_cmds;
+mod remote_cursor;
+mod splash;
 mod state;
 mod util;
 mod viewer;
@@ -87,7 +91,7 @@ use io_cmds::{
 use play::{start_remote_play, stop_stream};
 use session_cmds::{
 	fs_get, fs_list, host_window_list, render_banner, render_chat, render_fs, render_hint,
-	render_kin, render_nav, render_toast, reverse_play, set_frame_pacing, set_overlay,
+	render_kin, render_nav, render_toast, reverse_play, set_cursor_label, set_frame_pacing, set_overlay,
 	set_overlay_button, set_overlay_button_pos, set_play_adapt, set_play_audio, set_play_bitrate,
 	set_play_codec, set_play_encoder, set_play_fps, set_play_monitor, set_play_quality,
 	set_play_resolution, set_play_window, set_stats_hud,
@@ -321,6 +325,8 @@ pub fn run() {
 		tracing::info!("another Pulsar instance is already running for this user — surfacing it");
 		#[cfg(windows)]
 		signal_existing_instance();
+		#[cfg(unix)]
+		instance_unix::signal_existing_instance();
 		return;
 	}
 
@@ -333,26 +339,21 @@ pub fn run() {
 			use tauri::menu::{Menu, MenuItem};
 			use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
-			// The main window starts hidden (tauri.conf `visible:false`) so the UI can
-			// paint behind a splash before it appears — no white/frame flash on launch.
-			// The frontend reveals it once mounted; this is a safety net so a frontend
-			// failure can never leave an invisible window.
-			{
-				let h = app.handle().clone();
-				std::thread::spawn(move || {
-					std::thread::sleep(std::time::Duration::from_secs(4));
-					if let Some(w) = h.get_webview_window("main") {
-						if !w.is_visible().unwrap_or(true) {
-							let _ = w.show();
-						}
-					}
-				});
-			}
+			// The main window starts hidden (tauri.conf `visible:false`) while its UI loads;
+			// a small separate splash window is on screen meanwhile. The frontend swaps them
+			// via `splash_done` once ready (splash.rs also holds the never-ready fallback).
+			splash::show(app.handle());
 
 			// Re-launching a tray-hidden Pulsar should surface this instance (a second
 			// process detects the single-instance lock + signals us).
 			#[cfg(windows)]
 			spawn_show_watcher(app.handle().clone());
+			#[cfg(unix)]
+			instance_unix::spawn_show_listener(app.handle().clone());
+			// The renderer's local-cursor hiding follows the real capture state.
+			crate::session_cmds::spawn_engage_sync(app.handle().clone());
+			crate::remote_cursor::start(app.handle());
+			crate::host::takeover::start();
 
 			// Startup capability probe (encode + decode), Moonlight-style: every launch,
 			// in the background; the frontend splash waits for the `local-caps` event.
@@ -562,6 +563,10 @@ pub fn run() {
 			force_ac,
 			default_ui_hwaccel,
 			webview_sw_painted,
+			splash::splash_done,
+			splash::splash_ui,
+			splash::splash_encoder,
+			splash::set_splash_theme,
 			local_ip,
 			node_port,
 			auto_connect_target,
@@ -594,6 +599,7 @@ pub fn run() {
 			set_frame_pacing,
 			set_stats_hud,
 			set_overlay_button,
+			set_cursor_label,
 			set_overlay_button_pos,
 			render_hint,
 			render_banner,

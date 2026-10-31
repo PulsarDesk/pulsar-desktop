@@ -123,6 +123,9 @@ export const onKbdEngaged = (cb: () => void) => listenTo<null>('kbd-engaged', ()
 /** Client (Linux native): capture RELEASED without ending the session (3×RightCtrl) —
  * the grab is off, the session stays alive, the next video click re-engages. */
 export const onKbdReleased = (cb: () => void) => listenTo<null>('kbd-released', () => cb());
+/** The USER detached control (Ctrl+Alt+Z / 3×RightCtrl) — unlike `kbd-released`, which also
+ * fires on a focus-loss disengage. */
+export const onKbdDetach = (cb: () => void) => listenTo<null>('kbd-detach', () => cb());
 /** Client (game mode): the user pressed the Ctrl+Shift+M overlay combo — toggle the
  * in-session gaming overlay. Payload-less; the session stays alive (unlike kbd-leave). */
 export const onOverlayToggle = (cb: () => void) => listenTo<null>('overlay-toggle', () => cb());

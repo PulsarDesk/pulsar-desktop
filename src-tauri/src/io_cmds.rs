@@ -694,61 +694,130 @@ pub(crate) unsafe fn fill_children_to_client(hwnd: windows_sys::Win32::Foundatio
 /// webview keeps clicking — while the pointer stays confined to the toplevel.
 /// Windows/macOS use tao's grab (ClipCursor / CGAssociateMouseAndMouseCursorPosition).
 #[tauri::command]
-pub(crate) async fn confine_pointer(app: AppHandle, on: bool) -> Result<(), String> {
+pub(crate) async fn confine_pointer(app: AppHandle, on: bool, id: Option<u64>) -> Result<(), String> {
 	#[cfg(all(unix, not(target_os = "macos")))]
 	{
-		use tauri::Manager;
-		let _ = app.clone().run_on_main_thread(move || unsafe {
-			use gtk::glib::Cast;
-			use gtk::glib::translate::ToGlibPtr;
-			use gtk::prelude::WidgetExt;
-			use x11::xlib;
-			let dpy = gtk::gdk::Display::default()
-				.and_then(|d| d.downcast::<gdkx11::X11Display>().ok())
-				.map(|d| {
-					let stash = ToGlibPtr::<*mut gdkx11::ffi::GdkX11Display>::to_glib_none(&d);
-					gdkx11::ffi::gdk_x11_display_get_xdisplay(stash.0)
+		use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+		// Each call supersedes the previous one (a pending retry of an older `on` stops).
+		static GEN: AtomicU64 = AtomicU64::new(0);
+		// Whether a confine is WANTED right now. Checked on the main thread right before every
+		// grab attempt, so a retry can never land after the release (a stuck pointer grab
+		// outlives the session and locks the user's mouse to the window).
+		static WANTED: AtomicBool = AtomicBool::new(false);
+		let gen = GEN.fetch_add(1, Ordering::SeqCst) + 1;
+		WANTED.store(on, Ordering::SeqCst);
+		if !on {
+			let _ = app.run_on_main_thread(|| unsafe {
+				x11_confine(None);
+			});
+			return Ok(());
+		}
+		// The grab is requested from the very click that takes control — while that button
+		// is still down the pointer is actively grabbed elsewhere (AlreadyGrabbed) and the
+		// confinement silently never happened. Retry until it lands (the button is released
+		// within moments), giving up after ~2 s or as soon as a newer call supersedes us.
+		std::thread::spawn(move || {
+			for attempt in 0..40 {
+				if GEN.load(Ordering::SeqCst) != gen {
+					return;
+				}
+				let (tx, rx) = std::sync::mpsc::channel();
+				let a = app.clone();
+				let _ = app.run_on_main_thread(move || {
+					// Re-check ON the main thread: a release queued meanwhile must win.
+					if !WANTED.load(Ordering::SeqCst) || GEN.load(Ordering::SeqCst) != gen {
+						let _ = tx.send(x11::xlib::GrabSuccess); // nothing to do — stop retrying
+						return;
+					}
+					let _ = tx.send(unsafe { x11_confine(Some((&a, id))) });
 				});
-			let Some(dpy) = dpy else { return }; // not on X11 (native Wayland override)
-			if !on {
-				xlib::XUngrabPointer(dpy, xlib::CurrentTime);
-				xlib::XFlush(dpy);
-				return;
-			}
-			let xid = app
-				.get_webview_window("main")
-				.and_then(|w| w.gtk_window().ok())
-				.and_then(|gw| gw.window())
-				.and_then(|gdkw| gdkw.downcast::<gdkx11::X11Window>().ok())
-				.map(|x| x.xid());
-			let Some(xid) = xid else { return };
-			let mask = (xlib::PointerMotionMask
-				| xlib::ButtonPressMask
-				| xlib::ButtonReleaseMask
-				| xlib::ButtonMotionMask) as u32;
-			let status = xlib::XGrabPointer(
-				dpy,
-				xid,
-				xlib::True,
-				mask,
-				xlib::GrabModeAsync,
-				xlib::GrabModeAsync,
-				xid, // confine_to: the app toplevel
-				0,   // keep the current cursor
-				xlib::CurrentTime,
-			);
-			xlib::XFlush(dpy);
-			if status != xlib::GrabSuccess {
-				tracing::warn!("confine_pointer: XGrabPointer failed status={status}");
+				match rx.recv_timeout(std::time::Duration::from_secs(1)) {
+					Ok(status) if status == x11::xlib::GrabSuccess => return,
+					Ok(status) if attempt == 39 => {
+						tracing::warn!("confine_pointer: XGrabPointer kept failing status={status}");
+					}
+					_ => {}
+				}
+				std::thread::sleep(std::time::Duration::from_millis(50));
 			}
 		});
 	}
 	#[cfg(any(not(unix), target_os = "macos"))]
 	{
 		use tauri::Manager;
+		let _ = id; // window-level grab only here
 		if let Some(w) = app.get_webview_window("main") {
 			let _ = w.set_cursor_grab(on);
 		}
 	}
 	Ok(())
+}
+
+/// Raw X11 confine (see `confine_pointer`): `Some((app, play))` grabs the pointer confined
+/// to that play's video container (the session's video area) — or, without a shown
+/// container, to the main toplevel — and returns the `XGrabPointer` status; `None` ungrabs.
+/// Main thread only.
+#[cfg(all(unix, not(target_os = "macos")))]
+unsafe fn x11_confine(target: Option<(&AppHandle, Option<u64>)>) -> i32 {
+	use gtk::glib::Cast;
+	use gtk::glib::translate::ToGlibPtr;
+	use gtk::prelude::WidgetExt;
+	use tauri::Manager;
+	use x11::xlib;
+	let dpy = gtk::gdk::Display::default()
+		.and_then(|d| d.downcast::<gdkx11::X11Display>().ok())
+		.map(|d| {
+			let stash = ToGlibPtr::<*mut gdkx11::ffi::GdkX11Display>::to_glib_none(&d);
+			gdkx11::ffi::gdk_x11_display_get_xdisplay(stash.0)
+		});
+	let Some(dpy) = dpy else { return xlib::GrabSuccess }; // not on X11 (native Wayland override)
+	let Some((app, play)) = target else {
+		xlib::XUngrabPointer(dpy, xlib::CurrentTime);
+		xlib::XFlush(dpy);
+		return xlib::GrabSuccess;
+	};
+	let xid = app
+		.get_webview_window("main")
+		.and_then(|w| w.gtk_window().ok())
+		.and_then(|gw| gw.window())
+		.and_then(|gdkw| gdkw.downcast::<gdkx11::X11Window>().ok())
+		.map(|x| x.xid());
+	let Some(xid) = xid else { return xlib::GrabSuccess };
+	let confine = play
+		.and_then(crate::render::visible_container_xid)
+		.map(|c| c as xlib::Window)
+		.unwrap_or(xid);
+	let mask = (xlib::PointerMotionMask
+		| xlib::ButtonPressMask
+		| xlib::ButtonReleaseMask
+		| xlib::ButtonMotionMask) as u32;
+	let status = xlib::XGrabPointer(
+		dpy,
+		xid,
+		xlib::True,
+		mask,
+		xlib::GrabModeAsync,
+		xlib::GrabModeAsync,
+		confine, // confine_to: the session's video container (else the app toplevel)
+		0,   // keep the current cursor
+		xlib::CurrentTime,
+	);
+	xlib::XFlush(dpy);
+	if status == xlib::GrabSuccess {
+		let (mut rx, mut ry, mut cw, mut ch) = (0, 0, 0u32, 0u32);
+		let (mut root, mut child) = (0, 0);
+		let (mut bw, mut depth) = (0u32, 0u32);
+		xlib::XGetGeometry(dpy, confine, &mut root, &mut rx, &mut ry, &mut cw, &mut ch, &mut bw, &mut depth);
+		xlib::XTranslateCoordinates(dpy, confine, root, 0, 0, &mut rx, &mut ry, &mut child);
+		tracing::info!(
+			play = ?play,
+			to_container = confine != xid,
+			x = rx,
+			y = ry,
+			w = cw,
+			h = ch,
+			"confine_pointer: pointer confined"
+		);
+	}
+	status
 }

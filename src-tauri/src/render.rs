@@ -191,6 +191,22 @@ pub(crate) fn rename_native_container(app: &AppHandle, old_id: u64, new_id: u64)
 	});
 }
 
+/// XID of play `id`'s container while it is shown — the pointer-confine target (the video
+/// area, not the whole app window). MAIN THREAD only (the containers are thread-local there).
+pub(crate) fn visible_container_xid(id: u64) -> Option<u64> {
+	use gtk::glib::Cast;
+	NATIVE_CONTAINERS.with(|m| {
+		let m = m.borrow();
+		if m.get(&id).is_none() {
+			tracing::debug!(id, known = ?m.keys().collect::<Vec<_>>(), "confine: no container for this play");
+		}
+		m.get(&id)
+			.filter(|w| w.is_visible())
+			.and_then(|w| w.clone().downcast::<gdkx11::X11Window>().ok())
+			.map(|x| x.xid() as u64)
+	})
+}
+
 /// Return the X11 XID of an existing container for `id` (so a reconnect with the resident
 /// renderer can discover the XID it was spawned with without creating a new GdkWindow).
 pub(crate) async fn container_xid(app: &AppHandle, id: u64) -> Option<u64> {

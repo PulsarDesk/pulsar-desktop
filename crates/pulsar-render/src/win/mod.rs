@@ -68,6 +68,15 @@ static POINTER: Mutex<(f32, f32)> = Mutex::new((0.0, 0.0));
 static CHAT_LOG: Mutex<Vec<(bool, String)>> = Mutex::new(Vec::new());
 /// Host messages not yet seen in the overlay Chat view — badge on the open button.
 static CHAT_UNREAD: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Recent host messages + arrival, for the closed-state bubbles (overlay::draw_chat_bubbles).
+static CHAT_TOASTS: Mutex<Vec<(String, std::time::Instant)>> = Mutex::new(Vec::new());
+
+/// The live closed-state chat bubbles as (text, age s), expiring old ones.
+fn chat_toasts() -> Vec<(String, f32)> {
+	let mut t = CHAT_TOASTS.lock().unwrap();
+	t.retain(|(_, at)| at.elapsed().as_secs_f32() < crate::overlay::BUBBLE_SECS);
+	t.iter().map(|(m, at)| (m.clone(), at.elapsed().as_secs_f32())).collect()
+}
 /// Files view, REMOTE pane: (HOME-relative path, rows) from `fsjson …` (same
 /// one-line JSON as linux.rs) — copied into the overlay state each frame.
 static FS_REMOTE: Mutex<(String, Vec<crate::overlay::FsRow>)> =
@@ -80,6 +89,9 @@ static RTT_DMS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new
 // ---- closed-state chrome (Linux parity: linux.rs statics of the same names) ----
 /// Always-on mini stats HUD while the overlay is closed (`statshud 0|1` / caps seed).
 static STATS_HUD: AtomicBool = AtomicBool::new(false);
+/// "Show my pointer with my name on the host" (remote mode; synced via stdin `curlabel 0|1`
+/// and the caps line, flippable from the Yayın row). Default ON, like the app's config.
+static CUR_LABEL: AtomicBool = AtomicBool::new(true);
 /// Parsec-style overlay-open button while closed (`ovbtn 0|1` / caps seed). Default ON
 /// like linux.rs — the frontend only sends `ovbtn` when the user turned it OFF.
 static OVERLAY_BTN: AtomicBool = AtomicBool::new(true);
@@ -336,6 +348,9 @@ fn stdin_control() {
 		} else if let Some(rest) = l.strip_prefix("statshud ") {
 			let v = rest.trim();
 			STATS_HUD.store(v == "1" || v == "on" || v == "true", Ordering::SeqCst);
+		} else if let Some(rest) = l.strip_prefix("curlabel ") {
+			let v = rest.trim();
+			CUR_LABEL.store(v == "1" || v == "on" || v == "true", Ordering::SeqCst);
 		} else if let Some(rest) = l.strip_prefix("ovbtn ") {
 			let v = rest.trim();
 			OVERLAY_BTN.store(v == "1" || v == "on" || v == "true", Ordering::SeqCst);
@@ -365,6 +380,7 @@ fn stdin_control() {
 						"conn" => conn = v.to_string(),
 						"displays" => *DISPLAYS.lock().unwrap() = crate::overlay::parse_displays(v),
 						"statshud" => STATS_HUD.store(on, Ordering::SeqCst),
+						"curlabel" => CUR_LABEL.store(on, Ordering::SeqCst),
 						"ovbtn" => OVERLAY_BTN.store(on, Ordering::SeqCst),
 						"btnpos" => {
 							if let Some((x, y)) = v.split_once(',') {
@@ -412,6 +428,10 @@ fn stdin_control() {
 				}
 				if dir != "out" {
 					CHAT_UNREAD.fetch_add(1, Ordering::SeqCst);
+					let mut t = CHAT_TOASTS.lock().unwrap();
+					t.push((log.last().map(|m| m.1.clone()).unwrap_or_default(), std::time::Instant::now()));
+					let over = t.len().saturating_sub(crate::overlay::BUBBLE_MAX);
+					t.drain(..over);
 				}
 			}
 		} else if let Some(json) = l.strip_prefix("fsjson ") {
@@ -914,6 +934,7 @@ impl Renderer {
 		// Mirror the closed-state chrome toggles every frame (like linux.rs) so the
 		// overlay rows show + apply the live values (stdin echoes land here too).
 		self.ostate.stats_hud = STATS_HUD.load(Ordering::SeqCst);
+		self.ostate.cur_label = CUR_LABEL.load(Ordering::SeqCst);
 		self.ostate.overlay_btn = OVERLAY_BTN.load(Ordering::SeqCst);
 		self.ostate.btn_pos = *OVBTN_POS.lock().unwrap();
 		// Session audio truth (linux.rs parity) → the Ses section's live highlight.
@@ -944,9 +965,12 @@ impl Renderer {
 		ostate.chat = CHAT_LOG.lock().unwrap().clone();
 		// Reading the chat clears the unread badge; new arrivals while the Chat view
 		// is on screen count as read immediately.
-		if self.ov_ui.view == crate::overlay::View::Chat {
-			CHAT_UNREAD.store(0, Ordering::SeqCst);
+		let in_chat = self.ov_ui.view == crate::overlay::View::Chat;
+		let seen = if in_chat { CHAT_UNREAD.swap(0, Ordering::SeqCst) } else { 0 };
+		if in_chat {
+			CHAT_TOASTS.lock().unwrap().clear();
 		}
+		crate::overlay::mark_new_chat(&mut self.ov_ui, in_chat, ostate.chat.len(), seen);
 		ostate.chat_unread = CHAT_UNREAD.load(Ordering::SeqCst);
 		{
 			let (p, rows) = &*FS_REMOTE.lock().unwrap();
@@ -988,6 +1012,7 @@ impl Renderer {
 						// NOW so the row + HUD react instantly; the frontend's stdin echo
 						// (`statshud`/`ovbtn`) just confirms the same value later.
 						"statshud" => STATS_HUD.store(val == "on", Ordering::SeqCst),
+						"curlabel" => CUR_LABEL.store(val == "on", Ordering::SeqCst),
 						"ovbtn" => OVERLAY_BTN.store(val == "on", Ordering::SeqCst),
 						// Audio toggles apply optimistically (linux.rs parity); the app's
 						// `audio …` line re-syncs the truth after the host acknowledges.
@@ -1214,6 +1239,8 @@ impl Renderer {
 	/// drawn over the live video while the overlay is CLOSED. Display chrome only — the
 	/// open-button CLICK is hit-tested in `wndproc` (this child owns the pointer here).
 	unsafe fn paint_closed(&mut self) {
+		// Closed: the next Chat visit gets a fresh "— New —" divider.
+		crate::overlay::mark_new_chat(&mut self.ov_ui, false, 0, 0);
 		self.sync_cursor_tex();
 		let cursor_draw = self.cursor_draw();
 		// Expire + fade the tooltip (alpha 1→0 over the last HINT_FADE seconds).
@@ -1234,9 +1261,11 @@ impl Renderer {
 		let stats_hud = STATS_HUD.load(Ordering::SeqCst);
 		let ovbtn = OVERLAY_BTN.load(Ordering::SeqCst);
 		let stalled = STALLED.load(Ordering::Relaxed);
-		if !stats_hud && !ovbtn && hint_text.is_none() && cursor_draw.is_none() && !stalled {
+		let toasts = chat_toasts();
+		if !stats_hud && !ovbtn && hint_text.is_none() && cursor_draw.is_none() && !stalled && toasts.is_empty() {
 			return;
 		}
+		self.ostate.chat_toasts = toasts;
 		// Sync the display state (same sources as the open path).
 		let s = *STATS.lock().unwrap();
 		if s[0] > 0.0 {
@@ -1287,6 +1316,7 @@ impl Renderer {
 			if let Some((text, alpha)) = &hint_text {
 				crate::overlay::draw_hint(ctx, text, *alpha);
 			}
+			crate::overlay::draw_chat_bubbles(ctx, ostate);
 			paint_side_cursor(ctx, cursor_draw);
 		});
 		let _ = painter.update_textures(&self.device, &self.context, &mut out.textures_delta);

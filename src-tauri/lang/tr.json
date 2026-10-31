@@ -28,5 +28,9 @@
 	"host.captureFailed": "Ekran yakalama başlatılamadı",
 	"host.captureStopped": "Ekran yakalama durdu",
 	"err.identityChanged": "Bu cihazın kimliği değişti. Yeni kimliği kabul edip yeniden bağlanmak ister misiniz?",
-	"err.localRelayBind": "Yerel relay başlatılamadı (port kullanımda olabilir)"
+	"err.localRelayBind": "Yerel relay başlatılamadı (port kullanımda olabilir)",
+	"splash.start": "Başlatılıyor…",
+	"splash.ui": "Arayüz hazırlanıyor…",
+	"splash.encoder": "Donanımsal kodlayıcı hazırlanıyor…",
+	"splash.ready": "Hazır"
 }

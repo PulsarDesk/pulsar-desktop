@@ -75,6 +75,12 @@ static THREAD_STARTED: AtomicBool = AtomicBool::new(false);
 /// broken session can't trap the keyboard. Set by `engage()` (video click → renderer
 /// `ov engage` line), cleared by `release_engage()` / the 3×RightCtrl combo.
 static ENGAGED: AtomicBool = AtomicBool::new(false);
+
+/// Hook armed AND engaged (the user is controlling) — drives the renderer's cursor
+/// visibility (see `session_cmds::spawn_engage_sync`).
+pub fn is_engaged() -> bool {
+	ENABLED.load(Ordering::SeqCst) && ENGAGED.load(Ordering::SeqCst)
+}
 /// The play id the capture is currently armed for (same-session re-arm detection).
 /// NOT reset by `disable()`: the real tab deactivate→reactivate path is the frontend
 /// calling kbd_capture_stop()→disable() and THEN kbd_capture_start()→enable() for the
@@ -646,6 +652,8 @@ fn handle_key(evdev: u32, down: bool) -> bool {
 			send_flush_events(flush_tx, flush_evs);
 			if let Some(app) = &app_handle {
 				let _ = app.emit("kbd-released", ());
+				// The USER detached (vs a focus-loss release): the webview drops its control too.
+				let _ = app.emit("kbd-detach", ());
 			}
 			return true;
 		}
@@ -662,6 +670,7 @@ fn handle_key(evdev: u32, down: bool) -> bool {
 		send_flush_events(flush_tx, flush_evs);
 		if let Some(app) = &app_handle {
 			let _ = app.emit("kbd-released", ());
+			let _ = app.emit("kbd-detach", ()); // user detach (see 3×RightCtrl)
 		}
 		return true; // never leak the Z locally
 	}

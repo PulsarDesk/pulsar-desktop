@@ -68,8 +68,16 @@ use crate::util::{config_path, display_rotation, identity_path, resolve_relay, D
 #[cfg(target_os = "linux")]
 pub(crate) mod cursor;
 mod handlers;
+pub(crate) mod takeover;
 #[cfg(target_os = "linux")]
 mod libav;
+
+/// Dev aid for UX work: `PULSAR_MOCK_CAPTURE=1` makes this host stream a synthetic test
+/// pattern (`lavfi testsrc2`, software H.264/H.265) instead of the screen, skips the Wayland
+/// portal, and ignores remote mouse/keyboard (nothing reaches the real desktop). Linux only.
+pub(crate) fn mock_capture() -> bool {
+	cfg!(target_os = "linux") && std::env::var_os("PULSAR_MOCK_CAPTURE").is_some_and(|v| v == "1")
+}
 use handlers::{make_on_audio, make_on_file, make_on_stream};
 
 /// Transport features this host advertises in its `StreamCaps` reply: it can carry
@@ -892,6 +900,7 @@ pub(crate) async fn go_online(
 							// "Allow view-only" from the popup starts the session with control
 							// revoked; every other accept path grants control (false).
 							view_only: approved_view_only,
+							cursor_label: true,
 						},
 					);
 					incoming
@@ -1310,12 +1319,51 @@ pub(crate) async fn go_online(
 					move |ev: InputEvent| {
 						// View-only: drop EVERY input event for this session (gamepad too)
 						// while the host user has control revoked.
-						let view_only = view_active
+						let (view_only, remote_mode) = view_active
 							.lock()
 							.unwrap()
 							.get(&sid)
-							.map(|ci| ci.view_only)
-							.unwrap_or(false);
+							.map(|ci| (ci.view_only, ci.mode == crate::state::ConnMode::Remote))
+							.unwrap_or((false, true));
+						let pointer = matches!(
+							ev,
+							InputEvent::PointerMotion { .. }
+								| InputEvent::PointerRelative { .. }
+								| InputEvent::PointerButton { .. }
+								| InputEvent::Scroll { .. }
+						);
+						// Where the streamed screen sits in the virtual desktop, for the client's
+						// labelled pointer drawn while its input is held back (remote_cursor).
+						let ghost_region = || -> Option<crate::remote_cursor::Region> {
+							#[cfg(target_os = "linux")]
+							{
+								input_cap
+									.lock()
+									.unwrap()
+									.as_ref()
+									.and_then(|c| c.pointer_region())
+									.map(|r| (r.x, r.y, r.w, r.h))
+							}
+							#[cfg(windows)]
+							{
+								let idx = cur_display.load(std::sync::atomic::Ordering::Relaxed);
+								let r = pulsar_capture::display_rect(idx)?;
+								let (vw, vh) = (r.virt_width.max(1) as f64, r.virt_height.max(1) as f64);
+								Some((
+									(r.mon_left - r.virt_left) as f64 / vw,
+									(r.mon_top - r.virt_top) as f64 / vh,
+									r.mon_width as f64 / vw,
+									r.mon_height as f64 / vh,
+								))
+							}
+							#[cfg(not(any(target_os = "linux", windows)))]
+							{
+								None
+							}
+						};
+						if view_only && pointer && remote_mode {
+							crate::remote_cursor::held_back(sid, &ev, ghost_region());
+						}
 						if view_only {
 							// On the FALSE->TRUE edge, release whatever was held at the instant
 							// control was revoked (every later up-event is about to be dropped):
@@ -1339,6 +1387,17 @@ pub(crate) async fn go_online(
 							return;
 						}
 						was_view_only = false;
+						// The host user is on their own mouse: hold the client's pointer back
+						// (button releases still go through, so nothing stays pressed) and show
+						// where it points instead. Remote-desktop sessions only.
+						if pointer && remote_mode {
+							let release = matches!(ev, InputEvent::PointerButton { down: false, .. });
+							if takeover::active() && !release {
+								crate::remote_cursor::held_back(sid, &ev, ghost_region());
+								return;
+							}
+							crate::remote_cursor::applied(sid);
+						}
 						// Maximum virtual gamepads per session: matches the client's play.rs
 						// append_idx.min(3) ceiling so an authenticated peer cannot create more
 						// than 4 virtual gamepads or storm plug/unplug by cycling the target field.
@@ -1476,7 +1535,7 @@ pub(crate) async fn go_online(
 								if routed_to_window {
 									return;
 								}
-								if !tried {
+								if !tried && !mock_capture() {
 									tried = true;
 									match pulsar_core::input::DesktopInput::new() {
 										Ok(d) => desktop = Some(d),
@@ -1878,6 +1937,15 @@ pub(crate) async fn go_online(
 						let _ = app_h.emit("peer-name", (peer.clone(), name));
 					}
 				};
+				// The client's "show my pointer with my name here" preference (DataMsg::CursorLabel).
+				let on_cursor_label = {
+					let active = active.clone();
+					move |on: bool| {
+						if let Some(ci) = active.lock().unwrap().get_mut(&sid) {
+							ci.cursor_label = on;
+						}
+					}
+				};
 				// The client pushed its OWN device ID (DataMsg::PeerId): remember it keyed
 				// by this connection's peer-key and broadcast it so every connections window
 				// shows the client's id instead of its ip:port (direct/same-LAN connects).
@@ -1989,6 +2057,7 @@ pub(crate) async fn go_online(
 					on_avatar: Box::new(on_avatar),
 					on_peer_name: Box::new(on_peer_name),
 					on_peer_id: Box::new(on_peer_id),
+					on_cursor_label: Box::new(on_cursor_label),
 					// File manager: FsList/FsGet from this client, answered through the
 					// same outbound queue (HOME-jailed; see fs_browse).
 					on_fs: Box::new(crate::fs_browse::make_on_fs(fs_out)),

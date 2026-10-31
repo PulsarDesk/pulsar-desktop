@@ -10,15 +10,16 @@
 import { api } from '#lib/api.js';
 import { evdevCode } from '#lib/keymap.js';
 
-// Confine the OS cursor to the app window while controlling (best-effort; no-op where
-// unsupported). Rust command, NOT window.setCursorGrab(): tao's Linux set_cursor_grab
-// is a silent no-op (`Ok(())`), so the backend does a real GDK/X11 pointer grab with
-// confine_to on Linux and falls back to tao's grab (ClipCursor) on Windows/macOS.
+// Confine the OS cursor to the session's video area (Linux; the app window elsewhere) while
+// controlling (best-effort; no-op where unsupported). Rust command, NOT
+// window.setCursorGrab(): tao's Linux set_cursor_grab is a silent no-op (`Ok(())`), so the
+// backend does a real X11 pointer grab with confine_to on Linux and falls back to tao's grab
+// (ClipCursor) on Windows/macOS.
 // The VNC-style absolute path deliberately avoids the Pointer Lock API (it froze the
 // webview), but without ANY confinement the cursor walks off the window mid-drag.
-function grabCursor(on: boolean) {
+function grabCursor(on: boolean, id?: number) {
 	import('@tauri-apps/api/core')
-		.then(({ invoke }) => invoke('confine_pointer', { on }))
+		.then(({ invoke }) => invoke('confine_pointer', { on, id: id !== undefined && id >= 0 ? id : null }))
 		.catch(() => {
 			// not running under Tauri (vite dev / tests)
 		});
@@ -111,7 +112,8 @@ export class SessionInput {
 			window.addEventListener('keyup', ku, true);
 			window.addEventListener('blur', onBlur);
 			window.addEventListener('focus', onFocus);
-			grabCursor(true);
+			// Confined to this session's video container (falls back to the app window).
+			grabCursor(true, this.#in.playId());
 			return () => {
 				cancelAnimationFrame(raf);
 				window.removeEventListener('keydown', kd, true);
@@ -197,6 +199,18 @@ export class SessionInput {
 		if (this.controlling) {
 			this.controlling = false;
 			api.kbdCaptureStop().catch(() => {});
+			this.#releaseButtons();
+			this.#releaseHeldKeys();
+		}
+	};
+	// The native capture was RELEASED from outside the webview (Ctrl+Alt+Z / 3×RightCtrl →
+	// kbd-detach): drop the canvas control too, or `.video.control`'s `cursor: none` keeps
+	// the local cursor hidden over the video (the pass-through renderer leaves the pointer to
+	// this canvas). The capture thread stays armed — a detach only disengages it — so no
+	// kbdCaptureStop; the next video click re-engages via startControl as usual.
+	detach = () => {
+		if (this.controlling) {
+			this.controlling = false;
 			this.#releaseButtons();
 			this.#releaseHeldKeys();
 		}

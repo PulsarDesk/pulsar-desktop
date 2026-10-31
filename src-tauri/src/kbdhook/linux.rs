@@ -98,6 +98,12 @@ fn is_focused() -> bool {
 /// overlay-suspended — the exact gate the evdev keyboard/mouse capture applies before
 /// forwarding. The controller touchpad-as-mouse reader consults this so it obeys the
 /// same rule (instead of forwarding unconditionally on its own path).
+/// Capture is armed AND engaged (the user is controlling) — the native renderer hides the
+/// local cursor exactly while this holds (see `session_cmds::spawn_engage_sync`).
+pub fn is_engaged() -> bool {
+	RUNNING.load(Ordering::SeqCst) && ENGAGED.load(Ordering::SeqCst)
+}
+
 pub fn input_active() -> bool {
 	ENGAGED.load(Ordering::SeqCst) && is_focused() && !SUSPENDED.load(Ordering::SeqCst)
 }
@@ -709,6 +715,9 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, star
 									// Release everything held FIRST so no key latches on the host.
 									flush_held(&app, &default_tx, &grabbed, &mut held_buttons);
 									let _ = app.emit("kbd-released", ());
+									// The USER detached (vs a focus-loss release): the webview drops
+									// its canvas control too (cursor back, pointer unconfined).
+									let _ = app.emit("kbd-detach", ());
 									ENGAGED.store(false, Ordering::SeqCst);
 									// Explicit detach: don't let a kiosk session auto-re-engage it away.
 									MANUAL_DISENGAGE.store(true, Ordering::SeqCst);
@@ -743,6 +752,7 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, star
 										// host BEFORE disengaging, or Ctrl/Alt stay latched there.
 										flush_held(&app, &default_tx, &grabbed, &mut held_buttons);
 										let _ = app.emit("kbd-released", ());
+										let _ = app.emit("kbd-detach", ()); // user detach (see 3×RightCtrl)
 										ENGAGED.store(false, Ordering::SeqCst);
 										// Explicit detach: don't let a kiosk session auto-re-engage it away.
 										MANUAL_DISENGAGE.store(true, Ordering::SeqCst);

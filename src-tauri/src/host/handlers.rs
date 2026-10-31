@@ -1504,7 +1504,7 @@ pub(super) fn make_on_stream(
 			}
 		}
 		#[cfg(target_os = "linux")]
-		if pulsar_core::capture::is_wayland() {
+		if (pulsar_core::capture::is_wayland() && !super::mock_capture()) {
 			let slot = cap_slot.lock().unwrap();
 			if let (Some(cap), Some(prev)) = (slot.as_ref(), last_wl_req.as_ref()) {
 				let mut probe = prev.clone();
@@ -1658,13 +1658,14 @@ pub(super) fn make_on_stream(
 			// value). Same-host co-op: each session has its own sid key, so this never
 			// touches a sibling pane from the same device. Preserve any view_only flag the
 			// operator may have toggled in the accept-time → first-StartStream window (C9):
-			// do NOT clobber it with false.
-			let prev_view_only = active
+			// do NOT clobber it with false. Same for the client's cursor-label preference,
+			// which it pushes right after the session is up (before StartStream).
+			let (prev_view_only, prev_cursor_label) = active
 				.lock()
 				.unwrap()
 				.get(&sid)
-				.map(|ci| ci.view_only)
-				.unwrap_or(false);
+				.map(|ci| (ci.view_only, ci.cursor_label))
+				.unwrap_or((false, true));
 			active.lock().unwrap().insert(
 				sid,
 				crate::state::ConnInfo {
@@ -1672,6 +1673,7 @@ pub(super) fn make_on_stream(
 					since_ms,
 					mode,
 					view_only: prev_view_only,
+					cursor_label: prev_cursor_label,
 				},
 			);
 			// stop_tx is None now in the normal flow (the session was registered under its
@@ -1723,7 +1725,7 @@ pub(super) fn make_on_stream(
 		// Wayland: x11grab of rootless Xwayland is black, so capture the
 		// real screen (and inject input) through the desktop portals.
 		#[cfg(target_os = "linux")]
-		if pulsar_core::capture::is_wayland() {
+		if (pulsar_core::capture::is_wayland() && !super::mock_capture()) {
 			// Record the req that this full (re)start streams, so a later bitrate-only ABR
 			// re-stream is absorbed by the fast path above instead of restarting the pipeline.
 			last_wl_req = Some(req.clone());
@@ -2663,7 +2665,7 @@ pub(super) fn make_on_stream(
 		// controller's bitrate steps and keyframe requests apply live. A start failure (device,
 		// encoder or output) falls back to the CLI chain below, unchanged.
 		#[cfg(target_os = "linux")]
-		let libav_started = if !native_started && !pulsar_core::capture::is_wayland() {
+		let libav_started = if !native_started && !(pulsar_core::capture::is_wayland() && !super::mock_capture()) {
 			match super::libav::Params::from_plan(&plan).map(super::libav::LibavHost::start) {
 				Some(Ok(engine)) => {
 					*libav_slot.lock().unwrap() = Some(engine);

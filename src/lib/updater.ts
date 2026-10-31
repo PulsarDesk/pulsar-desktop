@@ -125,7 +125,7 @@ export async function checkForUpdateUi(isBusy?: () => boolean): Promise<void> {
 		updateState.handle = update;
 		updateState.from = update.currentVersion;
 		updateState.to = update.version;
-		updateState.notes = update.body ?? '';
+		updateState.notes = plainNotes(await notesFor(update.version, update.body ?? ''));
 		updateState.installable = await api.selfUpdatePossible().catch(() => true);
 		updateState.available = true;
 		if (ui.autoUpdate && updateState.installable && !isBusy?.()) {
@@ -198,4 +198,63 @@ export async function installUpdate(isBusy?: () => boolean): Promise<void> {
 		updateState.error = String(e);
 		console.warn('[updater] install failed:', e);
 	}
+}
+
+/** How often a long-running launch re-checks for a release (the boot check runs once). */
+export const PERIODIC_CHECK_MS = 60 * 60 * 1000;
+
+/**
+ * Re-run `checkForUpdateUi` every `everyMs` so an app left open for days still learns
+ * about new releases (it used to check only at launch). A tick is skipped while a
+ * session is live, while the update modal is open (the user is looking at that offer —
+ * don't swap its handle underneath them) or while an install is in flight. Returns a
+ * stop function.
+ */
+export function startPeriodicUpdateCheck(isBusy: () => boolean, everyMs = PERIODIC_CHECK_MS): () => void {
+	const timer = setInterval(() => {
+		if (isBusy() || updateState.open || updateState.phase !== 'idle') return;
+		void checkForUpdateUi(isBusy);
+	}, everyMs);
+	return () => clearInterval(timer);
+}
+
+const RELEASES_API = 'https://api.github.com/repos/PulsarDesk/pulsar-desktop/releases/tags/';
+
+/**
+ * The manifest's notes, or — when they're missing or only the "Pulsar x.y.z" placeholder
+ * older release runs wrote — the GitHub release's changelog for that version. Any failure
+ * keeps what the manifest had.
+ */
+async function notesFor(version: string, manifestNotes: string): Promise<string> {
+	const n = manifestNotes.trim();
+	if (n && !/^Pulsar v?\d+\.\d+\.\d+\S*$/.test(n)) return n;
+	try {
+		const r = await fetch(RELEASES_API + 'v' + version.replace(/^v/, ''), {
+			headers: { Accept: 'application/vnd.github+json' },
+			signal: AbortSignal.timeout(8000)
+		});
+		if (!r.ok) return n;
+		const body = ((await r.json()) as { body?: string }).body ?? '';
+		return body.trim() || n;
+	} catch {
+		return n;
+	}
+}
+
+/**
+ * semantic-release changelog markdown → readable plain text for the modal: drops the
+ * "## [x.y.z](compare-url) (date)" title (the modal shows the versions), commit-hash links
+ * and markdown syntax.
+ */
+export function plainNotes(md: string): string {
+	return md
+		.replace(/\r/g, '')
+		.replace(/^#{1,3}\s*\[?v?\d+\.\d+\.\d+[^\n]*\n?/m, '') // version title
+		.replace(/\s*\(\[[0-9a-f]{7,40}\]\([^)]*\)\)/g, '') // ([abc1234](commit-url))
+		.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1') // [text](url) → text
+		.replace(/^#{1,6}\s*/gm, '') // headings
+		.replace(/\*\*([^*]+)\*\*/g, '$1') // bold
+		.replace(/^[ \t]*[*-][ \t]+/gm, '• ') // bullets
+		.replace(/\n{3,}/g, '\n\n')
+		.trim();
 }

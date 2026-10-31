@@ -48,6 +48,9 @@ static HOST_ENC: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
 /// Always-on mini stats HUD while the overlay is closed (frontend-persisted toggle;
 /// synced via stdin `statshud 0|1` and flippable from the overlay row).
 static STATS_HUD: AtomicBool = AtomicBool::new(false);
+/// "Show my pointer with my name on the host" (remote mode; synced via stdin `curlabel 0|1`
+/// and the caps line, flippable from the Yayın row). Default ON, like the app's config.
+static CUR_LABEL: AtomicBool = AtomicBool::new(true);
 /// Parsec-style overlay-open button while the overlay is closed (default ON;
 /// frontend-persisted, synced via stdin `ovbtn 0|1`).
 static OVERLAY_BTN: AtomicBool = AtomicBool::new(true);
@@ -90,6 +93,8 @@ static MIC_ON: AtomicBool = AtomicBool::new(false);
 static CHAT_LOG: std::sync::Mutex<Vec<(bool, String)>> = std::sync::Mutex::new(Vec::new());
 /// Host messages not yet seen in the overlay Chat view — badge on the open button.
 static CHAT_UNREAD: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Recent host messages + arrival, for the closed-state bubbles (overlay::draw_chat_bubbles).
+static CHAT_TOASTS: std::sync::Mutex<Vec<(String, std::time::Instant)>> = std::sync::Mutex::new(Vec::new());
 /// Native Files view, REMOTE pane: (HOME-relative path, rows) from `fsjson …`.
 static FS_REMOTE: std::sync::Mutex<(String, Vec<crate::overlay::FsRow>)> =
 	std::sync::Mutex::new((String::new(), Vec::new()));
@@ -403,6 +408,10 @@ pub fn run() {
 						}
 						if dir != "out" {
 							CHAT_UNREAD.fetch_add(1, Ordering::SeqCst);
+							let mut t = CHAT_TOASTS.lock().unwrap();
+							t.push((log.last().map(|m| m.1.clone()).unwrap_or_default(), std::time::Instant::now()));
+							let over = t.len().saturating_sub(crate::overlay::BUBBLE_MAX);
+							t.drain(..over);
 						}
 					}
 				}
@@ -548,6 +557,11 @@ pub fn run() {
 						// Reset per-session overlay statics before the new session begins.
 						CHAT_LOG.lock().unwrap().clear();
 						CHAT_UNREAD.store(0, Ordering::SeqCst);
+						CHAT_TOASTS.lock().unwrap().clear();
+						// A new session starts DISENGAGED: the previous one may have ended while
+						// captured (no release edge ever came), which left the local cursor
+						// hidden over the next session's video.
+						ENGAGED_R.store(false, Ordering::SeqCst);
 						*FS_REMOTE.lock().unwrap() = (String::new(), Vec::new());
 						*CURSOR_POS.lock().unwrap() = None;
 						*CURSOR_IMG.lock().unwrap() = None;
@@ -600,6 +614,11 @@ pub fn run() {
 						STATS_HUD.store(v == "1" || v == "on" || v == "true", Ordering::SeqCst);
 					}
 				}
+				Some("curlabel") => {
+					if let Some(v) = it.next() {
+						CUR_LABEL.store(v == "1" || v == "on" || v == "true", Ordering::SeqCst);
+					}
+				}
 				// The host's active encode summary (rest of the line, verbatim).
 				Some("hostenc") => {
 					let rest = line.splitn(2, ' ').nth(1).unwrap_or("").to_string();
@@ -622,6 +641,8 @@ pub fn run() {
 									*DISPLAYS.lock().unwrap() = crate::overlay::parse_displays(v)
 								}
 								"statshud" => STATS_HUD
+									.store(v == "1" || v == "on" || v == "true", Ordering::SeqCst),
+								"curlabel" => CUR_LABEL
 									.store(v == "1" || v == "on" || v == "true", Ordering::SeqCst),
 								// Persisted overlay-button state rides the caps line so a
 								// respawn (live codec switch) re-seeds it with everything else.
@@ -1072,6 +1093,7 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 			Mode::Game
 		};
 		state.stats_hud = STATS_HUD.load(Ordering::SeqCst);
+		state.cur_label = CUR_LABEL.load(Ordering::SeqCst);
 		state.overlay_btn = OVERLAY_BTN.load(Ordering::SeqCst);
 		state.btn_pos = *OVBTN_POS.lock().unwrap();
 		state.fit = video::fit_label().to_string();
@@ -1081,10 +1103,18 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 		state.chat = CHAT_LOG.lock().unwrap().clone();
 		// Reading the chat clears the unread badge; new arrivals while the Chat view
 		// is on screen count as read immediately.
-		if open && ov_ui.view == overlay::View::Chat {
-			CHAT_UNREAD.store(0, Ordering::SeqCst);
+		let in_chat = open && ov_ui.view == overlay::View::Chat;
+		let seen = if in_chat { CHAT_UNREAD.swap(0, Ordering::SeqCst) } else { 0 };
+		if in_chat {
+			CHAT_TOASTS.lock().unwrap().clear();
 		}
+		overlay::mark_new_chat(&mut ov_ui, in_chat, state.chat.len(), seen);
 		state.chat_unread = CHAT_UNREAD.load(Ordering::SeqCst);
+		state.chat_toasts = {
+			let mut t = CHAT_TOASTS.lock().unwrap();
+			t.retain(|(_, at)| at.elapsed().as_secs_f32() < overlay::BUBBLE_SECS);
+			t.iter().map(|(m, at)| (m.clone(), at.elapsed().as_secs_f32())).collect()
+		};
 		{
 			let (p, rows) = &*FS_REMOTE.lock().unwrap();
 			state.fs_remote_path = p.clone();
@@ -1487,7 +1517,13 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 			let hint_text = hint;
 			let switching = video::SWITCHING.load(Ordering::Relaxed);
 			let stalled = video::STALLED.load(Ordering::Relaxed);
-			if state.stats_hud || state.overlay_btn || hint_text.is_some() || cursor_draw.is_some() || switching || stalled
+			if state.stats_hud
+				|| state.overlay_btn
+				|| hint_text.is_some()
+				|| cursor_draw.is_some()
+				|| switching
+				|| stalled
+				|| !state.chat_toasts.is_empty()
 			{
 				// Closed-state chrome: the mini stats HUD, the Parsec-style open button
 				// and/or the helper tooltip. Display-only on Linux (the container is input
@@ -1516,6 +1552,7 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 					if state.overlay_btn {
 						let _ = overlay::draw_open_button(ctx, &state);
 					}
+					overlay::draw_chat_bubbles(ctx, &state);
 					if let Some((text, alpha)) = &hint_text {
 						overlay::draw_hint(ctx, text, *alpha);
 					}
@@ -1592,6 +1629,10 @@ fn emit_cmd(state: &mut OverlayState, c: OverlayCmd) {
 				"statshud" => {
 					state.stats_hud = val == "on";
 					STATS_HUD.store(val == "on", Ordering::SeqCst);
+				}
+				"curlabel" => {
+					state.cur_label = val == "on";
+					CUR_LABEL.store(val == "on", Ordering::SeqCst);
 				}
 				"ovbtn" => {
 					state.overlay_btn = val == "on";

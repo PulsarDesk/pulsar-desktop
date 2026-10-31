@@ -28,5 +28,9 @@
 	"host.captureFailed": "Screen capture failed to start",
 	"host.captureStopped": "Screen capture stopped",
 	"err.identityChanged": "The identity behind this device has changed. Accept the new identity and reconnect?",
-	"err.localRelayBind": "Could not start the in-app relay (the port may be in use)"
+	"err.localRelayBind": "Could not start the in-app relay (the port may be in use)",
+	"splash.start": "Starting…",
+	"splash.ui": "Preparing the interface…",
+	"splash.encoder": "Preparing the hardware encoder…",
+	"splash.ready": "Ready"
 }

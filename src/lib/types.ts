@@ -38,6 +38,10 @@ export interface Config {
 	/** (Windows) Relaunch elevated (UAC) at startup so the host can control elevated app windows.
 	 * Default true; applied at startup → needs an app restart. */
 	request_admin?: boolean;
+	/** Host: show a controlling client's name next to the pointer (remote sessions). Default true. */
+	show_remote_cursor?: boolean;
+	/** Client: let the host show this device's name next to the pointer. Default true. */
+	share_cursor_label?: boolean;
 }
 
 export type Transport = 'direct' | 'relay';
