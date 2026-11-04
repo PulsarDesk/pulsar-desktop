@@ -1,6 +1,7 @@
 {
 	"err.online": "go online first",
 	"err.denied": "Connection denied.",
+	"err.peer_outdated": "The other device runs an older Pulsar. Update it to connect with a password.",
 	"err.folder": "folder not found",
 	"err.clipboard": "couldn't send the clipboard",
 	"err.message": "couldn't send the message",

@@ -760,9 +760,14 @@ pub(crate) async fn go_online(
 						// For the OTP, use try_consume_otp which atomically matches AND
 						// rotates under one lock, eliminating the read→compare→rotate TOCTOU
 						// race where two concurrent tasks could both match the same live OTP.
-						let otp_accepted = crate::commands::try_consume_otp(&app_h, &provided);
-						let custom_accepted =
-							!custom_pw.is_empty() && crate::auth::secret_eq(&provided, &custom_pw);
+						// PAKE (new clients) or a legacy plaintext compare (old clients):
+						// which credential did the client prove? The OTP is then consumed
+						// against the LIVE store (rotates only if it is still current).
+						let provided_empty = provided.is_empty();
+						let cred = provided.verify(&mut session, &host_pw, &custom_pw).await;
+						let otp_accepted = cred == pulsar_core::service::Credential::OneTime
+							&& crate::commands::try_consume_otp(&app_h, &host_pw);
+						let custom_accepted = cred == pulsar_core::service::Credential::Fixed;
 						if !accepted.is_empty() && (otp_accepted || custom_accepted) {
 							true
 						} else {
@@ -775,7 +780,7 @@ pub(crate) async fn go_online(
 							// race), so it is NOT counted, which also avoids double-counting a
 							// genuine human attempt (client sends empty up-front, then the
 							// typed code in the race).
-							if !provided.is_empty() {
+							if !provided_empty {
 								crate::auth::throttle::record_failure(&peer);
 								// Count it against the source-independent global limit
 								// too: a relay attacker who registers many ids gets a

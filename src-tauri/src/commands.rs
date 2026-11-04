@@ -288,6 +288,12 @@ fn norm_otp(s: &str) -> String {
 		.collect()
 }
 
+/// The live one-time password (empty when none is set).
+pub(crate) fn current_otp(app: &AppHandle) -> String {
+	use tauri::Manager;
+	app.state::<AppState>().password.lock().unwrap().clone()
+}
+
 /// Atomically compare-and-consume the one-time password: if `provided` matches
 /// the live OTP, rotate it under the same lock so that a concurrent task cannot
 /// also match the same value (eliminating the read→compare→rotate TOCTOU race).

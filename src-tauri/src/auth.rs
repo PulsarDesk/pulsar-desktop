@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use pulsar_core::service::{
-	need_password, recv_client_auth, recv_host_auth, send_auth, ClientAuth, HostAuth,
+	need_password, recv_client_auth, recv_host_auth, send_auth, ClientAuth, Credential, HostAuth,
 };
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tokio::sync::oneshot;
@@ -530,7 +530,7 @@ pub(crate) async fn race_host_auth(
 			}
 			msg = recv_client_auth(session) => {
 				match msg {
-					ClientAuth::Password(pw) => {
+					ClientAuth::Attempt(attempt) => {
 						// A real password attempt: re-arm the idle deadline so the
 						// operator has time to respond after a retry, but the absolute
 						// cap above still applies regardless.
@@ -541,20 +541,27 @@ pub(crate) async fn race_host_auth(
 						// a snapshot compare is fine since it is NEVER rotated. Exclude
 						// the OTP snapshot (`one_time_pw`) here — the OTP is consumed
 						// atomically below against the LIVE store.
-						if accepted_pws
+						let custom = accepted_pws
 							.iter()
-							.any(|a| !a.is_empty() && a.as_str() != one_time_pw && secret_eq(&pw, a))
-						{
-							break (true, false, false);
-						}
-						// One-time password: atomically match against the LIVE store and
-						// rotate in a single critical section (try_consume_otp), so two
-						// concurrent race tasks can never both consume the same live code
-						// (closes the read→compare→rotate TOCTOU on the race path too).
-						// It rotates internally on success → report matched_one_time=false
-						// so the caller does NOT rotate again.
-						if crate::commands::try_consume_otp(app, &pw) {
-							break (true, false, false);
+							.find(|a| !a.is_empty() && a.as_str() != one_time_pw)
+							.cloned()
+							.unwrap_or_default();
+						// Verify against the LIVE one-time password (it may have rotated
+						// since the race started) — PAKE for new clients, plaintext compare
+						// for old ones.
+						let live_otp = crate::commands::current_otp(app);
+						let empty = attempt.is_empty();
+						match attempt.verify(session, &live_otp, &custom).await {
+							Credential::Fixed => break (true, false, false),
+							// One-time password: consume atomically against the LIVE store
+							// (try_consume_otp matches AND rotates in one critical section),
+							// so two concurrent race tasks can never both consume the same
+							// code. It rotates internally → matched_one_time=false so the
+							// caller does NOT rotate again.
+							Credential::OneTime if crate::commands::try_consume_otp(app, &live_otp) => {
+								break (true, false, false);
+							}
+							_ => {}
 						}
 						// Wrong: only count non-empty submissions. An empty pw is the
 						// client's automatic "I have no password yet" probe — the same
@@ -563,7 +570,7 @@ pub(crate) async fn race_host_auth(
 						// free by spamming empty Auth frames, and would burn a
 						// legitimate user's attempt for accidentally submitting an empty
 						// field (asymmetric with the deliberate up-front empty-skip).
-						let locked = if !pw.is_empty() {
+						let locked = if !empty {
 							let locked = throttle::record_failure(peer);
 							// Also count it against the source-independent global limit:
 							// a relay attacker who cycles ids gets a fresh per-peer bucket
@@ -624,6 +631,15 @@ fn open_pw_prompt(
 	(id, rx)
 }
 
+/// User-facing text for a client auth send failure. A password for an old host is
+/// refused locally (it would travel in a form a MITM relay could read).
+fn auth_err(e: pulsar_core::ConnError) -> String {
+	match e {
+		pulsar_core::ConnError::PeerOutdated => crate::i18n::t("err.peer_outdated").into(),
+		e => e.to_string(),
+	}
+}
+
 /// Client: authenticate over the session. Sends an empty request first (which makes
 /// the host show its Allow/Deny popup + ask us to prompt), then races the host's
 /// approval against the user typing the password. Returns `Ok(true)` if accepted.
@@ -634,7 +650,7 @@ pub(crate) async fn client_authenticate(
 	next_auth: &Arc<AtomicU64>,
 	peer: &str,
 ) -> Result<bool, String> {
-	send_auth(sess, "").await.map_err(|e| e.to_string())?;
+	send_auth(sess, "").await.map_err(auth_err)?;
 	let mut pw_rx: Option<oneshot::Receiver<Option<String>>> = None;
 	let mut cur_id: u64 = 0;
 	let cleanup = |id: u64| {
@@ -649,7 +665,7 @@ pub(crate) async fn client_authenticate(
 					pw = &mut rx => {
 						cleanup(cur_id);
 						match pw {
-							Ok(Some(p)) => send_auth(sess, &p).await.map_err(|e| e.to_string())?,
+							Ok(Some(p)) => send_auth(sess, &p).await.map_err(auth_err)?,
 							_ => return Ok(false), // user cancelled
 						}
 					}
