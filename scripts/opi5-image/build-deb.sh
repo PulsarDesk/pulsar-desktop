@@ -92,5 +92,11 @@ cargo build --release -p pulsar-render
 mkdir -p src-tauri/resources
 cp target/release/pulsar-render src-tauri/resources/pulsar-render
 cp "$(command -v ffmpeg)" src-tauri/resources/ffmpeg
-bun run tauri build --bundles deb
+if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+	bun run tauri build --bundles deb
+else
+	# No signing key (a local build, the manual image workflow): skip the updater signature,
+	# which tauri otherwise demands once the config carries a public key.
+	bun run tauri build --bundles deb --config '{"bundle":{"createUpdaterArtifacts":false}}'
+fi
 ls -l target/release/bundle/deb/*.deb
