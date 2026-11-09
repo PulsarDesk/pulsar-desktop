@@ -42,7 +42,7 @@ if [ "${INSTALL_DEPS:-0}" = 1 ]; then
 		libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev \
 		patchelf libudev-dev libmpv-dev libxkbcommon-dev \
 		ffmpeg libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
-		libavdevice-dev libavfilter-dev \
+		libavdevice-dev libavfilter-dev clang libclang-dev \
 		libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
 		libegl1-mesa-dev libx11-dev libasound2-dev libpulse-dev \
 		libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev libxss-dev libxtst-dev \
