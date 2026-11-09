@@ -9,6 +9,25 @@
 //! APIs (`ChildStdout` + `Emitter`), so they compile on every platform.
 #![cfg(any(unix, target_os = "windows"))]
 
+/// The native renderer lost its reference picture (`vidsink-needidr`): the hold loop asks the
+/// host for a keyframe on its next repair tick (see play::hold).
+pub(crate) static RENDER_WANTS_IDR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The native renderer lost the video packets `first..=last` (`vidsink-rfi`, reference-frame
+/// invalidation mode): the hold loop asks the host to heal it without a keyframe. Merged until
+/// the hold loop takes it.
+pub(crate) static RENDER_WANTS_RFI: std::sync::Mutex<Option<(u16, u16)>> = std::sync::Mutex::new(None);
+/// Wakes the hold loop the moment `RENDER_WANTS_RFI` is set: the host can only reach a lost
+/// frame for ~8 frames (≈ 67 ms at 120 fps), so the request must not wait for a repair tick.
+pub(crate) static RFI_WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+/// The play id whose renderer was started with `--hold-reveal` (Windows): its first frames do
+/// NOT end the preparing screen — play::hold reveals + emits play-ready once the adaptive
+/// bitrate has settled. `FIRST_FRAMES_ID` = that renderer has decoded its first frames.
+pub(crate) static HOLD_REVEAL_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+pub(crate) static FIRST_FRAMES_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+/// The Windows renderer's average decode time per frame (ms, f32 bits) from its last
+/// `vidsink-fps` line; play::hold steps the fps down when the decoder can't keep up.
+pub(crate) static DECODE_MS_BITS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -89,6 +108,10 @@ pub(crate) fn start_render_reader(
 		// Reset on each reconnect (live_id path): the resident renderer starts streaming fresh
 		// data, so play-ready must fire again for the new session id.
 		let mut ready_sent_for: Option<u64> = None;
+		// When the last `vidsink-fps` line arrived: the Windows renderer only prints it after
+		// drawing a frame, so a long gap = no picture on screen (what the UI shows as "stream
+		// stopped"). Logged when the stats resume so freezes are visible in the log.
+		let mut last_fps_line: Option<std::time::Instant> = None;
 		let mut first_line_logged = false;
 		'lines: for line in reader.lines() {
 			let Ok(line) = line else { break };
@@ -115,6 +138,16 @@ pub(crate) fn start_render_reader(
 			if let Some(rest) = line.strip_prefix("vidsink-fps ") {
 				let mut it = rest.split_whitespace();
 				let fps = it.next().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+				let now = std::time::Instant::now();
+				if let Some(prev) = last_fps_line.replace(now) {
+					let gap = now.duration_since(prev);
+					if gap > std::time::Duration::from_millis(2000) {
+						tracing::info!(id = cur_id, gap_ms = gap.as_millis() as u64, fps, "renderer frame gap (no picture)");
+					}
+				}
+				if fps > 0.0 && fps < 5.0 {
+					tracing::info!(id = cur_id, fps, "renderer fps very low");
+				}
 				// The stats line carries the live stream dims ("<w>x<h>") — re-emit them as
 				// play-dims EVERY tick (1 Hz, a dozen bytes). The one-shot vidsink-dims print —
 				// and any change-deduped variant — races listener registration: a webview that
@@ -135,6 +168,7 @@ pub(crate) fn start_render_reader(
 				let mbps = it.next().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
 				let ms = it.next().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
 				tracing::debug!(fps, mbps, decode_ms = ms, "render stats");
+				DECODE_MS_BITS.store((ms as f32).to_bits(), std::sync::atomic::Ordering::Relaxed);
 				let _ = app.emit(
 					"play-vstats",
 					PlayVStats {
@@ -145,10 +179,53 @@ pub(crate) fn start_render_reader(
 						decode_ms: ms,
 					},
 				);
-				// Emit play-ready once per session id (reset when cur_id changes).
-				if ready_sent_for != Some(cur_id) && (fps > 0.0 || mbps > 0.0) {
+				// Emit play-ready once per session id (reset when cur_id changes). Gate on
+				// PRESENTED frames only: bytes arriving (mbps > 0) while the decoder emits
+				// nothing (e.g. a wedged async MFT before the watchdog rebuild) used to drop
+				// the Connecting screen onto a black session.
+				if ready_sent_for != Some(cur_id) && fps > 0.0 {
 					ready_sent_for = Some(cur_id);
-					let _ = app.emit("play-ready", cur_id);
+					if HOLD_REVEAL_ID.load(std::sync::atomic::Ordering::SeqCst) == cur_id {
+						FIRST_FRAMES_ID.store(cur_id, std::sync::atomic::Ordering::SeqCst);
+						tracing::info!(id = cur_id, fps, "first frames decoded — preparing screen held until the stream settles");
+						// The connecting screen moves on to its "optimizing stream" step.
+						let _ = app.emit("play-optimizing", cur_id);
+					} else {
+						tracing::info!(id = cur_id, fps, "first presented frames, play-ready");
+						let _ = app.emit("play-ready", cur_id);
+					}
+				}
+			} else if line.trim() == "vidsink-needidr" {
+				RENDER_WANTS_IDR.store(true, std::sync::atomic::Ordering::Relaxed);
+			} else if let Some(rest) = line.strip_prefix("vidsink-rfi ") {
+				let v: Vec<u16> = rest.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+				if let [first, last] = v[..] {
+					let mut r = RENDER_WANTS_RFI.lock().unwrap();
+					*r = Some(match *r {
+						Some((f, _)) => (f, last),
+						None => (first, last),
+					});
+					drop(r);
+					RFI_WAKE.notify_one();
+				}
+			} else if let Some(rest) = line.strip_prefix("vidsink-vrect ") {
+				// Where the video sits inside the renderer window (client fractions): the
+				// Windows capture confines the cursor to it while engaged.
+				let v: Vec<f32> = rest.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+				if v.len() == 4 {
+					crate::kbdhook::set_video_frac(v[0], v[1], v[2], v[3]);
+				}
+			} else if let Some((rest, from_hook)) = line
+				.strip_prefix("hkey ")
+				.map(|r| (r, true))
+				.or_else(|| line.strip_prefix("key ").map(|r| (r, false)))
+			{
+				// A key from the renderer while control is engaged (Windows): `hkey` = its
+				// shortcut capture (Alt+Tab / Win reach the remote), `key` = its focused child
+				// window's messages (fallback). `<vk> <0|1>`, same handler either way.
+				let mut it = rest.split_whitespace();
+				if let (Some(vk), Some(d)) = (it.next().and_then(|v| v.parse::<u16>().ok()), it.next()) {
+					crate::kbdhook::render_key(vk, d == "1", from_hook);
 				}
 			} else if let Some(rest) = line.strip_prefix("vidsink-dims ") {
 				// The STREAM's pixel size ("<w>x<h>", first frame / live res switch) — the
@@ -299,6 +376,11 @@ pub(crate) fn start_render_reader(
 					}
 					(Some("ov"), Some("engage")) => {
 						crate::kbdhook::engage_render(&app);
+					}
+					// The renderer's "stream stopped" edge: release the capture (no picture to
+					// control) and keep it released until the stream is back.
+					(Some("ov"), Some("stalled")) => {
+						crate::kbdhook::set_stream_stalled(&app, it.next() == Some("1"));
 					}
 					_ => {}
 				}

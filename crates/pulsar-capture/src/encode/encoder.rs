@@ -13,6 +13,7 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 
 use super::nvenc;
+use super::policy::{EncWindow, RefTracker, RfiPlan};
 use crate::rtp::RtpEgress;
 
 // ===========================================================================
@@ -117,6 +118,25 @@ pub struct Encoder {
 	/// the next multi-second safety GOP. A true RESOLUTION change rebuilds the whole encoder
 	/// (capture loop) instead, since the NV12/VideoProcessor are sized to the old dimensions.
 	pub(super) force_idr_once: bool,
+	pub(super) codec: crate::Codec,
+	/// Reference-frame invalidation is on (deeper DPB; see `invalidate_lost`).
+	pub(super) rfi: bool,
+	/// Rolling intra refresh is on (a loss heals by itself — no RFI, no keyframe for it).
+	pub(super) intra_refresh: bool,
+	/// The frames encoded lately and the reference buffer they sit in: maps a lost frame to
+	/// NVENC's timestamp and decides RFI vs keyframe (`policy::RefTracker`).
+	pub(super) refs: RefTracker,
+	/// This window's encode numbers (keyframe count / size vs the target), logged every ~2 s
+	/// when they show an overshoot.
+	pub(super) win: EncWindow,
+	/// The next access unit is an RFI recovery frame: prefix it with `recovery_sei`.
+	pub(super) mark_recovery: bool,
+	/// The rate-control class the encoder runs in (`policy::low_budget` / `use_two_pass`) and
+	/// the preset's keyframe scale to restore when it leaves the low-budget class — re-judged
+	/// on each live bitrate change (`reconfigure_bitrate`).
+	pub(super) low_budget: bool,
+	pub(super) two_pass: bool,
+	pub(super) preset_kf_scale: u8,
 }
 
 // The encoder lives entirely on the capture thread; the raw NVENC/COM pointers are
@@ -124,11 +144,6 @@ pub struct Encoder {
 unsafe impl Send for Encoder {}
 
 impl Encoder {
-	/// Live bitrate change (Stage-3 adaptive bitrate) via `nvEncReconfigureEncoder` — NO session
-	/// re-init (cheap; encodeWidth/Height/GUIDs unchanged). Updates the retained CBR rate params,
-	/// forces an IDR so the client recovers cleanly, and pushes the new bitrate into the RtpEgress
-	/// pacing atom so packet pacing tracks it. Returns Err on a bad reconfigure (caller logs; the
-	/// old bitrate stays in effect).
 	/// Request that the NEXT submitted frame be a forced IDR (+ in-band SPS/PPS). One-shot,
 	/// consumed in `submit`. Cheap (a flag) — the capture loop calls it after a same-resolution
 	/// reinit so a client mid-GOP re-syncs immediately rather than waiting the safety interval.
@@ -136,11 +151,69 @@ impl Encoder {
 		self.force_idr_once = true;
 	}
 
+	/// The client lost the packets `first..=last` (reported at once, while its NACK repair may
+	/// still fill the hole). Invalidate the frames they carried as references (NVENC also drops
+	/// every frame predicted from them) so the next frame is predicted from an older intact one
+	/// — no keyframe — and tag it as the recovery point.
+	///
+	/// The HOST decides whether RFI can heal it, because only it knows its reference buffer:
+	/// when the buffer no longer holds an intact reference older than the loss (too long ago
+	/// for its depth, the lost frame was the IDR itself, an earlier loss is still unhealed) or
+	/// the driver refuses, nothing is invalidated and NO keyframe is forced — the report comes
+	/// before repair, and a keyframe for every hole the repair then filled was a keyframe
+	/// storm on a lossy link (see `policy::RfiPlan`). A hole the client cannot fill makes it
+	/// ask for the keyframe itself (`request_idr`). `Ok(frames)` = invalidated; `Err(why)` =
+	/// not.
+	pub unsafe fn invalidate_lost(&mut self, first: u16, last: u16) -> Result<usize, &'static str> {
+		if !self.rfi {
+			if self.intra_refresh {
+				// The rolling intra wave heals the picture within its period.
+				return Err("rfi off (intra refresh heals the loss)");
+			}
+			// No recovery frame from this encoder (AV1, no driver support, or it was not asked
+			// for RFI): the client's keyframe request is the recovery, if its repair fails.
+			return Err("rfi off (the client asks for a keyframe if its repair fails)");
+		}
+		let lost = self.rtp.frames_in_seq_range(first, last);
+		let pts = match self.refs.plan(&lost) {
+			RfiPlan::Invalidate(pts) => pts,
+			RfiPlan::Nothing(why) => return Err(why),
+		};
+		let f = self.fns.nvEncInvalidateRefFrames;
+		let ok = !f.is_null() && {
+			let f: unsafe extern "C" fn(*mut c_void, u64) -> nvenc::NVENCSTATUS = std::mem::transmute(f);
+			pts.iter().all(|p| f(self.enc, *p) == nvenc::NV_ENC_SUCCESS)
+		};
+		if !ok {
+			// Some frames may already be invalidated — harmless: a later recovery reaches back
+			// past them (`RefTracker::invalidate_failed`), a keyframe resets everything.
+			self.refs.invalidate_failed(&pts);
+			return Err("nvEncInvalidateRefFrames failed");
+		}
+		self.mark_recovery = true;
+		Ok(pts.len())
+	}
+
+	/// Live bitrate change (Stage-3 adaptive bitrate) via `nvEncReconfigureEncoder` — NO session
+	/// re-init (cheap; encodeWidth/Height/GUIDs unchanged) and NO keyframe (`resetEncoder` and
+	/// `forceIDR` stay 0, see below). Updates the retained CBR rate params and pushes the new
+	/// bitrate into the RtpEgress pacing atom so packet pacing tracks it. Returns Err on a bad
+	/// reconfigure (caller logs; the old bitrate stays in effect). The rate-control class
+	/// (single / two-pass, keyframe scale) is re-judged from the new rate with hysteresis
+	/// (`policy::low_budget_live`); a driver that refuses that change live keeps the old class
+	/// and takes the bitrate alone.
 	pub unsafe fn reconfigure_bitrate(&mut self, kbps: u32) -> Result<(), String> {
 		if self.closed {
 			return Err("reconfigure after close".into());
 		}
 		let bps = kbps.saturating_mul(1000).max(1);
+		let low = super::policy::low_budget_live(self.low_budget, bps, self.width, self.height, self.fps);
+		let env = std::env::var("PULSAR_NVENC_MULTIPASS").ok();
+		let two_pass = super::policy::two_pass_for(low, self.width, self.height, self.fps, env.as_deref());
+		let mut class_change = low != self.low_budget || two_pass != self.two_pass;
+		if class_change {
+			self.set_rc_class(low, two_pass);
+		}
 		let vbv = bps / self.fps.max(1); // single-frame VBV (low latency), mirrors new.rs
 		self.enc_config.rcParams.averageBitRate = bps;
 		self.enc_config.rcParams.maxBitRate = bps;
@@ -162,12 +235,40 @@ impl Encoder {
 			.fns
 			.nvEncReconfigureEncoder
 			.ok_or("nvenc: nvEncReconfigureEncoder missing")?;
-		super::d3d::chk(f(self.enc, &mut rc), &self.fns, self.enc)
-			.map_err(|e| format!("nvEncReconfigureEncoder({kbps} kbps): {e}"))?;
+		// `rc.reInitEncodeParams.encodeConfig` points at `enc_config`: a retry sees its edits.
+		let mut res = super::d3d::chk(f(self.enc, &mut rc), &self.fns, self.enc);
+		if res.is_err() && class_change {
+			// The driver refused the RC-class change without a reset: keep the build's class
+			// and change the bitrate alone (the next resolution / fps rebuild re-judges it).
+			self.set_rc_class(self.low_budget, self.two_pass);
+			class_change = false;
+			res = super::d3d::chk(f(self.enc, &mut rc), &self.fns, self.enc);
+		}
+		res.map_err(|e| format!("nvEncReconfigureEncoder({kbps} kbps): {e}"))?;
+		if class_change {
+			super::cap_dbg(&format!(
+				"nvenc rc class {kbps} kbps: low_budget {} -> {low}, two_pass {} -> {two_pass}",
+				self.low_budget, self.two_pass
+			));
+			self.low_budget = low;
+			self.two_pass = two_pass;
+		}
 		// Pacing (Stage 1) reads this for packets_per_ms; keep it in lockstep with the encoder.
 		self.bitrate_kbps
 			.store(kbps, std::sync::atomic::Ordering::Relaxed);
 		Ok(())
+	}
+
+	/// Write a rate-control class into the retained config (see `new`: the quarter-resolution
+	/// first pass, and the keyframe pinned to one P-frame budget, for a low-budget stream).
+	fn set_rc_class(&mut self, low: bool, two_pass: bool) {
+		let rc = &mut self.enc_config.rcParams;
+		rc.multiPass = if two_pass {
+			nvenc::NV_ENC_TWO_PASS_QUARTER_RESOLUTION
+		} else {
+			nvenc::NV_ENC_MULTI_PASS_DISABLED
+		};
+		rc.lowDelayKeyFrameScale = if low { 1 } else { self.preset_kf_scale };
 	}
 
 	/// Tear down the NVENC session + resources. Idempotent — safe to call from both

@@ -1,10 +1,22 @@
 // The `api` object: typed wrappers over the Tauri commands exposed by the Rust
 // core. Re-exported by `api.ts`.
 
-import type { AutoConnectTarget, Config, ConnInfo, ControllerInfo } from './types';
+import type { AutoConnectTarget, Config, ConnInfo, ControllerInfo, PulsarToast } from './types';
 import type { FsEntry, LocalCaps } from './api.types';
 import type { GameInfo, LanDevice, PlayInfo, ScannedApp, WindowInfo } from './api.types';
 import { invoke } from './api.invoke';
+
+// The keyboard/mouse capture commands must land on the Rust side IN ISSUE ORDER. A tab
+// re-arm is a stop immediately followed by a start (effect cleanup + re-run in one tick);
+// Tauri runs async commands concurrently, and the start overtaking the stop left the
+// capture DISARMED while the UI showed control engaged (no keys, no clicks, no
+// Ctrl+Alt+Z — seen 2026-11-07). One promise chain serializes them.
+let kbdChain: Promise<unknown> = Promise.resolve();
+const kbdSerial = <T>(run: () => Promise<T>): Promise<T> => {
+	const next = kbdChain.then(run, run);
+	kbdChain = next.catch(() => undefined);
+	return next;
+};
 
 export const api = {
 	getConfig: () => invoke<Config>('get_config'),
@@ -117,6 +129,10 @@ export const api = {
 	/** Client: open (or focus) the per-session file-manager window for play `id`;
 	 * `peer` decorates the title/header so multi-session windows stay tellable apart. */
 	openFilesWindow: (id: number, peer: string) => invoke<void>('open_files_window', { id, peer }),
+	/** Toast window: the current Pulsar notices / click one (opens its folder) / dismiss one. */
+	toastList: () => invoke<PulsarToast[]>('toast_list'),
+	toastOpen: (id: number) => invoke<void>('toast_open', { id }),
+	toastClose: (id: number) => invoke<void>('toast_close', { id }),
 	/** Host: revoke/restore a connected SESSION's CONTROL ("Sadece izleme") — its
 	 * input is dropped while set; the stream keeps running. Keyed by session id. */
 	setViewOnly: (sid: number, on: boolean) => invoke<void>('set_view_only', { sid, on }),
@@ -175,7 +191,9 @@ export const api = {
 		 * `hostWindowList`, or the host-resolved game window) makes the host WGC-capture
 		 * that single window instead of a whole monitor — so two panes can share ONE
 		 * monitor. Wins over `displayIdx` on the host when set; null = monitor capture. */
-		windowHwnd?: number
+		windowHwnd?: number,
+		/** The user's saved stream picks (`savedStreamPicks()`); 0 = automatic for each. */
+		picks?: { width: number; height: number; fps: number; bitrateKbps: number }
 	) =>
 		invoke<PlayInfo>('start_remote_play', {
 			target,
@@ -188,7 +206,11 @@ export const api = {
 			quality: quality ?? null,
 			touchpadAsMouse,
 			displayIdx: displayIdx ?? null,
-			windowHwnd: windowHwnd ?? null
+			windowHwnd: windowHwnd ?? null,
+			initWidth: picks?.width || null,
+			initHeight: picks?.height || null,
+			initFps: picks?.fps || null,
+			initBitrateKbps: picks?.bitrateKbps || null
 		}),
 	/** CLI `--connect` auto-connect target (id/ip + password + mode + app), or null. */
 	autoConnectTarget: () =>
@@ -307,12 +329,16 @@ export const api = {
 	 * (Win, Alt+Tab, Ctrl+Esc, media) go to the remote and are suppressed locally.
 	 * No-op on non-Windows. */
 	kbdCaptureStart: (id: number, mouse = false) =>
-		invoke<void>('kbd_capture_start', { id, mouse }),
+		kbdSerial(() => invoke<void>('kbd_capture_start', { id, mouse })),
 	/** Control: disarm the low-level keyboard hook (release / blur / leave combo). */
-	kbdCaptureStop: () => invoke<void>('kbd_capture_stop'),
+	kbdCaptureStop: () => kbdSerial(() => invoke<void>('kbd_capture_stop')),
 	/** Control (Linux native): explicit click-to-engage — the user clicked the session
 	 * video (the pass-through container let the click reach the webview). */
-	kbdEngage: () => invoke<void>('kbd_engage'),
+	kbdEngage: () => kbdSerial(() => invoke<void>('kbd_engage')),
+	/** Control (Windows native): relay a key edge the webview saw (evdev code) to the capture's
+	 * key handler — the fallback for machines where the OS keyboard hook isn't called while
+	 * Pulsar's window has focus. Combos (Ctrl+Alt+Z etc.) are decided on the Rust side. */
+	kbdWebKey: (code: number, down: boolean) => invoke<void>('kbd_web_key', { code, down }),
 	/** Client (Linux native): position the in-app video container over the session tab's
 	 * content area (viewport CSS px). Zero area hides it (inactive tab / unmount). */
 	nativeViewRect: (id: number, x: number, y: number, w: number, h: number) =>

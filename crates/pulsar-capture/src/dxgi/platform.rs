@@ -98,4 +98,10 @@ impl Qpc {
 		// Multiply before divide; do it in i128 so a multi-hour counter can't overflow.
 		((c as i128) * 1_000_000_000i128 / (self.freq as i128)) as i64
 	}
+
+	/// A raw QPC tick count (e.g. `DXGI_OUTDUPL_FRAME_INFO::LastPresentTime`) on the same ns
+	/// scale as [`now_ns`](Self::now_ns).
+	pub(crate) fn ticks_to_ns(&self, ticks: i64) -> i64 {
+		((ticks as i128) * 1_000_000_000i128 / (self.freq as i128)) as i64
+	}
 }

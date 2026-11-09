@@ -76,23 +76,42 @@ const SWITCH_TIMEOUT_MS: u64 = 6_000;
 /// libav reads the field on every fetch, so the decode loop applies changes live. 0 = not
 /// received yet → the open-time default. `PULSAR_MAXDELAY` (env) pins it for diagnosis.
 static MAX_DELAY_US: AtomicU64 = AtomicU64::new(0);
-/// Monotonic-ms deadline until which decoded frames are decoded but NOT presented (stdin
+/// Loss hold: decoded frames are decoded but NOT presented for a bounded moment (stdin
 /// `hold <ms>`, sent by the app the moment a NACK repair is written off): the presenter keeps
-/// the last good frame while the requested keyframe / the intra-refresh wave is on its way,
-/// instead of showing the reference-less smear. A keyframe packet clears it early; the
-/// deadline bounds it so an intra-refresh stream (no IDR ever) resumes on the healing
-/// picture. An active hold is never extended (bounded freeze by construction). 0 = off.
-static HOLD_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
+/// the last good frame while the requested keyframe is on its way, instead of showing the
+/// reference-less smear. A keyframe packet ends it early; an active hold is never extended, and
+/// only the first request of a loss episode arms one (`stream::recovery::LossHold`), so
+/// back-to-back losses can't chain into a long freeze. Never on an intra-refreshed stream
+/// (no keyframe comes; the rolling wave heals the concealed picture). Shared by the stdin
+/// thread (requests) and the decode thread (frames, keyframes).
+static LOSS_HOLD: Mutex<crate::stream::recovery::LossHold> = Mutex::new(crate::stream::recovery::LossHold::new());
 
 /// App → renderer: the RTT-derived RTP reorder wait (see `MAX_DELAY_US`).
 pub fn set_max_delay_us(us: u64) {
-	MAX_DELAY_US.store(us, Ordering::Relaxed);
+	// Same ceiling as the Rust RTP path (`rtp::MAX_DELAY_CAP_US`): a longer wait only holds
+	// every frame behind a hole and releases them as one burst.
+	MAX_DELAY_US.store(us.min(crate::stream::rtp::MAX_DELAY_CAP_US), Ordering::Relaxed);
+	// The Rust RTP path's reorder buffer takes the same wait.
+	crate::stream::rtp::set_max_delay_us(us);
+}
+
+/// App → renderer (`ir 0|1`): the stream is intra-refreshed — after a gap the Rust RTP path
+/// resumes at the next whole access unit instead of waiting for a keyframe (`rtp::IR_MODE`).
+pub fn set_ir_mode(on: bool) {
+	crate::stream::rtp::IR_MODE.store(on, Ordering::SeqCst);
+}
+
+/// App → renderer (`rfi 0|1`): the host heals losses by reference-frame invalidation — report
+/// holes (`vidsink-rfi`) and resume at the recovery tag (`rtp::RFI_MODE`). Rust RTP path only.
+pub fn set_rfi_mode(on: bool) {
+	crate::stream::rtp::RFI_MODE.store(on, Ordering::SeqCst);
 }
 
 /// Report the end of a loss hold on stdout (`vidsink-hold <how> <frames> <ms>`) — the app
 /// logs it, the validation script counts freezes from it — and on stderr for a terminal.
-fn report_hold_end(how: &str, frames: u32, started_ms: u64) {
-	let ms = if started_ms > 0 { mono_ms().saturating_sub(started_ms) } else { 0 };
+/// `ms` = how long presentation was held (arming → keyframe / deadline).
+fn report_hold_end(e: crate::stream::recovery::HoldEnd) {
+	let (how, frames, ms) = (e.how, e.frames, e.ms);
 	println!("vidsink-hold {how} {frames} {ms}");
 	{
 		use std::io::Write;
@@ -102,12 +121,13 @@ fn report_hold_end(how: &str, frames: u32, started_ms: u64) {
 }
 
 /// App → renderer: an unrepaired loss happened — hold the last good frame for up to `ms`
-/// (or until the next keyframe). See `HOLD_UNTIL_MS`.
+/// (or until the next keyframe), if this starts a loss episode. See `LOSS_HOLD`.
 pub fn hold_for_ms(ms: u64) {
-	let now = mono_ms();
-	let cur = HOLD_UNTIL_MS.load(Ordering::Relaxed);
-	if cur == 0 || cur < now {
-		HOLD_UNTIL_MS.store(now + ms.max(1), Ordering::Relaxed);
+	let ir = crate::stream::rtp::IR_MODE.load(Ordering::Relaxed);
+	// Take the result out first: the report writes to stdout, not under the decode thread's lock.
+	let ended = LOSS_HOLD.lock().unwrap().request(mono_ms(), ms, ir);
+	if let Some(e) = ended {
+		report_hold_end(e);
 	}
 }
 
@@ -175,6 +195,32 @@ static PACE: AtomicBool = AtomicBool::new(false);
 /// ONLY now — the Moonlight pacer drives cadence off the real vblank (one frame per draw), NOT
 /// this timer (the old EMA-cadence pacer beat-drifted vs the panel). Kept for future HUD use.
 static SRC_US: AtomicU64 = AtomicU64::new(16_666);
+
+/// Decoded frames published so far, and a wakeup for a render loop that has no vblank wait to
+/// block on (swap interval 0 under a compositor): it sleeps until the next frame instead of
+/// redrawing in a tight loop.
+static FRAME_SEQ: AtomicU64 = AtomicU64::new(0);
+static FRAME_WAKE: std::sync::Condvar = std::sync::Condvar::new();
+static FRAME_WAKE_M: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn notify_frame() {
+	FRAME_SEQ.fetch_add(1, Ordering::Release);
+	FRAME_WAKE.notify_all();
+}
+
+/// Block until a frame newer than `seen` is published, or `timeout` passes; returns the latest
+/// frame number. With pacing on, the wait is also capped at the source frame period so the
+/// pacer still gets its ticks.
+pub fn wait_frame(seen: u64, timeout: std::time::Duration) -> u64 {
+	let timeout = if pace_on() {
+		timeout.min(std::time::Duration::from_micros(SRC_US.load(Ordering::Relaxed).max(1_000)))
+	} else {
+		timeout
+	};
+	let g = FRAME_WAKE_M.lock().unwrap();
+	let _ = FRAME_WAKE.wait_timeout_while(g, timeout, |_| FRAME_SEQ.load(Ordering::Acquire) == seen);
+	FRAME_SEQ.load(Ordering::Acquire)
+}
 /// Demuxed video bytes received since the presenter last sampled it (received-stream bitrate,
 /// matching mpv's `video-bitrate` notion). The decode thread adds each packet's size; the
 /// presenter swaps it to 0 once a second and turns it into Mbit/s for the HUD. Atomic, so the
@@ -395,10 +441,229 @@ pub fn start_decode(sdp_path: &str) {
 	});
 }
 
-/// One demux+decode pass over `sdp` — runs until stop, reopen, EOF or a fatal error.
-/// (The body of the old inline decode thread, unchanged except the loop condition and
-/// the interrupt callback; extracted so a live reopen can run it again on a new SDP.)
-unsafe fn decode_once(sdp: &CString) {
+/// Where a decode pass gets its compressed video from.
+enum Source {
+	/// libavformat's RTP/SDP demux on the loopback UDP port (`PULSAR_LINUX_DEMUX=ffmpeg`, or
+	/// an SDP without `a=x-pulsar-unix:`). `vs` = the video stream index.
+	Demux { fmt: *mut ff::AVFormatContext, vs: c_int },
+	/// The Rust RTP path (`stream::rtp`, shared with Windows/macOS): reorder + depacketize on a
+	/// receive thread fed over a Unix datagram socket; access units go straight into
+	/// `avcodec_send_packet`.
+	Rtp(RtpFeed),
+}
+
+/// Outcome of one [`Source::read`].
+enum Read {
+	/// `pkt` holds a video packet.
+	Video,
+	/// `pkt` holds a packet of another stream (demux only).
+	Other,
+	/// Nothing this time (a timeout or a recoverable read error); `pkt` is empty.
+	Again,
+	/// The demuxer ended.
+	Eof,
+}
+
+/// Access units handed from the receive thread to the decode thread.
+struct AuQueue {
+	q: Mutex<VecDeque<crate::stream::AccessUnit>>,
+	cv: std::sync::Condvar,
+}
+
+/// Backlog bound of [`AuQueue`]. Larger than the Windows renderer's 8: decoded frames are
+/// bounded downstream (`QCAP`; dropping a decoded frame never breaks a reference chain), so a
+/// burst released by the reorder buffer is better decoded than shed. Only a decoder that
+/// falls behind for ~1/4 s reaches it. Past it the stale lead-in up to the newest queued
+/// keyframe is dropped; a keyframe-less chain may grow to `AU_HARD_CAP`.
+const AU_QCAP: usize = 32;
+/// Hard bound of a keyframe-less [`AuQueue`] backlog (the Windows renderer's): ~0.5 s at
+/// 120 fps. A 250 ms reorder release at 120 fps (~30 AUs) sat right at `AU_QCAP`, and shedding
+/// from it there asked an intra-refreshed stream for a keyframe it otherwise never needs.
+const AU_HARD_CAP: usize = 64;
+
+struct RtpFeed {
+	par: *mut ff::AVCodecParameters,
+	q: std::sync::Arc<AuQueue>,
+	stop: std::sync::Arc<AtomicBool>,
+	thread: Option<std::thread::JoinHandle<()>>,
+	/// 90 kHz RTP timestamp unwrapped to 64 bits (packet pts).
+	pts: i64,
+	last_ts: Option<u32>,
+}
+
+impl Source {
+	unsafe fn par(&self) -> *const ff::AVCodecParameters {
+		match self {
+			Source::Demux { fmt, vs } => (**(**fmt).streams.add(*vs as usize)).codecpar,
+			Source::Rtp(f) => f.par,
+		}
+	}
+
+	/// Fetch the next packet into `pkt` (the caller unreferences it after use).
+	unsafe fn read(&mut self, pkt: *mut ff::AVPacket, maxdelay_pinned: bool) -> Read {
+		match self {
+			Source::Demux { fmt, vs } => {
+				let fmt = *fmt;
+				// Apply the app's RTT-derived reorder wait live (libav reads max_delay per fetch).
+				if !maxdelay_pinned {
+					let want = MAX_DELAY_US.load(Ordering::Relaxed);
+					if want > 0 && (*fmt).max_delay as i64 != want as i64 {
+						(*fmt).max_delay = want.min(c_int::MAX as u64) as c_int;
+					}
+				}
+				let r = ff::av_read_frame(fmt, pkt);
+				if r == ff::AVERROR_EOF {
+					ff::av_packet_unref(pkt);
+					return Read::Eof;
+				}
+				if r < 0 {
+					ff::av_packet_unref(pkt);
+					return Read::Again;
+				}
+				if (*pkt).stream_index == *vs {
+					Read::Video
+				} else {
+					Read::Other
+				}
+			}
+			Source::Rtp(f) => {
+				let au = {
+					let mut g = f.q.q.lock().unwrap();
+					if g.is_empty() {
+						g = f.q.cv.wait_timeout(g, std::time::Duration::from_millis(20)).unwrap().0;
+					}
+					g.pop_front()
+				};
+				let Some(au) = au else { return Read::Again };
+				if ff::av_new_packet(pkt, au.data.len() as c_int) < 0 {
+					return Read::Again;
+				}
+				ptr::copy_nonoverlapping(au.data.as_ptr(), (*pkt).data, au.data.len());
+				if au.key {
+					(*pkt).flags |= ff::AV_PKT_FLAG_KEY;
+				}
+				if let Some(prev) = f.last_ts {
+					f.pts += au.pts_90k.wrapping_sub(prev) as i32 as i64;
+				}
+				f.last_ts = Some(au.pts_90k);
+				(*pkt).pts = f.pts;
+				(*pkt).dts = f.pts;
+				(*pkt).stream_index = 0;
+				Read::Video
+			}
+		}
+	}
+
+	unsafe fn close(self) {
+		match self {
+			Source::Demux { mut fmt, .. } => ff::avformat_close_input(&mut fmt),
+			Source::Rtp(mut f) => {
+				f.stop.store(true, Ordering::SeqCst);
+				if let Some(t) = f.thread.take() {
+					let _ = t.join();
+				}
+				ff::avcodec_parameters_free(&mut f.par);
+			}
+		}
+	}
+}
+
+/// The decode source for `sdp`: the Rust RTP path when the app named a Unix video socket in
+/// the SDP (the Linux default), else libavformat's demux. None = could not open (logged).
+unsafe fn open_source(sdp: &CString) -> Option<Source> {
+	#[cfg(target_os = "linux")]
+	if std::env::var("PULSAR_LINUX_DEMUX").map(|v| v != "ffmpeg").unwrap_or(true) {
+		if let Ok(path) = sdp.to_str() {
+			if let Some(name) = crate::stream::sdp_unix_name(path) {
+				return open_rtp(path, &name);
+			}
+		}
+	}
+	open_demux(sdp)
+}
+
+/// Start the Rust RTP receive thread on the app's Unix video socket `name` (see
+/// `stream::rtp::recv_loop_unix`); the codec comes from the SDP's rtpmap.
+#[cfg(target_os = "linux")]
+unsafe fn open_rtp(path: &str, name: &str) -> Option<Source> {
+	use crate::stream::{rtp, Codec};
+	let codec = match crate::stream::parse_sdp(path) {
+		Ok((_, c)) => c,
+		Err(e) => {
+			eprintln!("pulsar-render: SDP {path} unreadable: {e}");
+			return None;
+		}
+	};
+	let par = ff::avcodec_parameters_alloc();
+	if par.is_null() {
+		return None;
+	}
+	(*par).codec_type = ff::AVMediaType::AVMEDIA_TYPE_VIDEO;
+	(*par).codec_id = match codec {
+		Codec::H264 => ff::AVCodecID::AV_CODEC_ID_H264,
+		Codec::H265 => ff::AVCodecID::AV_CODEC_ID_HEVC,
+		Codec::Av1 => ff::AVCodecID::AV_CODEC_ID_AV1,
+	};
+	let q = std::sync::Arc::new(AuQueue { q: Mutex::new(VecDeque::new()), cv: std::sync::Condvar::new() });
+	let stop = std::sync::Arc::new(AtomicBool::new(false));
+	let (q2, stop2, name) = (q.clone(), stop.clone(), name.to_string());
+	let thread = std::thread::Builder::new()
+		.name("pulsar-rtp".into())
+		.spawn(move || {
+			// Rate limit for `vidsink-needidr` (at most 2/s, the Windows renderer's cadence).
+			let mut last_needidr = std::time::Instant::now() - std::time::Duration::from_secs(1);
+			rtp::recv_loop_unix(
+				&name,
+				codec,
+				|au| {
+					let mut g = q2.q.lock().unwrap();
+					// Bounded backlog, the Windows overflow rule (win/mod.rs): never cut a delta
+					// AU out of the middle of the P-chain. Drop the stale lead-in up to the
+					// newest queued keyframe; with no keyframe queued, let an intact chain grow
+					// to AU_HARD_CAP (the decode thread decodes all of it, the presenter's
+					// bounded mailbox keeps the newest pictures), and only then shed the oldest
+					// AU and ask for an IDR at once.
+					match crate::stream::recovery::bound_backlog(&mut g, AU_QCAP, AU_HARD_CAP) {
+						crate::stream::recovery::Backlog::Kept => {}
+						crate::stream::recovery::Backlog::DroppedLeadIn(k) => {
+							eprintln!("pulsar-render: AU backlog overflow — dropped {k} stale AU(s) ahead of newest keyframe");
+						}
+						crate::stream::recovery::Backlog::ShedOldest => {
+							rtp::NEED_IDR.store(true, Ordering::Relaxed);
+							eprintln!("pulsar-render: AU backlog overflow — no keyframe queued; dropped the oldest AU, keyframe requested");
+						}
+					}
+					g.push_back(au);
+					drop(g);
+					q2.cv.notify_one();
+				},
+				|| {
+					use std::io::Write as _;
+					// A lost range for the host's reference-frame invalidation: report at once
+					// (the host can only reach a recent frame).
+					if let Some((first, last)) = rtp::take_rfi_request() {
+						println!("vidsink-rfi {first} {last}");
+						let _ = std::io::stdout().flush();
+					}
+					// The depacketizer lost the reference picture: ask the app for an IDR now
+					// instead of waiting out the host's periodic keyframe.
+					if last_needidr.elapsed() >= std::time::Duration::from_millis(500)
+						&& rtp::NEED_IDR.swap(false, Ordering::Relaxed)
+					{
+						last_needidr = std::time::Instant::now();
+						println!("vidsink-needidr");
+						let _ = std::io::stdout().flush();
+					}
+				},
+				&stop2,
+			);
+		})
+		.ok();
+	Some(Source::Rtp(RtpFeed { par, q, stop, thread, pts: 0, last_ts: None }))
+}
+
+/// Open libavformat's RTP/SDP demuxer on `sdp` (the pre-Unix-socket path).
+unsafe fn open_demux(sdp: &CString) -> Option<Source> {
 	{
 		let mut fmt: *mut ff::AVFormatContext = ptr::null_mut();
 		let mut opts: *mut ff::AVDictionary = ptr::null_mut();
@@ -553,33 +818,36 @@ unsafe fn decode_once(sdp: &CString) {
 		};
 		if !opened {
 			eprintln!("pulsar-render: avformat_open_input failed after retries");
-			return;
+			return None;
 		}
+		ff::avformat_find_stream_info(fmt, ptr::null_mut());
+		let vs = ff::av_find_best_stream(fmt, ff::AVMediaType::AVMEDIA_TYPE_VIDEO, -1, -1, ptr::null_mut(), 0);
+		if vs < 0 {
+			eprintln!("pulsar-render: no video stream");
+			ff::avformat_close_input(&mut fmt);
+			return None;
+		}
+		Some(Source::Demux { fmt, vs })
+	}
+}
+
+/// One decode pass over `sdp` — runs until stop, reopen, EOF or a fatal error. (The body of
+/// the old inline decode thread; extracted so a live reopen can run it again on a new SDP.)
+unsafe fn decode_once(sdp: &CString) {
+	{
+		let Some(mut src) = open_source(sdp) else { return };
 		// Every exit from here on funnels through the cleanup tail below the labeled block
 		// (this renderer stays resident after session end — the `hide` idle path — so an
-		// early-return leak of the format/codec contexts would persist).
+		// early-return leak of the source/codec contexts would persist).
 		let mut dc: *mut ff::AVCodecContext = ptr::null_mut();
 		'decode: {
-			ff::avformat_find_stream_info(fmt, ptr::null_mut());
-			let vs = ff::av_find_best_stream(
-				fmt,
-				ff::AVMediaType::AVMEDIA_TYPE_VIDEO,
-				-1,
-				-1,
-				ptr::null_mut(),
-				0,
-			);
-			if vs < 0 {
-				eprintln!("pulsar-render: no video stream");
-				break 'decode;
-			}
 			// Moonlight-style tiered selection (decode.rs): candidates per codec, each
 			// VALIDATED by really decoding a canned keyframe — zero-copy SoC decoders
 			// (DRM_PRIME by capability, e.g. rkmpp on RK3588) → generic hwaccels
 			// (VAAPI/CUDA/Vulkan, zero-copy map or readback) → software. The SDP (written
 			// by spawn.rs::write_sdp from the negotiated codec) sets codec_id.
-			let st = *(*fmt).streams.add(vs as usize);
-			let codec_id = (*(*st).codecpar).codec_id;
+			let par = src.par();
+			let codec_id = (*par).codec_id;
 			// Decoders already tried on THIS stream (by name) — the zero-output fallback
 			// below re-runs the tier walk with them excluded.
 			let mut skip: Vec<String> = Vec::new();
@@ -590,7 +858,7 @@ unsafe fn decode_once(sdp: &CString) {
 					break 'decode;
 				}
 			};
-			dc = open_decoder(st, codec_id, &sel);
+			dc = open_decoder(par, codec_id, &sel);
 			if dc.is_null() {
 				break 'decode;
 			}
@@ -619,28 +887,25 @@ unsafe fn decode_once(sdp: &CString) {
 			let mut au_since_open: u32 = 0;
 			let mut frames_since_open: u64 = 0;
 			let mut fallback_exhausted = false;
+			// Decoder-output gap diagnostics: when the decoder last gave a picture, and the AUs
+			// fed to it since. Field log 2026-11-09 (Orange Pi, intra refresh, lossy link) had a
+			// ~3 s stretch with AUs flowing but not one frame out (no loss hold counted any)
+			// until a keyframe — the decoder swallowing pictures predicted from a lost one would
+			// look exactly like that. One stderr line per such gap tells it from a network gap.
+			let mut last_out_ms: u64 = 0;
+			let mut fed_since_out: u32 = 0;
 			// The env pin wins over the app-derived reorder wait for the whole session.
 			let maxdelay_pinned = std::env::var_os("PULSAR_MAXDELAY").is_some();
-			// Frames withheld by an active hold (diagnostics, logged when the hold ends).
-			let mut held_frames: u32 = 0;
-			let mut hold_started_ms: u64 = 0;
 			while !STOP.load(Ordering::Relaxed) && !REOPEN.load(Ordering::Relaxed) {
-				// Apply the app's RTT-derived reorder wait live (libav reads max_delay per fetch).
-				if !maxdelay_pinned {
-					let want = MAX_DELAY_US.load(Ordering::Relaxed);
-					if want > 0 && (*fmt).max_delay as i64 != want as i64 {
-						(*fmt).max_delay = want.min(c_int::MAX as u64) as c_int;
-					}
-				}
-				let r = ff::av_read_frame(fmt, pkt);
+				let r = src.read(pkt, maxdelay_pinned);
 				// A switch that never produced its first keyframe within SWITCH_TIMEOUT_MS:
-				// intr_cb has aborted the (otherwise indefinite) read. Stop spinning, clear the
-				// "switching…" veil and requeue THIS sdp so start_decode's loop reopens it from
-				// scratch instead of letting the decode thread die — a silent host that later
-				// resumes is then picked up on the retry. (When the host is gone for good this
-				// just retries every ~SWITCH_TIMEOUT_MS, which is recoverable, not a hard hang.)
-				if r < 0 && !seen_key && switch_timed_out() {
-					ff::av_packet_unref(pkt);
+				// intr_cb has aborted the (otherwise indefinite) demux read, or the RTP feed
+				// stayed silent. Stop spinning, clear the "switching…" veil and requeue THIS sdp
+				// so start_decode's loop reopens it from scratch instead of letting the decode
+				// thread die — a silent host that later resumes is then picked up on the retry.
+				// (When the host is gone for good this just retries every ~SWITCH_TIMEOUT_MS,
+				// which is recoverable, not a hard hang.)
+				if matches!(r, Read::Again | Read::Eof) && !seen_key && switch_timed_out() {
 					SWITCHING.store(false, Ordering::Relaxed);
 					SWITCH_DEADLINE_MS.store(0, Ordering::Relaxed);
 					if let Ok(s) = sdp.to_str() {
@@ -648,15 +913,14 @@ unsafe fn decode_once(sdp: &CString) {
 					}
 					break;
 				}
-				if r == ff::AVERROR_EOF {
-					break;
-				}
-				if r < 0 {
-					ff::av_packet_unref(pkt);
-					continue;
-				}
+				let is_video = match r {
+					Read::Eof => break,
+					Read::Again => continue,
+					Read::Video => true,
+					Read::Other => false,
+				};
 				// Gate on the first keyframe (video stream only) — kills the pre-IDR green smear.
-				if (*pkt).stream_index == vs && !seen_key {
+				if is_video && !seen_key {
 					if (*pkt).flags & ff::AV_PKT_FLAG_KEY != 0 {
 						seen_key = true;
 						SWITCHING.store(false, Ordering::Relaxed); // new stream live
@@ -669,157 +933,177 @@ unsafe fn decode_once(sdp: &CString) {
 				// Time the decode work for this packet (send + frame drain), EMA'd per frame into the
 				// overlay's "Çözme ms" tile. rkmpp is async HW: timing avcodec_receive_frame alone
 				// reads ~0 (the frame is already decoded), so span the whole send→drain instead.
-				let dec_t0 = if (*pkt).stream_index == vs {
+				let dec_t0 = if is_video {
 					// Tally received video bytes for the HUD bitrate (presenter reads this 1×/s).
 					VBYTES.fetch_add((*pkt).size.max(0) as u64, Ordering::Relaxed);
 					// A keyframe ends a loss hold early: everything decoded from here is clean.
-					if (*pkt).flags & ff::AV_PKT_FLAG_KEY != 0
-						&& HOLD_UNTIL_MS.swap(0, Ordering::Relaxed) != 0
-					{
-						report_hold_end("keyframe", held_frames, hold_started_ms);
-						held_frames = 0;
-						hold_started_ms = 0;
+					if (*pkt).flags & ff::AV_PKT_FLAG_KEY != 0 {
+						let ended = LOSS_HOLD.lock().unwrap().on_keyframe(mono_ms());
+						if let Some(e) = ended {
+							report_hold_end(e);
+						}
 					}
 					let t0 = std::time::Instant::now();
-					ff::avcodec_send_packet(dc, pkt);
 					au_since_open = au_since_open.saturating_add(1);
+					fed_since_out = fed_since_out.saturating_add(1);
 					Some(t0)
 				} else {
 					None
 				};
-				ff::av_packet_unref(pkt);
+				// A decoder whose input is full (EAGAIN, e.g. rkmpp's queue under a burst) gets
+				// its frames drained below, then the packet again: dropping it would cut the
+				// reference chain.
+				let mut unsent = dec_t0.is_some();
+				let mut send_tries = 0u32;
 				let mut got_frames: u64 = 0;
-				while ff::avcodec_receive_frame(dc, frame) == 0 {
-					got_frames += 1;
-					frames_since_open += 1;
-					// Route by output class: DRM_PRIME → zero-copy present; tier-1 hwaccel
-					// frames → map to DRM_PRIME (zero-copy) or read back to NV12; software
-					// planar/NV12 → GL upload. Anything else is undisplayable → skip.
-					let f = (*frame).format;
-					let nf: *mut ff::AVFrame;
-					if f == ff::AVPixelFormat::AV_PIX_FMT_DRM_PRIME as c_int || is_displayable_sw(f)
-					{
-						nf = ff::av_frame_alloc();
-						ff::av_frame_move_ref(nf, frame);
-					} else if sel.tier == crate::decode::Tier::HwAccel
-						&& f == sel.hw_fmt as c_int
-						&& f == ff::AVPixelFormat::AV_PIX_FMT_CUDA as c_int
-						&& !force_readback
-						&& ZC_FAILED_GEN.load(Ordering::Relaxed) != gen
-						// Interop copies 8-bit NV12 only; a 10-bit (P010) stream reads back.
-						&& cuda_frame_ctx(frame)
-							.is_some_and(|c| c.sw_format == ff::AVPixelFormat::AV_PIX_FMT_NV12)
-					{
-						// CUDA on an NVIDIA display: hand the device frame to the presenter, which
-						// copies it GPU-side into the GL textures (CUDA↔GL interop).
-						nf = ff::av_frame_alloc();
-						ff::av_frame_move_ref(nf, frame);
-					} else if sel.tier == crate::decode::Tier::HwAccel && f == sel.hw_fmt as c_int {
-						// Zero-copy first: a VAAPI/DRM frame usually maps straight to a
-						// DRM_PRIME dmabuf the EGL path imports with no copy. (CUDA has no DRM
-						// mapping — it is either the interop branch above or a readback.)
-						let mut mapped: *mut ff::AVFrame = ptr::null_mut();
-						if !map_failed
+				'drain: loop {
+					if unsent {
+						unsent = ff::avcodec_send_packet(dc, pkt) == ff::AVERROR(libc::EAGAIN);
+					}
+					while ff::avcodec_receive_frame(dc, frame) == 0 {
+						got_frames += 1;
+						frames_since_open += 1;
+						{
+							let now = mono_ms();
+							// Fed a few AUs (not just one slow frame) and nothing came out for 0.5 s.
+							if last_out_ms > 0 && fed_since_out > 4 && now.saturating_sub(last_out_ms) >= 500 {
+								eprintln!(
+									"pulsar-render: decoder gave no picture for {} ms while fed {fed_since_out} AU(s)",
+									now - last_out_ms
+								);
+							}
+							last_out_ms = now;
+							fed_since_out = 0;
+						}
+						// Route by output class: DRM_PRIME → zero-copy present; tier-1 hwaccel
+						// frames → map to DRM_PRIME (zero-copy) or read back to NV12; software
+						// planar/NV12 → GL upload. Anything else is undisplayable → skip.
+						let f = (*frame).format;
+						let nf: *mut ff::AVFrame;
+						if f == ff::AVPixelFormat::AV_PIX_FMT_DRM_PRIME as c_int || is_displayable_sw(f)
+						{
+							nf = ff::av_frame_alloc();
+							ff::av_frame_move_ref(nf, frame);
+						} else if sel.tier == crate::decode::Tier::HwAccel
+							&& f == sel.hw_fmt as c_int
+							&& f == ff::AVPixelFormat::AV_PIX_FMT_CUDA as c_int
 							&& !force_readback
 							&& ZC_FAILED_GEN.load(Ordering::Relaxed) != gen
-							&& f != ff::AVPixelFormat::AV_PIX_FMT_CUDA as c_int
+							// Interop copies 8-bit NV12 only; a 10-bit (P010) stream reads back.
+							&& cuda_frame_ctx(frame)
+								.is_some_and(|c| c.sw_format == ff::AVPixelFormat::AV_PIX_FMT_NV12)
 						{
-							let mf = ff::av_frame_alloc();
-							(*mf).format = ff::AVPixelFormat::AV_PIX_FMT_DRM_PRIME as c_int;
-							if ff::av_hwframe_map(mf, frame, ff::AV_HWFRAME_MAP_READ as c_int) == 0
+							// CUDA on an NVIDIA display: hand the device frame to the presenter, which
+							// copies it GPU-side into the GL textures (CUDA↔GL interop).
+							nf = ff::av_frame_alloc();
+							ff::av_frame_move_ref(nf, frame);
+						} else if sel.tier == crate::decode::Tier::HwAccel && f == sel.hw_fmt as c_int {
+							// Zero-copy first: a VAAPI/DRM frame usually maps straight to a
+							// DRM_PRIME dmabuf the EGL path imports with no copy. (CUDA has no DRM
+							// mapping — it is either the interop branch above or a readback.)
+							let mut mapped: *mut ff::AVFrame = ptr::null_mut();
+							if !map_failed
+								&& !force_readback
+								&& ZC_FAILED_GEN.load(Ordering::Relaxed) != gen
+								&& f != ff::AVPixelFormat::AV_PIX_FMT_CUDA as c_int
 							{
-								mapped = mf;
-							} else {
-								let mut mf = mf;
-								ff::av_frame_free(&mut mf);
-								map_failed = true;
-								eprintln!(
-                                "pulsar-render: hwframe map to DRM_PRIME unavailable — using readback"
-                            );
-							}
-						}
-						if mapped.is_null() {
-							// Readback (the GenericHwAccel analog): GPU→CPU transfer, NV12 upload.
-							// NV12 is REQUESTED explicitly: a 10-bit stream (host HDR → P010)
-							// would otherwise read back in a format the presenter routes to its
-							// 3-plane branch, dereferencing P010's NULL data[2] → segfault. If
-							// the hwaccel refuses NV12, retry letting libav pick — and only
-							// queue the frame when the result is really displayable.
-							let sw = ff::av_frame_alloc();
-							(*sw).format = ff::AVPixelFormat::AV_PIX_FMT_NV12 as c_int;
-							let mut ok = ff::av_hwframe_transfer_data(sw, frame, 0) >= 0;
-							if !ok {
-								ff::av_frame_unref(sw); // resets format to NONE → libav picks
-								ok = ff::av_hwframe_transfer_data(sw, frame, 0) >= 0;
-							}
-							if !ok || !is_displayable_sw((*sw).format) {
-								if ok && !readback_warned {
-									readback_warned = true;
+								let mf = ff::av_frame_alloc();
+								(*mf).format = ff::AVPixelFormat::AV_PIX_FMT_DRM_PRIME as c_int;
+								if ff::av_hwframe_map(mf, frame, ff::AV_HWFRAME_MAP_READ as c_int) == 0
+								{
+									mapped = mf;
+								} else {
+									let mut mf = mf;
+									ff::av_frame_free(&mut mf);
+									map_failed = true;
 									eprintln!(
-                                    "pulsar-render: readback format {} not displayable — skipping frames",
-                                    (*sw).format
-                                );
+	                                "pulsar-render: hwframe map to DRM_PRIME unavailable — using readback"
+	                            );
 								}
-								let mut sw = sw;
-								ff::av_frame_free(&mut sw);
-								ff::av_frame_unref(frame);
-								continue;
 							}
-							mapped = sw;
-						}
-						ff::av_frame_unref(frame);
-						nf = mapped;
-					} else {
-						ff::av_frame_unref(frame);
-						continue;
-					}
-					// Loss hold (Phase 0.5): the app wrote a NACK repair off — this frame (and the
-					// next ones, until a keyframe or the deadline) decoded against a missing
-					// reference. Keep the decoder fed (state stays continuous) but don't present.
-					{
-						let until = HOLD_UNTIL_MS.load(Ordering::Relaxed);
-						if until != 0 {
-							if mono_ms() < until {
-								if held_frames == 0 {
-									hold_started_ms = mono_ms();
+							if mapped.is_null() {
+								// Readback (the GenericHwAccel analog): GPU→CPU transfer, NV12 upload.
+								// NV12 is REQUESTED explicitly: a 10-bit stream (host HDR → P010)
+								// would otherwise read back in a format the presenter routes to its
+								// 3-plane branch, dereferencing P010's NULL data[2] → segfault. If
+								// the hwaccel refuses NV12, retry letting libav pick — and only
+								// queue the frame when the result is really displayable.
+								let sw = ff::av_frame_alloc();
+								(*sw).format = ff::AVPixelFormat::AV_PIX_FMT_NV12 as c_int;
+								let mut ok = ff::av_hwframe_transfer_data(sw, frame, 0) >= 0;
+								if !ok {
+									ff::av_frame_unref(sw); // resets format to NONE → libav picks
+									ok = ff::av_hwframe_transfer_data(sw, frame, 0) >= 0;
 								}
-								held_frames += 1;
+								if !ok || !is_displayable_sw((*sw).format) {
+									if ok && !readback_warned {
+										readback_warned = true;
+										eprintln!(
+	                                    "pulsar-render: readback format {} not displayable — skipping frames",
+	                                    (*sw).format
+	                                );
+									}
+									let mut sw = sw;
+									ff::av_frame_free(&mut sw);
+									ff::av_frame_unref(frame);
+									continue;
+								}
+								mapped = sw;
+							}
+							ff::av_frame_unref(frame);
+							nf = mapped;
+						} else {
+							ff::av_frame_unref(frame);
+							continue;
+						}
+						// Loss hold (Phase 0.5): the app wrote a NACK repair off — this frame (and the
+						// next ones, until a keyframe or the deadline) decoded against a missing
+						// reference. Keep the decoder fed (state stays continuous) but don't present.
+						{
+							let (show, ended) = LOSS_HOLD.lock().unwrap().on_frame(mono_ms());
+							if let Some(e) = ended {
+								report_hold_end(e);
+							}
+							if !show {
 								let mut nf = nf;
 								ff::av_frame_free(&mut nf);
 								continue;
 							}
-							HOLD_UNTIL_MS.store(0, Ordering::Relaxed);
-							report_hold_end("deadline", held_frames, hold_started_ms);
-							held_frames = 0;
-							hold_started_ms = 0;
 						}
-					}
-					{
-						let mut q = MBX.lock().unwrap();
-						// Tag with the decoder generation (see ZC_FAILED_GEN).
-						(*nf).opaque = gen as usize as *mut c_void;
-						q.push_back(FramePtr(nf));
-						// Bound the queue: if the consumer falls behind, drop the OLDEST frame so
-						// latency stays capped (pacing ON) and newest-wins still works (pacing OFF).
-						while q.len() > QCAP.load(Ordering::Relaxed) {
-							if let Some(old) = q.pop_front() {
-								let mut o = old.0;
-								ff::av_frame_free(&mut o);
+						{
+							let mut q = MBX.lock().unwrap();
+							// Tag with the decoder generation (see ZC_FAILED_GEN).
+							(*nf).opaque = gen as usize as *mut c_void;
+							q.push_back(FramePtr(nf));
+							// Bound the queue: if the consumer falls behind, drop the OLDEST frame so
+							// latency stays capped (pacing ON) and newest-wins still works (pacing OFF).
+							while q.len() > QCAP.load(Ordering::Relaxed) {
+								if let Some(old) = q.pop_front() {
+									let mut o = old.0;
+									ff::av_frame_free(&mut o);
+								}
 							}
 						}
-					}
-					// Update the source-rate estimate (EMA) so the pacer presents at the host's
-					// frame rate, not the display refresh rate.
-					{
-						let pubt = std::time::Instant::now();
-						let dt = pubt.duration_since(last_pub_pace).as_micros() as u64;
-						if (1_000..1_000_000).contains(&dt) {
-							let prev = SRC_US.load(Ordering::Relaxed);
-							SRC_US.store((prev * 7 + dt) / 8, Ordering::Relaxed);
+						notify_frame();
+						// Update the source-rate estimate (EMA) so the pacer presents at the host's
+						// frame rate, not the display refresh rate.
+						{
+							let pubt = std::time::Instant::now();
+							let dt = pubt.duration_since(last_pub_pace).as_micros() as u64;
+							if (1_000..1_000_000).contains(&dt) {
+								let prev = SRC_US.load(Ordering::Relaxed);
+								SRC_US.store((prev * 7 + dt) / 8, Ordering::Relaxed);
+							}
+							last_pub_pace = pubt;
 						}
-						last_pub_pace = pubt;
 					}
+					send_tries += 1;
+					if !unsent || send_tries > 20 {
+						break 'drain;
+					}
+					std::thread::sleep(std::time::Duration::from_millis(1));
 				}
+				ff::av_packet_unref(pkt);
 				// ZERO-OUTPUT FALLBACK: ~2 s of video AUs in (120 at 60 fps), not one frame
 				// out = this decoder validated on the canned keyframe but cannot decode THIS
 				// stream (a profile/level the hwaccel rejects, a driver that wedges). Walk the
@@ -837,7 +1121,7 @@ unsafe fn decode_once(sdp: &CString) {
 						match crate::decode::select_skipping(codec_id, &skip) {
 							Some(p) => {
 								ff::avcodec_free_context(&mut dc);
-								dc = open_decoder(st, codec_id, &p.sel);
+								dc = open_decoder(par, codec_id, &p.sel);
 								if dc.is_null() {
 									skip.push(p.sel.key());
 									continue;
@@ -879,10 +1163,10 @@ unsafe fn decode_once(sdp: &CString) {
 			ff::av_packet_free(&mut pkt);
 			ff::av_frame_free(&mut frame);
 		}
-		// Cleanup tail for EVERY exit: the codec context (frees hw_device_ctx with it)
-		// and the demuxer. Both calls are no-ops on still-null pointers.
+		// Cleanup tail for EVERY exit: the codec context (frees hw_device_ctx with it; a
+		// no-op on a still-null pointer) and the source (demuxer, or RTP thread + params).
 		ff::avcodec_free_context(&mut dc);
-		ff::avformat_close_input(&mut fmt);
+		src.close();
 	}
 }
 
@@ -891,11 +1175,11 @@ unsafe fn decode_once(sdp: &CString) {
 /// drain+free (`stop_decode`) must be done from the main thread after the render loop ends, where
 /// MBX is not held — calling stop_decode() from the signal handler can deadlock on the MBX mutex
 /// the main thread holds every frame in `Presenter::draw`.
-/// Allocate + open a codec context for `sel` on stream `st` (the decoder the tier walk
-/// picked). Null on failure (the failure is already logged). Shared by the initial open
-/// and the runtime zero-output fallback so both configure the context identically.
+/// Allocate + open a codec context for `sel` on the stream parameters `par` (the decoder the
+/// tier walk picked). Null on failure (the failure is already logged). Shared by the initial
+/// open and the runtime zero-output fallback so both configure the context identically.
 unsafe fn open_decoder(
-	st: *mut ff::AVStream,
+	par: *const ff::AVCodecParameters,
 	codec_id: ff::AVCodecID,
 	sel: &crate::decode::Selected,
 ) -> *mut ff::AVCodecContext {
@@ -905,7 +1189,7 @@ unsafe fn open_decoder(
 		return ptr::null_mut();
 	}
 	let mut dc = ff::avcodec_alloc_context3(dec);
-	ff::avcodec_parameters_to_context(dc, (*st).codecpar);
+	ff::avcodec_parameters_to_context(dc, par);
 	// Decoder low-delay: emit frames without reorder buffering when the SPS lacks
 	// bitstream_restriction. This is a codec-context flag — an AVFormatContext has
 	// no "flags" AVOption, so it can't ride the demuxer dict.
@@ -1581,8 +1865,12 @@ impl Presenter {
 		ok
 	}
 
-	pub unsafe fn draw(&mut self, gl: &glow::Context, w: i32, h: i32) -> bool {
-		use glow::HasContext;
+	/// Frame-selection half of `draw()`: take the next decoded frame per the pacing policy (or
+	/// keep re-presenting the last one) and report a stream-size change. Returns the current
+	/// frame (null = none yet; owned by the presenter) and whether it is fresh. The DRM-lease
+	/// presenter (`kms_lease.rs`) calls this directly instead of `draw()` — it puts the frame on
+	/// a KMS plane rather than drawing it with GL.
+	pub unsafe fn take_frame(&mut self) -> (*mut ff::AVFrame, bool) {
 		// Take the newest decoded frame if there is one; else RE-PRESENT the last frame. The
 		// render loop runs at vsync (~display rate) but video arrives slower (e.g. 30 fps), so most
 		// presents have no new frame — without re-presenting the last one those frames would clear
@@ -1629,6 +1917,7 @@ impl Presenter {
 				newest
 			}
 		};
+		let is_fresh = fresh.is_some();
 		if let Some(FramePtr(nf)) = fresh {
 			if !self.last.is_null() {
 				let mut old = self.last;
@@ -1649,7 +1938,7 @@ impl Presenter {
 		}
 		let cur = self.last;
 		if cur.is_null() {
-			return false;
+			return (cur, false);
 		}
 
 		let vw = (*cur).width;
@@ -1664,6 +1953,17 @@ impl Presenter {
 			use std::io::Write as _;
 			let _ = std::io::stdout().flush();
 		}
+		(cur, is_fresh)
+	}
+
+	pub unsafe fn draw(&mut self, gl: &glow::Context, w: i32, h: i32) -> bool {
+		use glow::HasContext;
+		let cur = self.take_frame().0;
+		if cur.is_null() {
+			return false;
+		}
+		let vw = (*cur).width;
+		let vh = (*cur).height;
 		let is_prime = (*cur).format == ff::AVPixelFormat::AV_PIX_FMT_DRM_PRIME as c_int;
 		let is_cuda = (*cur).format == ff::AVPixelFormat::AV_PIX_FMT_CUDA as c_int;
 
@@ -1826,6 +2126,12 @@ impl Presenter {
 		// Restore the egui-expected active unit (it manages TEXTURE0 itself, but be tidy).
 		gl.active_texture(glow::TEXTURE0);
 
+		self.stats_tick();
+		true
+	}
+
+	/// ~1 Hz fps / bitrate / worst-gap sample for the HUD (also called by the DRM-lease path).
+	pub fn stats_tick(&mut self) {
 		let t = now_s();
 		if t - self.last_t >= 1.0 {
 			let win = t - self.last_t;
@@ -1838,7 +2144,11 @@ impl Presenter {
 			self.last_frames = self.frames;
 			self.max_gap_ms = 0.0;
 		}
-		true
+	}
+
+	/// The frame currently presented (null = none yet). Read-only; owned by the presenter.
+	pub fn current_frame(&self) -> *const ff::AVFrame {
+		self.last
 	}
 }
 

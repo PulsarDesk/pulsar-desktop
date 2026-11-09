@@ -16,7 +16,6 @@ vi.mock('#lib/api.js', async () => {
 			id: nextId++,
 			transport: 'direct',
 			ws_port: 0,
-			audio_ws_port: 0,
 			local: false,
 			native: false,
 			embedded: false,
@@ -40,14 +39,17 @@ vi.mock('#lib/api.js', async () => {
 			setActiveSession: _vi.fn().mockResolvedValue(undefined)
 		},
 		onPlayReady: _vi.fn(),
+		onPlayOptimizing: _vi.fn(),
 		onPlayEnded: _vi.fn(),
+		onPeerAvatar: _vi.fn(),
+		onPeerName: _vi.fn(),
 		setFullscreen: _vi.fn().mockResolvedValue(undefined),
 		recordConnection: _vi.fn()
 	};
 });
 
 // Stub recordConnection imported inside sessions.svelte.ts via #lib/peers.svelte.js
-vi.mock('#lib/peers.svelte.js', () => ({ recordConnection: vi.fn() }));
+vi.mock('#lib/peers.svelte.js', () => ({ recordConnection: vi.fn(), setPeerIdentity: vi.fn() }));
 
 // Stub i18n (t) to avoid loading JSON files in Node
 vi.mock('#lib/i18n.svelte.js', () => ({ t: (k: string) => k }));

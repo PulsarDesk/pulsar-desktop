@@ -1,6 +1,6 @@
 <script lang="ts">
 	import PulsarMark from '#lib/PulsarMark.svelte';
-	import { onConnPhase } from '#lib/api.js';
+	import { onConnPhase, onConnProbe } from '#lib/api.js';
 	import { t } from '#lib/i18n.svelte.js';
 
 	type Target = { name: string; id: string };
@@ -14,9 +14,12 @@
 		 * up until first frames (`play-ready`), but the status must say "preparing",
 		 * not "waiting for approval" (wrong for unattended hosts). */
 		preparing?: boolean;
+		/** First frames decoded; the stream is held back while its bitrate settles
+		 * (Settings → "optimize the stream before showing it"). */
+		optimizing?: boolean;
 		onCancel: () => void;
 	};
-	let { target, mode, awaitingApproval = false, preparing = false, onCancel }: Props = $props();
+	let { target, mode, awaitingApproval = false, preparing = false, optimizing = false, onCancel }: Props = $props();
 
 	// Real milestones only (no faked "peer found"): we show "reaching out", then the
 	// ACTUAL transport once the core establishes it (direct P2P vs relay), then
@@ -38,6 +41,23 @@
 			un?.();
 		};
 	});
+	// The session-start bandwidth probe's result (a real measurement, shown once it lands).
+	let probe = $state<{ kbps: number; atLeast: boolean } | null>(null);
+	$effect(() => {
+		let un: (() => void) | undefined;
+		let dead = false;
+		onConnProbe((e) => {
+			if (e.target === target.id) probe = { kbps: e.kbps, atLeast: e.at_least };
+		}).then((u) => {
+			if (dead) u();
+			else un = u;
+		});
+		return () => {
+			dead = true;
+			un?.();
+		};
+	});
+	const mbit = (kbps: number) => (kbps / 1000).toFixed(kbps < 10_000 ? 1 : 0);
 	// Step list (replaces the single status line): each REAL milestone is a row
 	// that turns green when passed — reach (→ the actual transport), authorization,
 	// then stream start. Driven only by signals we truly have (no faked progress).
@@ -62,10 +82,22 @@
 						: t('connecting.stepAuth'),
 				state: authDone ? 'done' : reached ? 'active' : 'pending'
 			},
+			...(probe
+				? [
+						{
+							label: t(probe.atLeast ? 'connecting.stepMeasuredAtLeast' : 'connecting.stepMeasured', {
+								mbit: mbit(probe.kbps)
+							}),
+							state: 'done' as StepState
+						}
+					]
+				: []),
 			{
 				label: t('connecting.preparing'),
-				state: preparing ? 'active' : 'pending'
-			}
+				state: optimizing ? 'done' : preparing ? 'active' : 'pending'
+			},
+			// Only once it is actually happening (the setting can be off).
+			...(optimizing ? [{ label: t('connecting.optimizing'), state: 'active' as StepState }] : [])
 		];
 	});
 

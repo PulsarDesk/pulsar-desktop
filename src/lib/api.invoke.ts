@@ -13,6 +13,7 @@ const DEFAULT_CONFIG: Config = {
 	relay_keys: {},
 	use_local_relay: false,
 	network_mode: 'auto',
+	port_mapping: true,
 	device_name: 'Bu Cihaz',
 	language: 'tr',
 	unattended_access: false,
@@ -24,6 +25,7 @@ const DEFAULT_CONFIG: Config = {
 	avatar_mode: 'user',
 	native_player: false,
 	request_admin: true,
+	pre_optimize_stream: true,
 	show_remote_cursor: true,
 	share_cursor_label: true
 };
@@ -109,7 +111,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 				'alsa_input.pci-0000_00_1f.3.analog-stereo'
 			] as unknown as T);
 		case 'start_remote_play':
-			return Promise.resolve({ id: 0, transport: 'direct', ws_port: 0, audio_ws_port: 0, local: false, native: false, embedded: false, host_codecs: ['h264'], host_encoders: ['software'], host_displays: [{ idx: 0, name: 'DISPLAY1', width: 2560, height: 1440, primary: true }, { idx: 1, name: 'DISPLAY2', width: 1920, height: 1080, primary: false }], client_codecs: ['h264', 'h265'] } as unknown as T);
+			return Promise.resolve({ id: 0, transport: 'direct', ws_port: 0, local: false, native: false, embedded: false, host_codecs: ['h264'], host_encoders: ['software'], host_displays: [{ idx: 0, name: 'DISPLAY1', width: 2560, height: 1440, primary: true }, { idx: 1, name: 'DISPLAY2', width: 1920, height: 1080, primary: false }], client_codecs: ['h264', 'h265'] } as unknown as T);
 		case 'local_caps':
 			return Promise.resolve({
 				platform: 'linux',
@@ -175,6 +177,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 		case 'kbd_capture_start':
 		case 'kbd_capture_stop':
 		case 'kbd_engage':
+		case 'kbd_web_key':
 		case 'native_view_rect':
 		case 'send_clipboard':
 		case 'send_chat':

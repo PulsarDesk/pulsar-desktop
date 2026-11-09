@@ -292,7 +292,9 @@
 			transparent 70%
 		);
 		transform: translateX(-150%);
-		animation: connect-shine 3.5s ease-in-out infinite;
+		/* Finite on purpose: an endless animation makes WebKitGTK repaint this area every display
+		   frame (software rendering on the Orange Pi: the idle home screen held a core at ~90 %). */
+		animation: connect-shine 3.5s ease-in-out 2;
 		pointer-events: none;
 	}
 	@keyframes connect-shine {
@@ -332,7 +334,9 @@
 		border-radius: 50%;
 		background: var(--ok);
 		flex: none;
-		animation: lpulse 1.8s ease-out infinite;
+		/* Finite on purpose: an endless animation makes WebKitGTK repaint this area every display
+		   frame (software rendering on the Orange Pi: the idle home screen held a core at ~90 %). */
+		animation: lpulse 1.8s ease-out 3;
 	}
 	@keyframes lpulse {
 		0% {

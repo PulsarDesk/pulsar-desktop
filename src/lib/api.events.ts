@@ -3,6 +3,7 @@
 
 import { isTauri } from './api.invoke';
 import type { AuthPrompt, DataText, FileBegin, FileRecv, FsEntries, LocalCaps, SessionEvent } from './api.types';
+import type { PulsarToast } from './types';
 
 async function listenTo<T>(event: string, cb: (e: T) => void): Promise<() => void> {
 	if (!isTauri) return () => {};
@@ -93,6 +94,8 @@ export const onDataClip = (cb: (e: DataText) => void) => listenTo<DataText>('dat
 /** Host: an inbound file transfer finished. Also fires on the CLIENT when a
  * file-manager download lands (`peer` = play id as string then). */
 export const onFileRecv = (cb: (e: FileRecv) => void) => listenTo<FileRecv>('file-recv', cb);
+/** Toast window: the full list of Pulsar notices whenever it changes. */
+export const onToasts = (cb: (list: PulsarToast[]) => void) => listenTo<PulsarToast[]>('toasts', cb);
 /** Client: the host started streaming a file-manager download (FileBegin received).
  * Used to cancel the short wall-clock timeout so the concurrency slot isn't released
  * while the transfer is legitimately in flight. `peer` = play id as string. */
@@ -160,6 +163,9 @@ export const onWindowBlur = (cb: () => void) => listenTo<null>('window-blur', ()
 /** Client: the stream is REALLY up (first decoded frames/bitrate) — the Connecting
  * screen holds until this fires for the play id. */
 export const onPlayReady = (cb: (id: number) => void) => listenTo<number>('play-ready', (e) => cb(e));
+/** First frames decoded but held back while the adaptive bitrate settles ("optimizing"). */
+export const onPlayOptimizing = (cb: (id: number) => void) =>
+	listenTo<number>('play-optimizing', (e) => cb(e));
 /** Client: a play session ended (host closed it, a network error, or we left). The UI must
  * release any input grab and drop the tab — otherwise the native path freezes on mpv's last
  * frame with the keyboard/mouse still captured (you'd be stuck). Payload is the play id. */
@@ -172,9 +178,17 @@ export const onReverseRequest = (cb: (e: { id: string }) => void) =>
  * screen, keyed by the target string. */
 export const onConnPhase = (cb: (e: { target: string; transport: string }) => void) =>
 	listenTo<{ target: string; transport: string }>('conn-phase', cb);
+/** Client: the session-start bandwidth probe measured the path (kbit/s; `at_least` = every
+ * train kept up, the path carries at least that) — for the Connecting screen, keyed by target. */
+export const onConnProbe = (cb: (e: { target: string; kbps: number; at_least: boolean }) => void) =>
+	listenTo<{ target: string; kbps: number; at_least: boolean }>('conn-probe', cb);
 /** Client: round-trip time (ms) for a play session, from keepalive ping/pong. */
 export const onPlayRtt = (cb: (e: { id: number; rtt: number }) => void) =>
 	listenTo<{ id: number; rtt: number }>('play-rtt', cb);
+/** Client: a short stream notice for a session WITHOUT the native renderer (which shows it as
+ * its own toast) — e.g. "the link can't carry the picked resolution/fps, a lighter one is used". */
+export const onPlayNotice = (cb: (e: { id: number; text: string }) => void) =>
+	listenTo<{ id: number; text: string }>('play-notice', cb);
 /** Client: the host's encode summary (e.g. "NVENC · 1080p · 60fps") for a session. */
 export const onPlayStats = (cb: (e: { id: number; label: string }) => void) =>
 	listenTo<{ id: number; label: string }>('host-stats', cb);

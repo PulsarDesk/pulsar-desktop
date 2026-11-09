@@ -39,6 +39,7 @@ mod io_cmds;
 #[cfg(windows)]
 mod job;
 mod kbdhook;
+mod native_audio;
 mod native_view;
 mod play;
 mod process;
@@ -55,6 +56,7 @@ mod session_cmds;
 mod remote_cursor;
 mod splash;
 mod state;
+mod toast;
 mod util;
 mod viewer;
 
@@ -83,7 +85,7 @@ use fs_browse::local_ls;
 use host::go_online;
 use io_cmds::{
 	chat_log, confine_pointer, host_send_chat, input_button, input_char, input_key, input_pointer,
-	input_scroll, kbd_capture_start, kbd_capture_stop, kbd_engage, list_input_devices, mic_start,
+	input_scroll, kbd_capture_start, kbd_capture_stop, kbd_engage, kbd_web_key, list_input_devices, mic_start,
 	mic_stop, native_view_rect, read_clipboard_text, send_chat, send_clipboard, send_file,
 	send_file_path, set_active_session, set_controller_lock, set_kbm_lock, set_pane_count,
 	set_window_fullscreen, write_clipboard_text,
@@ -344,6 +346,13 @@ pub fn run() {
 			// via `splash_done` once ready (splash.rs also holds the never-ready fallback).
 			splash::show(app.handle());
 
+			// Display scale for the native renderer's overlay (kept current below).
+			if let Some(w) = app.get_webview_window("main") {
+				if let Ok(scale) = w.scale_factor() {
+					crate::process::set_ui_scale(scale);
+				}
+			}
+
 			// Re-launching a tray-hidden Pulsar should surface this instance (a second
 			// process detects the single-instance lock + signals us).
 			#[cfg(windows)]
@@ -442,7 +451,15 @@ pub fn run() {
 			{
 				tray = tray.tooltip("Pulsar");
 			}
-			tray.build(app)?;
+			// No tray is not fatal: stock GNOME (no AppIndicator extension) has no
+			// StatusNotifierWatcher, and tray-icon's StatusNotifierItem backend then errors out —
+			// which, returned from setup, aborted the whole app at launch.
+			if let Err(e) = tray.build(app) {
+				tracing::warn!("tray icon unavailable — closing the window will quit: {e}");
+				app.state::<AppState>()
+					.tray_missing
+					.store(true, std::sync::atomic::Ordering::Relaxed);
+			}
 			Ok(())
 		})
 		.on_window_event(|window, event| match event {
@@ -455,12 +472,11 @@ pub fn run() {
 				// connections manager) close NORMALLY so a host-side win.close() works
 				// (prevent_close + hide would otherwise leave them stuck hidden).
 				if window.label() == "main" {
-					let tray_off = window
-						.state::<AppState>()
-						.tray_disabled
-						.load(std::sync::atomic::Ordering::Relaxed);
+					let st = window.state::<AppState>();
+					let tray_off = st.tray_disabled.load(std::sync::atomic::Ordering::Relaxed)
+						|| st.tray_missing.load(std::sync::atomic::Ordering::Relaxed);
 					if tray_off {
-						// Tray disabled → let the window close normally (quit the app).
+						// Tray disabled or unavailable → let the window close normally (quit the app).
 					} else {
 						api.prevent_close();
 						let _ = window.hide();
@@ -485,6 +501,9 @@ pub fn run() {
 			// Native fullscreen (set_fullscreen) never marks the main window topmost, and
 			// set_window_fullscreen already clears any stray always-on-top on exit, so this
 			// arm no longer manages fullscreen z-order - it only tracks per-window focus below.
+			WindowEvent::ScaleFactorChanged { scale_factor, .. } if window.label() == "main" => {
+				crate::process::set_ui_scale(*scale_factor);
+			}
 			WindowEvent::Focused(focused) => {
 				// Capture/forward keyboard+mouse + the overlay/leave combos ONLY while
 				// SOME Pulsar window is focused (Linux evdev grab is otherwise global).
@@ -613,6 +632,7 @@ pub fn run() {
 			reverse_play,
 			set_window_fullscreen,
 			kbd_engage,
+			kbd_web_key,
 			native_view_rect,
 			crate::caps::local_caps,
 			self_avatar,
@@ -626,6 +646,9 @@ pub fn run() {
 			list_connections,
 			show_connections,
 			open_files_window,
+			toast::toast_list,
+			toast::toast_open,
+			toast::toast_close,
 			set_view_only,
 			input_pointer,
 			input_button,

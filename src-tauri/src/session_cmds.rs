@@ -269,7 +269,7 @@ async fn respawn_render_for_codec(
 	}
 	let pace_default = std::env::var("PULSAR_PACE")
 		.map(|v| v == "1" || v == "on" || v == "true")
-		.unwrap_or(true);
+		.unwrap_or(false);
 	let rbin = crate::process::render_bin(app);
 	#[cfg(not(windows))]
 	let mut rc = crate::native_view::spawn_render(
@@ -291,6 +291,8 @@ async fn respawn_render_for_codec(
 				game_mode,
 				pace_default,
 				crate::i18n::lang(),
+				// A mid-session respawn (codec switch) shows on its first frame as before.
+				false,
 			)
 		})
 	};

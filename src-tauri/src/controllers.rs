@@ -333,6 +333,7 @@ fn run(shared: Arc<Shared>, rumble_rx: Receiver<RumbleCmd>, ready: std::sync::mp
     let mut last: HashMap<u32, GamepadState> = HashMap::new();
     let mut ev: SDL_Event = unsafe { std::mem::zeroed() };
     let mut needs_refresh = true; // open already-connected pads on the first pass
+    let mut battery_at = std::time::Instant::now();
 
     loop {
         // Block until a controller event arrives (0 CPU while waiting) or the timeout fires
@@ -361,34 +362,44 @@ fn run(shared: Arc<Shared>, rumble_rx: Receiver<RumbleCmd>, ready: std::sync::mp
             changed = true; // device set changed → reader rebuilds its list / disconnects
         }
 
-        // Read each open pad, diff against the last published state, and rebuild the snapshot.
-        let mut views: Vec<PadView> = Vec::with_capacity(open.len());
+        // Read each open pad and diff against the last published state.
         for (inst, p) in &open {
             let st = unsafe { read_state(p.ptr) };
             if last.get(inst) != Some(&st) {
                 last.insert(*inst, st);
                 changed = true;
             }
-            // Battery % (None for wired/unknown). Cheap cached getter; safe to call here.
-            let battery = unsafe {
-                let mut pct: c_int = -1;
-                let _ = SDL_GetGamepadPowerInfo(p.ptr, &mut pct);
-                if pct >= 0 {
-                    Some(pct.min(100) as u8)
-                } else {
-                    None
-                }
-            };
-            views.push(PadView {
-                uuid: p.uuid.clone(),
-                kind: p.kind,
-                name: p.name.clone(),
-                state: st,
-                battery,
-            });
         }
-        views.sort_by(|a, b| a.uuid.cmp(&b.uuid));
-        *shared.pads.lock().unwrap() = views;
+        // Rebuild + publish the snapshot only when something changed, or every 2 s for the
+        // battery level. Rebuilding it on every 8 ms pass (names/uuids cloned, battery queried,
+        // lock taken) was ~6 % of the app's CPU on the Orange Pi with one pad connected.
+        let battery_due = battery_at.elapsed() >= Duration::from_secs(2);
+        if changed || battery_due {
+            battery_at = std::time::Instant::now();
+            let mut views: Vec<PadView> = Vec::with_capacity(open.len());
+            for (inst, p) in &open {
+                let Some(st) = last.get(inst).copied() else { continue };
+                // Battery % (None for wired/unknown). Cheap cached getter.
+                let battery = unsafe {
+                    let mut pct: c_int = -1;
+                    let _ = SDL_GetGamepadPowerInfo(p.ptr, &mut pct);
+                    if pct >= 0 {
+                        Some(pct.min(100) as u8)
+                    } else {
+                        None
+                    }
+                };
+                views.push(PadView {
+                    uuid: p.uuid.clone(),
+                    kind: p.kind,
+                    name: p.name.clone(),
+                    state: st,
+                    battery,
+                });
+            }
+            views.sort_by(|a, b| a.uuid.cmp(&b.uuid));
+            *shared.pads.lock().unwrap() = views;
+        }
 
         if changed {
             shared.ping();

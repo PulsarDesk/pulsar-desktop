@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Openbox for the Pulsar kiosk: no decorations and no key bindings that could leave the
+     kiosk (Pulsar's own combos still work). Pulsar fullscreens its main window itself. -->
+<openbox_config xmlns="http://openbox.org/3.4/rc">
+  <keyboard/>
+  <mouse/>
+  <applications>
+    <application class="*">
+      <decor>no</decor>
+    </application>
+  </applications>
+</openbox_config>

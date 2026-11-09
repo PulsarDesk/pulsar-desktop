@@ -203,20 +203,55 @@ pub fn webview2_present() -> bool {
 	}
 }
 
-/// Best-effort: download + run Microsoft's Evergreen WebView2 bootstrapper
-/// (needs network; the payload itself stays fully offline-installable).
-pub fn install_webview2() {
+/// Download + run Microsoft's Evergreen WebView2 bootstrapper (needs network; the payload
+/// itself stays fully offline-installable). Blocking — run it on a worker thread. `Err` carries
+/// a short code for the UI (the bootstrapper's exit code, or why the download failed).
+pub fn install_webview2() -> Result<(), String> {
 	#[cfg(windows)]
 	{
+		use std::os::windows::process::CommandExt;
+		const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 		let tmp = std::env::temp_dir().join("MicrosoftEdgeWebview2Setup.exe");
 		let script = format!(
-			"Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile '{}'; Start-Process -Wait '{}'",
-			tmp.display(),
+			"$ErrorActionPreference='Stop'; try {{ Invoke-WebRequest -UseBasicParsing -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile '{0}' }} catch {{ exit 1001 }}; $p = Start-Process -Wait -PassThru '{0}' -ArgumentList '/silent','/install'; exit $p.ExitCode",
 			tmp.display()
 		);
-		let _ = std::process::Command::new("powershell")
+		let status = std::process::Command::new("powershell")
 			.args(["-NoProfile", "-NonInteractive", "-Command", &script])
-			.status();
+			.creation_flags(CREATE_NO_WINDOW)
+			.status()
+			.map_err(|e| e.to_string())?;
+		if webview2_present() {
+			return Ok(());
+		}
+		match status.code() {
+			Some(1001) => Err("indirme başarısız".to_string()),
+			Some(c) => Err(format!("0x{:08X}", c as u32)),
+			None => Err("bilinmeyen hata".to_string()),
+		}
+	}
+	#[cfg(not(windows))]
+	{
+		Ok(())
+	}
+}
+
+/// Whether Pulsar is running right now (an update closes it first — the welcome screen says so).
+pub fn pulsar_running() -> bool {
+	#[cfg(windows)]
+	{
+		use std::os::windows::process::CommandExt;
+		const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+		std::process::Command::new("tasklist")
+			.args(["/FI", "IMAGENAME eq pulsar.exe", "/NH"])
+			.creation_flags(CREATE_NO_WINDOW)
+			.output()
+			.map(|o| String::from_utf8_lossy(&o.stdout).to_ascii_lowercase().contains("pulsar.exe"))
+			.unwrap_or(false)
+	}
+	#[cfg(not(windows))]
+	{
+		false
 	}
 }
 
@@ -367,6 +402,17 @@ fn remove_uninstall_registry() {
 /// InstallLocation from a previous install's registry entry (silent updates and
 /// uninstall reuse it so a custom dir survives).
 pub fn registered_install_dir() -> Option<PathBuf> {
+	registry_value("InstallLocation").map(PathBuf::from)
+}
+
+/// The version a previous install registered (DisplayVersion) — the welcome screen turns into
+/// an update screen ("v0.15.2 → v0.16.0") when there is one.
+pub fn registered_version() -> Option<String> {
+	registry_value("DisplayVersion")
+}
+
+/// A string value of this app's uninstall registry entry (None if absent or empty).
+fn registry_value(name: &str) -> Option<String> {
 	#[cfg(windows)]
 	unsafe {
 		use windows_sys::Win32::System::Registry::*;
@@ -379,7 +425,7 @@ pub fn registered_install_dir() -> Option<PathBuf> {
 		let mut ty = 0u32;
 		let ok = RegQueryValueExW(
 			h,
-			wide("InstallLocation").as_ptr(),
+			wide(name).as_ptr(),
 			std::ptr::null_mut(),
 			&mut ty,
 			buf.as_mut_ptr() as *mut u8,
@@ -391,14 +437,11 @@ pub fn registered_install_dir() -> Option<PathBuf> {
 		}
 		let n = (len as usize / 2).saturating_sub(1);
 		let s = String::from_utf16_lossy(&buf[..n]);
-		if s.is_empty() {
-			None
-		} else {
-			Some(PathBuf::from(s))
-		}
+		(!s.is_empty()).then_some(s)
 	}
 	#[cfg(not(windows))]
 	{
+		let _ = name;
 		None
 	}
 }

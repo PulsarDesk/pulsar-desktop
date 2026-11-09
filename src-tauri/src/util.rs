@@ -307,13 +307,23 @@ async fn connect_target_inner(
 		network_mode,
 		pulsar_core::config::NetworkMode::RelayOnly
 	);
+	// A peer found over a VPN overlay (ZeroTier, Tailscale, ...) is not on a real LAN: keep its
+	// address as an ALTERNATIVE path and decide after the regular connect (see below).
+	let mut overlay_addr: Option<SocketAddr> = None;
 	if let Some(disc) = discovery.filter(|_| lan_allowed) {
 		let lan = disc
 			.peers()
 			.await
 			.into_iter()
 			.find(|p| p.id == Some(id))
-			.map(|p| p.addr);
+			.map(|p| p.addr)
+			.filter(|a| {
+				let overlay = pulsar_core::discovery::is_overlay_vpn_addr(a.ip());
+				if overlay {
+					overlay_addr = Some(*a);
+				}
+				!overlay
+			});
 		if let Some(addr) = lan {
 			match tokio::time::timeout(
 				std::time::Duration::from_millis(1500),
@@ -339,6 +349,44 @@ async fn connect_target_inner(
 					tracing::info!(%addr, "LAN fast path failed — falling back to the relay rendezvous");
 				}
 			}
+		}
+	}
+	// Path choice when the host is ALSO reachable over a VPN overlay: direct internet P2P wins
+	// (no tunnel in the way); a relayed internet path loses to the overlay's direct one (the
+	// relay is an extra hop — measured 2026-11-08: ~125 ms relayed vs ~38 ms over ZeroTier).
+	if let Some(addr) = overlay_addr {
+		let internet = node.connect_pinned(id, pinned).await;
+		let relayed = matches!(&internet, Ok(s) if s.transport() == pulsar_core::Transport::Relay);
+		if internet.is_ok() && !relayed {
+			tracing::info!(overlay = %addr, "path choice: direct internet P2P (preferred over the VPN overlay)");
+		} else if let Ok(Ok(sess)) = tokio::time::timeout(
+			std::time::Duration::from_millis(1500),
+			node.connect_direct(addr, pinned),
+		)
+		.await
+		{
+			tracing::info!(
+				%addr,
+				internet = if relayed { "relayed" } else { "failed" },
+				"path choice: direct over the VPN overlay (the internet path would be {})",
+				if relayed { "relayed" } else { "unavailable" }
+			);
+			if let Ok(mut other) = internet {
+				// Let the host drop the unused relayed session right away.
+				let _ = pulsar_core::service::send_bye(&mut other).await;
+			}
+			if let Some(k) = sess.peer_pubkey().await {
+				pin_peer_key(app, relay, &id, &k);
+			}
+			return Ok((sess, id.grouped()));
+		} else if relayed {
+			tracing::info!(%addr, "path choice: relay (the VPN overlay path didn't answer)");
+		}
+		if let Ok(sess) = internet {
+			if let Some(k) = sess.peer_pubkey().await {
+				pin_peer_key(app, relay, &id, &k);
+			}
+			return Ok((sess, id.grouped()));
 		}
 	}
 	let sess = node
@@ -410,10 +458,14 @@ pub(crate) async fn forward(state: &AppState, id: u64, ev: InputEvent) {
 
 /// Nearest stream fps the host offers ({30,60,120}) to a display's refresh rate.
 pub(crate) fn nearest_fps(hz: u32) -> u32 {
-	[30u32, 60, 120]
-		.into_iter()
-		.min_by_key(|f| (*f as i32 - hz as i32).abs())
-		.unwrap_or(60)
+	// Snap a measured refresh (59.94, 143.9, 164.8, ...) onto the common rate it means;
+	// an uncommon panel rate (75, 100) is targeted as-is. 30..240.
+	let hz = hz.clamp(30, 240);
+	pulsar_core::adapt::ladder::FPS_STEPS
+		.iter()
+		.copied()
+		.find(|f| (*f as i32 - hz as i32).abs() <= 2)
+		.unwrap_or(hz)
 }
 
 /// Client display refresh → nearest supported stream fps. "Auto" fps targets the client's own
@@ -437,7 +489,203 @@ pub(crate) async fn client_auto_fps(app: &AppHandle) -> u32 {
 	let hz = if posted { rx.await.unwrap_or(60) } else { 60 };
 	nearest_fps(hz)
 }
-#[cfg(not(target_os = "linux"))]
+/// Windows: the refresh of the monitor the Pulsar window is on (EnumDisplaySettings on that
+/// monitor's device), so a 120/144/165 Hz panel gets a matching stream.
+#[cfg(windows)]
+pub(crate) async fn client_auto_fps(app: &AppHandle) -> u32 {
+	use windows_sys::Win32::Graphics::Gdi::{
+		EnumDisplaySettingsW, GetMonitorInfoW, MonitorFromWindow, DEVMODEW, ENUM_CURRENT_SETTINGS,
+		MONITORINFO, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST,
+	};
+	let Some(hwnd) = crate::process::window_hwnd(app) else {
+		return 60;
+	};
+	let (enum_hz, qdc_hz) = unsafe {
+		let mon = MonitorFromWindow(hwnd as _, MONITOR_DEFAULTTONEAREST);
+		let mut mi: MONITORINFOEXW = std::mem::zeroed();
+		mi.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+		if GetMonitorInfoW(mon, &mut mi as *mut MONITORINFOEXW as *mut MONITORINFO) == 0 {
+			return 60;
+		}
+		let mut dm: DEVMODEW = std::mem::zeroed();
+		dm.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+		let enum_hz = if EnumDisplaySettingsW(mi.szDevice.as_ptr(), ENUM_CURRENT_SETTINGS, &mut dm) != 0
+			&& dm.dmDisplayFrequency > 1
+		{
+			dm.dmDisplayFrequency
+		} else {
+			0
+		};
+		(enum_hz, qdc_refresh_hz(&mi.szDevice).unwrap_or(0))
+	};
+	// Windows 11 "Dynamic refresh rate": EnumDisplaySettings reports the rate the panel is
+	// running at RIGHT NOW (60 on an idle desktop) while the configured mode is 120 — the
+	// display-config path's refresh is the configured mode, so take the higher of the two.
+	let hz = enum_hz.max(qdc_hz);
+	tracing::info!(enum_hz, qdc_hz, "client display refresh");
+	nearest_fps(if hz > 1 { hz } else { 60 })
+}
+
+/// The live (virtual) rate of the last display found running "Dynamic refresh rate" (0 = none
+/// seen): `DisplayBoost` only switches modes when the session wants more than this.
+#[cfg(windows)]
+static DRR_PATH_HZ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Windows "Dynamic refresh rate" keeps the panel at its LOW rate for ordinary apps — measured
+/// 2026-11-08 on a 120 Hz DRR laptop: a vsync'd window got ~60 presents/s, borderless
+/// fullscreen too. Only a display mode the app sets makes it run at the top rate (118-119
+/// presents/s), which is what games do. So while a session streams faster than the panel's
+/// live rate, switch the panel to its top rate as a TEMPORARY mode (`CDS_FULLSCREEN`: never
+/// written to the registry, and Windows reverts it if Pulsar exits or crashes) and restore the
+/// user's own mode when the last session ends. Ref-counted across sessions (split view).
+#[cfg(windows)]
+pub(crate) struct DisplayBoost;
+
+#[cfg(windows)]
+static DISPLAY_BOOST: std::sync::Mutex<Option<(Vec<u16>, u32)>> = std::sync::Mutex::new(None);
+
+#[cfg(windows)]
+impl DisplayBoost {
+	/// Boost the monitor Pulsar's window is on when the session targets `want_fps` above the
+	/// panel's live Dynamic-refresh rate. `None` = nothing to do (fixed-rate panel, already at
+	/// or above `want_fps`, or the mode switch was refused).
+	pub(crate) fn acquire(app: &AppHandle, want_fps: u32) -> Option<DisplayBoost> {
+		use windows_sys::Win32::Graphics::Gdi::{
+			ChangeDisplaySettingsExW, EnumDisplaySettingsW, GetMonitorInfoW, MonitorFromWindow,
+			CDS_FULLSCREEN, DEVMODEW, DISP_CHANGE_SUCCESSFUL, DM_DISPLAYFREQUENCY, DM_PELSHEIGHT,
+			DM_PELSWIDTH, ENUM_CURRENT_SETTINGS, MONITORINFO, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST,
+		};
+		let live = DRR_PATH_HZ.load(std::sync::atomic::Ordering::Relaxed);
+		if live == 0 || want_fps <= live + 2 {
+			return None;
+		}
+		let hwnd = crate::process::window_hwnd(app)?;
+		unsafe {
+			let mon = MonitorFromWindow(hwnd as _, MONITOR_DEFAULTTONEAREST);
+			let mut mi: MONITORINFOEXW = std::mem::zeroed();
+			mi.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+			if GetMonitorInfoW(mon, &mut mi as *mut MONITORINFOEXW as *mut MONITORINFO) == 0 {
+				return None;
+			}
+			let dev: Vec<u16> =
+				mi.szDevice.iter().copied().take_while(|c| *c != 0).chain(std::iter::once(0)).collect();
+			let mut g = DISPLAY_BOOST.lock().unwrap_or_else(|e| e.into_inner());
+			if let Some((d, n)) = g.as_mut() {
+				if *d == dev {
+					*n += 1;
+					return Some(DisplayBoost);
+				}
+				return None;
+			}
+			let top = qdc_refresh_hz(&mi.szDevice)?;
+			if top <= live {
+				return None;
+			}
+			let mut dm: DEVMODEW = std::mem::zeroed();
+			dm.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+			if EnumDisplaySettingsW(dev.as_ptr(), ENUM_CURRENT_SETTINGS, &mut dm) == 0 {
+				return None;
+			}
+			let from = dm.dmDisplayFrequency;
+			dm.dmDisplayFrequency = top;
+			dm.dmFields = DM_DISPLAYFREQUENCY | DM_PELSWIDTH | DM_PELSHEIGHT;
+			let r = ChangeDisplaySettingsExW(dev.as_ptr(), &dm, std::ptr::null_mut(), CDS_FULLSCREEN, std::ptr::null());
+			if r != DISP_CHANGE_SUCCESSFUL {
+				tracing::warn!(code = r, "Dynamic refresh panel: temporary top-rate mode refused");
+				return None;
+			}
+			tracing::info!(from, to = top, want_fps, "Dynamic refresh panel → temporary top-rate mode for the session");
+			*g = Some((dev, 1));
+			Some(DisplayBoost)
+		}
+	}
+}
+
+#[cfg(windows)]
+impl Drop for DisplayBoost {
+	fn drop(&mut self) {
+		use windows_sys::Win32::Graphics::Gdi::ChangeDisplaySettingsExW;
+		let mut g = DISPLAY_BOOST.lock().unwrap_or_else(|e| e.into_inner());
+		if let Some((dev, n)) = g.as_mut() {
+			*n = n.saturating_sub(1);
+			if *n == 0 {
+				// NULL mode + no flags = back to the user's registry mode (their Dynamic setting).
+				unsafe {
+					ChangeDisplaySettingsExW(dev.as_ptr(), std::ptr::null(), std::ptr::null_mut(), 0, std::ptr::null());
+				}
+				tracing::info!("Dynamic refresh panel: restored the user's display mode");
+				*g = None;
+			}
+		}
+	}
+}
+
+/// Refresh (Hz) of the active display path whose GDI source is `gdi_name` (`\\.\DISPLAYn`,
+/// NUL-terminated), via QueryDisplayConfig. With Windows 11 "Dynamic refresh rate" on, the
+/// path runs at a VIRTUAL rate (60 on an idle desktop) and boosts up to the panel mode's
+/// physical rate: asked "virtual-refresh-rate aware" (QDC flag 0x40), such a path carries
+/// DISPLAYCONFIG_PATH_BOOST_REFRESH_RATE (0x10) and its target mode holds the physical rate
+/// (120) — the highest rate the panel will show, which is what we target then.
+#[cfg(windows)]
+fn qdc_refresh_hz(gdi_name: &[u16]) -> Option<u32> {
+	use windows_sys::Win32::Devices::Display::{
+		DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QueryDisplayConfig,
+		DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO,
+		DISPLAYCONFIG_SOURCE_DEVICE_NAME, QDC_ONLY_ACTIVE_PATHS,
+	};
+	const QDC_VIRTUAL_REFRESH_RATE_AWARE: u32 = 0x40;
+	const PATH_BOOST_REFRESH_RATE: u32 = 0x10;
+	const MODE_INFO_TYPE_TARGET: i32 = 2;
+	let trim = |w: &[u16]| -> Vec<u16> { w.iter().copied().take_while(|c| *c != 0).collect() };
+	let want = trim(gdi_name);
+	let rate = |num: u32, den: u32| -> u32 {
+		if den == 0 {
+			0
+		} else {
+			(num as f64 / den as f64).round() as u32
+		}
+	};
+	// Virtual-refresh aware first; an older Windows rejects the flag → plain query.
+	for flags in [QDC_ONLY_ACTIVE_PATHS | QDC_VIRTUAL_REFRESH_RATE_AWARE, QDC_ONLY_ACTIVE_PATHS] {
+		unsafe {
+			let (mut np, mut nm) = (0u32, 0u32);
+			if GetDisplayConfigBufferSizes(flags, &mut np, &mut nm) != 0 {
+				continue;
+			}
+			let mut paths: Vec<DISPLAYCONFIG_PATH_INFO> = (0..np).map(|_| std::mem::zeroed()).collect();
+			let mut modes: Vec<DISPLAYCONFIG_MODE_INFO> = (0..nm).map(|_| std::mem::zeroed()).collect();
+			if QueryDisplayConfig(flags, &mut np, paths.as_mut_ptr(), &mut nm, modes.as_mut_ptr(), std::ptr::null_mut()) != 0 {
+				continue;
+			}
+			for p in paths.iter().take(np as usize) {
+				let mut src: DISPLAYCONFIG_SOURCE_DEVICE_NAME = std::mem::zeroed();
+				src.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+				src.header.size = std::mem::size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32;
+				src.header.adapterId = p.sourceInfo.adapterId;
+				src.header.id = p.sourceInfo.id;
+				if DisplayConfigGetDeviceInfo(&mut src.header) != 0 || trim(&src.viewGdiDeviceName) != want {
+					continue;
+				}
+				let r = p.targetInfo.refreshRate;
+				let path_hz = rate(r.Numerator, r.Denominator);
+				if p.flags & PATH_BOOST_REFRESH_RATE != 0 {
+					// Dynamic refresh rate: the target mode's physical vsync is the ceiling.
+					let idx = p.targetInfo.Anonymous.modeInfoIdx as usize;
+					if let Some(m) = modes.get(idx).filter(|m| m.infoType == MODE_INFO_TYPE_TARGET) {
+						let v = m.Anonymous.targetMode.targetVideoSignalInfo.vSyncFreq;
+						let phys = rate(v.Numerator, v.Denominator);
+						tracing::info!(path_hz, phys_hz = phys, "client display uses Dynamic refresh rate — targeting its top rate");
+						DRR_PATH_HZ.store(path_hz, std::sync::atomic::Ordering::Relaxed);
+						return Some(path_hz.max(phys));
+					}
+				}
+				return Some(path_hz);
+			}
+		}
+	}
+	None
+}
+#[cfg(not(any(target_os = "linux", windows)))]
 pub(crate) async fn client_auto_fps(_app: &AppHandle) -> u32 {
 	60
 }
@@ -534,7 +782,8 @@ fn host_panel_hz_detect() -> Option<u32> {
 
 #[cfg(target_os = "linux")]
 fn host_panel_hz_detect() -> Option<u32> {
-	let out = std::process::Command::new("xrandr").output().ok()?;
+	// `--current`: no output re-probe (see process::linux_displays).
+	let out = std::process::Command::new("xrandr").arg("--current").output().ok()?;
 	let text = String::from_utf8_lossy(&out.stdout);
 	// The active mode line carries the current rate marked with a trailing `*`, e.g.
 	// "   1920x1080     60.00*+   59.94    50.00". Take the first `*`-marked token.
@@ -568,6 +817,7 @@ fn host_panel_hz_detect() -> Option<u32> {
 pub(crate) fn display_size(display: &str) -> Option<(u32, u32)> {
 	let disp = if display.is_empty() { ":0" } else { display };
 	let out = std::process::Command::new("xrandr")
+		.arg("--current") // no output re-probe (see process::linux_displays)
 		.env("DISPLAY", disp)
 		.output()
 		.ok()?;

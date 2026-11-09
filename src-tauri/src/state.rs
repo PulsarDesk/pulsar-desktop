@@ -21,6 +21,13 @@ use crate::viewer;
 #[derive(Default)]
 pub(crate) struct AppState {
 	pub(crate) node: Mutex<Option<Arc<Node>>>,
+	/// Held for the whole of `go_online`: two overlapping runs (the UI retries every few
+	/// seconds while offline) each bound a node, and the later one overwrote the earlier
+	/// one's serve-task handle without aborting it. That serve task kept the earlier node
+	/// alive, so two nodes heartbeated the same identity and kept invalidating each other's
+	/// relay token (`NotRegistered` every 10 s, `BadToken` on connect; seen after a
+	/// Wi-Fi → mobile switch).
+	pub(crate) go_online_lock: tokio::sync::Mutex<()>,
 	pub(crate) config: Mutex<Config>,
 	/// LAN auto-discovery beacon (announces this device + collects peers on the
 	/// local network). Started on `go_online`, replaced on reconnect.
@@ -122,6 +129,10 @@ pub(crate) struct AppState {
 	/// Synced from the UI's `ui.tray` setting via `set_tray` (tray_disabled = !ui.tray).
 	/// Default `false` (tray enabled) — preserves the existing behavior on first launch.
 	pub(crate) tray_disabled: AtomicBool,
+	/// `true` when the tray icon could not be created (e.g. a Linux session with no
+	/// StatusNotifierWatcher, like stock GNOME): closing the main window then quits, since a
+	/// window hidden to a missing tray could never be brought back.
+	pub(crate) tray_missing: AtomicBool,
 	/// While `true`, a background thread reads the first connected controller via gilrs
 	/// and emits `gamepad-nav` events so the gaming-mode UI can be navigated with a pad.
 	/// This is the ONLY menu-nav input path on Linux (WebKitGTK ships without libmanette,
@@ -325,16 +336,14 @@ pub(crate) struct PlaySession {
 	/// Native renderer (ffplay) child, when the native player is in use — killed on
 	/// stop so the fullscreen window closes.
 	pub(crate) ffplay: Option<Child>,
-	/// Native audio player (ffmpeg→PulseAudio) child on Linux, where WebKitGTK can't play the
-	/// Opus stream via WebCodecs. `None` on Windows/macOS (webview audio) — killed on stop.
-	pub(crate) audio_native: Option<Child>,
+	/// The native audio player (libopus + SDL3, every platform); dropped on stop.
+	pub(crate) audio_native: Option<crate::native_audio::NativeAudio>,
 	/// Unix socket of the embedded `--wid` mpv's JSON IPC server (deterministic per-id
 	/// path, `temp_dir/pulsar-mpv-<id>.sock`). Drives BOTH the overlay pause (Faz 3) and
 	/// the stats poller (Faz 4). `None` on Windows (ffplay) and the single-surface path.
 	#[allow(dead_code)]
 	pub(crate) mpv_ipc: Option<std::path::PathBuf>,
-	/// Every SDP temp file this session has written (`write_sdp` for video,
-	/// `spawn_native_audio` for audio). The port-based filenames are essentially unique
+	/// Every SDP temp file this session has written (`write_sdp`, video). The port-based filenames are essentially unique
 	/// per session (ephemeral ports) and a fresh one is written on every live codec /
 	/// monitor switch, so they would otherwise pile up in `temp_dir` for the life of the
 	/// machine. `stop_stream` `remove_file`s each on teardown.

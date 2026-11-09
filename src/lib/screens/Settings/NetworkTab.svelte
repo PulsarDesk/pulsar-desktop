@@ -89,6 +89,27 @@
 		{/each}
 	</div>
 </div>
+<!-- Router port mapping (NAT-PMP / UPnP): some routers drop the peer's hole-punch packets
+     unless Pulsar's UDP port is mapped on them. Saving re-registers (Settings.svelte
+     reconnectKey), which makes or removes the mapping. -->
+<div class="srow" class:dimmed={config?.network_mode === 'relay-only'}>
+	<div class="st">
+		<b>{t('settings.portMapping')}</b>
+		<span>{t('settings.portMappingDesc')}</span>
+	</div>
+	<button
+		class="toggle"
+		aria-label={t('settings.portMapping')}
+		class:on={config?.port_mapping ?? true}
+		aria-pressed={config?.port_mapping ?? true}
+		onclick={() => {
+			if (config) {
+				config.port_mapping = !(config.port_mapping ?? true);
+				saveConfig();
+			}
+		}}><span class="knob"></span></button
+	>
+</div>
 <!-- Run the relay in this app. On = no address to type; the app registers against
      itself and other devices on the LAN can point at the shown address. -->
 <div class="srow">

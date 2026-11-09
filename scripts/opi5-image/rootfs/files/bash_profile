@@ -1,0 +1,4 @@
+# tty1 autologin → the Pulsar kiosk X session. Other ttys / SSH get a normal shell.
+if [ -z "${DISPLAY:-}" ] && [ "$(tty)" = /dev/tty1 ]; then
+	exec startx 2>"$HOME/.xsession-errors"
+fi

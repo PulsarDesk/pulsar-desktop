@@ -54,6 +54,24 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+/// Access units recently put on the wire: `(rtp_ts, first_seq, last_seq)`, oldest first.
+/// Reference-frame invalidation maps a client's lost sequence range back to its frames.
+pub type SentLog = Arc<Mutex<VecDeque<(u32, u16, u16)>>>;
+/// Entries kept (~2 s at 120 fps — far beyond any useful invalidation depth).
+const SENT_LOG_LEN: usize = 256;
+
+/// RTP timestamps of the logged access units whose packets overlap `first..=last`
+/// (sequence numbers wrap).
+pub fn frames_in_seq_range(log: &SentLog, first: u16, last: u16) -> Vec<u32> {
+	let within = |x: u16, lo: u16, hi: u16| x.wrapping_sub(lo) <= hi.wrapping_sub(lo);
+	log.lock()
+		.unwrap()
+		.iter()
+		.filter(|(_, a, b)| within(first, *a, *b) || within(*a, first, last))
+		.map(|(ts, _, _)| *ts)
+		.collect()
+}
+
 /// Dynamic payload type for H.264 (matches the ffmpeg `-payload_type 96` path
 /// and `h264.ts`, which assumes PT 96 / 90 kHz without inspecting the PT field).
 const PAYLOAD_TYPE: u8 = 96;
@@ -108,21 +126,20 @@ pub struct RtpSender {
 	/// Scratch buffer reused for every packet to avoid per-packet allocation.
 	buf: Vec<u8>,
 	// --- Stage-1 packet pacing (inert until `enable_pacing`) ---
-	/// When true, spread an AU's packets over ~one frame interval (Sunshine stream.cpp:1407-1572)
-	/// so a big IDR doesn't burst-saturate the link (the ~142ms/GOP delivery gap). false = burst.
+	/// When true, pace every packet through a token bucket ([`SendPacer`]) so a big IDR doesn't
+	/// burst-saturate the link (the ~142ms/GOP delivery gap). false = burst.
 	pace: bool,
 	fps: u32,
 	/// Live target bitrate (kbps), shared with the encoder so pacing tracks the (adaptive) bitrate.
 	bitrate_kbps: Arc<AtomicU32>,
-	/// Carry the send schedule across AUs (Sunshine ratecontrol_next_frame_start).
-	next_frame_start: Option<Instant>,
-	/// Per-AU pacing state, (re)computed at the top of `send_access_unit`.
-	pace_frame_start: Instant,
-	pace_per_ms: f64,
-	pace_pkts: u32,
+	/// The bucket; its state carries across AUs (a frame right behind a keyframe waits for the
+	/// budget the keyframe used, instead of getting a fresh one).
+	pacer: SendPacer,
 	/// High-res sleep for the pacing gate (Windows only; the native sender is Windows-only).
 	#[cfg(windows)]
 	timer: Option<crate::dxgi::platform::HiResTimer>,
+	/// What went out, per access unit (see [`SentLog`]).
+	sent: SentLog,
 }
 
 impl RtpSender {
@@ -176,13 +193,16 @@ impl RtpSender {
 			pace: false,
 			fps: 60,
 			bitrate_kbps: Arc::new(AtomicU32::new(20_000)),
-			next_frame_start: None,
-			pace_frame_start: Instant::now(),
-			pace_per_ms: 0.0,
-			pace_pkts: 0,
+			pacer: SendPacer::new(),
 			#[cfg(windows)]
 			timer: None,
+			sent: Arc::new(Mutex::new(VecDeque::with_capacity(SENT_LOG_LEN))),
 		})
+	}
+
+	/// The per-AU send log (shared; see [`SentLog`]).
+	pub fn sent_log(&self) -> SentLog {
+		self.sent.clone()
 	}
 
 	/// Enable Stage-1 packet pacing (called by `RtpEgress` on the host). `bitrate_kbps` is shared
@@ -198,33 +218,37 @@ impl RtpSender {
 		}
 	}
 
-	/// Pacing gate — called right before each packet's `send`. At every BATCH-th packet of the
-	/// current AU, sleep until that packet's scheduled due time so the AU's packets spread over
-	/// ~one frame interval instead of bursting. No-op when pacing is off.
+	/// Pacing gate — called right before each packet's `send` (the packet is already in
+	/// `self.buf`). Sleeps until the bucket holds that packet's bytes, so packets leave one by one
+	/// at the pace rate once the burst budget is spent (the old gate slept only every 48th packet,
+	/// so each 57 KB batch still left as one line-rate burst). No-op when pacing is off.
 	fn pace_gate(&mut self) {
 		if !self.pace {
 			return;
 		}
-		const BATCH: u32 = 48; // ~57 KB at MTU 1200 — Sunshine's 64-packet/64 KB send granularity
-		if self.pace_pkts > 0 && self.pace_pkts % BATCH == 0 && self.pace_per_ms > 0.0 {
-			let due = self.pace_frame_start
-				+ Duration::from_secs_f64(self.pace_pkts as f64 / self.pace_per_ms / 1000.0);
-			let now = Instant::now();
-			if now < due {
-				let d = due - now;
-				#[cfg(windows)]
-				{
-					if let Some(t) = self.timer.as_ref() {
-						unsafe { t.sleep_for(d) };
-					}
-				}
-				#[cfg(not(windows))]
-				{
-					std::thread::sleep(d);
+		let cost = self.buf.len() as f64;
+		let d = self.pacer.wait(cost, Instant::now());
+		if !d.is_zero() {
+			#[cfg(windows)]
+			{
+				if let Some(t) = self.timer.as_ref() {
+					unsafe { t.sleep_for(d) };
 				}
 			}
+			#[cfg(not(windows))]
+			{
+				std::thread::sleep(d);
+			}
 		}
-		self.pace_pkts = self.pace_pkts.wrapping_add(1);
+		self.pacer.take(cost, Instant::now());
+	}
+
+	/// Pacing setup at the top of an AU of `bytes` wire bytes that was handed over at `arrival`.
+	fn pace_begin(&mut self, bytes: usize, arrival: Instant) {
+		if self.pace {
+			let target = self.bitrate_kbps.load(Ordering::Relaxed);
+			self.pacer.begin_au(bytes as f64, target, self.fps, arrival, Instant::now());
+		}
 	}
 
 	/// The SSRC chosen for this stream (exposed for SDP/diagnostics).
@@ -242,13 +266,38 @@ impl RtpSender {
 	/// of FU-A fragments. The marker bit is set on the very last packet so the
 	/// client decodes the AU as a unit. Returns the number of RTP packets sent.
 	pub fn send_access_unit(&mut self, annexb: &[u8], pts_90k: u32) -> io::Result<usize> {
+		self.send_access_unit_from(annexb, pts_90k, Instant::now())
+	}
+
+	/// [`send_access_unit`](Self::send_access_unit) for an AU the encoder handed over at
+	/// `arrival` (the egress mailbox enqueue time): the pacer's spread deadline counts from
+	/// then, so time an AU spent queued behind a paced keyframe is caught up, not added.
+	fn send_access_unit_from(
+		&mut self,
+		annexb: &[u8],
+		pts_90k: u32,
+		arrival: Instant,
+	) -> io::Result<usize> {
+		let first = self.seq;
+		let r = self.send_au_inner(annexb, pts_90k, arrival);
+		if self.seq != first {
+			let mut log = self.sent.lock().unwrap();
+			if log.len() >= SENT_LOG_LEN {
+				log.pop_front();
+			}
+			log.push_back((pts_90k, first, self.seq.wrapping_sub(1)));
+		}
+		r
+	}
+
+	fn send_au_inner(&mut self, annexb: &[u8], pts_90k: u32, arrival: Instant) -> io::Result<usize> {
 		// AV1 is a low-overhead OBU temporal-unit stream (no Annex-B start codes), so `split_nals`
 		// would return nothing (or bogus pseudo-NALs on a coincidental `00 00 01` in an OBU payload,
 		// since AV1 has no emulation prevention) → zero packets on the wire. Packetize it via the
 		// aomedia AV1 RTP format the clients expect (`send_av1_tu`), NOT NAL splitting. Here `annexb`
 		// is actually the raw OBU TU the encoder emitted.
 		if self.codec == Codec::Av1 {
-			return self.send_av1_tu(annexb, pts_90k);
+			return self.send_av1_tu(annexb, pts_90k, arrival);
 		}
 		// Collect the NAL byte-ranges first so we know which one is last (the
 		// marker bit must land on the final RTP packet of the AU).
@@ -256,19 +305,12 @@ impl RtpSender {
 		if nals.is_empty() {
 			return Ok(0);
 		}
-		// Stage-1 pacing setup: rate = max(bitrate-derived, total/frame-interval). The floor
-		// (total * fps / 1000 packets-per-ms) caps the spread of any AU at ~one frame interval,
-		// so a big IDR is dripped over one frame's air-time (no link saturation) while small
-		// P-frames go at the stream rate — and nothing ever adds more than ~1 frame of latency.
+		// Stage-1 pacing setup (see `SendPacer::begin_au`): the AU's wire size (payload + one
+		// RTP/FU header per packet) sets how fast the part beyond the burst budget must drip so
+		// the AU still leaves within ~1.5 frame intervals of its arrival.
 		if self.pace {
-			let total = count_packets(&nals, self.codec).max(1);
-			let now = Instant::now();
-			self.pace_frame_start = self.next_frame_start.map_or(now, |t| t.max(now));
-			let bps = (self.bitrate_kbps.load(Ordering::Relaxed).max(1) as f64) * 1000.0;
-			let bitrate_per_ms = bps * 1.1 / (MTU as f64 * 8.0) / 1000.0;
-			let floor_per_ms = total as f64 * self.fps.max(1) as f64 / 1000.0;
-			self.pace_per_ms = bitrate_per_ms.max(floor_per_ms).max(0.001);
-			self.pace_pkts = 0;
+			let total = count_packets(&nals, self.codec).max(1) as usize;
+			self.pace_begin(annexb.len() + total * (RTP_HEADER_LEN + 3), arrival);
 		}
 		let last_idx = nals.len() - 1;
 
@@ -290,14 +332,6 @@ impl RtpSender {
 				sent += self.send_fu_a(nal, pts_90k, is_last_nal)?;
 			}
 		}
-		// Carry the schedule into the next AU so back-to-back frames keep a smooth wire cadence
-		// (Sunshine ratecontrol_next_frame_start, stream.cpp:1570-1572).
-		if self.pace && self.pace_per_ms > 0.0 {
-			self.next_frame_start = Some(
-				self.pace_frame_start
-					+ Duration::from_secs_f64(self.pace_pkts as f64 / self.pace_per_ms / 1000.0),
-			);
-		}
 		Ok(sent)
 	}
 
@@ -314,21 +348,15 @@ impl RtpSender {
 	/// reads a 2-bit `W` at bit 4 with `N` at bit 3), but an all-zero aggregation header is `W=0`
 	/// and `N=0` under BOTH layouts, making it the only cross-client-safe framing. The RTP marker
 	/// bit lands on the final chunk so the depacketizer emits the whole TU as one access unit.
-	fn send_av1_tu(&mut self, tu: &[u8], pts_90k: u32) -> io::Result<usize> {
+	fn send_av1_tu(&mut self, tu: &[u8], pts_90k: u32, arrival: Instant) -> io::Result<usize> {
 		if tu.is_empty() {
 			return Ok(0);
 		}
-		// Stage-1 pacing setup (identical rate model to the NAL path): the chunk count caps the
-		// AU's spread at ~one frame interval so a big key-frame TU doesn't burst-saturate the link.
+		// Stage-1 pacing setup (identical rate model to the NAL path): the chunk count gives the
+		// TU's wire size so a big key-frame TU doesn't burst-saturate the link.
 		if self.pace {
-			let total = ((tu.len() + MAX_AV1_OBU_PAYLOAD - 1) / MAX_AV1_OBU_PAYLOAD).max(1) as u32;
-			let now = Instant::now();
-			self.pace_frame_start = self.next_frame_start.map_or(now, |t| t.max(now));
-			let bps = (self.bitrate_kbps.load(Ordering::Relaxed).max(1) as f64) * 1000.0;
-			let bitrate_per_ms = bps * 1.1 / (MTU as f64 * 8.0) / 1000.0;
-			let floor_per_ms = total as f64 * self.fps.max(1) as f64 / 1000.0;
-			self.pace_per_ms = bitrate_per_ms.max(floor_per_ms).max(0.001);
-			self.pace_pkts = 0;
+			let total = ((tu.len() + MAX_AV1_OBU_PAYLOAD - 1) / MAX_AV1_OBU_PAYLOAD).max(1);
+			self.pace_begin(tu.len() + total * (RTP_HEADER_LEN + 3), arrival);
 		}
 
 		let n = tu.len();
@@ -350,13 +378,6 @@ impl RtpSender {
 
 			off = end;
 			sent += 1;
-		}
-		// Carry the pacing schedule into the next AU (Sunshine ratecontrol_next_frame_start).
-		if self.pace && self.pace_per_ms > 0.0 {
-			self.next_frame_start = Some(
-				self.pace_frame_start
-					+ Duration::from_secs_f64(self.pace_pkts as f64 / self.pace_per_ms / 1000.0),
-			);
 		}
 		Ok(sent)
 	}
@@ -518,6 +539,8 @@ impl RtpSender {
 struct AuMsg {
 	annexb: Vec<u8>,
 	pts_90k: u32,
+	/// When the encoder handed it over (the pacer's spread deadline counts from here).
+	at: Instant,
 }
 
 /// Bounded producer→consumer mailbox (mutex + condvar + `VecDeque`), mirroring Sunshine's
@@ -540,6 +563,7 @@ struct MailState {
 pub struct RtpEgress {
 	mb: Arc<AuMailbox>,
 	ssrc: u32,
+	sent: SentLog,
 	join: Option<JoinHandle<()>>,
 	/// A/B knob: `PULSAR_RTP_INLINE=1` keeps the OLD behavior (send on the calling/encode
 	/// thread) to reproduce the stall on demand. `Some` ⇒ inline, no sender thread spawned.
@@ -565,6 +589,7 @@ impl RtpEgress {
 			.socket
 			.set_write_timeout(Some(Duration::from_millis(250)));
 		let ssrc = sender.ssrc();
+		let sent = sender.sent_log();
 
 		// A/B: inline mode reproduces the old inline-send stall (no sender thread).
 		if std::env::var("PULSAR_RTP_INLINE")
@@ -581,17 +606,23 @@ impl RtpEgress {
 					cap: 1,
 				}),
 				ssrc,
+				sent,
 				join: None,
 				inline: Some(Mutex::new(sender)),
 			});
 		}
 
-		// Stage-1 packet pacing: ON by default on the threaded path (PULSAR_RTP_PACE=0 disables
-		// for A/B). Spreads each AU's packets so a big IDR doesn't burst-saturate the link.
-		if std::env::var("PULSAR_RTP_PACE")
-			.map(|v| v != "0")
-			.unwrap_or(true)
-		{
+		// Stage-1 packet pacing: ON by default on the threaded path toward a real (remote)
+		// destination (PULSAR_RTP_PACE=0 disables for A/B). Spreads each AU's packets so a big IDR
+		// doesn't burst-saturate the link. A LOOPBACK destination is the host's media-over-session
+		// intake: its forwarder (src-tauri host/handlers.rs) paces the actual wire, in one budget
+		// with the FEC parity and NACK retransmits it adds — pacing here as well would only stack
+		// a second queue (added latency) in front of that one. PULSAR_RTP_PACE=1 forces it on.
+		let pace = match std::env::var("PULSAR_RTP_PACE") {
+			Ok(v) => v != "0",
+			Err(_) => !dest.ip().is_loopback(),
+		};
+		if pace {
 			sender.enable_pacing(fps, bitrate_kbps);
 		}
 		// A19: a SHALLOW egress mailbox (3 AUs, was 16). The mailbox only buffers AUs the sender
@@ -648,7 +679,7 @@ impl RtpEgress {
 						// An Err (incl. a write-timeout on a saturated socket) just drops the
 						// rest of THIS AU and moves on — never stalls, never reorders.
 						Some(m) => {
-							let _ = sender.send_access_unit(&m.annexb, m.pts_90k);
+							let _ = sender.send_access_unit_from(&m.annexb, m.pts_90k, m.at);
 						}
 						None => break,
 					}
@@ -657,6 +688,7 @@ impl RtpEgress {
 		Ok(Self {
 			mb,
 			ssrc,
+			sent,
 			join: Some(join),
 			inline: None,
 		})
@@ -665,6 +697,11 @@ impl RtpEgress {
 	/// The stream SSRC (cached at construction so SDP/diagnostics need not cross the thread).
 	pub fn ssrc(&self) -> u32 {
 		self.ssrc
+	}
+
+	/// RTP timestamps of the access units already sent whose packets overlap `first..=last`.
+	pub fn frames_in_seq_range(&self, first: u16, last: u16) -> Vec<u32> {
+		frames_in_seq_range(&self.sent, first, last)
 	}
 
 	/// Hand one access unit to the sender thread. NON-BLOCKING: copies `annexb` (valid only
@@ -681,6 +718,7 @@ impl RtpEgress {
 		let msg = AuMsg {
 			annexb: annexb.to_vec(),
 			pts_90k,
+			at: Instant::now(),
 		};
 		{
 			let mut st = self.mb.state.lock().unwrap();
@@ -709,8 +747,8 @@ impl Drop for RtpEgress {
 }
 
 /// Count how many RTP packets `send_access_unit` will emit for these NALs (single-NAL = 1 each,
-/// else `ceil(rbsp_len / MAX_FU_PAYLOAD)` FU-A fragments). Used to clamp the pacing rate so an AU
-/// is never spread beyond ~one frame interval.
+/// else `ceil(rbsp_len / MAX_FU_PAYLOAD)` FU-A fragments). Used to size the AU for the pacer
+/// (payload + per-packet headers).
 fn count_packets(nals: &[&[u8]], codec: Codec) -> u32 {
 	// HEVC strips a 2-byte NAL header and uses a 3-byte FU prefix; H.264 strips 1 byte / 2-byte prefix.
 	let (hdr, budget) = if codec == Codec::H265 {
@@ -730,6 +768,113 @@ fn count_packets(nals: &[&[u8]], codec: Codec) -> u32 {
 			}
 		})
 		.sum()
+}
+
+/// Pace = this x the target bitrate: at steady state a frame's packets spread over about half
+/// a frame interval, with headroom for the encoder's frame-size variance.
+const PACE_FACTOR: f64 = 2.0;
+/// Never pace slower than this: at very low targets the per-packet overhead and encoder
+/// overshoot dominate, and smoothing to 2 Mbit/s is still far gentler than a line-rate burst.
+const PACE_FLOOR_KBPS: f64 = 2000.0;
+/// Burst budget (bucket depth) in ms of the pace rate. Covers whole P-frames on a fast LAN
+/// (no added delay there) and the first slice of a keyframe on a slow link.
+const PACE_BURST_MS: f64 = 16.0;
+/// ...but at least ~4 full packets, so a tiny rate still lets a small frame out in one go.
+const PACE_BURST_MIN: f64 = 4.0 * MTU as f64;
+/// A packet may leave while the bucket is short by up to this many ms of rate (repaid by the
+/// refill): a sleep shorter than the timer's ~1 ms granularity is not worth taking, so the few
+/// packets falling due inside one millisecond go together.
+const PACE_BORROW_MS: f64 = 1.0;
+/// The part of an AU beyond the burst budget is spread so the AU is out within this many frame
+/// intervals of its arrival. The old pacer fit every AU into one interval, which at 120 fps
+/// still fired a keyframe at several times the link rate; much more than 1.5 would let the
+/// egress mailbox (3 AUs, drops on overflow) fill behind a keyframe.
+const AU_SPREAD_FRAMES: f64 = 1.5;
+/// Least time an AU that starts late (it waited behind a keyframe) gets: it drains at up to
+/// 2x the frame cadence, so a backlog shrinks instead of growing frame over frame.
+const AU_MIN_WINDOW_FRAMES: f64 = 0.5;
+
+/// Sender-side pacer: a packet-granular token bucket. Pure — every call takes `now` — so the
+/// tests drive it with a fake clock.
+///
+/// - Base rate = `PACE_FACTOR` x the live target (>= `PACE_FLOOR_KBPS`), in bytes per ms.
+/// - Depth = `PACE_BURST_MS` of the base rate: a frame after an idle gap leaves at once up to
+///   that budget; the bucket state carries across AUs, so the frame behind a keyframe waits for
+///   the budget the keyframe used.
+/// - Per AU the drain rate rises above the base just enough for the AU to be out within
+///   `AU_SPREAD_FRAMES` intervals of its arrival (at least `AU_MIN_WINDOW_FRAMES` from now):
+///   the queue delay behind a keyframe stays bounded instead of growing frame over frame.
+struct SendPacer {
+	tokens: f64,
+	/// `None` until the first AU (the bucket starts full).
+	last: Option<Instant>,
+	/// Base rate (bytes per ms) — sets the depth.
+	base: f64,
+	/// Drain rate for the current AU (>= base).
+	rate: f64,
+}
+
+impl SendPacer {
+	fn new() -> Self {
+		Self { tokens: 0.0, last: None, base: 0.0, rate: 0.0 }
+	}
+
+	fn depth(&self) -> f64 {
+		(PACE_BURST_MS * self.base).max(PACE_BURST_MIN)
+	}
+
+	fn refill(&mut self, now: Instant) {
+		if let Some(last) = self.last {
+			let dt = now.saturating_duration_since(last).as_secs_f64() * 1000.0;
+			self.tokens = (self.tokens + self.rate * dt).min(self.depth());
+		} else {
+			self.tokens = self.depth();
+		}
+		if self.last.map_or(true, |l| now > l) {
+			self.last = Some(now);
+		}
+	}
+
+	/// Start an AU of `bytes` wire bytes handed over at `arrival` (`now` = when its first packet
+	/// is about to go). `target_kbps` 0 = unknown: the floor rate applies.
+	fn begin_au(&mut self, bytes: f64, target_kbps: u32, fps: u32, arrival: Instant, now: Instant) {
+		let base = (PACE_FACTOR * target_kbps as f64 / 8.0).max(PACE_FLOOR_KBPS / 8.0);
+		if self.last.is_none() {
+			// First AU: the bucket starts full at the new rate's depth.
+			self.base = base;
+			self.rate = base;
+			self.tokens = self.depth();
+			self.last = Some(now);
+		} else {
+			// Accrue the idle gap at the previous AU's rate, then switch to the new base.
+			self.refill(now);
+			self.base = base;
+			self.tokens = self.tokens.min(self.depth());
+		}
+		let interval = 1000.0 / fps.max(1) as f64;
+		let since_arrival = now.saturating_duration_since(arrival).as_secs_f64() * 1000.0;
+		let window = (AU_SPREAD_FRAMES * interval - since_arrival).max(AU_MIN_WINDOW_FRAMES * interval);
+		// A debt left by the previous AU's last packets counts against this one.
+		let excess = (bytes - self.tokens).max(0.0);
+		self.rate = self.base.max(excess / window);
+	}
+
+	/// How long to wait before a `cost`-byte packet may leave (zero = now).
+	fn wait(&mut self, cost: f64, now: Instant) -> Duration {
+		self.refill(now);
+		let deficit = cost - self.tokens - self.rate * PACE_BORROW_MS;
+		if deficit <= 0.0 || self.rate <= 0.0 {
+			Duration::ZERO
+		} else {
+			Duration::from_secs_f64(deficit / self.rate / 1000.0)
+		}
+	}
+
+	/// The packet left at `now` (after any wait): spend its bytes.
+	fn take(&mut self, cost: f64, now: Instant) {
+		self.refill(now);
+		self.tokens -= cost;
+	}
 }
 
 /// Split an Annex-B byte stream into its NAL units (without the start codes).
@@ -1194,5 +1339,160 @@ mod tests {
 		assert_eq!(nals.len(), 1);
 		assert_eq!(nals[0], &au[4..]);
 		drop(egress); // closes the mailbox + joins the sender thread (no orphan)
+	}
+
+	/// A lost sequence range maps back to exactly the access units that carried it, across
+	/// the 16-bit wrap.
+	#[test]
+	fn sent_log_maps_a_lost_range_to_its_frames() {
+		let log: SentLog = Arc::new(Mutex::new(VecDeque::new()));
+		{
+			let mut l = log.lock().unwrap();
+			l.push_back((1000, 65530, 65534));
+			l.push_back((2000, 65535, 3));
+			l.push_back((3000, 4, 4));
+		}
+		assert_eq!(frames_in_seq_range(&log, 65533, 65533), vec![1000]);
+		assert_eq!(frames_in_seq_range(&log, 65534, 0), vec![1000, 2000]);
+		assert_eq!(frames_in_seq_range(&log, 2, 9), vec![2000, 3000]);
+		assert!(frames_in_seq_range(&log, 5, 9).is_empty());
+	}
+
+	/// The sender logs each access unit's first/last sequence number.
+	#[test]
+	fn the_sender_logs_what_it_sent() {
+		let rx = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+		let mut tx = RtpSender::new_with_codec(rx.local_addr().unwrap(), Codec::H264).unwrap();
+		let mut au = vec![0, 0, 0, 1, 0x65];
+		au.extend(std::iter::repeat_n(7u8, 4000)); // fragments into several packets
+		tx.send_access_unit(&au, 90).unwrap();
+		tx.send_access_unit(&[0, 0, 0, 1, 0x41, 1, 2, 3], 180).unwrap();
+		let l = tx.sent_log();
+		let l = l.lock().unwrap();
+		assert_eq!(l.len(), 2);
+		let (ts0, a0, b0) = l[0];
+		let (ts1, a1, b1) = l[1];
+		assert_eq!((ts0, ts1), (90, 180));
+		assert!(b0.wrapping_sub(a0) >= 2, "an IDR spans several packets");
+		assert_eq!(a1, b0.wrapping_add(1));
+		assert_eq!(a1, b1);
+	}
+
+	/// Drive a `SendPacer` like `pace_gate` does with a fake clock: one AU of `bytes` in
+	/// MTU packets, arriving at `arrival`, sent from `*now` on. Returns each packet's send time
+	/// (ms since `t0`); `*now` ends at the last send.
+	fn pace_au(
+		p: &mut SendPacer,
+		t0: Instant,
+		now: &mut Instant,
+		arrival: Instant,
+		bytes: usize,
+		target_kbps: u32,
+		fps: u32,
+	) -> Vec<f64> {
+		if *now < arrival {
+			*now = arrival;
+		}
+		p.begin_au(bytes as f64, target_kbps, fps, arrival, *now);
+		let mut out = Vec::new();
+		let mut left = bytes;
+		while left > 0 {
+			let c = left.min(MTU);
+			let w = p.wait(c as f64, *now);
+			*now += w;
+			p.take(c as f64, *now);
+			out.push(now.duration_since(t0).as_secs_f64() * 1000.0);
+			left -= c;
+		}
+		out
+	}
+
+	#[test]
+	fn pacer_spreads_a_40kb_keyframe_at_3_mbit() {
+		let t0 = Instant::now();
+		let mut now = t0;
+		let mut p = SendPacer::new();
+		let sent = pace_au(&mut p, t0, &mut now, t0, 40_000, 3000, 60);
+		let spread = sent.last().unwrap() - sent[0];
+		// The 16 ms budget (12 KB at 2 x 3 Mbit) leaves at once; the rest drips so the AU is
+		// out within 1.5 frame intervals (25 ms at 60 fps) — not one line-rate burst.
+		assert!(spread >= 15.0, "keyframe spread {spread:.1} ms");
+		assert!(spread <= 1.5 * 1000.0 / 60.0 + 1.0, "keyframe spread {spread:.1} ms");
+		let burst = sent.iter().filter(|t| **t == sent[0]).count();
+		assert!(burst * MTU <= 12_000 + 1125 + MTU, "initial burst {burst} packets");
+		// Packet-granular after the burst: no 2 ms span carries more than the drain rate
+		// (~1.1 KB/ms here) allows plus one packet.
+		for w in 0..25 {
+			let lo = sent[0] + 0.5 + w as f64;
+			let n = sent.iter().filter(|t| **t >= lo && **t < lo + 2.0).count();
+			assert!(n <= 3, "{n} packets in the 2 ms from {lo:.1} ms");
+		}
+	}
+
+	#[test]
+	fn pacer_adds_no_delay_on_a_50_mbit_lan() {
+		let t0 = Instant::now();
+		let mut now = t0;
+		let mut p = SendPacer::new();
+		let interval = Duration::from_micros(8333); // 120 fps, ~52 KB a frame at 50 Mbit
+		let mut worst = 0.0f64;
+		for i in 0..360u32 {
+			let arrival = t0 + interval * i;
+			let size = 52_000 * (60 + (i * 37 % 80)) as usize / 100; // ±40 %
+			let sent = pace_au(&mut p, t0, &mut now, arrival, size, 50_000, 120);
+			let added = sent.last().unwrap() - arrival.duration_since(t0).as_secs_f64() * 1000.0;
+			worst = worst.max(added);
+		}
+		assert!(worst <= 2.0, "worst added delay {worst:.2} ms");
+	}
+
+	#[test]
+	fn pacer_keeps_back_to_back_keyframes_from_piling_up() {
+		// An encoder emitting 40 KB every frame on a 3 Mbit target (a recovery storm): every AU
+		// must still be out within ~1.5 intervals of its arrival, frame after frame.
+		let t0 = Instant::now();
+		let mut now = t0;
+		let mut p = SendPacer::new();
+		let interval = Duration::from_micros(16_667);
+		for i in 0..30u32 {
+			let arrival = t0 + interval * i;
+			let sent = pace_au(&mut p, t0, &mut now, arrival, 40_000, 3000, 60);
+			let lag = sent.last().unwrap() - arrival.duration_since(t0).as_secs_f64() * 1000.0;
+			assert!(lag <= 1.5 * 16.667 + 1.5, "AU {i} out {lag:.1} ms after arrival");
+		}
+	}
+
+	#[test]
+	fn pacing_is_off_toward_the_loopback_intake() {
+		// The media-over-session forwarder paces the wire; the loopback hop must not add a
+		// second queue (unless PULSAR_RTP_PACE forces it).
+		if std::env::var("PULSAR_RTP_PACE").is_ok() {
+			return;
+		}
+		let recv = UdpSocket::bind("127.0.0.1:0").unwrap();
+		// The unpaced burst must fit the receive buffer (Windows defaults to 64 KiB).
+		let _ = socket2::SockRef::from(&recv).set_recv_buffer_size(8 * 1024 * 1024);
+		recv.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+		let egress = RtpEgress::spawn(
+			recv.local_addr().unwrap(),
+			Codec::H264,
+			60,
+			Arc::new(AtomicU32::new(300)),
+		)
+		.unwrap();
+		// 200 KB at a 300 kbit target would take ~0.8 s paced at the 2 Mbit floor.
+		let au = annexb_nal(5, 3, 200_000);
+		let t = Instant::now();
+		egress.send_access_unit(&au, 1);
+		let mut buf = [0u8; 2048];
+		let mut n = 0;
+		while let Ok(m) = recv.recv(&mut buf) {
+			n += 1;
+			if buf[1] & 0x80 != 0 && m > 0 {
+				break;
+			}
+		}
+		assert!(n > 100);
+		assert!(t.elapsed() < Duration::from_millis(300), "loopback AU paced: {:?}", t.elapsed());
 	}
 }

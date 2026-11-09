@@ -656,6 +656,13 @@ pub(crate) async fn client_authenticate(
 	let cleanup = |id: u64| {
 		pw_pending.lock().unwrap().remove(&id);
 	};
+	// Every message here is one UDP datagram, and nothing re-sent a lost one: a lost probe or
+	// a lost verdict parked the connect for the whole 40 s AUTH_TIMEOUT (2026-11-09, a
+	// policed 3 Mbit link: the host accepted, its `Ok` never arrived). So the empty probe is
+	// repeated while no answer has come at all; a host that already accepted answers it with
+	// `Ok` again (pulsar-core serve loop), one still deciding with `NeedPassword`.
+	let mut answered = false;
+	let mut probes = 0u32;
 	loop {
 		match pw_rx.take() {
 			// Waiting for both the host's reply and the user's password.
@@ -672,30 +679,55 @@ pub(crate) async fn client_authenticate(
 					out = recv_host_auth(sess) => match out {
 						HostAuth::Ok => { cleanup(cur_id); return Ok(true); }
 						HostAuth::Denied | HostAuth::Gone => { cleanup(cur_id); return Ok(false); }
-						HostAuth::NeedPassword => {
-							cleanup(cur_id);
-							let (id, rx2) = open_pw_prompt(app, pw_pending, next_auth, peer);
-							cur_id = id;
-							pw_rx = Some(rx2);
-						}
+						// The prompt is already open and the user hasn't submitted (submitting
+						// leaves this branch): this answers a probe below, or repeats the first ask.
+						HostAuth::NeedPassword => pw_rx = Some(rx),
 						HostAuth::Other => pw_rx = Some(rx), // keepalive: keep waiting
+					},
+					// While the host user decides on the Allow/Deny popup, keep asking: if their
+					// Allow's `Ok` was lost, the accepted session answers this probe with `Ok`.
+					_ = tokio::time::sleep(PROMPT_PROBE_EVERY) => {
+						send_auth(sess, "").await.map_err(auth_err)?;
+						pw_rx = Some(rx);
 					}
 				}
 			}
-			// Not prompting yet: just read the host's reply.
-			None => match recv_host_auth(sess).await {
-				HostAuth::Ok => return Ok(true),
-				HostAuth::Denied | HostAuth::Gone => return Ok(false),
-				HostAuth::NeedPassword => {
-					let (id, rx) = open_pw_prompt(app, pw_pending, next_auth, peer);
-					cur_id = id;
-					pw_rx = Some(rx);
+			// Not prompting yet: read the host's reply, re-probing while it hasn't answered.
+			None => {
+				let out = if answered || probes >= PROBE_MAX {
+					recv_host_auth(sess).await
+				} else {
+					match tokio::time::timeout(PROBE_EVERY, recv_host_auth(sess)).await {
+						Ok(out) => out,
+						Err(_) => {
+							probes += 1;
+							send_auth(sess, "").await.map_err(auth_err)?;
+							continue;
+						}
+					}
+				};
+				answered = true;
+				match out {
+					HostAuth::Ok => return Ok(true),
+					HostAuth::Denied | HostAuth::Gone => return Ok(false),
+					HostAuth::NeedPassword => {
+						let (id, rx) = open_pw_prompt(app, pw_pending, next_auth, peer);
+						cur_id = id;
+						pw_rx = Some(rx);
+					}
+					HostAuth::Other => {}
 				}
-				HostAuth::Other => {}
-			},
+			}
 		}
 	}
 }
+
+/// How often the client repeats its empty access probe while the host hasn't answered at all,
+/// and how many times (then it just waits, bounded by the caller's AUTH_TIMEOUT).
+const PROBE_EVERY: std::time::Duration = std::time::Duration::from_millis(800);
+const PROBE_MAX: u32 = 12;
+/// How often it re-probes while its password prompt is open (the host user is deciding).
+const PROMPT_PROBE_EVERY: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Unit tests for the throttle module.
 #[cfg(test)]

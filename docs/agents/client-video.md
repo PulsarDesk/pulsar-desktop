@@ -7,11 +7,27 @@ Part of the pulsar-desktop agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
 The old in-webview WebCodecs video path (`h264.ts`) was **removed — too slow**.
 Video renders **natively on every platform** via the separate `pulsar-render`
 process: Linux rkmpp/EGL zero-copy, Windows MF+D3D11 zero-copy (DXVA), macOS
-mpv/VideoToolbox. The egui overlay draws on the video natively. **Only Opus
-audio still decodes in the webview** (`src/lib/opus-audio.ts`, fed by
-`viewer.rs`'s UDP→WebSocket relay). Don't resurrect a webview video path.
+mpv/VideoToolbox. The egui overlay draws on the video natively. Audio is native
+too (`src-tauri/src/native_audio.rs`, libopus + SDL3; see audio.md), so no media
+reaches the webview. Don't resurrect a webview video path.
 
 ## Linux / RK3588 (Orange Pi 5) renderer — the reality (IMPORTANT)
+
+- **VSync (Linux renderer, `linux.rs`):** the swap interval follows the compositor.
+  - With a compositing manager running (owner of `_NET_WM_CM_S<n>`, e.g. GNOME/mutter), the
+    interval is 0: the compositor syncs to vblank, so nothing tears.
+  - Without one (bare X, e.g. the Orange Pi image's openbox), the interval is 1.
+  - Why: on the OPi 5B under mutter, interval 1 left `eglSwapBuffers` waiting forever in
+    `xcb_wait_for_special_event` for a Present event that never came. The picture froze while
+    decode and audio carried on. The rkvdec2 resets seen in the kernel log were most likely a
+    consequence (frames never returned → MPP starved).
+  - A swap that blocks for 250 ms or more logs `present stalled N ms`. `PULSAR_VSYNC=0|1`
+    overrides the choice.
+- **Orange Pi 5B appliance image:** `scripts/opi5-image/` (+ `.github/workflows/opi5-image.yml`,
+  manual). It builds ubuntu-rockchip 22.04 server + a Pulsar `.deb` linked against the
+  rockchip-multimedia PPA's rkmpp libavcodec, set up as a kiosk. The generic linux-arm64 release
+  links Ubuntu's libavcodec, which has no rkmpp, so it decodes in software on the board. The
+  image is prepared but not yet built or booted; see the verify checklist in its README.
 
 - **WebKitGTK can't hardware-decode** the stream. Video MUST be native:
   historically `mpv --wid=<XID>` with `--hwdec` → `h264_rkmpp`/`hevc_rkmpp`
@@ -24,6 +40,20 @@ audio still decodes in the webview** (`src/lib/opus-audio.ts`, fed by
   natively; the rich menu is a separate screen you toggle to. (A libmpv-render →
   GtkGLArea single-surface exists behind `PULSAR_SINGLE_SURFACE=1`, still blocked
   by the transparency wall.)
+- **Video intake on Linux (Rust RTP path, default):**
+  - `play/hold.rs` sends each video RTP datagram to an abstract Unix datagram socket,
+    `@pulsar-v-<port>` (`native_view::VideoSink`). It does not use loopback UDP, so the
+    packets skip the IP stack and netfilter.
+  - `write_sdp` names that socket in the SDP as `a=x-pulsar-unix:`. The renderer binds it.
+  - `video.rs` runs `stream::rtp` (the Windows reorder buffer and depacketizer) on that
+    socket. It feeds the access units straight into `avcodec_send_packet`, with no
+    libavformat.
+  - The renderer prints `vidsink-needidr` and `vidsink-rfi` like on Windows, and takes
+    `ir` and `rfi` on stdin.
+  - If nobody has bound the socket (an mpv fallback consumer), the app falls back to UDP
+    per packet.
+  - `PULSAR_LINUX_DEMUX=ffmpeg` (app env, inherited by the renderer) restores the old
+    path: loopback UDP and libavformat's SDP/RTP demux with its jitter buffer.
 - **Control on Linux** = `kbdhook/linux.rs`: grabs local keyboard+mouse via
   **evdev (EVIOCGRAB)**, hotplug-aware. **Leave combo: Ctrl+Shift+Q** (F12
   unreliable on media-mode keyboards).
@@ -66,3 +96,60 @@ Hidden by default, opened with a key combo. Drawn **natively by pulsar-render
 (encoder/decoder, codec, fps, quality/perf, bitrate), **NOT**
 file/mic/clipboard. Video may pause while the rich menu screen is open —
 acceptable; priority is Moonlight-class latency during play.
+
+## Loss recovery on Windows — reference-frame invalidation (RFI)
+
+When the host advertises `rfi` (native NVENC), the Windows client asks for `StreamReq::rfi`.
+The host then keeps a level-5.1-sized DPB (`encode/policy.rs` `rfi_dpb`: 16 at ≤ 1080p,
+12 at 1440p, 8 at 4K; one reference for prediction). The flow:
+
+1. The renderer's reorder buffer reports a hole after 3 ms, while NACK repair still runs
+   (`vidsink-rfi a b`). hold.rs wakes on it at once and sends `DataMsg::MediaRfi`.
+2. The host maps the sequence range to its frames (`RtpEgress` send log) and calls
+   `nvEncInvalidateRefFrames`. It tags the next frame with a Pulsar SEI.
+3. The reorder buffer stops waiting as soon as the tagged packet arrives. The depacketizer
+   drops the frames in between and resumes at the tag.
+
+Waiting out the whole repair window releases a burst of about 24 frames. That burst
+overflows the renderer's 8-AU queue and drops the recovery frame.
+
+- **Reach is the host's call** (2026-11-09): the client no longer gates on RTT × fps ≤ 4
+  (a 120 fps WAN stream never met it). The host's `RefTracker` declines a loss out of reach,
+  a lost IDR, or a failed invalidation (no IDR forced) and marks it unhealed, so a later loss
+  is only invalidated together with it; a loss before the newest IDR needs nothing.
+- **Fallbacks:** The client asks for a keyframe if no recovery arrives within 150 ms of its
+  repair window running out; each new hole while waiting restarts that wait, capped at 1 s
+  (`stream/rtp.rs` `RFI_GIVE_UP`).
+- **Measured 2026-11-08** (renderer drop 1/600 packets, 1200p120 HEVC, LAN): 0 keyframe
+  requests in 45 s with RFI, against 52 in 40 s without it.
+- **Knobs:**
+  - `PULSAR_RFI=0` (client) turns RFI off.
+  - `PULSAR_TEST_DROP=N` (renderer) drops 1 of every N packets.
+
+## Poor-link client behaviour (2026-11-09, LOCAL, unpushed, untested on the field link)
+
+All in `src-tauri/src/play/hold.rs` unless noted. Why: a tethered ~10 Mbit / 78 ms link
+showed ~600 ms head-of-line holds, "stream stopped" over a live session and a locked RTT.
+
+- **Repair window** (`repair_window_ms`): median of the last 8 RTTs + 2 × their mean
+  deviation + 20 ms host slack + the FEC hold, 60–200 ms; sweep every 50 ms. The renderer's reorder wait is
+  that + one sweep, capped at 250 ms (`pulsar-render/src/stream/rtp.rs` `MAX_DELAY_CAP_US`;
+  `PULSAR_MAXDELAY` pin uncapped). Under >= 10 % pre-repair loss a hole with a whole frame
+  behind it is given up after max(2 × RTT, 60 ms) (`rtt <ms>` stdin feeds it).
+- **NACK waits for FEC** while parity flows (`fec_wait_ms`: 2 frame intervals + 8 ms), sent
+  early once the block's parity can't cover it (`fec_block_gave_up`); one NACK re-send.
+- **Ping/RTT**: Pings never wait for a Pong (lost after 2 s), go out at uneven 350–650 ms gaps
+  (`ping_gap_ms`), and `PongMatcher` votes over the last 4 Pongs — with a fixed cadence and no
+  ping id, RTT > 500 ms locked onto RTT − 500. Residual ~1–6 % wrong matches; the real fix is a
+  ping id (wire change).
+- **Liveness**: media counts (`host_silent`: 5 s of nothing, or 15 s without control); the
+  renderer no longer declares "stream stopped" itself — hold.rs sends `stopped 1|0` after 5 s
+  without video while control lives (`video_stopped`). The renderer shows a "recovering" pill
+  while the depacketizer waits for a keyframe/RFI (`win/mod.rs`, `stream/rtp.rs` `WAITING`).
+- **ABR inputs**: `Sample.recv_bytes`/`window_ms` = first-copy video payload per window
+  (goodput). Soft pins: the first request asks for `ctl.point()`, not the pick; a shortfall
+  toast ("the link can't carry your pick") at most once per 30 s (`shortfall_due`).
+- **Path changes both ways** (relay to direct, and the core watchdog's direct-to-relay
+  fallback): `ctl.path_changed` with `path_cap_kbps` (relay cap only while relayed).
+  `adapt_memory.rs` keys the per-peer hint by path class `lan`/`wan`/`relay` (100.64/10 = wan;
+  old peer-only entries dropped) — a LAN rate seeding the mobile session started the collapse.

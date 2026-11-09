@@ -392,8 +392,10 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, star
 		let _ = app.emit("kbd-engaged", ());
 	}
 	std::thread::spawn(move || {
-		// 1 Hz loop telemetry (see the "evdev capture state" log below).
+		// Loop telemetry (see the "evdev capture state" log below).
 		let mut diag_at = std::time::Instant::now();
+		let mut diag_logged_at = std::time::Instant::now();
+		let mut diag_last: Option<(bool, bool, bool, usize)> = None;
 		let (mut diag_events, mut diag_fwd) = (0u32, 0u32);
 		let mut grabbed: Vec<evdev::Device> = Vec::new();
 		// Event node of grabbed[i] (parallel array) — needed to purge a VANISHED device's
@@ -637,19 +639,30 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, star
 				applied_suspend = want_suspend;
 			}
 
-			// 1 Hz state telemetry: the capture loop was a black box during the
-			// "grabbed but nothing forwards" kiosk debugging — keep it observable.
+			// State telemetry: the capture loop was a black box during the "grabbed but nothing
+			// forwards" kiosk debugging, so keep it observable — but only log when the state
+			// changes, plus a summary every 60 s. Logging it every second wrote ~86k lines a day.
 			if diag_at.elapsed().as_secs() >= 1 {
-				tracing::info!(
-					engaged = ENGAGED.load(Ordering::SeqCst),
-					focused = is_focused(),
-					suspended = applied_suspend,
-					grabbed = grabbed.len(),
-					events = diag_events,
-					forwarded = diag_fwd,
-					"evdev capture state"
+				let state = (
+					ENGAGED.load(Ordering::SeqCst),
+					is_focused(),
+					applied_suspend,
+					grabbed.len(),
 				);
-				(diag_events, diag_fwd) = (0, 0);
+				if diag_last != Some(state) || diag_logged_at.elapsed().as_secs() >= 60 {
+					tracing::info!(
+						engaged = state.0,
+						focused = state.1,
+						suspended = state.2,
+						grabbed = state.3,
+						events = diag_events,
+						forwarded = diag_fwd,
+						"evdev capture state"
+					);
+					(diag_events, diag_fwd) = (0, 0);
+					diag_last = Some(state);
+					diag_logged_at = std::time::Instant::now();
+				}
 				diag_at = std::time::Instant::now();
 			}
 			if pfds.is_empty() {

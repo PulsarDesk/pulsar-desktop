@@ -50,6 +50,9 @@ pub struct CaptureConfig {
 	/// that resume on a partially-refreshed picture (`StreamReq::loss_recovery ==
 	/// IntraRefresh`); the on-demand IDR (`request_idr`) keeps working either way.
 	pub intra_refresh: bool,
+	/// Reference-frame invalidation (`StreamReq::rfi`): a deeper reference buffer, and a loss
+	/// the client reports (`CaptureHandle::request_rfi`) is healed without a keyframe.
+	pub rfi: bool,
 	/// Composite the cursor (v1: parsed but no-op unless `cursor.rs` landed).
 	pub draw_mouse: bool,
 	/// PER-WINDOW capture (Phase 2b): when `Some(hwnd)`, the native path captures that single
@@ -69,6 +72,64 @@ pub enum Codec {
 	H264,
 	H265,
 	Av1,
+}
+
+/// Live capture-path numbers, refreshed about once a second by the capture thread.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CaptureStats {
+	/// `"dxgi"` (Desktop Duplication), `"wgc"` (whole monitor via Windows Graphics Capture),
+	/// `"wgc-window"` (one window) — all NVENC — or `"dxgi-mf"` (Desktop Duplication + the
+	/// display GPU's own encoder through Media Foundation); `""` before the first build.
+	pub source: &'static str,
+	/// A fresh frame composed → its access unit handed to RTP (capture wait + any cross-GPU
+	/// hop + colour convert + encode): median / 90th percentile in µs. 0 on a static screen.
+	pub latency_p50_us: u32,
+	pub latency_p90_us: u32,
+	/// One encode tick on the capture thread (hop + convert + NVENC), µs.
+	pub submit_p50_us: u32,
+	pub submit_p90_us: u32,
+	/// Frames with new content encoded per second (the others re-encode the last surface).
+	pub fresh_per_s: u32,
+	/// Client-reported holes healed by reference-frame invalidation / left to the client (the
+	/// lost frame was out of reach: its NACK repair, or else its keyframe request, heals it).
+	/// Cumulative for the capture's life.
+	pub rfi_recovered: u32,
+	pub rfi_declined: u32,
+}
+
+/// The atomics behind [`CaptureStats`], written by the capture thread.
+#[derive(Debug, Default)]
+pub struct LiveStats {
+	pub(crate) source: std::sync::atomic::AtomicU32,
+	pub(crate) lat_p50: std::sync::atomic::AtomicU32,
+	pub(crate) lat_p90: std::sync::atomic::AtomicU32,
+	pub(crate) sub_p50: std::sync::atomic::AtomicU32,
+	pub(crate) sub_p90: std::sync::atomic::AtomicU32,
+	pub(crate) fresh_per_s: std::sync::atomic::AtomicU32,
+	pub(crate) rfi_ok: std::sync::atomic::AtomicU32,
+	pub(crate) rfi_no: std::sync::atomic::AtomicU32,
+}
+
+impl LiveStats {
+	pub fn snapshot(&self) -> CaptureStats {
+		use std::sync::atomic::Ordering::Relaxed;
+		CaptureStats {
+			source: match self.source.load(Relaxed) {
+				1 => "dxgi",
+				2 => "wgc",
+				3 => "wgc-window",
+				4 => "dxgi-mf",
+				_ => "",
+			},
+			latency_p50_us: self.lat_p50.load(Relaxed),
+			latency_p90_us: self.lat_p90.load(Relaxed),
+			submit_p50_us: self.sub_p50.load(Relaxed),
+			submit_p90_us: self.sub_p90.load(Relaxed),
+			fresh_per_s: self.fresh_per_s.load(Relaxed),
+			rfi_recovered: self.rfi_ok.load(Relaxed),
+			rfi_declined: self.rfi_no.load(Relaxed),
+		}
+	}
 }
 
 /// Owns the capture+encode thread. `stop()` or `Drop` tears everything down deterministically
@@ -114,9 +175,36 @@ pub struct CaptureHandle {
 	/// on a dead pipeline. Seeing `is_alive()==false` lets the host fall through to a full capture
 	/// restart instead. Distinct from `stop`: `stop` is host→thread intent; this is thread→host state.
 	alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
+	/// Live capture-path numbers (source, present→encoded latency, encode tick, fresh fps).
+	stats: std::sync::Arc<LiveStats>,
+	/// A client-reported loss (`request_rfi`), consumed by the capture thread before its next
+	/// encode. Ranges arriving before it runs are merged.
+	requested_rfi: std::sync::Arc<std::sync::Mutex<Option<(u16, u16)>>>,
 }
 
 impl CaptureHandle {
+	/// The client saw the video packets `first..=last` missing (reported at once, while its NACK
+	/// repair may still fill the hole): invalidate the frames they carried as references on the
+	/// next encode, so the next frame is a tagged recovery point. A frame out of reach is left
+	/// alone — the client then asks for a keyframe if the repair fails.
+	pub fn request_rfi(&self, first: u16, last: u16) {
+		let mut r = self.requested_rfi.lock().unwrap();
+		*r = Some(match *r {
+			Some((f, _)) => (f, last),
+			None => (first, last),
+		});
+	}
+
+	/// The capture path's live numbers.
+	pub fn stats(&self) -> CaptureStats {
+		self.stats.snapshot()
+	}
+
+	/// A clone of the live-stats Arc, to read without holding the handle.
+	pub fn stats_arc(&self) -> std::sync::Arc<LiveStats> {
+		self.stats.clone()
+	}
+
 	/// Set the live target bitrate (kbps). Lock-free: stores into the atom the capture thread
 	/// polls each tick — never blocks the caller or stalls encode. No-op if unchanged.
 	pub fn set_bitrate(&self, kbps: u32) {
@@ -233,6 +321,15 @@ pub(crate) mod dxgi;
 mod encode;
 #[cfg(windows)]
 pub use encode::{nvenc_codecs, nvenc_supported};
+/// Rare diagnostic lines (capture source picks, probe verdicts) — the encoder's init log file.
+#[cfg(windows)]
+pub(crate) use encode::cap_dbg as encode_log;
+// Which full-monitor source (DXGI / WGC) a build uses, and the measurement that picks it.
+#[cfg(windows)]
+mod path;
+// Glass-to-encode measurement hooks for the capbench example (inert unless PULSAR_BENCH_PIXEL=1).
+#[cfg(windows)]
+pub mod bench;
 /// Off-Windows stubs — the native NVENC SDK path is Windows-only.
 #[cfg(not(windows))]
 pub fn nvenc_supported() -> bool {
@@ -282,6 +379,10 @@ mod frame {
 		/// transient ACCESS_LOST). The encoder forces an IDR (+ SPS/PPS) for this frame so a
 		/// client mid-GOP re-syncs immediately instead of freezing until the next safety GOP.
 		pub force_idr: bool,
+		/// When this content was composed (QPC ns, the `Qpc::now_ns` scale): DXGI's
+		/// `LastPresentTime` / WGC's `SystemRelativeTime`. 0 on a reused surface or when
+		/// unknown. Feeds the present→encoded latency (live stats + the source probe).
+		pub present_ns: i64,
 	}
 }
 
@@ -337,12 +438,54 @@ impl CapSource {
 		fps: u32,
 		draw_mouse: bool,
 		req_out: &std::sync::atomic::AtomicU32,
+		rebuild: &std::sync::atomic::AtomicBool,
 		stop: &std::sync::atomic::AtomicBool,
 		on_frame: impl FnMut(&Frame),
 	) -> dxgi::RunExit {
 		match self {
-			CapSource::Dxgi(c) => c.run(fps, draw_mouse, req_out, stop, on_frame),
-			CapSource::Wgc(c) => c.run(fps, draw_mouse, req_out, stop, on_frame),
+			CapSource::Dxgi(c) => c.run(fps, draw_mouse, req_out, rebuild, stop, on_frame),
+			CapSource::Wgc(c) => c.run(fps, draw_mouse, req_out, rebuild, stop, on_frame),
+		}
+	}
+}
+
+/// The encoder a build streams with: NVENC, or the display GPU's own via Media Foundation.
+#[cfg(windows)]
+enum AnyEncoder {
+	Nv(encode::Encoder),
+	Mf(encode::mf::MfEncoder),
+}
+
+#[cfg(windows)]
+impl AnyEncoder {
+	unsafe fn submit(&mut self, frame: &Frame, pts: i64, rtp_ts: u32) -> Result<(), String> {
+		match self {
+			AnyEncoder::Nv(e) => e.submit(frame, pts, rtp_ts),
+			AnyEncoder::Mf(e) => e.submit(frame, pts, rtp_ts),
+		}
+	}
+	unsafe fn reconfigure_bitrate(&mut self, kbps: u32) -> Result<(), String> {
+		match self {
+			AnyEncoder::Nv(e) => e.reconfigure_bitrate(kbps),
+			AnyEncoder::Mf(e) => e.reconfigure_bitrate(kbps),
+		}
+	}
+	fn request_idr(&mut self) {
+		match self {
+			AnyEncoder::Nv(e) => e.request_idr(),
+			AnyEncoder::Mf(e) => e.request_idr(),
+		}
+	}
+	unsafe fn invalidate_lost(&mut self, first: u16, last: u16) -> Result<usize, &'static str> {
+		match self {
+			AnyEncoder::Nv(e) => e.invalidate_lost(first, last),
+			AnyEncoder::Mf(e) => e.invalidate_lost(first, last),
+		}
+	}
+	unsafe fn flush_and_close(&mut self) {
+		match self {
+			AnyEncoder::Nv(e) => e.flush_and_close(),
+			AnyEncoder::Mf(e) => e.flush_and_close(),
 		}
 	}
 }
@@ -389,6 +532,10 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 	// the RAII guard below so the host can detect a dead capture thread on its fast path.
 	let alive = Arc::new(AtomicBool::new(true));
 	let alive_t = alive.clone();
+	let stats = Arc::new(LiveStats::default());
+	let stats_t = stats.clone();
+	let requested_rfi = Arc::new(std::sync::Mutex::new(None::<(u16, u16)>));
+	let req_rfi_t = requested_rfi.clone();
 
 	let thread = std::thread::Builder::new()
 		.name("pulsar-capture".into())
@@ -428,11 +575,48 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 			// pts is monotonic across switches (the rebuilt encoder forces an IDR on its first
 			// frame, so the client re-syncs regardless); last_kbps is re-seeded per build.
 			let mut pts: i64 = 0;
+			// RTP timestamps come from the CAPTURE TIME, not from `pts` (a frame counter): the
+			// client's delay-gradient estimator compares their spacing with the arrival spacing,
+			// and a host that falls a few % short of its nominal fps (measured 2026-11-08: 113-116
+			// frames/s at 120 on a hybrid-GPU host) made frame-count timestamps run
+			// 4-6 % slow — read as a queue growing on the path, which cut the bitrate on an idle
+			// 40 Mbit link and stepped the stream down to 1080p30. Monotonic across monitor switches.
+			let rtp_epoch = std::time::Instant::now();
 			let mut build_no: u32 = 0;
 			// The last output index that successfully built+streamed — a failed SWITCH build
 			// reverts here so the stream survives (instead of the thread dying → packet drought).
 			let mut prev_good_output = cfg.output_idx;
+			// Full-monitor capture source (DXGI or WGC) and, on a hybrid host, the measurement
+			// that picks it (path.rs). A window capture always uses WGC on its window.
+			let forced_source = path::forced_source();
+			let plan_for = |idx: u32| {
+				if cfg.window_hwnd.is_some() {
+					path::Plan::none()
+				} else {
+					path::plan(idx, cfg.fps, forced_source)
+				}
+			};
+			let mut plan = plan_for(output_idx);
+			let mut plan_output = output_idx;
+			let mut source = plan.first;
+			let mut probe_results: Vec<(path::MonSource, path::Score)> = Vec::new();
+			let mut next_source: Option<path::MonSource> = None;
+			// Set by the probe to rebuild on the same output (the run loop returns Switch).
+			let rebuild = AtomicBool::new(false);
+			let qpc = dxgi::platform::Qpc::new();
 			loop {
+				// Another monitor → plan again; a probe step / fallback may have picked the source.
+				if output_idx != plan_output {
+					plan = plan_for(output_idx);
+					plan_output = output_idx;
+					source = plan.first;
+					probe_results.clear();
+					next_source = None;
+				}
+				if let Some(next) = next_source.take() {
+					source = next;
+				}
+				rebuild.store(false, Ordering::Relaxed);
 				build_no += 1;
 				let build_t0 = std::time::Instant::now();
 				cap_log(&format!("=== build #{build_no} output={output_idx} ==="));
@@ -462,8 +646,40 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 					wgc::WgcCaptureDevice::create(hwnd, output_idx, stop_t.clone(), fast_transient)
 						.map(CapSource::Wgc)
 				} else {
-					dxgi::CaptureDevice::create(output_idx, stop_t.clone(), fast_transient)
-						.map(CapSource::Dxgi)
+					let build = |s: path::MonSource| match s {
+						path::MonSource::Dxgi | path::MonSource::DxgiMf => {
+							dxgi::CaptureDevice::create(output_idx, stop_t.clone(), fast_transient)
+								.map(CapSource::Dxgi)
+						}
+						path::MonSource::Wgc => {
+							wgc::WgcCaptureDevice::create_monitor(output_idx, stop_t.clone())
+								.map(CapSource::Wgc)
+						}
+					};
+					match build(source) {
+						Ok(c) => Ok(c),
+						// The other source before giving up: DXGI refuses a monitor this process
+						// already duplicates (E_INVALIDARG — a second session on the same screen)
+						// and WGC captures it again; WGC can be missing where DXGI works.
+						Err(e) if forced_source.is_none() && !stop_t.load(Ordering::Relaxed) => {
+							let alt = source.other();
+							encode_log(&format!(
+								"capture source {} failed on output {output_idx} ({e:?}), trying {}",
+								source.name(),
+								alt.name()
+							));
+							match build(alt) {
+								Ok(c) => {
+									source = alt;
+									plan.probe = false;
+									probe_results.clear();
+									Ok(c)
+								}
+								Err(_) => Err(e),
+							}
+						}
+						Err(e) => Err(e),
+					}
 				};
 				let mut cap = match build_result {
 					Ok(c) => c,
@@ -496,24 +712,38 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 				//    driver does any cross-adapter copy internally on hybrid GPUs). Seed the
 				//    bitrate from the LIVE target so a switch preserves any adaptive-bitrate step.
 				let mut last_kbps = req_kbps_t.load(Ordering::Relaxed).max(1);
-				let mut enc = match encode::Encoder::new(
-					cap.device(),
-					cap.context(),
-					&encode::EncParams {
-						width: w,
-						height: h,
-						capture_width: cap_w,
-						capture_height: cap_h,
-						fps: cfg.fps.max(1),
-						bitrate_kbps: last_kbps,
-						dest: cfg.dest.clone(),
-						codec: cfg.codec,
-						low_latency: cfg.low_latency,
-						intra_refresh: cfg.intra_refresh,
-						rotation,
-					},
-				) {
+				let params = encode::EncParams {
+					width: w,
+					height: h,
+					capture_width: cap_w,
+					capture_height: cap_h,
+					fps: cfg.fps.max(1),
+					bitrate_kbps: last_kbps,
+					dest: cfg.dest.clone(),
+					codec: cfg.codec,
+					low_latency: cfg.low_latency,
+					intra_refresh: cfg.intra_refresh,
+					rotation,
+					rfi: cfg.rfi,
+				};
+				let mf_path = cfg.window_hwnd.is_none() && source.is_mf();
+				let built = if mf_path {
+					encode::mf::MfEncoder::new(cap.device(), cap.context(), &params).map(AnyEncoder::Mf)
+				} else {
+					encode::Encoder::new(cap.device(), cap.context(), &params).map(AnyEncoder::Nv)
+				};
+				let mut enc = match built {
 					Ok(e) => e,
+					// The display GPU has no usable encoder for this codec: measure / use the next
+					// path (NVENC) instead — never a reason to leave the native path.
+					Err(e) if mf_path => {
+						encode_log(&format!("capture path dxgi-mf: encoder unavailable ({e})"));
+						if plan.skip(&mut probe_results, &mut next_source).is_none() {
+							next_source = Some(source.other());
+						}
+						drop(cap);
+						continue;
+					}
 					Err(e) => {
 						if !announced {
 							cap_log(&format!("BUILD #{build_no} enc FAILED output={output_idx}: {e} — initial, fall to ffmpeg"));
@@ -530,6 +760,18 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 					}
 				};
 				prev_good_output = output_idx;
+				stats_t.source.store(
+					if cfg.window_hwnd.is_some() { 3 } else { source.code() },
+					Ordering::Relaxed,
+				);
+				if cfg.window_hwnd.is_none() {
+					encode_log(&format!(
+						"capture source {} output={output_idx} {w}x{h}@{} probe={}",
+						source.name(),
+						cfg.fps,
+						plan.probe
+					));
+				}
 				// Publish the confirmed output so the host can read current_output() and
 				// reconcile cur_display / last_native_req after a failed switch revert.
 				cur_out_t.store(output_idx, Ordering::SeqCst);
@@ -566,10 +808,13 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 				//    Stop (teardown) or Switch(idx) when the host asked for a new monitor.
 				let mut submit_errs: u64 = 0;
 				let mut frames_sent: u64 = 0;
+				let mut meter = path::Meter::new();
+				let mut pixel = bench::PixelProbe::enabled().then(bench::PixelProbe::new);
 				let exit = cap.run(
 					cfg.fps.max(1),
 					cfg.draw_mouse,
 					&req_out_t,
+					&rebuild,
 					&stop_t,
 					|frame: &Frame| {
 						// Stage-3 adaptive bitrate: apply any pending target BEFORE encoding this
@@ -590,20 +835,52 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 						if frame.force_idr || req_idr_t.swap(false, Ordering::AcqRel) {
 							enc.request_idr();
 						}
+						// A client-reported hole: invalidate the lost frames as references (the next
+						// frame is the tagged recovery point). Out of reach → nothing here: the
+						// client's repair or keyframe request handles it.
+						let lost = req_rfi_t.lock().unwrap().take();
+						if let Some((first, last)) = lost {
+							match enc.invalidate_lost(first, last) {
+								Ok(n) => {
+									stats_t.rfi_ok.fetch_add(1, Ordering::Relaxed);
+									cap_log(&format!("rfi seq {first}..={last}: {n} frame(s) invalidated"));
+								}
+								Err(why) => {
+									// The first few per build go to the release log too (why RFI
+									// could not help is the thing to know on a new machine).
+									if stats_t.rfi_no.fetch_add(1, Ordering::Relaxed) < 20 {
+										encode_log(&format!("rfi seq {first}..={last}: declined ({why})"));
+									}
+								}
+							}
+						}
 						let enc_t0 = std::time::Instant::now();
-							if let Err(e) = enc.submit(frame, pts) {
+						// 90 kHz ticks since the capture thread started (wraps after ~13 h, as RTP does).
+						let rtp_ts = (rtp_epoch.elapsed().as_micros() as u64 * 9 / 100) as u32;
+						if let Err(e) = enc.submit(frame, pts, rtp_ts) {
 							submit_errs += 1;
 							if submit_errs <= 3 || submit_errs % 240 == 0 {
 								cap_log(&format!("build #{build_no} submit err #{submit_errs}: {e}"));
 							}
 						} else {
 							frames_sent += 1;
-								// G2: smooth per-frame encode wall-time (µs) into the EWMA atom.
-								let us = enc_t0.elapsed().as_micros().min(u32::MAX as u128) as u32;
-								let prev = encode_us_t.load(Ordering::Relaxed);
-								encode_us_t.store(if prev == 0 { us } else { prev / 8 * 7 + us / 8 }, Ordering::Relaxed);
+							// G2: smooth per-frame encode wall-time (µs) into the EWMA atom.
+							let us = enc_t0.elapsed().as_micros().min(u32::MAX as u128) as u32;
+							let prev = encode_us_t.load(Ordering::Relaxed);
+							encode_us_t.store(if prev == 0 { us } else { prev / 8 * 7 + us / 8 }, Ordering::Relaxed);
+							// present→encoded latency: the live stats and, while probing, this source's score.
+							let done_ns = qpc.now_ns();
+							let present_ns = match pixel.as_mut() {
+								Some(p) if frame.is_new => p.paint_ns(frame.texture),
+								Some(_) => 0,
+								None => frame.present_ns,
+							};
+							meter.record(frame.is_new, present_ns, done_ns, us, &stats_t);
+							if plan.probe && meter.samples() >= path::PROBE_SAMPLES {
+								path::probe_step(&mut plan, &mut probe_results, &mut next_source, source, meter.score(), &rebuild);
+							}
 						}
-						pts += 1;
+pts += 1;
 					},
 				);
 				cap_log(&format!(
@@ -637,6 +914,8 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 			encode_us,
 			requested_idr,
 			alive,
+			stats,
+			requested_rfi,
 		}),
 		Ok(Err(msg)) => {
 			// Thread reported an init error and is returning; join to reap it.

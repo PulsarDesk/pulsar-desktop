@@ -15,7 +15,7 @@ use pulsar_core::service::{
 use pulsar_core::Transport;
 use tauri::{AppHandle, Emitter, State};
 
-use crate::events::{ConnPhase, PlayInfo};
+use crate::events::{ConnPhase, ConnProbe, PlayInfo};
 use crate::native_view;
 use crate::process;
 use crate::state::{AppState, PlaySession, RenderSeed, Restream};
@@ -157,6 +157,13 @@ pub(crate) async fn start_remote_play(
 	// Wins over `display_idx` on the host when set. The session menu changes it live via
 	// `Restream::Window`. The launched-game (game-mode) case is resolved host-side, not here.
 	window_hwnd: Option<i64>,
+	// The user's saved stream picks (session menu, persisted by the UI): a resolution, an fps
+	// and a bitrate limit in kbit/s. 0/None = automatic. Applied to the controller before the
+	// first request, so every connect path (incl. the CLI auto-connect) starts on them.
+	init_width: Option<u32>,
+	init_height: Option<u32>,
+	init_fps: Option<u32>,
+	init_bitrate_kbps: Option<u32>,
 ) -> Result<PlayInfo, String> {
 	let node = state
 		.node
@@ -228,6 +235,10 @@ pub(crate) async fn start_remote_play(
 	.and_then(|r| r.ok())
 	.unwrap_or_default();
 	tracing::info!(codecs = ?host_caps.codecs, encoders = ?host_caps.encoders, features = ?host_caps.features, "host caps received");
+	// Touchpad pinch: real gesture to hosts that inject it, Ctrl + wheel to the rest.
+	crate::kbdhook::set_host_pinch(
+		host_caps.features.iter().any(|f| f == pulsar_core::service::media::FEAT_PINCH),
+	);
 	// Media-over-session: carry the RTP inside the encrypted session (ONE external
 	// socket — the same hole the control channel punched; symmetric NAT then works
 	// via the relay). Only when the host advertises it; old hosts stream direct.
@@ -239,6 +250,15 @@ pub(crate) async fn start_remote_play(
 		.features
 		.iter()
 		.any(|f| f == pulsar_core::service::media::FEAT_NACK);
+	// Reference-frame invalidation: the Windows renderer reports a lost frame's packets and
+	// resumes at the host's tagged recovery frame instead of waiting for a keyframe (H.264 /
+	// HEVC; the recovery tag is an SEI). Needs the media-over-session NACK path.
+	let host_rfi = cfg!(windows)
+		&& mos
+		&& host_nack
+		&& host_caps.features.iter().any(|f| f == pulsar_core::service::media::FEAT_RFI)
+		// A/B knob: PULSAR_RFI=0 keeps the keyframe recovery.
+		&& std::env::var("PULSAR_RFI").map(|v| v != "0").unwrap_or(true);
 	// This client's DECODE caps (startup probe). Unknown (probe still running /
 	// macOS stub failure) → assume the universal software pair. `incompat` maps a codec
 	// to the host encoder families whose REAL bitstream this client can't decode even
@@ -298,11 +318,9 @@ pub(crate) async fn start_remote_play(
 			.map(|a| a.ip().is_loopback())
 			.unwrap_or(false);
 
-	// Start the local RTP→WebSocket viewer only after auth (don't bind ports for a
-	// rejected connection). The host streams to the viewer's ephemeral UDP port.
-	// `mut` is used on Linux (forward_audio_to_loopback for the native audio player).
-	#[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
-	let mut view = viewer::start(mos)
+	// Start the local media intake only after auth (don't bind ports for a rejected
+	// connection). The host streams to the viewer's ephemeral UDP ports.
+	let view = viewer::start(mos)
 		.await
 		.map_err(|e| format!("{}: {e}", crate::i18n::t("err.videoRecv")))?;
 	let ws_port = view.ws_port;
@@ -310,7 +328,6 @@ pub(crate) async fn start_remote_play(
 	// Audio flows as a second RTP stream to its own port; the host streams to it
 	// only when its audio policy says transmit (game mode always does).
 	let audio_port = view.audio_port;
-	let audio_ws_port = view.audio_ws_port;
 
 	// Native external player (opt-in): a hardware-decoded fullscreen player (ffplay on
 	// Windows, mpv on Linux/macOS) fed by its own RTP port + SDP, instead of the in-webview
@@ -321,6 +338,8 @@ pub(crate) async fn start_remote_play(
 	// Falls back to the webview on any spawn failure.
 	// Allocate the play id early — the Linux single-surface renderer keys its GL state by it.
 	let id = state.next_play.fetch_add(1, Ordering::SeqCst);
+	// Settings → "Optimize the stream before showing it" (Windows native renderer).
+	let pre_optimize = cfg!(windows) && state.config.lock().unwrap().pre_optimize_stream;
 	let mut native_child: Option<Child> = None;
 	let mut video_port = media_port;
 	#[allow(unused_mut)]
@@ -398,7 +417,13 @@ pub(crate) async fn start_remote_play(
 						let hwnd = process::window_hwnd(&app);
 						let pace_default = std::env::var("PULSAR_PACE")
 							.map(|v| v == "1" || v == "on" || v == "true")
-							.unwrap_or(true);
+							.unwrap_or(false);
+						// The preparing screen stays up until the adaptive bitrate has settled
+						// (play::hold reveals the renderer + emits play-ready then).
+						crate::render_stats::HOLD_REVEAL_ID.store(
+							if pre_optimize { id } else { u64::MAX },
+							std::sync::atomic::Ordering::SeqCst,
+						);
 						let mut rc = match hwnd {
 							Some(h) => native_view::spawn_render_win(
 								&process::render_bin(&app),
@@ -407,6 +432,7 @@ pub(crate) async fn start_remote_play(
 								game_mode,
 								pace_default,
 								crate::i18n::lang(),
+								pre_optimize,
 							),
 							None => {
 								tracing::warn!("native render skipped: main window HWND unavailable");
@@ -560,7 +586,7 @@ pub(crate) async fn start_remote_play(
 							// persisted ui.framePacing live once the session is up).
 							let pace_default = std::env::var("PULSAR_PACE")
 								.map(|v| v == "1" || v == "on" || v == "true")
-								.unwrap_or(true);
+								.unwrap_or(false);
 							// Try the resident renderer first; fall back to a fresh spawn.
 							// Belt-and-suspenders liveness check: even if stop_stream's guard
 							// should have caught a dead renderer at park time, probe again here
@@ -782,7 +808,7 @@ pub(crate) async fn start_remote_play(
 						let rbin = process::render_bin(&app);
 						let pace_default = std::env::var("PULSAR_PACE")
 							.map(|v| v == "1" || v == "on" || v == "true")
-							.unwrap_or(true);
+							.unwrap_or(false);
 						// No mac-specific spawn helper (spawn_render is Linux-only, spawn_render_win
 						// Windows-only); build the overlay-only command inline — same flags as the
 						// other backends minus `--wid` (nothing to embed into).
@@ -938,11 +964,28 @@ pub(crate) async fn start_remote_play(
 	// once the Pi runs a zero-copy mpv build. Webview clients defer to the host (0).
 	// "Auto" fps targets the client's display refresh (nearest of 30/60/120).
 	let auto_fps = client_auto_fps(&app).await;
+	let client_fps = auto_fps;
+	// The monitor this session starts on (the picker's choice, else the primary): its size and
+	// refresh rate bound the stream (a second monitor at 144 Hz / 1440p is not the primary).
+	let start_disp = host_caps
+		.displays
+		.iter()
+		.find(|d| Some(d.idx) == display_idx)
+		.or_else(|| host_caps.displays.iter().find(|d| d.primary))
+		.or(host_caps.displays.first());
+	// The host can't capture new frames faster than its own panel refreshes: cap the target.
+	let host_hz = start_disp.map(|d| d.refresh_hz).unwrap_or(0);
+	let auto_fps = if host_hz > 1 { auto_fps.min(crate::util::nearest_fps(host_hz)) } else { auto_fps };
+	tracing::info!(auto_fps, host_hz, "stream fps target (client display refresh, capped by the host's)");
 	// A host with no hardware encoder (x264 on the CPU) can't encode a high-refresh stream in
 	// real time: its frames queue up and the picture stutters at any bitrate. Start such a
 	// host at ≤ 60 fps; the adaptive ladder goes lower if it still can't keep up.
 	let host_sw_only = !host_caps.encoders.is_empty() && host_caps.encoders.iter().all(|e| e == "software");
 	let auto_fps = if host_sw_only { auto_fps.min(60) } else { auto_fps };
+	let client_fps = if host_sw_only { client_fps.min(60) } else { client_fps };
+	// Every host monitor (idx, w, h, Hz) — a monitor switch mid-session rebuilds the ladder.
+	let host_displays: Vec<(u32, u32, u32, u32)> =
+		host_caps.displays.iter().map(|d| (d.idx, d.width, d.height, d.refresh_hz)).collect();
 	let (req_w, req_h, req_fps, req_kbps) = if native && cfg!(target_os = "linux") {
 		let g = |k: &str, d: u32| {
 			std::env::var(k)
@@ -979,7 +1022,9 @@ pub(crate) async fn start_remote_play(
 			)
 		}
 	} else {
-		(0, 0, 0, 0) // defer to the host config
+		// Size + bitrate: the host's defaults. Frame rate: this display's refresh (capped by the
+		// host's) — the ladder then steps it down through the common rates when it can't hold.
+		(0, 0, auto_fps, 0)
 	};
 	// Relay per-session rate cap (kbit/s, 0 = uncapped): when this session is RELAYED the relay
 	// forwards the media, so its per-session forwarding cap (advertised in PeerFound) applies.
@@ -993,6 +1038,9 @@ pub(crate) async fn start_remote_play(
 	} else {
 		0
 	};
+	// The rate asked for before any relay clamp: a mid-session upgrade to a direct path goes
+	// back to it (hold.rs `direct_cap_kbps`).
+	let req_kbps_unclamped = req_kbps;
 	let req_kbps = if cap_kbps > 0 {
 		if req_kbps == 0 { cap_kbps } else { req_kbps.min(cap_kbps) }
 	} else {
@@ -1007,43 +1055,170 @@ pub(crate) async fn start_remote_play(
 	let native_dims = {
 		// The client's configured maximum bounds the ladder (a deliberate 1080p default must
 		// not become 1440p because the host's monitor is); otherwise the host's primary display.
-		let disp = host_caps.displays.iter().find(|d| d.primary).or(host_caps.displays.first());
 		let (w, h) = if req_w > 0 && req_h > 0 {
 			(req_w, req_h)
 		} else {
-			disp.map(|d| (d.width, d.height)).unwrap_or((0, 0))
+			start_disp.map(|d| (d.width, d.height)).unwrap_or((0, 0))
 		};
 		(w, h, req_fps)
 	};
 	let peer_key = target.clone();
-	// 0 (host default) means the cap is unknown: assume a generous LAN-class cap and let the
-	// controller find the path's real budget.
-	let cap_for_ctl = if req_kbps > 0 { req_kbps } else { 15_000 };
+	// 0 (host default) means the cap is unknown: allow what a crystal-clear picture of the
+	// native point needs (scaled by pixels, fps and codec — see `auto_cap_kbps`) and let the
+	// controller find the path's real budget under it. (Was a flat 15 Mbit: a 1200p120 game
+	// stream on a fast LAN never got past it.)
+	let cap_for_ctl = if req_kbps > 0 { req_kbps } else { auto_cap_kbps(&codec_h, native_dims, game_mode) };
+	let direct_cap_kbps = if req_kbps_unclamped > 0 {
+		req_kbps_unclamped
+	} else {
+		auto_cap_kbps(&codec_h, native_dims, game_mode)
+	};
+	// The memory is per peer AND per kind of path (LAN / internet / relay): the same host over
+	// the home LAN and over a tethered phone are different paths, and a LAN rate seeding a
+	// mobile session started it far above the link (the 2026-11-09 field collapse).
+	let path_class = crate::adapt_memory::PathClass::of(
+		sess.transport(),
+		sess.peer_addr().await.map(|a| a.ip()),
+	);
 	// The memory seeds 60 % of the last clean rate, but never under ~2 Mbit: one bad session
 	// (e.g. a host that couldn't keep up) must not start every later one at the floor.
-	let hint = crate::adapt_memory::hint(&app, &peer_key)
+	// (Pre-optimized sessions used to start at 6 Mbit or more — on a ~10 Mbit mobile link
+	// that opened with 40 % loss; they now start like any other session.)
+	let hint = crate::adapt_memory::hint(&app, &peer_key, path_class)
 		.map(|k| (k * 3 / 5).max(2_000).clamp(pulsar_core::adapt::FLOOR_KBPS, cap_for_ctl));
+	// Session-start bandwidth probe (pulsar-core `adapt::probe`): ~1 s of packet trains at
+	// rising rates, measured before the stream starts, so the first picture already comes at
+	// the rate the path holds instead of after an 8-10 s climb from a cautious 4 Mbit (which
+	// the preparing screen's 8 s limit cut short, and which on a thin mobile link ran into the
+	// policer before it settled). It picks the START only; the controller adapts as before.
+	// The measured rate replaces the per-path memory, which may describe an older link.
+	let probe_cap = match init_bitrate_kbps.filter(|&k| k > 0) {
+		Some(user) => user.min(cap_for_ctl),
+		None => cap_for_ctl,
+	};
+	let probe = if mos
+		&& host_caps.features.iter().any(|f| f == pulsar_core::service::media::FEAT_PROBE)
+		&& std::env::var("PULSAR_PROBE").map(|v| v != "0").unwrap_or(true)
+	{
+		let rtt = match sess.path_latency().await {
+			Some((d, r)) => match sess.transport() {
+				Transport::Direct => d.or(r),
+				Transport::Relay => r.or(d),
+			},
+			None => None,
+		}
+		.unwrap_or(100.0);
+		let rates = pulsar_core::adapt::probe::plan_rates(probe_cap);
+		let started = std::time::Instant::now();
+		match pulsar_core::service::run_probe(&mut sess, rates, pulsar_core::adapt::probe::TRAIN_MS, rtt).await {
+			Ok(Some(e)) => {
+				let trains: Vec<String> = e
+					.trains
+					.iter()
+					.map(|t| {
+						format!(
+							"{}k:{}k/{:.0}%/{:+.0}ms{}",
+							t.rate_kbps,
+							t.delivered_kbps,
+							t.loss * 100.0,
+							t.delay_growth_ms,
+							if t.clean { "" } else { "!" }
+						)
+					})
+					.collect();
+				tracing::info!(
+					kbps = e.kbps,
+					at_least = e.at_least,
+					ms = started.elapsed().as_millis() as u64,
+					?trains,
+					"bandwidth probe"
+				);
+				let _ = app.emit(
+					"conn-probe",
+					ConnProbe { target: target.clone(), kbps: e.kbps, at_least: e.at_least },
+				);
+				Some(e)
+			}
+			Ok(None) => {
+				tracing::info!(ms = started.elapsed().as_millis() as u64, "bandwidth probe: nothing came back");
+				None
+			}
+			Err(e) => {
+				tracing::warn!(%e, "bandwidth probe failed");
+				None
+			}
+		}
+	} else {
+		None
+	};
 	let mut acfg = pulsar_core::adapt::Config::new(pulsar_core::adapt::codec_from_wire(&codec_h), cap_for_ctl);
 	acfg.native = native_dims;
+	// No memory of this path → 0: the controller starts cautiously (min(cap, ~4 Mbit)) and
+	// probes up, instead of opening at the cap.
 	acfg.start_kbps = hint.unwrap_or(0);
-	// Only the Linux libav renderer can resume on a partially intra-refreshed picture; the
-	// Windows/macOS depacketizer waits for an IDR and gets a short GOP instead.
+	if let Some(e) = &probe {
+		// 80 % of the measured rate: room for parity, retransmits and the measurement's own
+		// error (a policer's bucket can read a little high). No startup ramp on top — the
+		// probe already did that job; later climbs follow the controller's normal probing.
+		acfg.start_kbps = (e.kbps as u64 * 4 / 5).clamp(pulsar_core::adapt::FLOOR_KBPS as u64, cap_for_ctl as u64) as u32;
+		acfg.startup_windows = 0;
+	}
+	// Only the Linux libav renderer resumes on a partially intra-refreshed picture (libav
+	// conceals the lost reference). Windows heals a loss by reference-frame invalidation instead
+	// (`host_rfi`; the 2026-11-08 IR attempt there overflowed the AU queue — see stream/rtp.rs
+	// IR_MODE), macOS waits for an IDR and gets a short GOP.
 	acfg.ir_capable = cfg!(target_os = "linux");
 	// The resolution/fps ladder is ON: when the budget (or a host that can't keep up) no
 	// longer buys a clean picture at the current point, the controller steps to a lighter
 	// one instead of starving the encoder. A resolution or fps picked in the session menu
 	// still pins that dimension (hold.rs → `set_manual_point`).
 	acfg.ladder = true;
-	let ctl = pulsar_core::adapt::Controller::new(acfg);
-	// A low start rate (the per-peer hint) starts on a lower rung: request that point, not the
-	// native size the rate can't buy. The top rung keeps the original request (0 = host default).
+	// Remote desktop: hold full HD (or the configured/native size if smaller) and adapt only
+	// fps + bitrate — readable text matters more than motion, and desktop content needs far
+	// fewer bits than the game-content ladder assumes. Game mode keeps the full ladder.
+	if !game_mode {
+		acfg.min_height = 1080;
+		acfg.min_kbps_scale = 0.5;
+	} else {
+		// Game mode: keep 60 fps and give up resolution on a thin path (a 3 Mbit mobile link
+		// landed on 720p30), but never below 720p (maintainer decision, 2026-11-09). 720p60 is
+		// the bottom rung: under its minimum only the bitrate drops.
+		acfg.min_fps = 60;
+		acfg.min_height = 720;
+	}
+	let mut ctl = pulsar_core::adapt::Controller::new(acfg);
+	// The user's saved picks: a bitrate limit is the controller's ceiling (it still adapts under
+	// it), a resolution/fps pins that dimension — same as picking them in the session menu.
+	let pin_res = match (init_width, init_height) {
+		(Some(w), Some(h)) if w > 0 && h > 0 => Some((w, h)),
+		_ => None,
+	};
+	let pin_fps = init_fps.filter(|&f| f > 0);
+	if let Some(kbps) = init_bitrate_kbps.filter(|&k| k > 0) {
+		ctl.set_user_cap(kbps);
+	}
+	if pin_res.is_some() || pin_fps.is_some() {
+		ctl.set_pins(pin_res, pin_fps);
+	}
+	// A low start rate (the per-peer hint, or the cautious no-memory start) starts on a lower
+	// rung: request that point, not the native size the rate can't buy. The top rung keeps the
+	// original request (0 = host default). The saved picks are a preferred MAXIMUM: the
+	// controller's point already honours them, and a lighter one means the start rate can't
+	// carry the pick yet (it climbs back when the link allows).
 	let (req_w, req_h, req_fps) = match ctl.points().first() {
 		Some(top) if *top != ctl.point() => {
 			let p = ctl.point();
 			(p.width, p.height, p.fps)
 		}
-		_ => (req_w, req_h, req_fps),
+		// A pinned dimension is always requested explicitly (never "host default").
+		_ => {
+			let (w, h) = pin_res.unwrap_or((req_w, req_h));
+			(w, h, pin_fps.unwrap_or(req_fps))
+		}
 	};
+	if pin_res.is_some() || pin_fps.is_some() || init_bitrate_kbps.unwrap_or(0) > 0 {
+		tracing::info!(?pin_res, ?pin_fps, limit_kbps = init_bitrate_kbps.unwrap_or(0), "saved stream picks applied");
+	}
 	// Media-over-session carries the per-packet measurements the controller runs on; the
 	// first request already uses its start rate (the per-peer memory hint, or the cap).
 	let req_kbps = if mos { ctl.encoder_kbps() } else { req_kbps };
@@ -1052,11 +1227,13 @@ pub(crate) async fn start_remote_play(
 		cap = cap_for_ctl,
 		start = ctl.target_kbps(),
 		hint = ?hint,
+		path = path_class.as_str(),
 		point = %ctl.point().label(),
 		ladder = ?ctl.points().iter().map(|p| format!("{}:{}", p.label(), p.min_kbps)).collect::<Vec<_>>(),
 		req_w, req_h, req_fps, req_kbps,
 		"adaptive controller seeded"
 	);
+	let rfi_req = host_rfi && codec != "av1";
 	let req = StreamReq {
 		port: video_port,
 		codec,
@@ -1119,6 +1296,7 @@ pub(crate) async fn start_remote_play(
 		// Reed-Solomon (several losses per frame) preferred, XOR for older hosts.
 		fec: mos,
 		fec_rs: mos,
+		rfi: rfi_req,
 	};
 	if let Err(e) = request_stream(&mut sess, &req).await {
 		// Park ANY live pulsar-render child instead of killing it — regardless of whether
@@ -1171,42 +1349,10 @@ pub(crate) async fn start_remote_play(
 		return Err(e.to_string());
 	}
 
-	// Linux native client: play the host's Opus/RTP audio NATIVELY (ffmpeg→PulseAudio),
-	// because WebKitGTK can't decode it via WebCodecs (the webview audio path is silent there).
-	// The viewer forwards the received audio datagrams to a loopback port ffmpeg listens on.
-	#[cfg(target_os = "linux")]
-	let audio_native: Option<Child> = if native && req.transmit_audio && audio_port > 0 {
-		match std::net::UdpSocket::bind("127.0.0.1:0")
-			.and_then(|s| s.local_addr().map(|a| a.port()))
-		{
-			Ok(lp) => {
-				let ff = process::ffmpeg_bin(&app);
-				// The host derives the real channel layout from its own endpoint/config
-				// (it isn't carried in StreamReq), and the client negotiates stereo by
-				// default, so pass the stereo channel count here — the SDP stays
-				// stereo-correct and ffmpeg's Opus decoder still outputs the stream's
-				// true channel count if the host ever sends multistream surround.
-				match native_view::spawn_native_audio(&ff, lp, pulsar_core::audio::CHANNELS) {
-					Some(c) => {
-						// Track the audio SDP temp file (named by spawn_native_audio after
-						// the loopback port) so stop_stream removes it on teardown.
-						sdp_files
-							.lock()
-							.unwrap()
-							.push(std::env::temp_dir().join(format!("pulsar-audio-{lp}.sdp")));
-						view.forward_audio_to_loopback(lp);
-						Some(c)
-					}
-					None => None,
-				}
-			}
-			Err(_) => None,
-		}
-	} else {
-		None
-	};
-	#[cfg(not(target_os = "linux"))]
-	let audio_native: Option<Child> = None;
+	// The host's Opus/RTP audio plays natively on every platform (libopus + SDL3,
+	// Moonlight's model — see native_audio.rs). Started even when transmit is off, so a live
+	// toggle on just works; the SDL device only opens when the first packet arrives.
+	let audio_native = (audio_port > 0).then(|| crate::native_audio::start(view.audio_packets()));
 
 	// Register this play session (one per connected-host tab). `id` was allocated above.
 	let running = Arc::new(AtomicBool::new(true));
@@ -1844,6 +1990,7 @@ pub(crate) async fn start_remote_play(
 		overlay_stdin.clone(),
 		mos,
 		host_nack,
+		host_rfi,
 		req_w,
 		req_h,
 		req_fps,
@@ -1851,6 +1998,7 @@ pub(crate) async fn start_remote_play(
 		cap_kbps,
 		ctl,
 		peer_key,
+		path_class,
 		req.cursor_external,
 		req_hdr,
 		req_quality,
@@ -1858,9 +2006,11 @@ pub(crate) async fn start_remote_play(
 		req.window_hwnd,
 		windows_query_rx,
 		rumble_tx,
+		host_displays,
+		client_fps,
+		direct_cap_kbps,
 	));
 
-	let audio_is_native = audio_native.is_some();
 	state.plays.lock().unwrap().insert(
 		id,
 		PlaySession {
@@ -1894,11 +2044,6 @@ pub(crate) async fn start_remote_play(
 		id,
 		transport,
 		ws_port,
-		// When the NATIVE audio player runs (Linux ffmpeg→PulseAudio), the webview must
-		// NOT also open the audio WebSocket — on WebKits whose WebCodecs CAN decode Opus
-		// the same stream played twice (native + WebAudio, offset by the webview's
-		// buffering) as a delayed echo. Port 0 = the frontend skips its audio path.
-		audio_ws_port: if audio_is_native { 0 } else { audio_ws_port },
 		local,
 		native,
 		embedded: single_surface,
@@ -2137,18 +2282,15 @@ pub(crate) async fn stop_stream(
 		if let Some(child) = play.render_child.take() {
 			stop_render_child_blocking(child);
 		}
-		// Stop the Linux native audio player (ffmpeg→PulseAudio), if any.
-		if let Some(mut child) = play.audio_native.take() {
-			let _ = child.kill();
-			let _ = child.wait();
-		}
+		// Stop the native audio player (dropping it ends its thread and closes the device).
+		drop(play.audio_native.take());
 		// Remove the embedded mpv's IPC socket file (deterministic per-id path → at most
 		// one stale file, overwritten on reuse anyway).
 		#[cfg(unix)]
 		if let Some(sock) = play.mpv_ipc.take() {
 			let _ = std::fs::remove_file(&sock);
 		}
-		// Remove every SDP temp file this session wrote (video + Linux audio, plus one per
+		// Remove every SDP temp file this session wrote (video, plus one per
 		// codec/monitor switch). Their port-based names are effectively unique per session,
 		// so without this they accumulate in temp_dir for the life of the machine.
 		for sdp in play.sdp_files.lock().unwrap().drain(..) {
@@ -2217,5 +2359,42 @@ mod tests {
 		assert_eq!(resolve_codec("h264", &set(&["h264", "h265"])), "h264");
 		// Nothing learned (old host / caps timeout): honored, the host degrades it.
 		assert_eq!(resolve_codec("av1", &set(&[])), "av1");
+	}
+}
+
+/// The adaptive controller's ceiling when neither the user nor the transport set one: what a
+/// clean picture of the native point needs, with headroom. Moonlight-like reference (≈ 20 Mbit
+/// for 1080p60 H.264 game content), scaled by pixels, by fps^0.75 (more frames share more
+/// redundancy), and by the codec's efficiency; desktop content needs ~60 % of that. Clamped
+/// to 15..150 Mbit. The controller still only climbs as far as the path stays clean.
+pub(crate) fn auto_cap_kbps(codec: &str, native: (u32, u32, u32), game_mode: bool) -> u32 {
+	let (w, h, fps) = native;
+	let (w, h) = if w == 0 || h == 0 { (1920, 1080) } else { (w, h) };
+	let fps = if fps == 0 { 60 } else { fps.max(30) };
+	let px = (w as f64 * h as f64) / (1920.0 * 1080.0);
+	let f = (fps as f64 / 60.0).powf(0.75);
+	let eff = match codec.to_ascii_lowercase().as_str() {
+		"h265" | "hevc" => 0.75,
+		"av1" => 0.65,
+		_ => 1.0,
+	};
+	let mode = if game_mode { 1.0 } else { 0.6 };
+	((20_000.0 * px * f * eff * mode) as u32).clamp(15_000, 150_000)
+}
+
+#[cfg(test)]
+mod auto_cap_tests {
+	use super::auto_cap_kbps;
+
+	#[test]
+	fn scales_with_pixels_fps_codec_and_mode() {
+		let game_1200p120_hevc = auto_cap_kbps("h265", (1920, 1200, 120), true);
+		assert!((26_000..30_000).contains(&game_1200p120_hevc), "{game_1200p120_hevc}");
+		let remote = auto_cap_kbps("h265", (1920, 1200, 120), false);
+		assert!(remote < game_1200p120_hevc && remote >= 15_000, "{remote}");
+		let uhd = auto_cap_kbps("h265", (3840, 2160, 60), true);
+		assert!((55_000..65_000).contains(&uhd), "{uhd}");
+		assert_eq!(auto_cap_kbps("h264", (1280, 720, 30), false), 15_000, "never under 15 Mbit");
+		assert_eq!(auto_cap_kbps("h264", (0, 0, 0), true), 20_000, "unknown → 1080p60 reference");
 	}
 }

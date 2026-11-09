@@ -103,6 +103,13 @@ impl Decoder {
 			// 2. Find the decoder MFT for this input subtype. Prefer a hardware DXVA MFT (sync
 			//    or async); fall back to a software MFT so the path works on any GPU.
 			let transform = create_decoder_mft(subtype, allow_async)?;
+			// Low-latency decoding: without MF_LOW_LATENCY the Microsoft decoders hold frames
+			// back (a DPB/reorder output delay of one to several frames) before emitting them —
+			// pure added glass-to-glass latency for a bframes=0 live stream. Best effort: a
+			// decoder that doesn't know the attribute just ignores it.
+			if let Ok(attrs) = transform.GetAttributes() {
+				let _ = attrs.SetUINT32(&windows::Win32::Media::MediaFoundation::MF_LOW_LATENCY, 1);
+			}
 
 			// 3. Multithread-protect the caller's D3D11 device (it was created WITHOUT it), then
 			//    build the DXGI device manager and hand it to the MFT for zero-copy output.

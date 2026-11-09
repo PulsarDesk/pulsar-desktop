@@ -452,6 +452,14 @@ pub(crate) fn kbd_engage(app: AppHandle) -> Result<(), String> {
 	Ok(())
 }
 
+/// Client (Windows native): a key edge the webview received while the session tab is active —
+/// fed to the capture's key handler (see kbdhook::imp::web_key). Sync so edges stay in order.
+#[tauri::command]
+pub(crate) fn kbd_web_key(code: u32, down: bool) -> Result<(), String> {
+	kbdhook::web_key(code, down);
+	Ok(())
+}
+
 /// Client (native): position the in-app native video over the session tab's content
 /// area. Linux: moves the pass-through GDK container (viewport CSS px == GDK logical
 /// px). Windows: streams `viewrect` (scaled to PHYSICAL px) to the renderer child over

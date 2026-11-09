@@ -84,12 +84,24 @@ use handlers::{make_on_audio, make_on_file, make_on_stream};
 /// the RTP media inside the session (single socket) and honors NACK retransmits.
 fn media_features() -> Vec<String> {
 	use pulsar_core::service::media::{FEAT_FEC, FEAT_FEC_RS, FEAT_MOS, FEAT_NACK};
-	vec![
+	#[allow(unused_mut)]
+	let mut v = vec![
 		FEAT_MOS.to_string(),
 		FEAT_NACK.to_string(),
 		FEAT_FEC.to_string(),
 		FEAT_FEC_RS.to_string(),
-	]
+	];
+	// Real pinch gestures (two-finger touch injection) — Windows hosts only; elsewhere the
+	// client keeps sending Ctrl + wheel.
+	#[cfg(windows)]
+	v.push(pulsar_core::service::media::FEAT_PINCH.to_string());
+	// Reference-frame invalidation: the native NVENC path heals a client-reported loss without
+	// a keyframe (other paths answer MediaRfi with a keyframe).
+	#[cfg(windows)]
+	v.push(pulsar_core::service::media::FEAT_RFI.to_string());
+	// The session-start bandwidth probe (pulsar-core serve loop answers it on every platform).
+	v.push(pulsar_core::service::media::FEAT_PROBE.to_string());
+	v
 }
 
 /// RAII guard that ensures per-session resources are released when the session task
@@ -315,6 +327,8 @@ pub(crate) async fn go_online(
 	relay_password: Option<String>,
 	relay_totp: Option<String>,
 ) -> Result<String, String> {
+	// One go_online at a time (see AppState::go_online_lock).
+	let _online_guard = state.go_online_lock.lock().await;
 	// Pre-warm ALL encoder probes off the hot path: the first QueryStreamCaps must
 	// answer within the client's 2 s window, but a cold probe chain (one-frame ffmpeg
 	// encodes per backend×codec + the gst pipelines) takes several seconds. Results
@@ -524,6 +538,9 @@ pub(crate) async fn go_online(
 		}
 		Err(e) => return Err(e.to_string()),
 	};
+
+	// Settings → Ağ → router port mapping (NAT-PMP / UPnP), done on the first register().
+	node.set_port_mapping(cfg.port_mapping);
 
 	// Start LAN discovery BEFORE registering so it works even when the relay is
 	// unreachable (offline mode): we announce ourselves (id-less) and find peers on
@@ -933,7 +950,25 @@ pub(crate) async fn go_online(
 				// loss the client reports in its stats (adaptive streaming Phase 2.1 / 2.4), read
 				// live by the forwarder — Reed-Solomon per frame for clients that decode it
 				// (`StreamReq::fec_rs`), XOR groups of `1/ratio` for XOR-only clients.
-				let fec_n: Arc<std::sync::atomic::AtomicU16> = Arc::new(std::sync::atomic::AtomicU16::new(0));
+				// A session that crosses the internet (relay, or direct to a non-LAN address)
+				// starts WITH parity (`fec_policy::FecPolicy`): its first losses would otherwise
+				// cost a keyframe before the first stats window could turn parity on. The policy
+				// re-judges the path from the client's RTT each window (relay → direct LAN
+				// upgrade, overlay VPNs with private addresses).
+				let fec_policy = {
+					let relayed = !matches!(session.live_transport().await, pulsar_core::Transport::Direct);
+					let lan_peer = session
+						.peer_addr()
+						.await
+						.is_some_and(|a| pulsar_core::adapt::fec_policy::is_lan_ip(a.ip()));
+					pulsar_core::adapt::fec_policy::FecPolicy::new(relayed || !lan_peer)
+				};
+				let fec_n: Arc<std::sync::atomic::AtomicU16> =
+					Arc::new(std::sync::atomic::AtomicU16::new((fec_policy.ratio() * 1000.0).round() as u16));
+				// What the video forwarder put on the wire (first copies / parity / NACK
+				// retransmits): logged per client stats window, and the packet count the
+				// pre-repair loss is rebuilt from.
+				let media_sent: Arc<pulsar_core::service::media::MediaSendStats> = Arc::new(Default::default());
 
 				// Per-session: hold the screen capture so it can be stopped when this
 				// client disconnects. (Input injection is via uinput in `on_input`.)
@@ -1239,6 +1274,7 @@ pub(crate) async fn go_online(
 					nack_slot.clone(),
 					fwd_slot.clone(),
 					fec_n.clone(),
+					media_sent.clone(),
 					#[cfg(target_os = "linux")]
 					restore_token.clone(),
 					#[cfg(target_os = "linux")]
@@ -1336,6 +1372,7 @@ pub(crate) async fn go_online(
 								| InputEvent::PointerRelative { .. }
 								| InputEvent::PointerButton { .. }
 								| InputEvent::Scroll { .. }
+								| InputEvent::Pinch { .. }
 						);
 						// Where the streamed screen sits in the virtual desktop, for the client's
 						// labelled pointer drawn while its input is held back (remote_cursor).
@@ -1524,10 +1561,12 @@ pub(crate) async fn go_online(
 											InputEvent::Scroll { dx, dy } => w.scroll(*dx, *dy),
 											InputEvent::Key { code, down } => w.key(*code, *down),
 											InputEvent::Char(c) => w.type_char(*c),
-											// Controllers never reach the desktop/window injector.
+											// Controllers never reach the desktop/window injector; a pinch
+											// is screen-level touch input, so the global injector takes it.
 											InputEvent::Gamepad(_)
 											| InputEvent::GamepadSlot { .. }
-											| InputEvent::GamepadDisconnect { .. } => {
+											| InputEvent::GamepadDisconnect { .. }
+											| InputEvent::Pinch { .. } => {
 												routed_to_window = false;
 											}
 										}
@@ -1671,6 +1710,7 @@ pub(crate) async fn go_online(
 										InputEvent::Scroll { dx, dy } => d.scroll(dx, dy),
 										InputEvent::Key { code, down } => d.key(code, down),
 										InputEvent::Char(c) => d.type_char(c),
+										InputEvent::Pinch { phase, scale } => d.pinch(phase, scale),
 										// Controller variants are routed to virtual pads in the outer
 										// match and never reach the desktop injector.
 										InputEvent::Gamepad(_)
@@ -1700,6 +1740,7 @@ pub(crate) async fn go_online(
 					let app_h = app_h.clone();
 					let peer = peer.clone();
 					let chat_log = tauri::Manager::state::<AppState>(&app_h).chat_log.clone();
+					let chat_active = active.clone();
 					move |text: String| {
 						// Backlog first (the connections window may be CLOSED — events
 						// broadcast only to live windows), then surface the window: the
@@ -1713,9 +1754,20 @@ pub(crate) async fn go_online(
 								log.drain(..excess);
 							}
 						}
+						// A game session's chat doesn't pop the window over the game (it is
+						// in the backlog; the sidebar button opens it).
+						let game = chat_active
+							.lock()
+							.unwrap()
+							.get(&sid)
+							.is_some_and(|ci| ci.mode == crate::state::ConnMode::Game);
 						crate::connections::open_or_update(
 							&app_h,
-							crate::connections::Surface::Forward,
+							if game {
+								crate::connections::Surface::Background
+							} else {
+								crate::connections::Surface::Forward
+							},
 						);
 						let _ = app_h.emit(
 							"host-chat",
@@ -2028,6 +2080,21 @@ pub(crate) async fn go_online(
 						}
 					}
 				};
+				// A hole the client reported at once (reference-frame invalidation, see
+				// DataMsg::MediaRfi) — while its NACK repair may still fill it. Only the native
+				// NVENC capture can act on it; any other path ignores it, and the client asks for
+				// a keyframe itself if the repair fails (so a repaired hole never costs one).
+				let on_rfi = {
+					#[cfg(windows)]
+					let native = native_slot.clone();
+					move |first: u16, last: u16| {
+						#[cfg(windows)]
+						if let Some(h) = native.lock().unwrap().as_ref() {
+							h.request_rfi(first, last);
+						}
+						let _ = (first, last);
+					}
+				};
 				let handlers = DataHandlers {
 					outbound: Some(out_rx),
 					on_clipboard: Box::new(on_clipboard),
@@ -2059,6 +2126,7 @@ pub(crate) async fn go_online(
 						}
 					}),
 					on_nack: Box::new(on_nack),
+					on_rfi: Some(Box::new(on_rfi)),
 					on_avatar: Box::new(on_avatar),
 					on_peer_name: Box::new(on_peer_name),
 					on_peer_id: Box::new(on_peer_id),
@@ -2068,25 +2136,51 @@ pub(crate) async fn go_online(
 					on_fs: Box::new(crate::fs_browse::make_on_fs(fs_out)),
 					// The client's adaptive controller's per-window feedback (Phase 0 / 2.4):
 					// logged next to the host's own encode stats, and the one input to the FEC
-					// parity sizing (Phase 2.1) — the forwarder reads `fec_n` live.
+					// parity sizing (Phase 2.1) — the forwarder reads `fec_n` live. The parity is
+					// sized from the PRE-repair loss (`FecPolicy`): the client's `loss` is what
+					// NACK + parity left over, so sizing from it switched working parity off.
+					// The window's wire counters go in too: the policy raises parity only for
+					// loss our own rate did not cause, and keeps video + parity + retransmits
+					// within a margin of the client's wire target (`kbps` here is the client's
+					// ENCODER rate, net of the parity share it deducts — see `budget_cap`).
 					on_stats: {
 						let fec_n = fec_n.clone();
-						let mut clean_windows = 0u32;
+						let mut policy = fec_policy;
+						let media_sent = media_sent.clone();
+						let mut sent_prev = media_sent.snapshot();
+						let mut at_prev = std::time::Instant::now();
 						Box::new(move |cs| {
 							use std::sync::atomic::Ordering;
-							let prev = fec_n.load(Ordering::Relaxed) as f32 / 1000.0;
-							if cs.loss < pulsar_core::adapt::fec_policy::OFF_BELOW {
-								clean_windows += 1;
-							} else {
-								clean_windows = 0;
-							}
-							let ratio = pulsar_core::adapt::fec_policy::parity_ratio(cs.loss, prev, clean_windows);
+							let now = std::time::Instant::now();
+							let sent_now = media_sent.snapshot();
+							let sent = sent_now.since(&sent_prev);
+							let window_ms = now.duration_since(at_prev).as_millis().min(u32::MAX as u128) as u32;
+							(sent_prev, at_prev) = (sent_now, now);
+							let w = pulsar_core::adapt::fec_policy::FecWindow {
+								loss: cs.loss,
+								nack_ok: cs.nack_ok,
+								fec_ok: cs.fec_ok,
+								sent_pkts: sent.video_pkts,
+								window_ms,
+								kbps: cs.kbps,
+								fps: pulsar_core::adapt::fec_policy::point_label_fps(&cs.point),
+								rtt_ms: cs.rtt_ms,
+								video_bytes: sent.video_bytes,
+								parity_pkts: sent.parity_pkts,
+								parity_bytes: sent.parity_bytes,
+								rtx_bytes: sent.rtx_bytes,
+							};
+							let ratio = policy.on_window(&w);
 							let n = (ratio * 1000.0).round() as u16;
 							if n != fec_n.load(Ordering::Relaxed) {
 								fec_n.store(n, Ordering::Relaxed);
 							}
+							// Wire rate per kind over the window (kbit/s): congestion vs policing
+							// vs MTU trouble shows here against the client's raw loss.
+							let kbit = |bytes: u64| if window_ms == 0 { 0 } else { bytes * 8 / window_ms as u64 };
 							tracing::info!(
 								loss_pct = cs.loss * 100.0,
+								raw_loss_pct = policy.last_raw_loss() * 100.0,
 								rtt = cs.rtt_ms,
 								jitter = cs.jitter_ms,
 								kbps = cs.kbps,
@@ -2096,6 +2190,20 @@ pub(crate) async fn go_online(
 								nack_ok = cs.nack_ok,
 								fec_ok = cs.fec_ok,
 								fec_pct = n as f32 / 10.0,
+								// Why the parity stayed under what the loss asked for (congestive /
+								// single-window / rate-up / step-limit / budget; empty = it did not),
+								// and the client's wire target the budget is held to.
+								fec_hold = policy.hold_reason(),
+								target_kbps = policy.target_kbps() as u32,
+								wan = policy.is_wan(),
+								window_ms,
+								video_pkts = sent.video_pkts,
+								video_kbps = kbit(sent.video_bytes),
+								parity_pkts = sent.parity_pkts,
+								parity_kbps = kbit(sent.parity_bytes),
+								rtx_pkts = sent.rtx_pkts,
+								rtx_kbps = kbit(sent.rtx_bytes),
+								wire_kbps = kbit(sent.bytes()),
 								"client stats"
 							);
 						})
@@ -2243,7 +2351,11 @@ pub(crate) async fn go_online(
 	// relay is unreachable — otherwise the documented offline-LAN flow hangs
 	// every connecting client at auth.
 	*state.node.lock().unwrap() = Some(node.clone());
-	*state.serve_task.lock().unwrap() = Some(serve_handle);
+	// Never let a replaced serve task live on: it holds a strong Arc<Node> (see
+	// AppState::go_online_lock).
+	if let Some(old) = state.serve_task.lock().unwrap().replace(serve_handle) {
+		old.abort();
+	}
 
 	// Register with the relay. If it's unreachable we stay "offline" for the UI
 	// (the Err) but keep the node + serve loop + LAN discovery running so

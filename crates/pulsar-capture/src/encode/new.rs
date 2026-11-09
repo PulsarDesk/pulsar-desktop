@@ -15,7 +15,7 @@ use super::d3d::{
 	parse_rtp_dest, CrossAdapterBridge, SessionGuard,
 };
 use super::encoder::Encoder;
-use super::{cap_dbg, nvenc, EncParams, VENDOR_NVIDIA};
+use super::{cap_dbg, nvenc, policy, EncParams, VENDOR_NVIDIA};
 use crate::rtp::RtpEgress;
 use crate::Codec;
 
@@ -229,6 +229,20 @@ impl Encoder {
 				nvenc::NV_ENC_AV1_PROFILE_MAIN_GUID,
 			),
 		};
+		// RFI needs a driver that invalidates references and keeps several of them (the two caps
+		// Sunshine checks too). A query the driver does not answer keeps the old behaviour
+		// (assume support) — only an explicit 0 turns RFI off.
+		let query_cap = |which: u32| -> Option<i32> {
+			let f = fns.nvEncGetEncodeCaps?;
+			let mut q: nvenc::NV_ENC_CAPS_PARAM = std::mem::zeroed();
+			q.version = nvenc::NV_ENC_CAPS_PARAM_VER;
+			q.capsToQuery = which;
+			let mut v: i32 = 0;
+			(f(enc, codec_guid, &mut q, &mut v) == nvenc::NV_ENC_SUCCESS).then_some(v)
+		};
+		let rfi_caps = query_cap(nvenc::NV_ENC_CAPS_SUPPORT_REF_PIC_INVALIDATION) != Some(0)
+			&& query_cap(nvenc::NV_ENC_CAPS_SUPPORT_MULTIPLE_REF_FRAMES) != Some(0);
+
 		let mut preset: nvenc::NV_ENC_PRESET_CONFIG = std::mem::zeroed();
 		preset.version = nvenc::NV_ENC_PRESET_CONFIG_VER;
 		preset.presetCfg.version = nvenc::NV_ENC_CONFIG_VER;
@@ -277,6 +291,12 @@ impl Encoder {
 		// forced IDR (`request_idr`) still works, so a lost reference the wave cannot heal
 		// in time is still recovered by the client's keyframe request.
 		let intra_refresh = p.intra_refresh;
+		// RFI needs references to fall back to; an intra-refreshed stream heals by itself.
+		let rfi = p.rfi && !intra_refresh && p.codec != Codec::Av1 && rfi_caps;
+		// As deep as the level allows at this size (16 at 1080p): the reach of an RFI request is
+		// the buffer depth in frames, and at 120 fps over a mobile RTT the old fixed 8 was short.
+		// Prediction still uses ONE reference (numRefL0 below), so encode cost is unchanged.
+		let dpb = if rfi { policy::rfi_dpb(p.codec, w, h) } else { 1 };
 		if intra_refresh {
 			cfg.gopLength = nvenc::NVENC_INFINITE_GOPLENGTH;
 		}
@@ -299,8 +319,41 @@ impl Encoder {
 		// them directly. (AQ stays off via the ULTRA_LOW_LATENCY / LOW_LATENCY preset baseline —
 		// those presets disable spatial/temporal AQ; the rcParams flags word only exposes an OR
 		// setter, so we don't risk clearing the preset's reserved bits to force it.)
-		cfg.rcParams.multiPass = 0; // NV_ENC_MULTI_PASS_DISABLED
+		cfg.rcParams.multiPass = nvenc::NV_ENC_MULTI_PASS_DISABLED;
 		cfg.rcParams.lookaheadDepth = 0;
+		// Low-budget stream (WAN / mobile — see `policy::LOW_BUDGET_BPP`): with a few KB per frame
+		// the single-pass RC misjudges a complex frame, overshoots the one-frame VBV and starves
+		// the next frames to pay it back. The quarter-resolution first pass (Sunshine's default,
+		// within the same encode call — no lookahead, no frame of delay) measures the frame first;
+		// and the keyframe target is pinned to 1× a P-frame budget (lowDelayKeyFrameScale, the
+		// ULTRA_LOW_LATENCY default but 2 under LOW_LATENCY), so a keyframe takes the quality hit
+		// instead of a multi-frame burst. A LAN-rate stream keeps exactly today's single pass and
+		// preset scale (no added encode time). Chosen per build from the starting bitrate and
+		// re-judged on a live bitrate change with hysteresis (`reconfigure_bitrate`), so a
+		// cautious low start that climbs to a LAN rate leaves it. PULSAR_NVENC_MULTIPASS=0/1
+		// overrides the pass choice.
+		let low_budget = policy::low_budget(br, w, h, fps);
+		let two_pass = policy::use_two_pass(
+			br,
+			w,
+			h,
+			fps,
+			std::env::var("PULSAR_NVENC_MULTIPASS").ok().as_deref(),
+		);
+		// The preset's own keyframe scale: what a stream that leaves the low-budget class live
+		// goes back to.
+		let preset_kf_scale = cfg.rcParams.lowDelayKeyFrameScale;
+		if two_pass {
+			cfg.rcParams.multiPass = nvenc::NV_ENC_TWO_PASS_QUARTER_RESOLUTION;
+		}
+		if low_budget {
+			cfg.rcParams.lowDelayKeyFrameScale = 1;
+		}
+		// No minimum intra QP / keyframe size cap: at a starved budget the RC already runs the
+		// keyframe at the top of the QP range, so a QP floor cannot shrink it (the one-frame VBV
+		// is NVENC's only frame-size cap and is already set); on a LAN it would only blur the
+		// first picture. A 1080p keyframe that cannot fit the budget is a point (resolution) the
+		// ABR must not hold at that rate — the adaptive controller's job, not the encoder's.
 		// RC flag bits (named, OR'd): zeroReorderDelay (no reorder), no lookahead, no AQ.
 		// Bit positions are stable across NVENC versions (see nvenc consts).
 		cfg.rcParams.set_flags(
@@ -325,8 +378,8 @@ impl Encoder {
 					h264.intraRefreshCnt = refresh_cnt;
 				}
 				h264.set_entropyCodingMode(nvenc::NV_ENC_H264_ENTROPY_CODING_MODE_CABAC);
-				h264.maxNumRefFrames = 1;
-				h264.set_numRefL0(1);
+				h264.maxNumRefFrames = dpb;
+				h264.set_numRefL0(nvenc::NV_ENC_NUM_REF_FRAMES_1);
 				h264.set_chromaFormatIDC(1); // 4:2:0
 			}
 			Codec::H265 => {
@@ -340,7 +393,12 @@ impl Encoder {
 					nvenc::NV_ENC_HEVC_FLAG_REPEAT_SPSPPS | nvenc::NV_ENC_HEVC_CHROMA_420,
 				);
 				hevc.idrPeriod = gop;
-				hevc.maxNumRefFramesInDPB = 1;
+				hevc.maxNumRefFramesInDPB = dpb;
+				if rfi {
+					// Predict from ONE reference: the deep buffer is only the fallback an RFI
+					// recovery frame reaches into (autoselect could search several = slower).
+					hevc.numRefL0 = nvenc::NV_ENC_NUM_REF_FRAMES_1;
+				}
 				if intra_refresh {
 					hevc.set_flags(nvenc::NV_ENC_HEVC_FLAG_INTRA_REFRESH);
 					hevc.idrPeriod = nvenc::NVENC_INFINITE_GOPLENGTH;
@@ -393,6 +451,12 @@ impl Encoder {
 		chk(init_fn(enc, &mut *ip), &fns, enc)
 			.map_err(|e| format!("nvEncInitializeEncoder: {e}"))?;
 		let init_params = ip; // retained on the Encoder for live bitrate reconfigure
+		cap_dbg(&format!(
+			"nvenc rc {w}x{h}@{fps} {} kbps: bpp={:.3} low_budget={low_budget} two_pass={two_pass} \
+			 rfi={rfi} (caps {rfi_caps}) dpb={dpb}",
+			br / 1000,
+			policy::bits_per_pixel(br, w, h, fps),
+		));
 
 		// -- 9. Register our NV12 texture as an NVENC input resource. ------------------
 		let mut reg: nvenc::NV_ENC_REGISTER_RESOURCE = std::mem::zeroed();
@@ -472,6 +536,15 @@ impl Encoder {
 			closed: false,
 			frame_idx: 0,
 			force_idr_once: false,
+			codec: p.codec,
+			rfi,
+			intra_refresh,
+			refs: policy::RefTracker::new(dpb),
+			win: policy::EncWindow::default(),
+			mark_recovery: false,
+			low_budget,
+			two_pass,
+			preset_kf_scale,
 			// B3: VideoProcessor view caches start empty; `blt_bgra_to_nv12` fills them lazily
 			// (output view once, input view keyed by source-texture ptr) and sets the stream
 			// rotation once. A rebuilt encoder (resolution/rotation change) gets fresh empties.

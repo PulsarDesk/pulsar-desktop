@@ -16,7 +16,7 @@
 //!   stdin:  `open` / `close` (overlay), `stat <fps> <lat> <dec> <mbps>`, `pace 0|1`
 //!   stdout: `vidsink-fps <fps> <w>x<h>` (HUD), `ov set <field> <val>` / `ov end` / `ov close`
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 pub mod decode; // Media Foundation DXVA decode (Annex-B AU → NV12 ID3D11Texture2D)
@@ -41,13 +41,17 @@ use windows::Win32::Graphics::Dxgi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
 	CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, PeekMessageW, RegisterClassW,
-	SetWindowPos, TranslateMessage, CW_USEDEFAULT, HWND_TOP, MSG, PM_REMOVE, SWP_NOACTIVATE,
-	SWP_NOMOVE, SWP_NOSIZE, WNDCLASSW, WS_CHILD, WS_VISIBLE,
+	SetWindowPos, ShowWindow, TranslateMessage, CW_USEDEFAULT, HWND_TOP, MSG, PM_REMOVE,
+	SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_SHOWNA, WNDCLASSW, WS_CHILD,
 };
 
 // ---- shared control state (host → renderer over stdin) ---------------------------------
 static OPEN: AtomicBool = AtomicBool::new(false);
-static PACE: AtomicBool = AtomicBool::new(true);
+// Frame pacing default OFF (lowest latency); the app pushes the user's setting on start.
+static PACE: AtomicBool = AtomicBool::new(false);
+/// Set by a `rotate` stdin line that changed the rotation: the next presented frame
+/// re-reports `vidsink-dims` (displayed dims) and re-sizes the processor.
+static ROT_DIRTY: AtomicBool = AtomicBool::new(false);
 static STATS: Mutex<[f32; 4]> = Mutex::new([0.0; 4]); // fps, latency_ms, decode_ms, mbps
 /// Parent (Tauri) HWND passed via `--wid`; the child window is created under it.
 static PARENT: AtomicU64 = AtomicU64::new(0);
@@ -136,10 +140,22 @@ static DISPLAY_IDX_SEED: std::sync::atomic::AtomicU32 =
 static CURSOR_POS: Mutex<Option<(f32, f32)>> = Mutex::new(None);
 static CURSOR_IMG: Mutex<Option<CursorImg>> = Mutex::new(None);
 static CURSOR_IMG_GEN: AtomicU64 = AtomicU64::new(0);
-/// True while the stream is stalled (no AU for ≥ STALL_SECS and decoder was live).
-/// The render loop sets this; it is cleared as soon as AUs start arriving again.
-/// Mirrors video::STALLED on Linux — kept separate because video.rs is unix-only.
+/// True while the stream is really stopped: the app said so (stdin `stopped 1`) or its stdin
+/// closed (the app is gone). It used to be set by 3 s without a decodable AU, which on a lossy
+/// link (a keyframe that never arrives whole) released the input capture and showed "stream
+/// stopped" over a session that was still alive — ending a session is the app's call. Cleared
+/// by `stopped 0` or as soon as AUs arrive again. Mirrors video::STALLED on Linux — kept
+/// separate because video.rs is unix-only.
 static STALLED: AtomicBool = AtomicBool::new(false);
+/// No decodable AU for a while although the session lives: the depacketizer waits for a
+/// keyframe / RFI recovery frame (`stream::rtp::WAITING`, after `RECOVER_AFTER`), or nothing at
+/// all arrived for `STALL_SECS` while the app's keepalive went quiet too. Shows the
+/// non-blocking "recovering connection" pill; input capture stays as it is.
+static RECOVERING: AtomicBool = AtomicBool::new(false);
+/// When the last `rtt` stdin line arrived (the app's keepalive pong, ~every 2 s while the peer
+/// answers). A static host screen can legitimately send no video for seconds; a fresh pong then
+/// means the session is fine and no "recovering" pill is due (linux.rs RTT_AT_MS parity).
+static RTT_AT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 /// Connected controllers pushed by the app over stdin (`ctrls slot:kind:name[:uuid:target],...`).
 /// Game mode only; empty list in remote mode or when no pads are connected. Copied
 /// into `ostate.controllers` each frame (paint_overlay + paint_closed parity).
@@ -238,14 +254,31 @@ fn arm_hint(kind: &str) {
 	*HINT.lock().unwrap() = Some((text.to_string(), std::time::Instant::now(), HINT_SECS));
 }
 
-/// Overlay scale (egui points-per-physical-pixel). MUST match the Linux backend (`linux.rs`
-/// ppp=1.25) so the overlay is the IDENTICAL physical size + look on every platform.
-const OVERLAY_PPP: f32 = 1.25;
+/// Overlay scale at 100 % display scaling (96 DPI): the Linux backend's ppp, so a standard
+/// display looks the same on both platforms.
+const OVERLAY_PPP_BASE: f32 = 1.25;
+/// Live overlay scale (egui pixels per point) as f32 bits = BASE x the window's DPI / 96. A
+/// fixed 1.25 drew the menu button + menu at the same PHYSICAL size on every display, so on
+/// a 200 % laptop panel (and 4K/8K screens) they came out half the size of the app UI.
+static OVERLAY_PPP_BITS: AtomicU32 = AtomicU32::new(0x3FA0_0000); // 1.25f32
+
+fn overlay_ppp() -> f32 {
+	f32::from_bits(OVERLAY_PPP_BITS.load(Ordering::Relaxed))
+}
+
+/// Re-read the window's DPI and update the overlay scale; true when it changed (the window
+/// moved to a monitor with another scale, or the user changed Windows' scaling).
+fn refresh_overlay_ppp(hwnd: HWND) -> bool {
+	use windows::Win32::UI::HiDpi::GetDpiForWindow;
+	let dpi = unsafe { GetDpiForWindow(hwnd) };
+	let ppp = if dpi == 0 { OVERLAY_PPP_BASE } else { OVERLAY_PPP_BASE * dpi as f32 / 96.0 };
+	OVERLAY_PPP_BITS.swap(ppp.to_bits(), Ordering::Relaxed) != ppp.to_bits()
+}
 
 /// Mouse position from an `LPARAM`, in egui POINTS (physical px ÷ ppp), matching linux.rs.
 fn lparam_xy(lp: LPARAM) -> egui::Pos2 {
-	let x = (lp.0 & 0xffff) as i16 as f32 / OVERLAY_PPP;
-	let y = ((lp.0 >> 16) & 0xffff) as i16 as f32 / OVERLAY_PPP;
+	let x = (lp.0 & 0xffff) as i16 as f32 / overlay_ppp();
+	let y = ((lp.0 >> 16) & 0xffff) as i16 as f32 / overlay_ppp();
 	egui::pos2(x, y)
 }
 
@@ -272,6 +305,13 @@ fn stdin_control() {
 			}
 		} else if let Some(rest) = l.strip_prefix("pace ") {
 			PACE.store(rest.trim() != "0", Ordering::SeqCst);
+		} else if let Some(rest) = l.strip_prefix("rfi ") {
+			// The host heals losses by reference-frame invalidation (stream/rtp.rs `RFI_MODE`).
+			crate::stream::rtp::RFI_MODE.store(rest.trim() != "0", Ordering::SeqCst);
+		} else if let Some(rest) = l.strip_prefix("ir ") {
+			// The host now streams with a rolling intra refresh (no IDRs): resume after a gap
+			// instead of waiting for a keyframe (stream/rtp.rs `IR_MODE`).
+			crate::stream::rtp::IR_MODE.store(rest.trim() != "0", Ordering::SeqCst);
 		} else if let Some(rest) = l.strip_prefix("cursor ") {
 			// Side-channel cursor position (normalized 0..1 over the host frame).
 			let v: Vec<f32> = rest
@@ -300,6 +340,8 @@ fn stdin_control() {
 					CURSOR_IMG_GEN.fetch_add(1, Ordering::SeqCst);
 				}
 			}
+		} else if l.trim() == "reveal" {
+			REVEAL.store(true, Ordering::SeqCst);
 		} else if l == "cursorhide" {
 			*CURSOR_POS.lock().unwrap() = None;
 		} else if let Some(rest) = l.strip_prefix("engaged ") {
@@ -340,6 +382,16 @@ fn stdin_control() {
 			} else {
 				Some((rest.to_string(), std::time::Instant::now(), BANNER_SECS))
 			};
+		} else if let Some(rest) = l.strip_prefix("rotate ") {
+			// Host display rotation (deg CW) the stream still carries — the Blt rotates it
+			// upright (present::ROTATION). Flag the displayed dims for a re-report: a 90/270
+			// change swaps the aspect the app letterboxes input over.
+			if let Ok(d) = rest.trim().parse::<u32>() {
+				if present::rotation() != d % 360 {
+					present::set_rotation(d);
+					ROT_DIRTY.store(true, Ordering::SeqCst);
+				}
+			}
 		} else if let Some(rest) = l.strip_prefix("fit ") {
 			// View-fit mode pushed by the frontend (persisted value / respawn re-seed).
 			present::set_fit(rest.trim());
@@ -402,10 +454,18 @@ fn stdin_control() {
 				crate::stream::rtp::set_max_delay_us(us);
 			}
 		} else if let Some(rest) = l.strip_prefix("rtt ") {
-			// Keepalive RTT from the app — overrides the latency tile (linux.rs parity).
+			// Keepalive RTT from the app — overrides the latency tile (linux.rs parity), sizes
+			// the reorder buffer's early give-up on an unrepairable hole, and proves the
+			// session is alive (RTT_AT).
 			if let Ok(ms) = rest.trim().parse::<f32>() {
 				RTT_DMS.store((ms * 10.0) as u32, Ordering::Relaxed);
+				crate::stream::rtp::set_rtt_ms(ms);
+				*RTT_AT.lock().unwrap() = Some(std::time::Instant::now());
 			}
+		} else if let Some(rest) = l.strip_prefix("stopped ") {
+			// The app's verdict that the stream really stopped (`stopped 1`) or is back
+			// (`stopped 0`): the "stream stopped" card + input-capture release (see STALLED).
+			STALLED.store(rest.trim() == "1", Ordering::SeqCst);
 		} else if let Some(rest) = l.strip_prefix("viewrect ") {
 			// In-app embed rect (physical px) — see VIEW_RECT above.
 			let v: Vec<i32> = rest
@@ -544,6 +604,8 @@ fn stdin_control() {
 		// (`paint_closed` via `draw_hint`), alongside the mini stats HUD and the
 		// overlay-open button — see paint_closed below.
 	}
+	// stdin closed: the app is gone (or dropped us) — nothing will feed this stream again.
+	STALLED.store(true, Ordering::SeqCst);
 }
 
 /// Draw the side-channel cursor with egui's painter (own foreground layer, over the
@@ -563,11 +625,164 @@ fn paint_side_cursor(ctx: &egui::Context, draw: Option<(egui::Pos2, egui::Textur
 	}
 }
 
+// ---- System-shortcut capture owned by the renderer process --------------------------------
+// While the user has taken control of the remote session AND this child holds the keyboard
+// focus, Pulsar sends every key (Alt+Tab, Win, ...) to the remote instead of the local shell,
+// like Moonlight's "capture system keyboard shortcuts". The app process' own hook is not
+// called on some machines while Pulsar's window is in front, so the renderer runs one too.
+// Gate: `SHORTCUT_CAPTURE` (engaged + focused, set by the event loop); otherwise every key
+// passes straight through. The callback only queues; a writer thread prints `hkey` lines.
+static SHORTCUT_CAPTURE: AtomicBool = AtomicBool::new(false);
+/// `--hold-reveal`: stay hidden past the first frame until the app's `reveal` line (it waits
+/// for the adaptive bitrate to settle, behind its "preparing" screen). `REVEAL` = that line.
+static HOLD_REVEAL: AtomicBool = AtomicBool::new(false);
+static REVEAL: AtomicBool = AtomicBool::new(false);
+/// Safety net: show anyway this long after the first drawn frame if `reveal` never comes.
+const REVEAL_FALLBACK: std::time::Duration = std::time::Duration::from_secs(10);
+/// Ctrl key messages the system SYNTHESIZED (touchpad pinch = Ctrl + wheel) that the focused
+/// child will receive next: they must not reach the remote as a held Ctrl — the app turns the
+/// pinch into a real pinch (or a Ctrl-wrapped wheel step) itself.
+static SKIP_CTRL_MSGS: AtomicU32 = AtomicU32::new(0);
+static HKEY_TX: std::sync::OnceLock<Mutex<std::sync::mpsc::Sender<(u16, bool)>>> =
+	std::sync::OnceLock::new();
+
+unsafe extern "system" fn shortcut_hook_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+	use windows::Win32::UI::WindowsAndMessaging::{
+		CallNextHookEx, KBDLLHOOKSTRUCT, LLKHF_INJECTED, WM_KEYDOWN, WM_SYSKEYDOWN,
+	};
+	if code >= 0 && SHORTCUT_CAPTURE.load(Ordering::Relaxed) {
+		let kb = &*(lp.0 as *const KBDLLHOOKSTRUCT);
+		// Browser / volume / media / app-launch keys (VK 0xA6-0xB7) keep working on THIS
+		// machine (local volume, play/pause): the remote has no use for them and swallowing
+		// them left the laptop's volume keys dead while in control.
+		let local_key = (0xA6..=0xB7).contains(&kb.vkCode);
+		if kb.flags.0 & LLKHF_INJECTED.0 != 0 && matches!(kb.vkCode, 0x11 | 0xA2 | 0xA3) {
+			SKIP_CTRL_MSGS.fetch_add(1, Ordering::Relaxed);
+		}
+		if kb.flags.0 & LLKHF_INJECTED.0 == 0 && !local_key {
+			let down = matches!(wp.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
+			if let Some(tx) = HKEY_TX.get() {
+				if let Ok(tx) = tx.try_lock() {
+					let _ = tx.send((kb.vkCode as u16, down));
+				}
+			}
+			return LRESULT(1); // acts on the remote only
+		}
+	}
+	CallNextHookEx(None, code, wp, lp)
+}
+
+/// Start the `hkey` writer thread (once per renderer process). The hook itself is installed
+/// by the event loop, see `set_shortcut_hook`.
+fn start_shortcut_capture() {
+	let (tx, rx) = std::sync::mpsc::channel::<(u16, bool)>();
+	if HKEY_TX.set(Mutex::new(tx)).is_err() {
+		return;
+	}
+	std::thread::spawn(move || {
+		use std::io::Write as _;
+		for (vk, down) in rx {
+			println!("hkey {vk} {}", down as u8);
+			let _ = std::io::stdout().flush();
+		}
+	});
+}
+
+/// Install / remove the shortcut hook the way SDL's keyboard grab does (Moonlight's "capture
+/// system keyboard shortcuts"): on the thread that owns the focused window (this render
+/// thread, which pumps its messages every frame) and at the moment control + focus are
+/// taken, so it is the newest hook in the chain; removed again when control is released.
+unsafe fn set_shortcut_hook(
+	hook: &mut Option<windows::Win32::UI::WindowsAndMessaging::HHOOK>,
+	on: bool,
+) {
+	use windows::Win32::UI::WindowsAndMessaging::{SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL};
+	if on && hook.is_none() {
+		let hmod = GetModuleHandleW(None).ok().map(|h| h.into());
+		match SetWindowsHookExW(WH_KEYBOARD_LL, Some(shortcut_hook_proc), hmod, 0) {
+			Ok(h) => *hook = Some(h),
+			Err(e) => eprintln!("pulsar-render(win): shortcut hook install failed: {e}"),
+		}
+	} else if !on {
+		if let Some(h) = hook.take() {
+			let _ = UnhookWindowsHookEx(h);
+		}
+	}
+}
+
+/// Left/right-resolved virtual key for a WM_(SYS)KEY* message, matching what WH_KEYBOARD_LL
+/// reports (VK_LCONTROL / VK_RMENU / VK_RSHIFT ...), so the app maps both sources the same way.
+fn resolve_vk(wp: WPARAM, lp: LPARAM) -> u16 {
+	use windows::Win32::UI::Input::KeyboardAndMouse::{MapVirtualKeyW, MAPVK_VSC_TO_VK_EX};
+	let vk = wp.0 as u16;
+	let extended = (lp.0 >> 24) & 1 == 1;
+	match vk {
+		0x10 => {
+			let sc = ((lp.0 >> 16) & 0xff) as u32;
+			match unsafe { MapVirtualKeyW(sc, MAPVK_VSC_TO_VK_EX) } as u16 {
+				0 => 0xA0,
+				v => v,
+			}
+		}
+		0x11 => {
+			if extended {
+				0xA3
+			} else {
+				0xA2
+			}
+		}
+		0x12 => {
+			if extended {
+				0xA5
+			} else {
+				0xA4
+			}
+		}
+		v => v,
+	}
+}
+
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
 	use windows::Win32::UI::WindowsAndMessaging::{
-		WM_CAPTURECHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-		WM_RBUTTONDOWN, WM_RBUTTONUP,
+		WM_CAPTURECHANGED, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+		WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS, WM_SYSKEYDOWN, WM_SYSKEYUP,
 	};
+	// ---- Keyboard (system-key capture) ---------------------------------------------
+	// While control is engaged this child holds the keyboard focus (see event_loop), so the
+	// app's WH_KEYBOARD_LL hook sees and swallows every key incl. Alt+Tab / Win (on some
+	// machines the hook is never called while the WebView2 window has focus). Whatever still
+	// reaches us here (the hook isn't running / didn't suppress it) goes to the app as a
+	// `key <vk> <0|1>` line, into the same key handler. Engaged: never let DefWindowProc act
+	// on it (Alt opening a menu, Alt+F4 closing Pulsar, F10).
+	if matches!(msg, WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP) {
+		use std::io::Write as _;
+		let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+		let vk = resolve_vk(wp, lp);
+		if matches!(vk, 0xA2 | 0xA3)
+			&& SKIP_CTRL_MSGS
+				.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+				.is_ok()
+		{
+			// The touchpad pinch's synthesized Ctrl: stays local (see SKIP_CTRL_MSGS).
+			return unsafe { DefWindowProcW(hwnd, msg, wp, lp) };
+		}
+		println!("key {} {}", vk, down as u8);
+		let _ = std::io::stdout().flush();
+		if ENGAGED_R.load(Ordering::SeqCst) {
+			return LRESULT(0);
+		}
+		return unsafe { DefWindowProcW(hwnd, msg, wp, lp) };
+	}
+	// Focus that lands here while NOT engaged (Windows restoring the last-focused child after
+	// an Alt+Tab back) belongs to the app UI: hand it straight back to the parent (WebView2).
+	if msg == WM_SETFOCUS && !ENGAGED_R.load(Ordering::SeqCst) {
+		use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+		use windows::Win32::UI::WindowsAndMessaging::GetParent;
+		if let Ok(p) = unsafe { GetParent(hwnd) } {
+			let _ = unsafe { SetFocus(Some(p)) };
+		}
+		return LRESULT(0);
+	}
 	// ---- Capture-leak guard (races the OPEN flag) ----------------------------------
 	// If OPEN flips false→true between WM_LBUTTONDOWN (SetCapture in closed state) and
 	// the matching WM_LBUTTONUP, the up-edge handler below is skipped (it lives inside
@@ -615,8 +830,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
 			let mut rc = RECT::default();
 			let _ = unsafe { GetClientRect(hwnd, &mut rc) };
 			let (sw, sh) = (
-				(rc.right - rc.left) as f32 / OVERLAY_PPP,
-				(rc.bottom - rc.top) as f32 / OVERLAY_PPP,
+				(rc.right - rc.left) as f32 / overlay_ppp(),
+				(rc.bottom - rc.top) as f32 / overlay_ppp(),
 			);
 			let mut hit_btn = false;
 			let (mut bx, mut by) = *OVBTN_POS.lock().unwrap();
@@ -631,8 +846,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
 				use windows::Win32::UI::Input::KeyboardAndMouse::SetCapture;
 				unsafe { SetCapture(hwnd) };
 				*BTN_DRAG.lock().unwrap() = Some((p.x, p.y, bx, by, false));
-			} else {
-				// Click-to-engage; the engaging click is not forwarded to the host.
+			} else if !STALLED.load(Ordering::Relaxed) {
+				// Click-to-engage; the engaging click is not forwarded to the host. Not while
+				// the stream is stopped: there is no picture to control.
 				println!("ov engage");
 				let _ = std::io::stdout().flush();
 			}
@@ -650,8 +866,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
 					let mut rc = RECT::default();
 					let _ = unsafe { GetClientRect(hwnd, &mut rc) };
 					let (sw, sh) = (
-						(rc.right - rc.left) as f32 / OVERLAY_PPP,
-						(rc.bottom - rc.top) as f32 / OVERLAY_PPP,
+						(rc.right - rc.left) as f32 / overlay_ppp(),
+						(rc.bottom - rc.top) as f32 / overlay_ppp(),
 					);
 					let bs = crate::overlay::BTN_SIZE;
 					let nx = (*bx0 + dx).clamp(0.0, (sw - bs).max(0.0));
@@ -757,6 +973,9 @@ struct Renderer {
 	// linux.rs re-presents `last` every vsync). Cleared on resolution change so a stale frame
 	// is never re-presented through a mismatched VideoProcessor.
 	last_nv12: Option<ID3D11Texture2D>,
+	// Newest picture of an AU burst decoded without presenting (`on_access_unit(.., false)`);
+	// the render loop presents it once the burst is through. Owned texture, like `last_nv12`.
+	held_back: Option<ID3D11Texture2D>,
 	// fps counter for the `vidsink-fps` HUD line + self-measured stream metrics
 	// (bytes → mbps, decode wall time → ms) so the overlay shows real numbers
 	// without an app-side echo (the stdin `stat` line never arrives on Windows).
@@ -772,6 +991,16 @@ struct Renderer {
 	au_since_dec: u32,
 	dec_frames: u64,
 	dec_rebuilt: bool,
+	// The child window is created HIDDEN and shown on the first decoded frame (see
+	// `event_loop`): until then the app's connecting/loading screen must stay visible.
+	shown: bool,
+	// Last `vidsink-vrect` reported to the app (video area as client fractions).
+	last_vrect: (f32, f32, f32, f32),
+	// When the first frame was drawn (the `--hold-reveal` fallback clock).
+	first_drawn: Option<std::time::Instant>,
+	// Compositor clock boost state (see `boost_compositor`) + seconds at ≤ 60 fps.
+	compositor_boosted: bool,
+	low_fps_secs: u32,
 	// Side-channel cursor: uploaded egui texture + hotspot/dims (points come from the
 	// statics fed over stdin; re-uploaded when CURSOR_IMG_GEN moves).
 	cursor_tex: Option<egui::TextureHandle>,
@@ -837,8 +1066,9 @@ impl Renderer {
 		// if it fails the overlay is simply unavailable (video unaffected).
 		let egui_ctx = egui::Context::default();
 		crate::overlay::apply_theme(&egui_ctx);
-		// Same ppp as the Linux backend → identical overlay size/look across platforms.
-		egui_ctx.set_pixels_per_point(OVERLAY_PPP);
+		// Linux's ppp at 100 % scaling, multiplied by this display's DPI scale.
+		refresh_overlay_ppp(hwnd);
+		egui_ctx.set_pixels_per_point(overlay_ppp());
 		let painter = egui_paint::EguiPaint::new(&device).ok();
 		let ostate = crate::overlay::OverlayState {
 			mode,
@@ -863,6 +1093,7 @@ impl Renderer {
 			src_w: 0,
 			src_h: 0,
 			last_nv12: None,
+			held_back: None,
 			frames: 0,
 			last_fps_at: std::time::Instant::now(),
 			bytes: 0,
@@ -871,6 +1102,11 @@ impl Renderer {
 			au_since_dec: 0,
 			dec_frames: 0,
 			dec_rebuilt: false,
+			shown: false,
+			last_vrect: (-1.0, -1.0, -1.0, -1.0),
+			first_drawn: None,
+			compositor_boosted: false,
+			low_fps_secs: 0,
 			cursor_tex: None,
 			cursor_gen: 0,
 			cursor_hot: (0.0, 0.0),
@@ -900,6 +1136,12 @@ impl Renderer {
 			} else {
 				EGUI_EVENTS.lock().unwrap().clear();
 				ENTER_IN.store(false, Ordering::SeqCst);
+				// Stream-restarting choices made in the menu apply now that it's closed.
+				for c in crate::overlay::take_deferred(&mut self.ov_ui) {
+					apply_ov_cmd(&mut self.ostate, c);
+				}
+				use std::io::Write;
+				let _ = std::io::stdout().flush();
 			}
 			self.was_open = open;
 		}
@@ -952,8 +1194,8 @@ impl Renderer {
 			screen_rect: Some(egui::Rect::from_min_size(
 				egui::pos2(0.0, 0.0),
 				egui::vec2(
-					self.width as f32 / OVERLAY_PPP,
-					self.height as f32 / OVERLAY_PPP,
+					self.width as f32 / overlay_ppp(),
+					self.height as f32 / overlay_ppp(),
 				),
 			)),
 			events,
@@ -992,134 +1234,14 @@ impl Renderer {
 			// SWITCHING state here — only STALLED applies.)
 			if STALLED.load(Ordering::Relaxed) {
 				crate::overlay::draw_stalled(ctx);
+			} else if RECOVERING.load(Ordering::Relaxed) {
+				crate::overlay::draw_recovering(ctx);
 			}
 			paint_side_cursor(ctx, cursor_draw);
 		});
 		// Apply + emit commands (mirrors desktop.rs / the Linux backend).
 		for c in cmds {
-			match c {
-				crate::overlay::OverlayCmd::Set(field, val) => {
-					match field {
-						"codec" => self.ostate.codec = val.clone(),
-						"encoder" => self.ostate.encoder = val.clone(),
-						"decoder" => self.ostate.decoder = val.clone(),
-						"res" => self.ostate.res = val.clone(),
-						"fps" => self.ostate.fps_sel = val.clone(),
-						"bitrate" => self.ostate.bitrate = val.clone(),
-						"quality" => self.ostate.quality = val.clone(),
-						"pace" => self.ostate.pace = val == "on",
-						// Local echo for the closed-state chrome toggles: flip the statics
-						// NOW so the row + HUD react instantly; the frontend's stdin echo
-						// (`statshud`/`ovbtn`) just confirms the same value later.
-						"statshud" => STATS_HUD.store(val == "on", Ordering::SeqCst),
-						"curlabel" => CUR_LABEL.store(val == "on", Ordering::SeqCst),
-						"ovbtn" => OVERLAY_BTN.store(val == "on", Ordering::SeqCst),
-						// Audio toggles apply optimistically (linux.rs parity); the app's
-						// `audio …` line re-syncs the truth after the host acknowledges.
-						"atx" => AUDIO_TX.store(val == "on", Ordering::SeqCst),
-						"amute" => AUDIO_MUTE.store(val == "on", Ordering::SeqCst),
-						"mic" => MIC_ON.store(val == "on", Ordering::SeqCst),
-						// Voice call = mic + host audio together (paired optimistic update).
-						// ON enables BOTH; OFF drops ONLY the mic and leaves host audio
-						// as-is (it has its own `atx` row). The overlay highlight derives
-						// from MIC_ON alone (overlay::draw_audio) so it stays in sync.
-						"call" => {
-							let on = val == "on";
-							MIC_ON.store(on, Ordering::SeqCst);
-							if on {
-								AUDIO_TX.store(true, Ordering::SeqCst);
-							}
-						}
-						// View fit is renderer-local (instant Blt rect change) + forwarded
-						// so the frontend mirrors/persists it — Linux-parity (linux.rs).
-						"fit" => present::set_fit(&val),
-						// Optimistic controller swap: the overlay row ▲/▼ was clicked.
-						// Swap the two entries in CONTROLLERS immediately so the list
-						// re-renders at the next frame without waiting for the gilrs
-						// reader's next `ctrls` line (~16 ms later). The frontend will
-						// re-emit the canonical ctrls line via set_controller_order, which
-						// confirms the same state.
-						"ctrlswap" => {
-							if let Some((ai, bi)) = val.split_once(',') {
-								if let (Ok(ai), Ok(bi)) = (ai.parse::<usize>(), bi.parse::<usize>()) {
-									let mut ctrls = CONTROLLERS.lock().unwrap();
-									let len = ctrls.len();
-									if ai < len && bi < len {
-										ctrls.swap(ai, bi);
-									}
-								}
-							}
-						}
-						// Optimistic emulation-target update: the overlay picker was clicked.
-						// Update the matching row's target in CONTROLLERS by uuid so the
-						// row re-renders immediately without waiting for the next ctrls line.
-						"ctrlemu" => {
-							if let Some((uuid, target)) = val.split_once(',') {
-								let mut ctrls = CONTROLLERS.lock().unwrap();
-								for row in ctrls.iter_mut() {
-									if row.3 == uuid {
-										row.4 = target.to_string();
-										break;
-									}
-								}
-							}
-						}
-						// Optimistic PER-PAD vibration update: `val` = "uuid,level". Reflect it
-						// locally (the matching pad row's 6th field) so the highlight moves
-						// immediately; the frontend confirms via set_controller_rumble → ctrls.
-						"ctrlrumble" => {
-							if let Some((uuid, level)) = val.split_once(',') {
-								let mut ctrls = CONTROLLERS.lock().unwrap();
-								for row in ctrls.iter_mut() {
-									if row.3 == uuid {
-										row.5 = level.to_string();
-										break;
-									}
-								}
-							}
-						}
-						// Optimistic enable/disable SET: `val` = "uuid,state" (1 = disabled,
-						// 0 = enabled). Apply to the matching pad so the row updates immediately.
-						"ctrldisable" => {
-							if let Some((uuid, state)) = val.split_once(',') {
-								let mut ctrls = CONTROLLERS.lock().unwrap();
-								for row in ctrls.iter_mut() {
-									if row.3 == uuid {
-										row.6 = state == "1";
-										break;
-									}
-								}
-							}
-						}
-						// Optimistic SPLIT-MODE lock SET: `val` = "uuid,state" (1 = lock to this
-						// session, 0 = unlock). Reflect locally so the row's Kilitli/Serbest
-						// updates immediately; play.rs confirms via the ctrls line's 8th field.
-						// The lock is applied app-side (set_controller_lock, via `ov set ctrllock`).
-						"ctrllock" => {
-							if let Some((uuid, state)) = val.split_once(',') {
-								let mut locked = CONTROLLERS_LOCKED.lock().unwrap();
-								locked.retain(|u| u != uuid);
-								if state == "1" {
-									locked.push(uuid.to_string());
-								}
-							}
-						}
-						_ => {}
-					}
-					println!("ov set {field} {val}");
-				}
-				crate::overlay::OverlayCmd::End => println!("ov end"),
-				crate::overlay::OverlayCmd::Close => {
-					OPEN.store(false, Ordering::SeqCst);
-					println!("ov close");
-				}
-				// Same wire lines as the Linux backend (render_stats.rs parses them).
-				crate::overlay::OverlayCmd::Chat(t) => println!("ov chat {t}"),
-				crate::overlay::OverlayCmd::FsLs(p) => println!("ov fsls {p}"),
-				crate::overlay::OverlayCmd::FsGet(p) => println!("ov fsget {p}"),
-				crate::overlay::OverlayCmd::FsSend(p) => println!("ov fssend {p}"),
-				crate::overlay::OverlayCmd::OpenFiles => println!("ov files"),
-			}
+			apply_ov_cmd(&mut self.ostate, c);
 		}
 		use std::io::Write;
 		let _ = std::io::stdout().flush();
@@ -1168,7 +1290,10 @@ impl Renderer {
 		if self.src_w == 0 || self.src_h == 0 {
 			return None;
 		}
-		let (iw, ih) = (self.src_w as f32, self.src_h as f32);
+		// Displayed (upright) space — the side cursor is normalized over the host's logical
+		// desktop, which is what the rotated Blt shows.
+		let (vw, vh) = present::displayed_dims(self.src_w, self.src_h);
+		let (iw, ih) = (vw as f32, vh as f32);
 		let (ow, oh) = (self.width as f32, self.height as f32);
 		// Same fit-mode rects the video Blt uses — the cursor must track the video
 		// through fit/stretch/original (original = a center CROP, so the source
@@ -1182,12 +1307,12 @@ impl Renderer {
 		let px = dx + (nx * iw - sx) * kx;
 		let py = dy + (ny * ih - sy) * ky;
 		let pos = egui::pos2(
-			(px - self.cursor_hot.0 * kx) / OVERLAY_PPP,
-			(py - self.cursor_hot.1 * ky) / OVERLAY_PPP,
+			(px - self.cursor_hot.0 * kx) / overlay_ppp(),
+			(py - self.cursor_hot.1 * ky) / overlay_ppp(),
 		);
 		let size = egui::vec2(
-			self.cursor_dims.0 * kx / OVERLAY_PPP,
-			self.cursor_dims.1 * ky / OVERLAY_PPP,
+			self.cursor_dims.0 * kx / overlay_ppp(),
+			self.cursor_dims.1 * ky / overlay_ppp(),
 		);
 		Some((pos, tex.id(), size))
 	}
@@ -1261,8 +1386,16 @@ impl Renderer {
 		let stats_hud = STATS_HUD.load(Ordering::SeqCst);
 		let ovbtn = OVERLAY_BTN.load(Ordering::SeqCst);
 		let stalled = STALLED.load(Ordering::Relaxed);
+		let recovering = !stalled && RECOVERING.load(Ordering::Relaxed);
 		let toasts = chat_toasts();
-		if !stats_hud && !ovbtn && hint_text.is_none() && cursor_draw.is_none() && !stalled && toasts.is_empty() {
+		if !stats_hud
+			&& !ovbtn
+			&& hint_text.is_none()
+			&& cursor_draw.is_none()
+			&& !stalled
+			&& !recovering
+			&& toasts.is_empty()
+		{
 			return;
 		}
 		self.ostate.chat_toasts = toasts;
@@ -1292,8 +1425,8 @@ impl Renderer {
 			screen_rect: Some(egui::Rect::from_min_size(
 				egui::pos2(0.0, 0.0),
 				egui::vec2(
-					self.width as f32 / OVERLAY_PPP,
-					self.height as f32 / OVERLAY_PPP,
+					self.width as f32 / overlay_ppp(),
+					self.height as f32 / overlay_ppp(),
 				),
 			)),
 			events: Vec::new(),
@@ -1306,6 +1439,9 @@ impl Renderer {
 			// div cannot show because the native renderer window occludes it.
 			if stalled {
 				crate::overlay::draw_stalled(ctx);
+			} else if recovering {
+				// Non-blocking: a pill at the top, the frozen frame and all input stay usable.
+				crate::overlay::draw_recovering(ctx);
 			}
 			if stats_hud {
 				crate::overlay::draw_hud(ctx, ostate);
@@ -1336,7 +1472,10 @@ impl Renderer {
 	/// Decode one access unit and present its newest NV12 frame (zero-copy: decoder texture →
 	/// VideoProcessor → swapchain). Builds the decoder lazily on the first AU. Per-AU errors are
 	/// non-fatal (a bad packet must not kill the renderer).
-	unsafe fn on_access_unit(&mut self, au: &AccessUnit) {
+	/// Decode one AU; `show` = present its picture(s) now. A burst's older AUs are decoded with
+	/// `show == false`: their newest picture waits in `held_back` until the caller presents it
+	/// (or a newer one replaces it).
+	unsafe fn on_access_unit(&mut self, au: &AccessUnit, show: bool) {
 		if self.decoder.is_none() {
 			// Nominal size; the MFT emits MF_E_TRANSFORM_STREAM_CHANGE → real size, and the
 			// present path resizes to the decoded texture's actual dims.
@@ -1359,11 +1498,14 @@ impl Renderer {
 				}
 			}
 		}
-		// ZERO-OUTPUT WATCHDOG: ~2 s of AUs in, not one frame out = the async-MFT-driven-
+		// ZERO-OUTPUT WATCHDOG: AUs in, not one frame out = the async-MFT-driven-
 		// synchronously black hole (or an MFT wedged on this stream). Rebuild ONCE with the
 		// async fallback disabled so a sync/inbox MFT must be picked; it re-syncs on the
 		// next IDR. Without this the session stays black forever with zero diagnostics.
-		if self.au_since_dec >= 120 && self.dec_frames == 0 && !self.dec_rebuilt {
+		// 45 AUs, not 120: the low-latency streams carry no B-frames, so a healthy decoder
+		// emits within a few AUs — and 120 AUs from a slow software-encoding host
+		// (seen: libx265 at ~10 fps) meant ~11 s on the Connecting screen.
+		if self.au_since_dec >= 45 && self.dec_frames == 0 && !self.dec_rebuilt {
 			self.dec_rebuilt = true;
 			eprintln!(
 				"pulsar-render(win): decoder consumed {} AUs with zero output — rebuilding with a sync-only MFT",
@@ -1392,6 +1534,15 @@ impl Renderer {
 		self.dec_ms_acc += dec_t0.elapsed().as_secs_f32() * 1000.0;
 		self.dec_n += 1;
 		self.dec_frames = self.dec_frames.saturating_add(texs.len() as u64);
+		if !show {
+			if let Some(t) = texs.into_iter().last() {
+				self.held_back = Some(t);
+			}
+			return;
+		}
+		if !texs.is_empty() {
+			self.held_back = None; // superseded by a newer picture
+		}
 		// Present EVERY decoded frame in order: a single decode() drain can yield more than one
 		// NV12 texture (multi-frame batch), and dropping all but the last silently loses frames
 		// (micro-stutter). In steady state this is exactly one frame, so the loop is a no-op there.
@@ -1406,7 +1557,8 @@ impl Renderer {
 		let mut td = windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC::default();
 		nv12.GetDesc(&mut td);
 		let (sw, sh) = (td.Width, td.Height);
-		if self.present.is_none() || sw != self.src_w || sh != self.src_h {
+		let rot_dirty = ROT_DIRTY.swap(false, Ordering::SeqCst);
+		if self.present.is_none() || sw != self.src_w || sh != self.src_h || rot_dirty {
 			// Resolution changed (or first frame): the held frame is now stale for the
 			// resized processor — drop it so repaint_idle can't re-Blt a mismatched texture
 			// (it is replaced with this fresh frame at the end of show_frame anyway).
@@ -1419,7 +1571,9 @@ impl Renderer {
 			// switch) so the app sizes the windowed session to the host's aspect —
 			// render_stats.rs parses this into `play-dims` (linux.rs/video.rs parity).
 			if sw > 0 && sh > 0 {
-				println!("vidsink-dims {sw}x{sh}");
+				// DISPLAYED (upright) dims: a 90/270 host rotation swaps the axes.
+				let (vw, vh) = present::displayed_dims(sw, sh);
+				println!("vidsink-dims {vw}x{vh}");
 				use std::io::Write as _;
 				let _ = std::io::stdout().flush();
 			}
@@ -1448,12 +1602,48 @@ impl Renderer {
 			None => false,
 		};
 		if drawn {
+			// First real picture: reveal the (hidden-at-birth) child now, right before its
+			// first Present, so the loading screen underneath gives way to video — never to a
+			// black swapchain. `play-ready` fires off this same first counted frame.
+			let first = *self.first_drawn.get_or_insert_with(std::time::Instant::now);
+			let held = HOLD_REVEAL.load(Ordering::SeqCst)
+				&& !REVEAL.load(Ordering::SeqCst)
+				&& first.elapsed() < REVEAL_FALLBACK;
+			if !self.shown && !held {
+				self.shown = true;
+				let _ = ShowWindow(self.hwnd, SW_SHOWNA);
+				let _ = SetWindowPos(
+					self.hwnd,
+					Some(HWND_TOP),
+					0,
+					0,
+					0,
+					0,
+					SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOMOVE,
+				);
+			}
+			// Tell the app where the picture sits inside this window (changes on resize,
+			// fit mode, stream size or rotation): it confines the cursor to that area.
+			if let Some(f) = self.present.as_ref().map(|p| p.dest_frac()) {
+				if f != self.last_vrect {
+					self.last_vrect = f;
+					use std::io::Write as _;
+					println!("vidsink-vrect {:.5} {:.5} {:.5} {:.5}", f.0, f.1, f.2, f.3);
+					let _ = std::io::stdout().flush();
+				}
+			}
 			// Retain this frame so a later video STALL can re-present it under the overlay
 			// instead of freezing (see repaint_idle). Cheap COM refcount bump on an owned
 			// single-slice texture.
 			self.last_nv12 = Some(nv12.clone());
 			self.paint_overlay(); // egui over the video (no-op unless OPEN)
-			let _ = self.swap.Present(0, Default::default());
+			// Never let presentation pace the DECODE: with both flip buffers queued a plain
+			// Present waits for the next vsync, so a 90/120 fps stream on a 60 Hz panel (a
+			// "Dynamic refresh" laptop idles at 60) throttled this whole loop to 60 fps — the AU
+			// backlog overflowed, a reference frame got dropped and the picture froze until the
+			// next periodic keyframe. DO_NOT_WAIT: if the swapchain is busy this frame simply
+			// isn't shown (the panel couldn't have shown it anyway) and decoding keeps up.
+			let _ = self.swap.Present(0, windows::Win32::Graphics::Dxgi::DXGI_PRESENT_DO_NOT_WAIT);
 			self.tick_fps();
 		}
 	}
@@ -1487,12 +1677,51 @@ impl Renderer {
 		let _ = self.swap.Present(0, Default::default());
 	}
 
+	/// "Dynamic refresh rate" laptops idle the panel at 60 Hz and only boost to the high rate
+	/// for a few system scenarios — a 90/120 fps stream was composed at 60 (measured: DWM 60 Hz
+	/// while the stream ran 120). `DCompositionBoostCompositorClock(TRUE)` lifts the compositor
+	/// to the panel's top rate (verified on a 120 Hz Dynamic-refresh laptop: 60 → 120 Hz). Held while the
+	/// stream runs above 60 fps, released when it drops back (or when the renderer exits).
+	/// Windows 11+ export → looked up at runtime so Windows 10 still starts.
+	fn boost_compositor(&mut self, on: bool) {
+		if self.compositor_boosted == on {
+			return;
+		}
+		type BoostFn = unsafe extern "system" fn(windows::core::BOOL) -> windows::core::HRESULT;
+		static BOOST: std::sync::OnceLock<Option<BoostFn>> = std::sync::OnceLock::new();
+		let f = BOOST.get_or_init(|| unsafe {
+			let lib = windows::Win32::System::LibraryLoader::LoadLibraryW(windows::core::w!("dcomp.dll")).ok()?;
+			let p = windows::Win32::System::LibraryLoader::GetProcAddress(
+				lib,
+				windows::core::s!("DCompositionBoostCompositorClock"),
+			)?;
+			Some(std::mem::transmute::<_, BoostFn>(p))
+		});
+		if let Some(f) = f {
+			let hr = unsafe { f(on.into()) };
+			if hr.is_ok() {
+				self.compositor_boosted = on;
+				eprintln!("pulsar-render(win): compositor clock boost {}", if on { "ON (panel top rate)" } else { "off" });
+			}
+		}
+	}
+
 	/// Emit a `vidsink-fps <fps> <w>x<h>` HUD line once per second (same as the Linux backend).
 	fn tick_fps(&mut self) {
 		self.frames += 1;
 		let dt = self.last_fps_at.elapsed();
 		if dt.as_secs_f32() >= 1.0 {
 			let fps = self.frames as f32 / dt.as_secs_f32();
+			// > 60 fps arriving: ask for the panel's top refresh rate; ≤ 60 for 3 s: release it.
+			if fps > 65.0 {
+				self.low_fps_secs = 0;
+				self.boost_compositor(true);
+			} else {
+				self.low_fps_secs = self.low_fps_secs.saturating_add(1);
+				if self.low_fps_secs >= 3 {
+					self.boost_compositor(false);
+				}
+			}
 			let mbps = (self.bytes as f32 * 8.0) / dt.as_secs_f32() / 1_000_000.0;
 			let dec = if self.dec_n > 0 {
 				self.dec_ms_acc / self.dec_n as f32
@@ -1501,10 +1730,8 @@ impl Renderer {
 			};
 			// 4-field line like the Linux backends (fps, dims, mbit, decode-ms) so the
 			// app's render_stats reader gets real values for the webview HUD too.
-			println!(
-				"vidsink-fps {fps:.0} {}x{} {mbps:.1} {dec:.1}",
-				self.src_w, self.src_h
-			);
+			let (vw, vh) = present::displayed_dims(self.src_w, self.src_h);
+			println!("vidsink-fps {fps:.0} {vw}x{vh} {mbps:.1} {dec:.1}");
 			use std::io::Write;
 			let _ = std::io::stdout().flush();
 			// Feed the overlay directly: no stdin `stat` echo exists on Windows; these
@@ -1531,6 +1758,10 @@ impl Renderer {
 	/// Match the child window + swapchain to the parent client area (follows resize/fullscreen,
 	/// like linux.rs's XGetGeometry/XResizeWindow loop).
 	unsafe fn track_parent(&mut self) {
+		// Display scale can change under us (monitor switch, Windows scaling setting).
+		if refresh_overlay_ppp(self.hwnd) {
+			self.egui_ctx.set_pixels_per_point(overlay_ppp());
+		}
 		// Frontend-driven embed rect (stdin `viewrect`) wins: position over the session
 		// tab's CONTENT area so the app chrome/tabs stay visible (Linux-container parity).
 		// Before the first report, fill the whole parent client area as before.
@@ -1623,6 +1854,7 @@ pub fn run() {
 					i += 1;
 				}
 			}
+			"--hold-reveal" => HOLD_REVEAL.store(true, Ordering::SeqCst),
 			"--mode" => {
 				if let Some(s) = args.get(i + 1) {
 					mode = if s == "remote" {
@@ -1700,7 +1932,10 @@ unsafe fn event_loop(
 		Default::default(),
 		class_name,
 		PCWSTR::null(),
-		WS_CHILD | WS_VISIBLE,
+		// NOT WS_VISIBLE: a visible child at birth covered the app's connecting/loading screen
+		// with a black swapchain until the first frame decoded. `Renderer` shows it on the
+		// first drawn frame.
+		WS_CHILD,
 		0,
 		0,
 		w0 as i32,
@@ -1732,6 +1967,11 @@ unsafe fn event_loop(
 	// the render thread means one D3D11 device, zero-copy into the swapchain.
 	let queue: std::sync::Arc<Mutex<std::collections::VecDeque<AccessUnit>>> =
 		std::sync::Arc::new(Mutex::new(std::collections::VecDeque::new()));
+	// Backlog bounds (see the overflow rule in the sink below): past `AU_SOFT_CAP` the stale
+	// lead-in up to the newest keyframe is dropped; an intact keyframe-less chain may grow to
+	// `AU_HARD_CAP` (~0.5 s at 120 fps) and is caught up by decoding without presenting.
+	const AU_SOFT_CAP: usize = 8;
+	const AU_HARD_CAP: usize = 64;
 	let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 	{
 		let q = queue.clone();
@@ -1752,21 +1992,36 @@ unsafe fn event_loop(
 					// no keyframe at all we can't drop without breaking the chain, so shed only the
 					// single oldest AU as a last resort. Either way log the count — never sever
 					// references silently (Moonlight-style overflow handling).
-					if g.len() >= 8 {
-						let dropped = match g.iter().rposition(|au| au.key) {
-							Some(k) => {
+					//
+					// Without a keyframe to skip to, an INTACT chain is no longer cut at 8: the
+					// reorder buffer releases everything that waited behind a repaired hole at
+					// once (~24 AUs per 200 ms at 120 fps), and shedding the oldest of that burst
+					// broke the chain into a keyframe wait — on a lossy link a keyframe that
+					// never arrived whole (field log: 15 stalls in one session). The render loop
+					// instead decodes the whole backlog and presents only its newest frame
+					// (`AU_BURST`), so latency snaps back without a freeze. An RFI recovery frame
+					// is no drop point: it references a frame from before the hole, which may be
+					// exactly one of the queued AUs ahead of it. Only `AU_HARD_CAP` (a decoder
+					// that can't keep up at all) still sheds + asks for an IDR.
+					if g.len() >= AU_SOFT_CAP {
+						match g.iter().rposition(|au| au.key) {
+							Some(k) if k > 0 => {
 								g.drain(..k);
-								k
+								eprintln!(
+									"pulsar-render(win): AU backlog overflow — dropped {k} stale AU(s) ahead of newest keyframe"
+								);
 							}
-							None => {
+							_ if g.len() < AU_HARD_CAP => {}
+							_ => {
+								// No keyframe to skip to: shedding the oldest delta AU breaks the
+								// reference chain, so ask for a fresh IDR right away (else the
+								// picture stays broken until the host's periodic keyframe).
 								g.pop_front();
-								1
+								stream::rtp::NEED_IDR.store(true, Ordering::Relaxed);
+								eprintln!(
+									"pulsar-render(win): AU backlog overflow — no keyframe queued; dropped the oldest AU, keyframe requested"
+								);
 							}
-						};
-						if dropped > 0 {
-							eprintln!(
-								"pulsar-render(win): AU backlog overflow — dropped {dropped} stale AU(s) ahead of newest keyframe"
-							);
 						}
 					}
 					g.push_back(au);
@@ -1779,15 +2034,35 @@ unsafe fn event_loop(
 	// Pump Win32 messages + drain decode + present.
 	let mut msg = MSG::default();
 	let mut cursor_hidden = false;
+	// Keyboard focus follows the engage state (see wndproc's keyboard block).
+	let mut kbd_focus = false;
+	// Rate limit for `vidsink-needidr` (see stream::rtp::NEED_IDR).
+	let mut last_needidr = std::time::Instant::now() - std::time::Duration::from_secs(1);
+	start_shortcut_capture();
+	let mut shortcut_hook: Option<windows::Win32::UI::WindowsAndMessaging::HHOOK> = None;
 	// Rate-cap the idle (video-stall) overlay repaint to ~60 Hz so a frozen/paused host
 	// doesn't pin the CPU re-presenting the same frame every 2 ms loop tick.
 	let mut last_idle_paint = std::time::Instant::now();
-	// Stall detection: track when the last AU arrived so we can surface a "stream stopped"
-	// indicator after STALL_SECS of silence (video was live = decoder exists).
+	// Stall detection: track when the last AU arrived so we can surface the "recovering"
+	// pill after a keyframe wait / STALL_SECS of silence (video was live = decoder exists).
 	// This mirrors the webview media.svelte stall detector but lives inside the renderer
 	// so it is visible on native paths where the webview is occluded.
 	const STALL_SECS: u64 = 3;
+	// A keyframe / recovery wait shows "recovering" after this long without a decodable AU
+	// (shorter waits — a recovery frame ~1 RTT after the report — would only flash it).
+	const RECOVER_AFTER: std::time::Duration = std::time::Duration::from_millis(400);
+	// The app's keepalive pong counts as "session fine" for this long (2 s cadence + slack).
+	const RTT_FRESH: std::time::Duration = std::time::Duration::from_secs(4);
+	// A drained batch of at least this many AUs is a backlog (a burst released by the reorder
+	// buffer): decode all of it, present only the newest frame.
+	const AU_BURST: usize = 3;
 	let mut last_au_at = std::time::Instant::now();
+	// Edges already printed to the app: `ov stalled` (input capture lock) / `ov recovering`.
+	let mut stalled_sent = false;
+	let mut recovering_sent = false;
+	// The first AU of this renderer announces a live stream too: a renderer respawned while
+	// the old one was stalled (codec switch) must lift the app's stopped-stream lock.
+	let mut live_announced = false;
 	loop {
 		// GPU device-loss recovery (driver TDR / reset / update mid-session — common while
 		// gaming): a removed D3D11 device makes every VideoProcessorBlt / Present / decode fail
@@ -1840,6 +2115,45 @@ unsafe fn event_loop(
 			let _ = TranslateMessage(&msg);
 			DispatchMessageW(&msg);
 		}
+		// A lost packet range for the host's reference-frame invalidation (stream/rtp.rs
+		// `RFI_MODE`) — sent at once: the host can only reach a recent frame.
+		if let Some((first, last)) = crate::stream::rtp::take_rfi_request() {
+			use std::io::Write as _;
+			println!("vidsink-rfi {first} {last}");
+			let _ = std::io::stdout().flush();
+		}
+		// The depacketizer lost the reference picture mid-stream: ask the app for an IDR now
+		// (≤ 2/s) instead of waiting out the host's periodic keyframe.
+		if last_needidr.elapsed() >= std::time::Duration::from_millis(500)
+			&& crate::stream::rtp::NEED_IDR.swap(false, Ordering::Relaxed)
+		{
+			last_needidr = std::time::Instant::now();
+			use std::io::Write as _;
+			println!("vidsink-needidr");
+			let _ = std::io::stdout().flush();
+		}
+		// Engaged: this child takes the keyboard focus (Moonlight-style "capture system
+		// keyboard shortcuts": the LL hook then sees every key, Alt+Tab / Win included).
+		// Released: give it back to the app UI. Our input queue is attached to the parent's
+		// (cross-process child), so SetFocus across it is allowed.
+		{
+			use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus};
+			let want = ENGAGED_R.load(Ordering::SeqCst) && !OPEN.load(Ordering::SeqCst);
+			if want != kbd_focus {
+				kbd_focus = want;
+				if want {
+					let _ = SetFocus(Some(hwnd));
+				} else if GetFocus() == hwnd {
+					let _ = SetFocus(Some(parent));
+				}
+				SHORTCUT_CAPTURE.store(want, Ordering::Relaxed);
+				SKIP_CTRL_MSGS.store(0, Ordering::Relaxed);
+				set_shortcut_hook(&mut shortcut_hook, want);
+				use std::io::Write as _;
+				println!("ov kfocus {}", want as u8);
+				let _ = std::io::stdout().flush();
+			}
+		}
 		// Cursor visibility tracks the ENGAGE state (linux.rs parity). While engaged the
 		// Interception capture suppresses mouse messages entirely, so WM_SETCURSOR never
 		// fires — assert it from the render loop (this thread owns the window under the
@@ -1874,21 +2188,28 @@ unsafe fn event_loop(
 				// there is actually chrome to draw (overlay open OR any closed-state HUD /
 				// open-button / hint / side-cursor) so a plain frozen frame stays idle.
 				//
-				// After STALL_SECS of silence (decoder exists → video was live) set STALLED
-				// so paint_closed / repaint_idle surfaces the "stream stopped" indicator
-				// that the webview's .stall div cannot show (it is occluded by this window).
-				// Windows respawns the renderer on a codec switch, so there is no local
-				// SWITCHING state to suppress here (a respawn resets last_au_at).
-				if last_au_at.elapsed().as_secs() >= STALL_SECS {
-					STALLED.store(true, Ordering::Relaxed);
-				}
+				// paint_closed / repaint_idle surface the state the webview's .stall div cannot
+				// show (it is occluded by this window). Windows respawns the renderer on a
+				// codec switch, so there is no local SWITCHING state to suppress here (a respawn
+				// resets last_au_at).
+				// A long gap is NOT "stream stopped" any more (see STALLED): the session may be
+				// alive on a lossy link (keyframe wait) or the host screen static. Show the
+				// non-blocking "recovering" pill while the depacketizer drops AUs waiting for
+				// an entry point, or after STALL_SECS of total silence when the app's keepalive
+				// went quiet as well; the capture stays engaged and the app decides the end.
+				let gap = last_au_at.elapsed();
+				let rtt_fresh = RTT_AT.lock().unwrap().is_some_and(|t| t.elapsed() < RTT_FRESH);
+				let recovering = (crate::stream::rtp::WAITING.load(Ordering::Relaxed) && gap >= RECOVER_AFTER)
+					|| (gap.as_secs() >= STALL_SECS && !rtt_fresh);
+				RECOVERING.store(recovering, Ordering::Relaxed);
 				let stalled = STALLED.load(Ordering::Relaxed);
 				let chrome = OPEN.load(Ordering::SeqCst)
 					|| STATS_HUD.load(Ordering::SeqCst)
 					|| OVERLAY_BTN.load(Ordering::SeqCst)
 					|| HINT.lock().unwrap().is_some()
 					|| CURSOR_POS.lock().unwrap().is_some()
-					|| stalled;
+					|| stalled
+					|| recovering;
 				if chrome && last_idle_paint.elapsed() >= std::time::Duration::from_millis(16) {
 					r.repaint_idle();
 					last_idle_paint = std::time::Instant::now();
@@ -1896,12 +2217,182 @@ unsafe fn event_loop(
 			}
 			std::thread::sleep(std::time::Duration::from_millis(2));
 		} else {
-			// AUs are arriving — clear any stall indicator and reset the stall timer.
+			// AUs are arriving — clear any stall / recovering indicator and reset the timer.
 			STALLED.store(false, Ordering::Relaxed);
+			RECOVERING.store(false, Ordering::Relaxed);
+			if !live_announced {
+				live_announced = true;
+				use std::io::Write as _;
+				println!("ov stalled 0");
+				let _ = std::io::stdout().flush();
+				stalled_sent = false;
+			}
 			last_au_at = std::time::Instant::now();
-			for au in &aus {
-				r.on_access_unit(au);
+			// A backlog (the reorder buffer released what waited behind a hole): decode every
+			// AU — the P-chain needs them all — but present only the newest picture, so the
+			// latency snaps back at once instead of replaying the stale frames.
+			let burst = aus.len() >= AU_BURST;
+			if burst && aus.len() >= AU_SOFT_CAP {
+				eprintln!("pulsar-render(win): AU burst of {} — decoded, presenting the newest only", aus.len());
+			}
+			let n = aus.len();
+			for (i, au) in aus.iter().enumerate() {
+				r.on_access_unit(au, !burst || i + 1 == n);
+			}
+			// The newest AU produced no picture yet (decoder latency): show the newest one the
+			// burst did produce rather than nothing.
+			if let Some(t) = r.held_back.take() {
+				r.show_frame(&t);
 			}
 		}
+		// Edges to the app. `ov stalled 1|0` keeps its meaning (release / allow the input
+		// capture) but only follows a real stop (STALLED); `ov recovering 1|0` is informational
+		// (render_stats.rs ignores unknown `ov` lines). `writeln!` rather than `println!`: after
+		// stdin closed stdout may be a broken pipe, and println! would panic this thread.
+		{
+			use std::io::Write as _;
+			let stalled = STALLED.load(Ordering::Relaxed);
+			if stalled != stalled_sent {
+				stalled_sent = stalled;
+				let mut o = std::io::stdout();
+				let _ = writeln!(o, "ov stalled {}", stalled as u8);
+				let _ = o.flush();
+			}
+			let recovering = RECOVERING.load(Ordering::Relaxed) && !stalled;
+			if recovering != recovering_sent {
+				recovering_sent = recovering;
+				let mut o = std::io::stdout();
+				let _ = writeln!(o, "ov recovering {}", recovering as u8);
+				let _ = o.flush();
+			}
+		}
+	}
+}
+
+/// Apply one overlay command to the local overlay state and emit its `ov …` stdout line
+/// (render_stats.rs parses them) — the Windows counterpart of linux.rs/desktop.rs `emit_cmd`.
+fn apply_ov_cmd(ostate: &mut crate::overlay::OverlayState, c: crate::overlay::OverlayCmd) {
+	match c {
+		crate::overlay::OverlayCmd::Set(field, val) => {
+			match field {
+				"codec" => ostate.codec = val.clone(),
+				"encoder" => ostate.encoder = val.clone(),
+				"decoder" => ostate.decoder = val.clone(),
+				"res" => ostate.res = val.clone(),
+				"fps" => ostate.fps_sel = val.clone(),
+				"bitrate" => ostate.bitrate = val.clone(),
+				"quality" => ostate.quality = val.clone(),
+				"pace" => ostate.pace = val == "on",
+				// Local echo for the closed-state chrome toggles: flip the statics
+				// NOW so the row + HUD react instantly; the frontend's stdin echo
+				// (`statshud`/`ovbtn`) just confirms the same value later.
+				"statshud" => STATS_HUD.store(val == "on", Ordering::SeqCst),
+				"curlabel" => CUR_LABEL.store(val == "on", Ordering::SeqCst),
+				"ovbtn" => OVERLAY_BTN.store(val == "on", Ordering::SeqCst),
+				// Audio toggles apply optimistically (linux.rs parity); the app's
+				// `audio …` line re-syncs the truth after the host acknowledges.
+				"atx" => AUDIO_TX.store(val == "on", Ordering::SeqCst),
+				"amute" => AUDIO_MUTE.store(val == "on", Ordering::SeqCst),
+				"mic" => MIC_ON.store(val == "on", Ordering::SeqCst),
+				// Voice call = mic + host audio together (paired optimistic update).
+				// ON enables BOTH; OFF drops ONLY the mic and leaves host audio
+				// as-is (it has its own `atx` row). The overlay highlight derives
+				// from MIC_ON alone (overlay::draw_audio) so it stays in sync.
+				"call" => {
+					let on = val == "on";
+					MIC_ON.store(on, Ordering::SeqCst);
+					if on {
+						AUDIO_TX.store(true, Ordering::SeqCst);
+					}
+				}
+				// View fit is renderer-local (instant Blt rect change) + forwarded
+				// so the frontend mirrors/persists it — Linux-parity (linux.rs).
+				"fit" => present::set_fit(&val),
+				// Optimistic controller swap: the overlay row ▲/▼ was clicked.
+				// Swap the two entries in CONTROLLERS immediately so the list
+				// re-renders at the next frame without waiting for the gilrs
+				// reader's next `ctrls` line (~16 ms later). The frontend will
+				// re-emit the canonical ctrls line via set_controller_order, which
+				// confirms the same state.
+				"ctrlswap" => {
+					if let Some((ai, bi)) = val.split_once(',') {
+						if let (Ok(ai), Ok(bi)) = (ai.parse::<usize>(), bi.parse::<usize>()) {
+							let mut ctrls = CONTROLLERS.lock().unwrap();
+							let len = ctrls.len();
+							if ai < len && bi < len {
+								ctrls.swap(ai, bi);
+							}
+						}
+					}
+				}
+				// Optimistic emulation-target update: the overlay picker was clicked.
+				// Update the matching row's target in CONTROLLERS by uuid so the
+				// row re-renders immediately without waiting for the next ctrls line.
+				"ctrlemu" => {
+					if let Some((uuid, target)) = val.split_once(',') {
+						let mut ctrls = CONTROLLERS.lock().unwrap();
+						for row in ctrls.iter_mut() {
+							if row.3 == uuid {
+								row.4 = target.to_string();
+								break;
+							}
+						}
+					}
+				}
+				// Optimistic PER-PAD vibration update: `val` = "uuid,level". Reflect it
+				// locally (the matching pad row's 6th field) so the highlight moves
+				// immediately; the frontend confirms via set_controller_rumble → ctrls.
+				"ctrlrumble" => {
+					if let Some((uuid, level)) = val.split_once(',') {
+						let mut ctrls = CONTROLLERS.lock().unwrap();
+						for row in ctrls.iter_mut() {
+							if row.3 == uuid {
+								row.5 = level.to_string();
+								break;
+							}
+						}
+					}
+				}
+				// Optimistic enable/disable SET: `val` = "uuid,state" (1 = disabled,
+				// 0 = enabled). Apply to the matching pad so the row updates immediately.
+				"ctrldisable" => {
+					if let Some((uuid, state)) = val.split_once(',') {
+						let mut ctrls = CONTROLLERS.lock().unwrap();
+						for row in ctrls.iter_mut() {
+							if row.3 == uuid {
+								row.6 = state == "1";
+								break;
+							}
+						}
+					}
+				}
+				// Optimistic SPLIT-MODE lock SET: `val` = "uuid,state" (1 = lock to this
+				// session, 0 = unlock). Reflect locally so the row's Kilitli/Serbest
+				// updates immediately; play.rs confirms via the ctrls line's 8th field.
+				// The lock is applied app-side (set_controller_lock, via `ov set ctrllock`).
+				"ctrllock" => {
+					if let Some((uuid, state)) = val.split_once(',') {
+						let mut locked = CONTROLLERS_LOCKED.lock().unwrap();
+						locked.retain(|u| u != uuid);
+						if state == "1" {
+							locked.push(uuid.to_string());
+						}
+					}
+				}
+				_ => {}
+			}
+			println!("ov set {field} {val}");
+		}
+		crate::overlay::OverlayCmd::End => println!("ov end"),
+		crate::overlay::OverlayCmd::Close => {
+			OPEN.store(false, Ordering::SeqCst);
+			println!("ov close");
+		}
+		// Same wire lines as the Linux backend (render_stats.rs parses them).
+		crate::overlay::OverlayCmd::Chat(t) => println!("ov chat {t}"),
+		crate::overlay::OverlayCmd::FsLs(p) => println!("ov fsls {p}"),
+		crate::overlay::OverlayCmd::FsGet(p) => println!("ov fsget {p}"),
+		crate::overlay::OverlayCmd::FsSend(p) => println!("ov fssend {p}"),
+		crate::overlay::OverlayCmd::OpenFiles => println!("ov files"),
 	}
 }

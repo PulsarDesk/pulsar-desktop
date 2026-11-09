@@ -177,6 +177,35 @@ pub struct UiState {
 	/// while the view is on screen are read on arrival and don't move it); cleared when the
 	/// Chat view isn't on screen. See [`mark_new_chat`].
 	pub chat_new_from: Option<usize>,
+	/// Choices that RESTART the stream (codec, encoder, resolution, fps, quality, monitor,
+	/// screen adaptation — [`RESTART_FIELDS`]), held while the overlay is open and applied when
+	/// it closes: each one rebuilds the host encoder (and on Windows respawns this renderer), so
+	/// applying them on click tore the picture down under the menu — and twice when the user
+	/// changed two of them. The rows show the staged value meanwhile. Last choice per field wins.
+	pub deferred: Vec<(&'static str, String)>,
+}
+
+/// Overlay settings whose change restarts the stream; see [`UiState::deferred`].
+pub const RESTART_FIELDS: [&str; 7] = ["codec", "encoder", "res", "fps", "quality", "display", "adapt"];
+
+/// Stage a stream-restarting choice (replacing an earlier one for the same field).
+fn stage(ui: &mut UiState, field: &'static str, val: String) {
+	match ui.deferred.iter_mut().find(|(f, _)| *f == field) {
+		Some(slot) => slot.1 = val,
+		None => ui.deferred.push((field, val)),
+	}
+}
+
+/// The staged choices as `Set` commands, emptying the queue. The backends call this on the
+/// overlay's open→closed edge (the hotkey / button / app-side close), and `draw` itself when
+/// it emits `Close`, so the restarts happen once the menu is out of the way.
+pub fn take_deferred(ui: &mut UiState) -> Vec<OverlayCmd> {
+	ui.deferred.drain(..).map(|(f, v)| OverlayCmd::Set(f, v)).collect()
+}
+
+/// The value a row shows: the staged choice when there is one, else the live one.
+fn staged<'a>(deferred: &'a [(&'static str, String)], field: &str, live: &'a str) -> &'a str {
+	deferred.iter().find(|(f, _)| *f == field).map(|(_, v)| v.as_str()).unwrap_or(live)
 }
 
 /// Per-frame bookkeeping for the chat's "— New —" divider. `in_chat`: the overlay is open
@@ -322,6 +351,8 @@ use crate::i18n::t;
 /// the user informed that the change is loading, not hung.
 pub fn draw_switching(ctx: &egui::Context) {
 	egui::Area::new(egui::Id::unique("switching"))
+		// Background layer: drawn over the video but always UNDER the open menu window.
+		.order(egui::Order::Background)
 		.anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
 		.show(ctx, |ui| {
 			egui::Frame::NONE
@@ -342,12 +373,46 @@ pub fn draw_switching(ctx: &egui::Context) {
 		});
 }
 
-/// Centered "stream stopped" indicator drawn over the frozen last frame when the stall
-/// detector has tripped (no fresh frame for ≥ 3 s while video was live). Mirrors the
+/// Non-blocking "recovering connection" pill (spinner + label, top centre) drawn over the
+/// frozen last frame while the session is alive but no decodable frame arrives — a keyframe /
+/// RFI recovery wait on a lossy link. Unlike [`draw_stalled`] it covers nothing important and
+/// takes no input: the picture resumes under it on its own.
+pub fn draw_recovering(ctx: &egui::Context) {
+	egui::Area::new(egui::Id::unique("recovering"))
+		// Background layer: over the video but UNDER the open menu.
+		.order(egui::Order::Background)
+		.interactable(false)
+		.anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 18.0))
+		.show(ctx, |ui| {
+			egui::Frame::NONE
+				.fill(egui::Color32::from_rgba_unmultiplied(18, 20, 26, 215))
+				.corner_radius(16.0)
+				.inner_margin(egui::Margin::symmetric(14, 8))
+				.show(ui, |ui| {
+					ui.horizontal(|ui| {
+						ui.add(egui::Spinner::new().size(14.0));
+						ui.add_space(6.0);
+						ui.label(
+							egui::RichText::new(t("recovering"))
+								.size(13.0)
+								.color(egui::Color32::WHITE),
+						);
+					});
+				});
+		});
+	// The spinner animates only while egui is asked to repaint.
+	ctx.request_repaint();
+}
+
+/// Centered "stream stopped" indicator drawn over the frozen last frame when the stream
+/// really stopped (Windows: the app's `stopped 1` or its stdin closed; Linux: the stall
+/// detector — no fresh frame for ≥ 3 s with the keepalive stale too). Mirrors the
 /// webview's `.stall` div that is permanently occluded by the native renderer window;
 /// this surfaces the same message inside the renderer where the user can see it.
 pub fn draw_stalled(ctx: &egui::Context) {
 	egui::Area::new(egui::Id::unique("stalled"))
+		// Background layer: over the video but UNDER the open menu (it used to cover it).
+		.order(egui::Order::Background)
 		.anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
 		.show(ctx, |ui| {
 			egui::Frame::NONE
@@ -511,7 +576,11 @@ fn pin_egui_029_look(v: &mut egui::Visuals) {
 pub fn draw(ctx: &egui::Context, st: &OverlayState, ui_state: &mut UiState) -> Vec<OverlayCmd> {
 	let mut cmds = Vec::new();
 	if !st.open {
-		// Remember we're closed so the next open is detected as an edge below.
+		// Remember we're closed so the next open is detected as an edge below. Closing from
+		// outside the overlay (hotkey, button, app): apply the staged restart choices now.
+		if ui_state.was_open {
+			cmds = take_deferred(ui_state);
+		}
 		ui_state.was_open = false;
 		return cmds;
 	}
@@ -526,6 +595,11 @@ pub fn draw(ctx: &egui::Context, st: &OverlayState, ui_state: &mut UiState) -> V
 	if open_edge {
 		ui_state.sel = 0;
 		ui_state.nav_active = false;
+		// A fresh open always lands on the hub (main page), never the section it was closed
+		// on — for every backend (Windows used not to reset it).
+		ui_state.view = View::Root;
+		ui_state.sub_sel = 0;
+		ui_state.pending = None;
 	}
 	// B / Escape steps back one level: a sub-view returns to the Root menu; from Root it
 	// closes the overlay. (The pad's B button is relayed as Escape — see play.rs.)
@@ -675,12 +749,25 @@ pub fn draw(ctx: &egui::Context, st: &OverlayState, ui_state: &mut UiState) -> V
 					View::Root => {
 						draw_root(ui, st, &mut ui_state.view, &mut ui_state.sel, nav, ui_state.nav_active, &mut cmds)
 					}
-					View::Stream => {
-						draw_stream(ui, st, &mut ui_state.sub_sel, nav, &mut ui_state.pending, &mut cmds)
-					}
-					View::Display => {
-						draw_display(ui, st, st.mode, &mut ui_state.sub_sel, nav, &mut ui_state.pending, &mut cmds)
-					}
+					View::Stream => draw_stream(
+						ui,
+						st,
+						&ui_state.deferred,
+						&mut ui_state.sub_sel,
+						nav,
+						&mut ui_state.pending,
+						&mut cmds,
+					),
+					View::Display => draw_display(
+						ui,
+						st,
+						st.mode,
+						&ui_state.deferred,
+						&mut ui_state.sub_sel,
+						nav,
+						&mut ui_state.pending,
+						&mut cmds,
+					),
 					View::Audio => {
 						draw_audio(ui, st, &mut ui_state.sub_sel, nav, &mut ui_state.pending, &mut cmds)
 					}
@@ -705,7 +792,26 @@ pub fn draw(ctx: &egui::Context, st: &OverlayState, ui_state: &mut UiState) -> V
 				.color(egui::Color32::from_rgb(120, 125, 140)),
 			);
 		});
-	cmds
+	// Stream-restarting choices wait for the menu to close (see `UiState::deferred`): hold them
+	// here; a Close from inside the overlay applies them right before closing, End drops them.
+	let mut out = Vec::with_capacity(cmds.len());
+	let mut closing = false;
+	for c in cmds {
+		match c {
+			OverlayCmd::Set(f, v) if RESTART_FIELDS.contains(&f) => stage(ui_state, f, v),
+			OverlayCmd::Close => closing = true,
+			OverlayCmd::End => {
+				ui_state.deferred.clear();
+				out.push(OverlayCmd::End);
+			}
+			other => out.push(other),
+		}
+	}
+	if closing {
+		out.extend(take_deferred(ui_state));
+		out.push(OverlayCmd::Close);
+	}
+	out
 }
 
 /// Move the Root-menu selection over a 2-column grid of `n` boxes plus an End-session button
@@ -772,7 +878,18 @@ fn draw_root(
 		);
 		stat_tile(ui, &bw, icon::CELL_SIGNAL_HIGH, t("stat.band"));
 	});
-	ui.add_space(8.0);
+	// The codec (and host encoder) actually on the wire.
+	let enc = stream_encoder(st);
+	ui.label(
+		egui::RichText::new(if enc.is_empty() {
+			format!("Codec · {}", stream_codec(st))
+		} else {
+			format!("Codec · {} · {enc}", stream_codec(st))
+		})
+		.size(11.0)
+		.color(egui::Color32::from_gray(150)),
+	);
+	ui.add_space(6.0);
 
 	// Category boxes, 2 per row (AnyDesk-style hub). Chat + Files are NATIVE views
 	// now — the webview session menu is gone on Linux (it lived under the video).
@@ -858,6 +975,7 @@ fn draw_root(
 fn draw_stream(
 	ui: &mut egui::Ui,
 	st: &OverlayState,
+	deferred: &[(&'static str, String)],
 	sub_sel: &mut usize,
 	nav: Nav,
 	pending: &mut Option<(usize, String)>,
@@ -919,22 +1037,27 @@ fn draw_stream(
 	}
 	let s = (*sub_sel).min(rows - 1);
 	ui.spacing_mut().item_spacing.y = 6.0;
-	if let Some(v) = choice_row(ui, s == 0, nav, "Codec", &st.codec, &codecs, 0, pending) {
+	if let Some(v) = choice_row(ui, s == 0, nav, "Codec", staged(deferred, "codec", &st.codec), &codecs, 0, pending) {
 		cmds.push(OverlayCmd::Set("codec", v));
 	}
-	if let Some(v) = choice_row(ui, s == 1, nav, "Encoder", &st.encoder, &encoders, 1, pending) {
+	if let Some(v) =
+		choice_row(ui, s == 1, nav, "Encoder", staged(deferred, "encoder", &st.encoder), &encoders, 1, pending)
+	{
 		cmds.push(OverlayCmd::Set("encoder", v));
 	}
-	if let Some(v) = choice_row(ui, s == 2, nav, t("res"), &st.res, res, 2, pending) {
+	if let Some(v) = choice_row(ui, s == 2, nav, t("res"), staged(deferred, "res", &st.res), res, 2, pending) {
 		cmds.push(OverlayCmd::Set("res", v));
 	}
-	if let Some(v) = choice_row(ui, s == 3, nav, "FPS", &st.fps_sel, &fps, 3, pending) {
+	if let Some(v) = choice_row(ui, s == 3, nav, "FPS", staged(deferred, "fps", &st.fps_sel), &fps, 3, pending) {
 		cmds.push(OverlayCmd::Set("fps", v));
 	}
-	if let Some(v) = choice_row(ui, s == 4, nav, t("bwlimit"), &st.bitrate, &br, 4, pending) {
+	// The bitrate LIMIT (the adaptive controller's ceiling; it still goes lower on a weak link).
+	if let Some(v) = choice_row_i(ui, s == 4, nav, t("bwlimit"), &st.bitrate, &br, 4, pending, Some(t("info.bitrate"))) {
 		cmds.push(OverlayCmd::Set("bitrate", v));
 	}
-	if let Some(v) = choice_row(ui, s == 5, nav, t("quality"), &st.quality, &quality, 5, pending) {
+	if let Some(v) =
+		choice_row(ui, s == 5, nav, t("quality"), staged(deferred, "quality", &st.quality), &quality, 5, pending)
+	{
 		cmds.push(OverlayCmd::Set("quality", v));
 	}
 	if let Some(v) =
@@ -950,6 +1073,7 @@ fn draw_stream(
 			cmds.push(OverlayCmd::Set("curlabel", v));
 		}
 	}
+	pending_note(ui, deferred);
 	// Decoder is auto-selected by this renderer — display only.
 	ui.add_space(4.0);
 	ui.label(
@@ -972,6 +1096,7 @@ fn draw_display(
 	ui: &mut egui::Ui,
 	st: &OverlayState,
 	_mode: Mode,
+	deferred: &[(&'static str, String)],
 	sub_sel: &mut usize,
 	nav: Nav,
 	pending: &mut Option<(usize, String)>,
@@ -998,8 +1123,9 @@ fn draw_display(
 			.enumerate()
 			.map(|(k, (_, label))| (idx_strs[k].as_str(), label.as_str()))
 			.collect();
-		let cur = st.display_idx.to_string();
-		if let Some(v) = choice_row(ui, s == row, nav, t("monitor.title"), &cur, &opts, row, pending) {
+		let live = st.display_idx.to_string();
+		let cur = staged(deferred, "display", &live);
+		if let Some(v) = choice_row(ui, s == row, nav, t("monitor.title"), cur, &opts, row, pending) {
 			cmds.push(OverlayCmd::Set("display", v));
 		}
 		row += 1;
@@ -1019,7 +1145,10 @@ fn draw_display(
 	// pane. The pane size = this renderer's own window (egui screen rect × pixels-per-point), sent
 	// so the host can pick the closest mode.
 	let onoff = [("on", t("on")), ("off", t("off"))];
-	let adapt_cur = if st.adapt { "on" } else { "off" };
+	let adapt_cur = match deferred.iter().find(|(f, _)| *f == "adapt") {
+		Some((_, v)) => if v == "off" { "off" } else { "on" },
+		None => if st.adapt { "on" } else { "off" },
+	};
 	if let Some(v) =
 		choice_row_i(ui, s == row, nav, t("display.adapt"), adapt_cur, &onoff, row, pending, Some(t("info.adapt")))
 	{
@@ -1033,12 +1162,22 @@ fn draw_display(
 			cmds.push(OverlayCmd::Set("adapt", "off".into()));
 		}
 	}
+	pending_note(ui, deferred);
 	ui.add_space(6.0);
 	ui.label(
 		egui::RichText::new(t("fit.help"))
 			.size(10.0)
 			.color(egui::Color32::from_gray(110)),
 	);
+}
+
+/// "Applied when the menu closes" under the rows while stream-restarting choices are staged.
+fn pending_note(ui: &mut egui::Ui, deferred: &[(&'static str, String)]) {
+	if deferred.is_empty() {
+		return;
+	}
+	ui.add_space(4.0);
+	ui.label(egui::RichText::new(t("pending.apply")).size(11.0).color(ACCENT));
 }
 
 /// Audio section: voice call / host transmit / host speakers / mic to host — as pad-navigable
@@ -1627,6 +1766,26 @@ fn draw_controllers(
 
 /// Parse the host's Stats label parts we surface as tiles: encode pace (optional
 /// 6th part) and the TARGET bitrate ("15 Mbit hedef" → 15.0).
+/// The codec actually streaming: the host's stats label leads with it ("H.265 · NVENC · …");
+/// before the first label arrives, the user's explicit pick, else a dash.
+fn stream_codec(st: &OverlayState) -> String {
+	let first = st.host_active.split(" · ").next().unwrap_or("").trim();
+	if !first.is_empty() {
+		return first.to_string();
+	}
+	match st.codec.as_str() {
+		"h264" => "H.264".into(),
+		"h265" => "H.265".into(),
+		"av1" => "AV1".into(),
+		_ => "—".into(),
+	}
+}
+
+/// The host encoder from the same label (second field), empty when unknown.
+fn stream_encoder(st: &OverlayState) -> String {
+	st.host_active.split(" · ").nth(1).unwrap_or("").trim().to_string()
+}
+
 fn host_parts(st: &OverlayState) -> (Option<f32>, Option<f32>) {
 	let parts: Vec<&str> = st.host_active.split(" · ").collect();
 	let enc_ms = parts
@@ -1960,6 +2119,7 @@ fn stat_tile(ui: &mut egui::Ui, value: &str, icon: &str, label: &str) {
 /// pass-through), so this is display-only by construction.
 pub fn draw_hud(ctx: &egui::Context, st: &OverlayState) {
 	let bw = fmt_mbps(st.mbps);
+	let codec = stream_codec(st);
 	egui::Area::new(egui::Id::unique("pulsar_hud"))
 		.order(egui::Order::Foreground)
 		.anchor(egui::Align2::RIGHT_TOP, egui::vec2(-10.0, 10.0))
@@ -1972,7 +2132,7 @@ pub fn draw_hud(ctx: &egui::Context, st: &OverlayState) {
 					ui.add(
 						egui::Label::new(
 							egui::RichText::new(format!(
-								"{:.0} fps · {:.0} ms · {} {:.1} ms · {bw} Mbps",
+								"{codec} · {:.0} fps · {:.0} ms · {} {:.1} ms · {bw} Mbps",
 								st.fps,
 								st.latency_ms,
 								t("hud.decode"),
@@ -2364,5 +2524,85 @@ mod new_divider_tests {
 		assert_eq!(ui.chat_new_from, None);
 		mark_new_chat(&mut ui, true, 6, 0);
 		assert_eq!(ui.chat_new_from, None);
+	}
+}
+
+#[cfg(test)]
+mod deferred_restart_tests {
+	use super::*;
+
+	fn run(ctx: &egui::Context, st: &OverlayState, ui: &mut UiState) -> Vec<OverlayCmd> {
+		let mut cmds = Vec::new();
+		let mut out = ctx.run_pass(egui::RawInput::default(), |ctx| {
+			cmds = draw(ctx, st, ui);
+		});
+		out.textures_delta.clear(); // no painter here (egui asserts on unapplied deltas)
+		cmds
+	}
+
+	fn sets(cmds: &[OverlayCmd]) -> Vec<(&'static str, String)> {
+		cmds.iter()
+			.filter_map(|c| match c {
+				OverlayCmd::Set(f, v) => Some((*f, v.clone())),
+				_ => None,
+			})
+			.collect()
+	}
+
+	#[test]
+	fn restart_choices_wait_for_the_close_and_the_last_one_wins() {
+		let mut ui = UiState::default();
+		stage(&mut ui, "codec", "h264".into());
+		stage(&mut ui, "res", "1080p".into());
+		stage(&mut ui, "codec", "h265".into());
+		assert_eq!(staged(&ui.deferred, "codec", "auto"), "h265");
+		assert_eq!(staged(&ui.deferred, "fps", "60"), "60", "an unstaged field shows the live value");
+		let out = take_deferred(&mut ui);
+		assert_eq!(sets(&out), vec![("codec", "h265".to_string()), ("res", "1080p".to_string())]);
+		assert!(ui.deferred.is_empty());
+	}
+
+	#[test]
+	fn closing_from_outside_applies_them_and_reopening_lands_on_the_hub() {
+		let ctx = egui::Context::default();
+		let mut ui = UiState::default();
+		let mut st = OverlayState { open: true, ..OverlayState::default() };
+		run(&ctx, &st, &mut ui);
+		ui.view = View::Stream;
+		stage(&mut ui, "fps", "120".into());
+		// Hotkey / app-side close: the next draw sees it closed.
+		st.open = false;
+		let out = run(&ctx, &st, &mut ui);
+		assert_eq!(sets(&out), vec![("fps", "120".to_string())]);
+		assert!(run(&ctx, &st, &mut ui).is_empty(), "applied once");
+		st.open = true;
+		run(&ctx, &st, &mut ui);
+		assert!(ui.view == View::Root, "a fresh open shows the main page");
+	}
+
+	#[test]
+	fn live_settings_still_apply_at_once() {
+		assert!(!RESTART_FIELDS.contains(&"bitrate"));
+		assert!(!RESTART_FIELDS.contains(&"fit"));
+		assert!(RESTART_FIELDS.contains(&"codec") && RESTART_FIELDS.contains(&"adapt"));
+	}
+}
+
+#[cfg(test)]
+mod stats_codec_tests {
+	use super::*;
+
+	#[test]
+	fn the_codec_comes_from_the_host_label_then_the_pick() {
+		let mut st = OverlayState::default();
+		st.host_active = "H.265 · NVENC · 1920x1200 · 120 fps · 17 Mbit hedef · 3.1 ms kodlama".into();
+		assert_eq!(stream_codec(&st), "H.265");
+		assert_eq!(stream_encoder(&st), "NVENC");
+		st.host_active.clear();
+		st.codec = "av1".into();
+		assert_eq!(stream_codec(&st), "AV1", "before the host's label: the user's pick");
+		st.codec = "auto".into();
+		assert_eq!(stream_codec(&st), "—");
+		assert_eq!(stream_encoder(&st), "");
 	}
 }

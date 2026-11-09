@@ -1,0 +1,52 @@
+name: Orange Pi 5B image
+
+# Flashable Pulsar kiosk image for the Orange Pi 5B (see scripts/opi5-image/README.md).
+# Manual for now: it is not part of the release until it has been verified on the board.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deb:
+    name: Pulsar .deb (Ubuntu 22.04 + Rockchip multimedia)
+    runs-on: ubuntu-22.04-arm
+    # A clean 22.04 userland, so the rkmpp ffmpeg from the PPA is what pulsar-render links.
+    container: ubuntu:22.04
+    steps:
+      - name: Install git (checkout needs it inside the container)
+        run: apt-get update && apt-get install -y --no-install-recommends git ca-certificates
+      - uses: actions/checkout@v4
+      - name: Build the .deb
+        run: INSTALL_DEPS=1 bash scripts/opi5-image/build-deb.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pulsar-deb-opi5
+          path: target/release/bundle/deb/*.deb
+          if-no-files-found: error
+
+  image:
+    name: Image
+    needs: deb
+    runs-on: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: pulsar-deb-opi5
+          path: deb
+      - name: Install image tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends xz-utils gdisk cloud-guest-utils e2fsprogs
+      - name: Build the image
+        run: |
+          deb="$(ls deb/*.deb | head -1)"
+          sudo WORK="$RUNNER_TEMP/opi5" bash scripts/opi5-image/build-image.sh "$deb" "$PWD/pulsar-opi5b.img.xz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pulsar-opi5b-image
+          path: |
+            pulsar-opi5b.img.xz
+            pulsar-opi5b.img.xz.sha256
+          retention-days: 14
+          compression-level: 0

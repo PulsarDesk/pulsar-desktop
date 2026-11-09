@@ -44,6 +44,7 @@
 	import Approve from '#lib/screens/Approve.svelte';
 	import Connections from '#lib/screens/Connections.svelte';
 	import FilesWindow from '#lib/screens/FilesWindow.svelte';
+	import ToastWindow from '#lib/screens/ToastWindow.svelte';
 	import HostChat from '#lib/screens/HostChat.svelte';
 	import Chrome from './page/Chrome.svelte';
 	import ResizeEdges from './page/ResizeEdges.svelte';
@@ -84,8 +85,11 @@
 		return inj ? { id: Number(inj.id), peer: String(inj.peer ?? '') } : null;
 	})();
 
+	// The Pulsar toast window (toast.rs, label `toast`): render only the notice stack.
+	const toastReq = typeof window !== 'undefined' && '__TOAST__' in window;
+
 	// Any popup window short-circuits the main-app bootstrap (no relay re-register).
-	const isPopup = !!approveReq || connReq || !!filesReq;
+	const isPopup = !!approveReq || connReq || !!filesReq || toastReq;
 
 	type View = 'home' | 'devices' | 'gaming' | 'settings';
 
@@ -105,14 +109,11 @@
 
 	// Flip the personality and persist the choice so the app reopens in the last mode.
 	function toggleMode() {
+		if (modeLocked) return;
 		const next = mode === 'game' ? 'remote' : 'game';
 		// Changing personality ALWAYS leaves split mode (either direction) — the split's panes are
-		// tied to the mode it was entered in. Switching INTO gaming also closes any open
-		// (remote-mode) sessions/tabs — gaming is a fresh pure-client personality.
+		// tied to the mode it was entered in.
 		if (sm.splitMode !== 'off') sm.exitSplit();
-		if (next === 'game') {
-			for (const s of [...sm.sessions]) sm.endSession(s.tabId);
-		}
 		mode = next;
 		ui.appMode = next;
 		saveUi();
@@ -297,6 +298,13 @@
 	// device can hold several concurrent sessions — couch co-op / split panes), with the
 	// peer kept for the label + kick routing.
 	let hostSessions = $state<{ sid: number; peer: string; since: number }[]>([]);
+
+	// The personality can't change while a connection is open — a client session (connecting
+	// or live) or one this machine hosts. The open session belongs to the current personality:
+	// switching used to silently end remote sessions on entering gaming, and to leave a game
+	// session running inside the remote shell the other way round. Same rule as the
+	// controller's Guide-button toggle.
+	const modeLocked = $derived(sm.sessions.length > 0 || hostSessions.length > 0);
 	// Peer map-key → the client's own device id (pushed via DataMsg::PeerId). Lets the
 	// connect-tab list show a client's ID even on a direct/same-LAN connect (where the
 	// session's peer key is the client's ip:port).
@@ -608,8 +616,7 @@
 		// never in the approval popup. In gaming mode this leaves it; from remote it enters.
 		await onGuideToggle(() => {
 			if (isPopup) return;
-			if (sm.sessions.length > 0 || hostSessions.length > 0) return;
-			toggleMode();
+			toggleMode(); // a no-op while a connection is open (modeLocked)
 		});
 		// Controller connected → toast (only when idle; in a session it's surfaced in-overlay).
 		await onControllerConnected((e) => {
@@ -892,6 +899,8 @@
 	<Connections />
 {:else if filesReq}
 	<FilesWindow playId={filesReq.id} peer={filesReq.peer} />
+{:else if toastReq}
+	<ToastWindow />
 {:else}
 	<HostChat />
 	{#if padToast}
@@ -917,6 +926,7 @@
 				onToggleTheme={toggleTheme}
 				gaming={mode === 'game'}
 				onToggleMode={toggleMode}
+				{modeLocked}
 				splitMode={sm.splitMode}
 				onSplit={openSplit}
 				fullscreen={sm.fullscreen}
@@ -986,6 +996,7 @@
 						mode={s.mode}
 						awaitingApproval={hasPendingPromptFor(s.target.id)}
 						preparing={s.playId >= 0}
+						optimizing={!!s.optimizing}
 						onCancel={() => sm.endSession(s.tabId)}
 					/>
 				{:else}
@@ -995,7 +1006,6 @@
 						mode={s.mode}
 						conn={s.conn}
 						wsPort={s.wsPort}
-						audioWsPort={s.audioWsPort ?? 0}
 						native={s.native ?? false}
 						embedded={s.embedded ?? false}
 						hostCodecs={s.hostCodecs ?? []}

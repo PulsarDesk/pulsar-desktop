@@ -1,7 +1,7 @@
 //! Process-spawning helpers for the native video path: pick a free UDP port, write the
-//! tiny SDP describing the host's RTP stream, and spawn the platform renderer/audio player
-//! (ffplay on Windows; the native vidsink/render or mpv on Linux/macOS) plus the Linux
-//! native audio player. Each spawned child is wired to die with this process.
+//! tiny SDP describing the host's RTP stream, and spawn the platform renderer (ffplay on
+//! Windows; the native vidsink/render or mpv on Linux/macOS). Each spawned child is wired to
+//! die with this process. Audio is not here: it plays in-process (`crate::native_audio`).
 
 use std::path::PathBuf;
 // `Path` is only referenced by the non-Windows `spawn_mpv`/vidsink/render helpers below.
@@ -70,16 +70,95 @@ pub fn write_sdp(port: u16, codec: &str) -> std::io::Result<PathBuf> {
 		 c=IN IP4 0.0.0.0\r\n\
 		 t=0 0\r\n\
 		 m=video {port} RTP/AVP 96\r\n\
-		 a=rtpmap:96 {rtpmap}\r\n{fmtp}"
+		 a=rtpmap:96 {rtpmap}\r\n{fmtp}{unix}",
+		unix = video_unix_name(port)
+			.map(|n| format!("a=x-pulsar-unix:{n}\r\n"))
+			.unwrap_or_default()
 	);
 	let path = std::env::temp_dir().join(format!("pulsar-{port}.sdp"));
 	std::fs::write(&path, sdp)?;
 	Ok(path)
 }
 
+/// Linux: the abstract Unix datagram socket `pulsar-render` receives video RTP on for the
+/// stream on `port` (written into the SDP as `a=x-pulsar-unix:`; the renderer binds it, the
+/// session loop sends to it via [`VideoSink`]). A local Unix datagram skips the IP stack and
+/// netfilter that every loopback-UDP packet paid. None (other OSes, or
+/// `PULSAR_LINUX_DEMUX=ffmpeg`, the old libavformat RTP demux kept for A/B) = loopback UDP.
+pub fn video_unix_name(port: u16) -> Option<String> {
+	if !cfg!(target_os = "linux") || std::env::var("PULSAR_LINUX_DEMUX").is_ok_and(|v| v == "ffmpeg") {
+		return None;
+	}
+	Some(format!("pulsar-v-{port}"))
+}
+
+/// Where the session loop forwards video RTP on Linux: the renderer's Unix socket
+/// ([`video_unix_name`]). `try_send` returns false when the datagram should take the loopback
+/// UDP path instead: no Unix socket on this platform/mode, or nobody bound to it (an
+/// mpv/ffplay fallback consumer, or a renderer between decode passes).
+pub struct VideoSink {
+	#[cfg(target_os = "linux")]
+	unix: Option<(std::os::unix::net::UnixDatagram, std::os::unix::net::SocketAddr)>,
+	/// Datagrams dropped because the renderer's queue was full (logged sparsely).
+	#[cfg(target_os = "linux")]
+	dropped: u64,
+}
+
+impl VideoSink {
+	pub fn new(port: u16) -> Self {
+		#[cfg(target_os = "linux")]
+		{
+			use std::os::linux::net::SocketAddrExt;
+			let unix = video_unix_name(port).and_then(|name| {
+				let addr = std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes()).ok()?;
+				let sock = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::DGRAM, None).ok()?;
+				// The send buffer bounds the datagrams in flight to the renderer (a Unix
+				// datagram is charged to the SENDER until it is read): ask for 4 MiB, the
+				// kernel caps it at 2 x wmem_max (~416 KiB by default, a few hundred packets).
+				let _ = sock.set_send_buffer_size(4 * 1024 * 1024);
+				sock.set_nonblocking(true).ok()?;
+				Some((std::os::unix::net::UnixDatagram::from(sock), addr))
+			});
+			if let Some((_, a)) = unix.as_ref() {
+				tracing::info!(addr = ?a, "video forwarded over a unix datagram socket");
+			}
+			Self { unix, dropped: 0 }
+		}
+		#[cfg(not(target_os = "linux"))]
+		{
+			let _ = port;
+			Self {}
+		}
+	}
+
+	/// Send one video RTP datagram over the Unix socket. False = send it over UDP instead.
+	pub fn try_send(&mut self, pkt: &[u8]) -> bool {
+		#[cfg(target_os = "linux")]
+		if let Some((sock, addr)) = self.unix.as_ref() {
+			return match sock.send_to_addr(pkt, addr) {
+				Ok(_) => true,
+				// The renderer is behind (its queue is full): drop like a full UDP buffer
+				// would, never block the session loop. NACK/keyframe recovery covers it.
+				Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+					self.dropped += 1;
+					if self.dropped.is_power_of_two() {
+						tracing::warn!(dropped = self.dropped, "renderer video socket full, datagrams dropped");
+					}
+					true
+				}
+				// Nobody bound (ECONNREFUSED / ENOENT): a non-pulsar-render consumer or a
+				// renderer between passes; fall back to UDP.
+				Err(_) => false,
+			};
+		}
+		let _ = pkt;
+		false
+	}
+}
+
 /// Spawn ffplay to render the SDP stream: hardware decode, low-latency, a normal
-/// WINDOWED window (the user fullscreens it themself), no audio (audio still plays via
-/// the webview path). The returned `Child` is kept so the caller can kill it on session
+/// WINDOWED window (the user fullscreens it themself), no audio (audio plays in-process,
+/// native_audio.rs). The returned `Child` is kept so the caller can kill it on session
 /// end. No console window pops up. Returns None if ffplay can't be spawned.
 pub fn spawn_ffplay(ffplay: &str, sdp: &PathBuf) -> Option<Child> {
 	let mut cmd = std::process::Command::new(ffplay);
@@ -106,7 +185,7 @@ pub fn spawn_ffplay(ffplay: &str, sdp: &PathBuf) -> Option<Child> {
 		// Hardware decode (d3d11va/dxva2/cuda) — auto-picks what the GPU supports.
 		"-hwaccel",
 		"auto",
-		"-an", // audio comes through the webview WebAudio path, not ffplay
+		"-an", // audio plays in-process (native_audio.rs), not in ffplay
 		// Windowed by default (no -fs/-noborder/-alwaysontop): a session must not take
 		// over the screen on connect; the user fullscreens it themself.
 		"-x",
@@ -194,6 +273,10 @@ pub fn spawn_render(
 		.arg(if game_mode { "game" } else { "remote" });
 	cmd.arg("--pace").arg(if pace_on { "on" } else { "off" });
 	cmd.arg("--lang").arg(lang);
+	// The app window's display scale: the renderer sizes its egui overlay by it (HiDPI).
+	if let Some(scale) = crate::process::ui_scale() {
+		cmd.env("PULSAR_UI_SCALE", format!("{scale}"));
+	}
 	// Pipe BOTH stdout (HUD `vidsink-fps` / `ov set` lines) AND stdin (live `pace 0|1` toggles
 	// from the frontend); without stdin piped, set_frame_pacing can't reach the renderer.
 	cmd.stdin(std::process::Stdio::piped());
@@ -244,10 +327,15 @@ pub fn spawn_render_win(
 	game_mode: bool,
 	pace_on: bool,
 	lang: &str,
+	hold_reveal: bool,
 ) -> Option<Child> {
 	let mut cmd = std::process::Command::new(bin);
 	cmd.arg(sdp);
 	cmd.arg("--wid").arg(format!("0x{hwnd:x}"));
+	// Session start: stay hidden until the app says the stream has settled (`reveal`).
+	if hold_reveal {
+		cmd.arg("--hold-reveal");
+	}
 	cmd.arg("--mode")
 		.arg(if game_mode { "game" } else { "remote" });
 	cmd.arg("--pace").arg(if pace_on { "on" } else { "off" });
@@ -264,211 +352,6 @@ pub fn spawn_render_win(
 		}
 		Err(_) => None,
 	}
-}
-
-/// Spawn a native **audio** player for the Linux client. WebKitGTK can't decode the host's
-/// Opus/RTP audio via WebCodecs (its webview audio path is silent), so — like the native
-/// `vidsink` for video — we decode + play it natively. ffmpeg receives the Opus RTP on
-/// `127.0.0.1:loopback_port` (an SDP describes it; `Viewer::forward_audio_to_loopback` pumps
-/// the host's audio datagrams there) and plays it to PulseAudio. Returns None on spawn failure.
-#[cfg(target_os = "linux")]
-pub fn spawn_native_audio(ffmpeg: &str, loopback_port: u16, channels: u16) -> Option<Child> {
-	// Matches the host encoder (pulsar_core::audio::opus_rtp_output{,_layout}): Opus, 48 kHz,
-	// RTP payload type 97. The viewer forwards the host's datagrams to this loopback port.
-	//
-	// Per RFC 7587 the rtpmap encoding parameter MUST be `2` for Opus regardless of the real
-	// channel count — multichannel is signalled in-band (mapping_family 1) and ffmpeg's Opus
-	// decoder outputs the stream's true channel count to PulseAudio. For 5.1/7.1 we add an
-	// `a=fmtp:97` line carrying the surround hints so the depacketizer/decoder are told to
-	// expect a multistream stream rather than fold it to stereo. `channels` is the negotiated
-	// layout's channel count (2 / 6 / 8); 2 keeps the stereo SDP byte-for-byte unchanged.
-	let fmtp = if channels > 2 {
-		// `stereo=0` (program is multichannel) + `sprop-stereo=0`; ffmpeg keys multichannel
-		// decode off the in-band Opus mapping, but the hint keeps SDP-driven decoders honest.
-		"a=fmtp:97 stereo=0; sprop-stereo=0\r\n".to_string()
-	} else {
-		String::new()
-	};
-	let sdp = format!(
-		"v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=PulsarAudio\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n\
-		 m=audio {loopback_port} RTP/AVP 97\r\na=rtpmap:97 opus/48000/2\r\n{fmtp}"
-	);
-	let path = std::env::temp_dir().join(format!("pulsar-audio-{loopback_port}.sdp"));
-	if std::fs::write(&path, sdp).is_err() {
-		return None;
-	}
-	// Cap the PulseAudio output buffer. The default `-f pulse` target length let the Pi's
-	// HDMI sink queue ~2 s of audio (measured 1.98 s Buffer Latency), so the remote sound
-	// lagged the video by seconds. `buffer_duration` (ms) + `prebuf 0` bound it tight so
-	// audio stays in sync with the ultra-low-latency video. 40 ms ≈ Moonlight's SDL queue
-	// (~30–50 ms); measured ~25–45 ms end-to-end on the sink-input. Env-tunable via
-	// PULSAR_AUDIO_BUFMS (raise if it crackles on a jittery link, lower for even less lag).
-	// (Old PulseAudio output-buffer cap removed — the SDL3 player below bounds latency by
-	// dropping, not buffering. Tunable via PULSAR_AUDIO_CAPMS, read in spawn_sdl_audio_player.)
-	// Build the player command for a given ffmpeg binary (shared by the bundled path and
-	// the system-`ffmpeg` fallback, so the two can never drift). ffmpeg reads the Opus RTP
-	// (forwarded to this loopback port) and plays it to PulseAudio.
-	//
-	// SURROUND-CORRECTNESS: there is deliberately **no `-ac` on EITHER side**. ffmpeg derives
-	// the real channel count from the Opus bitstream itself (the in-band mapping_family 1
-	// header signals multistream 5.1/7.1) — the rtpmap stays `opus/48000/2` per RFC 7587, which
-	// fixes the encoding parameter at 2 and is NOT the playback channel count. So:
-	//   - no `-ac N` on the INPUT  -> we never force a downmix of the decoded surround stream;
-	//   - no `-ac N` on the OUTPUT -> the decoder's native channel count flows straight to the
-	//     PulseAudio sink (2 for stereo, 6 for 5.1, 8 for 7.1).
-	// Stereo is byte-for-byte unaffected; surround reaches the speakers un-folded.
-	let build = |bin: &str| -> std::process::Command {
-		let mut cmd = std::process::Command::new(bin);
-		cmd.args([
-			"-hide_banner",
-			"-loglevel",
-			"error",
-			"-protocol_whitelist",
-			"file,udp,rtp",
-			"-fflags",
-			"nobuffer",
-			"-flags",
-			"low_delay",
-			// THE big audio-latency fix: ffmpeg's RTP demuxer reorder/jitter buffer defaults
-			// to ~0.5 s (max_delay). On a low-reordering LAN/loopback path that buffer just sat
-			// there as a fixed ~500 ms audio lag behind the video. Pin it to 0 so packets play
-			// the instant they arrive (the mos session + loopback forward deliver in order).
-			"-max_delay",
-			"0",
-			"-reorder_queue_size",
-			"0",
-			// Low-latency input probe (the HOST encoder + the video player both set these;
-			// the audio player was missing them, so ffmpeg ran its default analyze/probe on
-			// the RTP/Opus stream — reading + holding input before emitting, a fixed lag
-			// behind the video). The SDP already declares opus/48000, so 0 probe is safe.
-			"-probesize",
-			"32",
-			"-analyzeduration",
-			"0",
-			"-i",
-		])
-		.arg(&path)
-		// Adaptively resample to keep playback locked to the stream clock: absorbs host↔Pi
-		// clock drift + small jitter by micro-stretching instead of letting the PulseAudio
-		// buffer underrun (measured swinging to 0). Steady sync, no fixed added latency;
-		// preserves channel count (no surround downmix).
-		// DECODE ONLY → raw interleaved f32 PCM on stdout. NO `-f pulse`: the Rust SDL3
-		// consumer (spawn_sdl_audio_player) owns playback + a Moonlight-style drop bound, so
-		// the buffer can't accumulate on host/sink clock drift the way the never-dropping
-		// pulse sink did (it grew to ~300 ms over minutes). `-ac {channels}` makes the pipe
-		// deterministic; the host clamps the stream to <= the negotiated count, so this never
-		// downmixes (only pads silent channels if the endpoint had fewer).
-		.args(["-ac", &channels.to_string(), "-ar", "48000", "-f", "f32le", "pipe:1"]);
-		cmd.stdin(std::process::Stdio::null());
-		cmd.stdout(std::process::Stdio::piped()); // decoded PCM → SDL3 player thread
-		cmd.stderr(std::process::Stdio::null());
-		die_with_parent(&mut cmd);
-		cmd
-	};
-	let mut child = match build(ffmpeg).spawn() {
-		Ok(c) => c,
-		// Bundled ffmpeg missing/unrunnable → fall back to a system ffmpeg on PATH (the
-		// distro build, with the Opus decoder). Better degraded-via-system than no audio.
-		Err(_) if ffmpeg != "ffmpeg" => build("ffmpeg").spawn().ok()?,
-		Err(_) => return None,
-	};
-	// Hand ffmpeg's decoded PCM (stdout) to the SDL3 player thread — it owns playback + the
-	// Moonlight-style bounded-queue drop. No stdout → the child is useless; kill it.
-	match child.stdout.take() {
-		Some(out) => spawn_sdl_audio_player(out, channels),
-		None => {
-			let _ = child.kill();
-			return None;
-		}
-	}
-	Some(child)
-}
-
-/// The Linux client's **SDL3 audio player** — the Moonlight model. Reads raw f32 PCM from the
-/// decode-only ffmpeg's stdout and feeds SDL's default playback device, but DROPS a chunk
-/// whenever more than `PULSAR_AUDIO_CAPMS` ms (default 50) is already queued. That hard cap is
-/// exactly what the old `ffmpeg -f pulse` sink lacked: it never dropped, so host-vs-Pi-sink
-/// clock drift integrated into the PulseAudio buffer and audio crept ~300 ms behind the video
-/// over a few minutes. Dropping (instead of buffering) keeps latency bounded forever, like
-/// Moonlight's `sdlaud.cpp` (drop when pending >30 ms, cap the device queue ≤50 ms). We keep
-/// draining the pipe even while dropping, so ffmpeg keeps decoding in real time. The thread
-/// ends when ffmpeg dies (stdout EOF). SDL3 is already linked (sdl3-sys) + inited for gamepads;
-/// AUDIO is an independent subsystem, safe to init off the main thread.
-#[cfg(target_os = "linux")]
-fn spawn_sdl_audio_player(mut out: std::process::ChildStdout, channels: u16) {
-	use sdl3_sys::audio::{
-		SDL_AudioSpec, SDL_ClearAudioStream, SDL_DestroyAudioStream, SDL_GetAudioStreamQueued,
-		SDL_OpenAudioDeviceStream, SDL_PutAudioStreamData, SDL_ResumeAudioStreamDevice,
-		SDL_SetAudioStreamFrequencyRatio, SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, SDL_AUDIO_F32,
-	};
-	use sdl3_sys::init::{SDL_InitSubSystem, SDL_QuitSubSystem, SDL_INIT_AUDIO};
-	use std::io::Read;
-	let ch = channels.max(1) as i32;
-	let _ = std::thread::Builder::new()
-		.name("sdl-audio".into())
-		.spawn(move || unsafe {
-			if !SDL_InitSubSystem(SDL_INIT_AUDIO) {
-				tracing::warn!("audio: SDL_InitSubSystem(AUDIO) failed — no client audio");
-				return;
-			}
-			let spec = SDL_AudioSpec { format: SDL_AUDIO_F32, channels: ch, freq: 48_000 };
-			let stream = SDL_OpenAudioDeviceStream(
-				SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,
-				&spec,
-				None,
-				std::ptr::null_mut(),
-			);
-			if stream.is_null() {
-				tracing::warn!("audio: SDL_OpenAudioDeviceStream failed — no client audio");
-				SDL_QuitSubSystem(SDL_INIT_AUDIO);
-				return;
-			}
-			SDL_ResumeAudioStreamDevice(stream); // the device opens paused
-			let target_ms: usize = std::env::var("PULSAR_AUDIO_TARGETMS")
-				.ok()
-				.and_then(|s| s.parse().ok())
-				.unwrap_or(30)
-				.max(1); // guard against 0 → target_bytes=0 → 0/0=NaN ratio
-			tracing::info!(channels = ch, target_ms, "audio: SDL3 player up (drift-resampled, click-free)");
-			let bytes_per_ms = 48 * ch as usize * 4; // f32 @ 48 kHz
-			let target_bytes = (bytes_per_ms * target_ms) as i32;
-			// Hard-resync ceiling: a startup burst or a long stall can jump the queue far past
-			// target; above this we flush once (one click) rather than slow-draining for seconds.
-			// Steady drift never reaches it — the rate nudge holds the queue near target.
-			let high_bytes = (bytes_per_ms * 120) as i32;
-			// FRAME-ALIGNED chunks (read_exact on a buffer that is a whole number of frames):
-			// dropping/pushing must never split an interleaved frame, or the L/R alignment
-			// shifts permanently and audio turns to garbage after the first drop.
-			let mut buf = vec![0u8; bytes_per_ms * 10]; // exactly 10 ms = 480 frames
-			loop {
-				if out.read_exact(&mut buf).is_err() {
-					break; // ffmpeg gone (EOF) / pipe error → teardown
-				}
-				// Push EVERY (frame-aligned) chunk — never drop (drops = audible clicks). Then
-				// absorb host/sink clock drift by NUDGING the playback rate so the queued depth
-				// holds near target: ratio > 1 plays slightly faster (drains the queue), < 1
-				// slower (lets it fill). Steady drift keeps the ratio within a fraction of a
-				// percent (inaudible); only a big overrun (startup/stall) hard-resets.
-				SDL_PutAudioStreamData(
-					stream,
-					buf.as_ptr() as *const std::ffi::c_void,
-					buf.len() as i32,
-				);
-				let q = SDL_GetAudioStreamQueued(stream);
-				if q > high_bytes {
-					SDL_ClearAudioStream(stream);
-					SDL_SetAudioStreamFrequencyRatio(stream, 1.0);
-				} else {
-					let err = (q - target_bytes) as f32 / target_bytes as f32;
-					let ratio = (1.0 + 0.5 * err).clamp(0.97, 1.03);
-					let ratio = if ratio.is_finite() { ratio } else { 1.0 };
-					SDL_SetAudioStreamFrequencyRatio(stream, ratio);
-				}
-			}
-			SDL_DestroyAudioStream(stream);
-			SDL_QuitSubSystem(SDL_INIT_AUDIO);
-			tracing::info!("audio: SDL3 player stopped");
-		});
 }
 
 /// Spawn **mpv** to render the SDP/RTP stream on Linux/macOS with hardware decode and
@@ -513,7 +396,7 @@ pub fn spawn_mpv(sdp: &PathBuf, wid: Option<u64>, ipc: &Path) -> Option<Child> {
 		"--no-correct-pts",
 		"--video-sync=desync",
 		"--demuxer-lavf-probe-info=no",
-		"--audio=no", // audio is handled separately (webview WebAudio / a second stream)
+		"--audio=no", // audio plays in-process (native_audio.rs)
 		"--no-osc",
 		"--no-config",
 		// Don't let mpv consume keyboard/mouse/cursor — control is captured + forwarded to

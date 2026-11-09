@@ -1,10 +1,12 @@
 //! Shared streaming types + RTP depacketizer for the native-decode backends (Windows Media
-//! Foundation, macOS VideoToolbox). Pure Rust (no platform deps) so it compiles + unit-tests
-//! anywhere and both backends consume the IDENTICAL depacketization (codec parity). The Linux
-//! backend uses ffmpeg's own RTP/SDP demux instead, so it does not use this module.
+//! Foundation, macOS VideoToolbox, Linux libavcodec). Pure Rust (no platform deps) so it
+//! compiles + unit-tests anywhere and every backend consumes the IDENTICAL depacketization
+//! (codec parity). Linux reads the RTP from a Unix datagram socket (`rtp::recv_loop_unix`);
+//! `PULSAR_LINUX_DEMUX=ffmpeg` keeps the old libavformat RTP/SDP demux there instead.
 
 #![allow(dead_code)]
 
+pub mod recovery; // loss hold + AU backlog bound (Linux renderer policy, pure)
 pub mod rtp; // RTP receive + depacketize (→ Annex-B / OBU access units)
 
 /// Video codec of the stream (from the SDP rtpmap). Drives depacketization + the decoder.
@@ -48,4 +50,14 @@ pub fn parse_sdp(path: &str) -> std::io::Result<(u16, Codec)> {
 		}
 	}
 	Ok((port, codec))
+}
+
+/// The abstract Unix datagram socket the app forwards video RTP to (`a=x-pulsar-unix:<name>`,
+/// written by `spawn.rs::write_sdp` on Linux), if the SDP names one.
+pub fn sdp_unix_name(path: &str) -> Option<String> {
+	let text = std::fs::read_to_string(path).ok()?;
+	text.lines()
+		.find_map(|l| l.trim().strip_prefix("a=x-pulsar-unix:"))
+		.map(|n| n.trim().to_string())
+		.filter(|n| !n.is_empty())
 }

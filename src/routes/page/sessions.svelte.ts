@@ -3,8 +3,9 @@
 // the connect/disconnect lifecycle. Kept out of the route component so the shell
 // markup stays small; behavior is identical to the inline version it replaced.
 
-import { api, isTauri, onPlayEnded, onPlayReady, setFullscreen } from '#lib/api.js';
-import { recordConnection } from '#lib/peers.svelte.js';
+import { savedStreamPicks } from '#lib/streamPicks.js';
+import { api, isTauri, onPeerAvatar, onPeerName, onPlayEnded, onPlayOptimizing, onPlayReady, setFullscreen } from '#lib/api.js';
+import { recordConnection, setPeerIdentity } from '#lib/peers.svelte.js';
 import { ui, saveUi } from '#lib/settings.svelte.js';
 import { t } from '#lib/i18n.svelte.js';
 import type { Game } from '#lib/games.svelte.js';
@@ -17,6 +18,8 @@ export type Session = {
 	/** First decoded frames have landed (`play-ready`) — the native child window is now
 	 * actually painting over the webview. Drives the occlusion repaint-suspend. */
 	ready?: boolean;
+	/** First frames are in, held back while the stream is optimized (connecting screen step). */
+	optimizing?: boolean;
 	target: Target;
 	/** User-renamed tab title (session-scoped, via the tab's edit button); falls
 	 * back to `target.name` when unset. */
@@ -26,7 +29,6 @@ export type Session = {
 	gameId?: string;
 	conn: 'direct' | 'relay';
 	wsPort: number;
-	audioWsPort?: number;
 	native?: boolean;
 	embedded?: boolean;
 	/** Host's validated stream caps (empty = unknown) — gates the session-menu options. */
@@ -352,6 +354,15 @@ export class SessionManager {
 		// The Connecting screen holds until the stream is REALLY up (first decoded
 		// frames — `play-ready`), so the user never lands on a black session.
 		onPlayReady((playId) => this.#activateByPlayId(playId));
+		onPlayOptimizing((playId) => {
+			this.sessions = this.sessions.map((s) => (s.playId === playId ? { ...s, optimizing: true } : s));
+		});
+		// The HOST's pushed identity (image + name) lands at stream start, keyed by play id —
+		// usually BEFORE Session.svelte mounts (it waits for play-ready), so its listener missed
+		// it and recents / LAN never got the host's face. Cache it here (always alive) against
+		// the session's target id; a push that beats the play id is parked until #patch sets it.
+		onPeerAvatar((e) => this.#identity(e.peer, { avatar: e.dataUrl }));
+		onPeerName((e) => this.#identity(e.peer, { name: e.name }));
 		// A session can die during the connecting-hold window (after start_remote_play
 		// resolves but before play-ready) — Session.svelte isn't mounted yet to see
 		// `play-ended` then, so close the tab here regardless of phase. (Local host-game
@@ -377,6 +388,19 @@ export class SessionManager {
 				if (this.panes[this.focusedPane] === s.tabId)
 					api.setActiveSession(playId).catch(() => {});
 			}
+		}
+	}
+
+	#pendingIdentity = new Map<string, { name?: string; avatar?: string }>();
+
+	#identity(peer: string, patch: { name?: string; avatar?: string }) {
+		if (!isTauri) return;
+		const s = this.sessions.find((x) => x.playId != null && x.playId >= 0 && String(x.playId) === peer);
+		if (s) setPeerIdentity(s.target.id, patch);
+		else if (/^\d+$/.test(peer) && peer.length < 9) {
+			// A play id we don't know YET (start_remote_play hasn't resolved). Keep it small.
+			if (this.#pendingIdentity.size > 16) this.#pendingIdentity.clear();
+			this.#pendingIdentity.set(peer, { ...this.#pendingIdentity.get(peer), ...patch });
 		}
 	}
 
@@ -467,7 +491,8 @@ export class SessionManager {
 				ui.quality,
 				ui.touchpadAsMouse,
 				opts.displayIdx,
-				opts.windowHwnd
+				opts.windowHwnd,
+				savedStreamPicks()
 			);
 			let timer: ReturnType<typeof setTimeout> | undefined;
 			let timedOut = false;
@@ -523,14 +548,21 @@ export class SessionManager {
 				phase: isTauri ? 'connecting' : 'active',
 				conn: info.transport === 'relay' ? 'relay' : 'direct',
 				wsPort: info.ws_port,
-				audioWsPort: info.audio_ws_port,
 				native: info.native,
 				embedded: info.embedded,
 				hostCodecs: info.host_codecs ?? [],
 				hostEncoders: info.host_encoders ?? [],
 				hostDisplays: info.host_displays ?? []
 			});
-			setTimeout(() => this.#activateByPlayId(pid), 10_000);
+			// Identity the host pushed before we knew this play id → cache it now.
+			const early = this.#pendingIdentity.get(String(pid));
+			if (early && isTauri) {
+				this.#pendingIdentity.delete(String(pid));
+				setPeerIdentity(target.id, early);
+			}
+			// Fallback only: native Windows sessions reveal on their own once the stream has
+			// settled (≤ ~8 s after the first frame), so this must not cut that short.
+			setTimeout(() => this.#activateByPlayId(pid), 14_000);
 			recordConnection(
 				target.id,
 				target.name,

@@ -84,6 +84,11 @@ static RTT_AT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::n
 /// hides over the video ONLY while engaged — after Ctrl+Alt+Z the user has their
 /// mouse back, so it must be visible again.
 static ENGAGED_R: AtomicBool = AtomicBool::new(false);
+/// The Rust RTP path's depacketizer has dropped access units for ≥ 400 ms waiting for a
+/// keyframe / RFI recovery frame (`stream::rtp::WAITING`) while the session lives: the
+/// non-blocking "recovering connection" pill (overlay::draw_recovering). Set by the stall
+/// detection block of the render loop.
+static RECOVERING: AtomicBool = AtomicBool::new(false);
 /// Session audio truth (app stdin `audio tx=1 mute=0 mic=0`) for the Ses section.
 static AUDIO_TX: AtomicBool = AtomicBool::new(true);
 static AUDIO_MUTE: AtomicBool = AtomicBool::new(false);
@@ -308,7 +313,7 @@ pub fn run() {
 	// flag and the live `pace 0|1` stdin toggle still override. The frontend persists the choice.
 	let mut pace = std::env::var("PULSAR_PACE")
 		.map(|v| v == "1" || v == "on" || v == "true")
-		.unwrap_or(true);
+		.unwrap_or(false);
 	let mut i = 1;
 	while i < args.len() {
 		match args[i].as_str() {
@@ -349,6 +354,7 @@ pub fn run() {
 		libc::signal(libc::SIGINT, on_stop as *const () as usize);
 		libc::signal(libc::SIGTERM, on_stop as *const () as usize);
 	}
+	crate::kms_lease::debug_signals(); // KMS-LEASE (PULSAR_KMS_DEBUG=1 only)
 
 	video::set_pace(pace);
 	// Seed the MODE_REMOTE atomic so the render loop and the live `mode` command see the
@@ -480,7 +486,10 @@ pub fn run() {
 				// Live engage state (cursor visibility) — same app-side edges.
 				Some("engaged") => {
 					if let Some(v) = it.next() {
-						ENGAGED_R.store(v == "1" || v == "on" || v == "true", Ordering::SeqCst);
+						let on = v == "1" || v == "on" || v == "true";
+						if ENGAGED_R.swap(on, Ordering::SeqCst) != on {
+							eprintln!("pulsar-render: engaged={on} (app)");
+						}
 					}
 				}
 				// Cursor side-channel position (normalized 0..1 in the streamed screen). The
@@ -521,6 +530,8 @@ pub fn run() {
 					if let Some(ms) = it.next().and_then(|v| v.parse::<f32>().ok()) {
 						RTT_DMS.store((ms * 10.0) as u32, Ordering::Relaxed);
 						RTT_AT_MS.store(video::mono_ms_pub(), Ordering::Relaxed);
+						// Sizes the reorder buffer's early give-up on an unrepairable hole.
+						crate::stream::rtp::set_rtt_ms(ms);
 					}
 				}
 				// Adaptive streaming Phase 0.5: the RTT-derived RTP reorder wait (µs) and a
@@ -535,6 +546,9 @@ pub fn run() {
 						video::hold_for_ms(ms);
 					}
 				}
+				// Loss-recovery mode of the stream (Rust RTP path, see video::set_ir_mode/set_rfi_mode).
+				Some("ir") => video::set_ir_mode(it.next() == Some("1")),
+				Some("rfi") => video::set_rfi_mode(it.next() == Some("1")),
 				// Live mode switch for cross-session reconnects (game→remote or remote→game).
 				// Updates the MODE_REMOTE atomic; the render loop re-reads it each frame so
 				// OverlayState.mode and the pace ceiling update on the very next frame paint
@@ -759,6 +773,13 @@ unsafe fn toplevel_of(xd: *mut xlib::Display, mut w: u64) -> u64 {
 	}
 }
 
+/// A compositing manager owns the `_NET_WM_CM_S<screen>` selection (EWMH) while it runs.
+unsafe fn compositor_running(xd: *mut xlib::Display) -> bool {
+	let name = format!("_NET_WM_CM_S{}\0", xlib::XDefaultScreen(xd));
+	let atom = xlib::XInternAtom(xd, name.as_ptr().cast(), xlib::False);
+	atom != 0 && xlib::XGetSelectionOwner(xd, atom) != 0
+}
+
 unsafe fn win_size(xd: *mut xlib::Display, win: u64) -> (u32, u32) {
 	let mut root = 0u64;
 	let (mut x, mut y, mut bw, mut depth) = (0i32, 0i32, 0u32, 0u32);
@@ -956,14 +977,22 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 		.expect("surface");
 	egl.make_current(display, Some(surface), Some(surface), Some(context))
 		.expect("make_current");
-	// VSync: 1 = sync to vblank (default). Under the GNOME/mutter compositor a windowed GL
-	// app's own vblank-sync can beat against the compositor's redraw → periodic judder
-	// ("mouse jumps") on smooth motion. PULSAR_VSYNC=0 lets us present without blocking so the
-	// compositor paces us instead — A/B knob for the windowed-stutter investigation.
+	// VSync. Under a compositing manager (GNOME/mutter on X11) the COMPOSITOR is what syncs
+	// to vblank: it copies our buffer into its scene and presents that on vblank, so our
+	// frames never tear. Waiting for vblank ourselves as well (interval 1) only makes every
+	// eglSwapBuffers block on the X Present completion event relayed through the compositor —
+	// and on the Orange Pi 5B under mutter that event was occasionally never delivered: the
+	// render thread sat in xcb_wait_for_special_event forever and the picture froze while
+	// decode and audio carried on (gdb, 2026-11-09). It also beat against the compositor's
+	// redraw (periodic judder). So: interval 0 with a compositor, 1 without one (bare X, e.g.
+	// the Orange Pi image's openbox: there our swap IS the presentation and would tear).
+	// PULSAR_VSYNC=0|1 overrides.
+	let compositor = compositor_running(xd);
 	let vsync: i32 = std::env::var("PULSAR_VSYNC")
 		.ok()
 		.and_then(|s| s.parse().ok())
-		.unwrap_or(1);
+		.unwrap_or(if compositor { 0 } else { 1 });
+	eprintln!("pulsar-render: compositor={compositor} → swap interval {vsync}");
 	egl.swap_interval(display, vsync).ok();
 
 	let get_proc = |s: &str| -> *const c_void {
@@ -976,12 +1005,24 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 
 	let egui_ctx = egui::Context::default();
 	overlay::apply_theme(&egui_ctx);
-	let ppp = 1.25_f32;
+	// 1.25 at 100 % scaling (same look as Windows at 96 DPI), times the app window's display
+	// scale (`PULSAR_UI_SCALE`, from Tauri's scale factor): a fixed 1.25 left the overlay at
+	// half the app UI's size on a 2x HiDPI screen.
+	let ui_scale = std::env::var("PULSAR_UI_SCALE")
+		.ok()
+		.and_then(|v| v.parse::<f32>().ok())
+		.filter(|s| s.is_finite() && *s > 0.0)
+		.unwrap_or(1.0)
+		.clamp(0.5, 4.0);
+	let ppp = 1.25_f32 * ui_scale;
 	egui_ctx.set_pixels_per_point(ppp);
 	let mut painter = egui_glow::Painter::new(gl.clone(), "", None, false).expect("painter");
 
 	let dpy_ptr = display.as_ptr();
 	let mut presenter = video::Presenter::new(&gl, dpy_ptr, &get_proc);
+	// KMS-LEASE: fullscreen DRM-lease presenter (kms_lease.rs). While it holds a lease, video
+	// goes straight to a KMS plane and the egui chrome to another; otherwise the EGL/X path runs.
+	let mut kms = crate::kms_lease::Ctl::new();
 
 	let mut state = OverlayState {
 		mode,
@@ -1005,10 +1046,15 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 	// shows) until the first frame; standalone is mapped from the start.
 	let mut win_visible = standalone;
 	let mut cursor_hidden = false;
+	// KMS-LEASE: an embedded `ov engage` was sent while leased (see the button handling).
+	let mut sent_engage = false;
+	// KMS-LEASE debug (PULSAR_KMS_DEBUG=1): treat input as disengaged regardless of the app.
+	let mut dbg_disengaged = false;
 	// Overlay UI state (page, chat composer, local file pane) — page resets to the
 	// hub each time the overlay opens; the rest persists across opens.
 	let mut ov_ui = overlay::UiState::default();
 
+	let mut frame_seen: u64 = 0;
 	while !STOP.load(Ordering::SeqCst) {
 		// Idle (post-disconnect): unmap the video window so the WebKitGTK webview underneath is
 		// revealed + interactive, but keep this process + its EGL context resident (exiting would
@@ -1017,6 +1063,7 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 		let idle = IDLE.load(Ordering::SeqCst);
 		if idle != prev_idle {
 			if idle {
+				kms.release(&gl, "session idle"); // KMS-LEASE
 				xlib::XUnmapWindow(xd, win);
 				win_visible = false; // re-hide until the NEXT stream's first frame
 			}
@@ -1025,6 +1072,7 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 			xlib::XSync(xd, xlib::False);
 			prev_idle = idle;
 		}
+		kms.refit_tick(); // KMS-LEASE: re-fit the toplevel after a release
 		if idle {
 			while xlib::XPending(xd) > 0 {
 				let mut ev: xlib::XEvent = std::mem::zeroed();
@@ -1159,6 +1207,10 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 				// Closing leaves the user DISENGAGED (the app released the grab when the
 				// overlay opened) — prompt the click-to-control step.
 				arm_hint("click");
+				// Stream-restarting choices made in the menu apply now that it's closed.
+				for c in overlay::take_deferred(&mut ov_ui) {
+					emit_cmd(&mut state, c);
+				}
 				// Overlay CLOSED: back to the base mask. Embedded: no pointer events, so a click
 				// on the video PROPAGATES to the GTK window → Pulsar refocuses → the evdev grab
 				// re-engages (click-to-capture) — otherwise this opaque child window ate the
@@ -1171,7 +1223,20 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 		// Cursor visibility tracks ENGAGE state, not the overlay: hidden only while input
 		// is captured + forwarded (no local cursor over the video) — after a release
 		// (Ctrl+Alt+Z / 3×RightCtrl) the user has their mouse back and must SEE it.
-		let want_hidden = !standalone && !open && ENGAGED_R.load(Ordering::SeqCst);
+		// KMS-LEASE debug hooks (PULSAR_KMS_DEBUG=1): toggle engaged / end the session.
+		if crate::kms_lease::DBG_ENGAGE.swap(false, Ordering::SeqCst) {
+			// Sticky: a kiosk app re-asserts `engaged 1` within a fraction of a second.
+			dbg_disengaged = !dbg_disengaged;
+			eprintln!("pulsar-render: debug: forced disengaged={dbg_disengaged}");
+		}
+		if crate::kms_lease::DBG_RELEASE.swap(false, Ordering::SeqCst) {
+			kms.debug_release(&gl);
+		}
+		if crate::kms_lease::DBG_END.swap(false, Ordering::SeqCst) {
+			println!("ov end");
+			let _ = std::io::stdout().flush();
+		}
+		let want_hidden = !standalone && !open && ENGAGED_R.load(Ordering::SeqCst) && !dbg_disengaged;
 		if want_hidden != cursor_hidden {
 			if want_hidden {
 				xlib::XDefineCursor(xd, win, invisible);
@@ -1201,10 +1266,26 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 
 		// X events → egui input.
 		let mut events: Vec<egui::Event> = Vec::new();
+		// Button edges of this batch: (X button, pressed, position in egui points).
+		let mut btns: Vec<(u32, bool, egui::Pos2)> = Vec::new();
 		while xlib::XPending(xd) > 0 {
 			let mut ev: xlib::XEvent = std::mem::zeroed();
 			xlib::XNextEvent(xd, &mut ev);
 			match ev.get_type() {
+				// KMS-LEASE: XI2 raw input drives the renderer-owned pointer while leased (X's
+				// pointer coordinates no longer match the screen). Buttons 1-3 come from here,
+				// the wheel from the core events of our pointer grab (always emulated there).
+				xlib::GenericEvent => match kms.raw_event(&mut ev) {
+					Some(crate::kms_lease::RawEv::Motion(..)) => {
+						if let Some((x, y)) = kms.pointer_px() {
+							pointer = egui::pos2(x / ppp, y / ppp);
+							events.push(egui::Event::PointerMoved(pointer));
+						}
+					}
+					Some(crate::kms_lease::RawEv::Button(b @ 1..=3, pressed)) => btns.push((b, pressed, pointer)),
+					_ => {}
+				},
+				xlib::MotionNotify if kms.raw_input() => {}
 				xlib::MotionNotify => {
 					let m = ev.motion;
 					pointer = egui::pos2(m.x as f32 / ppp, m.y as f32 / ppp);
@@ -1242,80 +1323,110 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 				xlib::ButtonPress | xlib::ButtonRelease => {
 					let b = ev.button;
 					let pressed = ev.get_type() == xlib::ButtonPress;
-					// Overlay CLOSED (standalone only — embedded selects no buttons then): a
-					// left-click on the video is the click-to-engage trigger. Tell the app so
-					// the evdev capture takes the devices; the click itself stays local.
-					// EXCEPT on the drawn overlay-open button: there is no webview hotspot
-					// over this separate toplevel, so the renderer hit-tests the click itself
-					// and asks the app to open the overlay instead of grabbing input.
-					if !open {
-						if standalone && pressed && b.button == 1 {
-							let on_btn = OVERLAY_BTN.load(Ordering::SeqCst)
-								&& overlay::btn_rect(
-									*OVBTN_POS.lock().unwrap(),
-									egui::Rect::from_min_size(
-										egui::pos2(0.0, 0.0),
-										egui::vec2(w as f32 / ppp, h as f32 / ppp),
-									),
-								)
-								.contains(egui::pos2(b.x as f32 / ppp, b.y as f32 / ppp));
-							println!("{}", if on_btn { "ov toggle" } else { "ov engage" });
-							let _ = std::io::stdout().flush();
+					// KMS-LEASE: under raw input buttons 1-3 arrive as raw events (above) and the
+					// core event's coordinates are meaningless; the wheel still comes from here.
+					if kms.raw_input() {
+						if (4..=7).contains(&b.button) {
+							btns.push((b.button, pressed, pointer));
 						}
-						continue;
-					}
-					// A click into the overlay reaches THIS child window (it grabs pointer events
-					// while open), so it never propagates to GTK → the app stays unfocused if it
-					// was (e.g. the user alt-tabbed away). Without focus, FOCUSED stays false: the
-					// close combo (Ctrl+Shift+M, focus-gated) can't fire and, on close, the evdev
-					// grab never re-engages → the session is stranded with no input. Refocus the
-					// parent (Tauri GTK toplevel) on press so Focused(true) fires; SUSPENDED keeps
-					// the grab released while the overlay is open, so this is safe. Embedded only —
-					// standalone has no embedding parent (root), and IS the focused window already.
-					if pressed && wid != 0 && focus_top != 0 {
-						xlib::XSetInputFocus(
-							xd,
-							focus_top,
-							xlib::RevertToParent,
-							xlib::CurrentTime,
-						);
-					}
-					pointer = egui::pos2(b.x as f32 / ppp, b.y as f32 / ppp);
-					let button = match b.button {
-						1 => Some(egui::PointerButton::Primary),
-						2 => Some(egui::PointerButton::Middle),
-						3 => Some(egui::PointerButton::Secondary),
-						// X11 wheel "buttons" 4-7: translate the press edge to an egui
-						// scroll line so the overlay's ScrollAreas (chat log, file panes)
-						// wheel-scroll — like the win backend's WM_MOUSEWHEEL arm.
-						4..=7 if pressed => {
-							events.push(egui::Event::MouseWheel {
-								unit: egui::MouseWheelUnit::Line,
-								delta: match b.button {
-									4 => egui::vec2(0.0, 1.0),
-									5 => egui::vec2(0.0, -1.0),
-									6 => egui::vec2(1.0, 0.0),
-									_ => egui::vec2(-1.0, 0.0),
-								},
-								phase: egui::TouchPhase::Move,
-								source: egui::MouseWheelSource::Wheel,
-								modifiers: egui::Modifiers::default(),
-							});
-							None
-						}
-						_ => None,
-					};
-					if let Some(button) = button {
-						events.push(egui::Event::PointerButton {
-							pos: pointer,
-							button,
-							pressed,
-							modifiers: egui::Modifiers::default(),
-						});
+					} else {
+						btns.push((b.button, pressed, egui::pos2(b.x as f32 / ppp, b.y as f32 / ppp)));
 					}
 				}
 				_ => {}
 			}
+		}
+		for (bn, pressed, pos) in btns {
+			// Overlay CLOSED: a left-click on the video is the click-to-engage trigger. Tell the
+			// app so the evdev capture takes the devices; the click itself stays local. EXCEPT
+			// on the drawn overlay-open button: the renderer hit-tests the click itself and asks
+			// the app to open the overlay instead of grabbing input. Standalone always (there is
+			// no webview hotspot over a separate toplevel); embedded only while KMS-leased (our
+			// pointer grab keeps the click from reaching the webview, whose window the WM has
+			// shrunk meanwhile anyway). Embedded without a lease selects no buttons while closed.
+			if !open {
+				if (standalone || kms.active()) && pressed && bn == 1 {
+					let (dw, dh) = kms.draw_size().unwrap_or((w, h));
+					let on_btn = OVERLAY_BTN.load(Ordering::SeqCst)
+						&& overlay::btn_rect(
+							*OVBTN_POS.lock().unwrap(),
+							egui::Rect::from_min_size(
+								egui::pos2(0.0, 0.0),
+								egui::vec2(dw as f32 / ppp, dh as f32 / ppp),
+							),
+						)
+						.contains(pos);
+					if !standalone && focus_top != 0 {
+						// The Tauri toplevel must hold focus for the capture's focus gate.
+						xlib::XSetInputFocus(xd, focus_top, xlib::RevertToParent, xlib::CurrentTime);
+					}
+					println!("{}", if on_btn { "ov toggle" } else { "ov engage" });
+					let _ = std::io::stdout().flush();
+					if kms.active() {
+						eprintln!(
+							"pulsar-render: kms click at {:.0},{:.0} → {}",
+							pos.x * ppp,
+							pos.y * ppp,
+							if on_btn { "ov toggle" } else { "ov engage" }
+						);
+					}
+					if !standalone && !on_btn {
+						// `ov engage` also marks the "render window" focused app-side; undone
+						// with `ov focus 0` once the lease ends (see below).
+						sent_engage = true;
+					}
+				}
+				continue;
+			}
+			// A click into the overlay reaches THIS child window (it grabs pointer events
+			// while open), so it never propagates to GTK → the app stays unfocused if it
+			// was (e.g. the user alt-tabbed away). Without focus, FOCUSED stays false: the
+			// close combo (Ctrl+Shift+M, focus-gated) can't fire and, on close, the evdev
+			// grab never re-engages → the session is stranded with no input. Refocus the
+			// parent (Tauri GTK toplevel) on press so Focused(true) fires; SUSPENDED keeps
+			// the grab released while the overlay is open, so this is safe. Embedded only —
+			// standalone has no embedding parent (root), and IS the focused window already.
+			if pressed && wid != 0 && focus_top != 0 {
+				xlib::XSetInputFocus(xd, focus_top, xlib::RevertToParent, xlib::CurrentTime);
+			}
+			pointer = pos;
+			let button = match bn {
+				1 => Some(egui::PointerButton::Primary),
+				2 => Some(egui::PointerButton::Middle),
+				3 => Some(egui::PointerButton::Secondary),
+				// X11 wheel "buttons" 4-7: translate the press edge to an egui
+				// scroll line so the overlay's ScrollAreas (chat log, file panes)
+				// wheel-scroll — like the win backend's WM_MOUSEWHEEL arm.
+				4..=7 if pressed => {
+					events.push(egui::Event::MouseWheel {
+						unit: egui::MouseWheelUnit::Line,
+						delta: match bn {
+							4 => egui::vec2(0.0, 1.0),
+							5 => egui::vec2(0.0, -1.0),
+							6 => egui::vec2(1.0, 0.0),
+							_ => egui::vec2(-1.0, 0.0),
+						},
+						phase: egui::TouchPhase::Move,
+						source: egui::MouseWheelSource::Wheel,
+						modifiers: egui::Modifiers::default(),
+					});
+					None
+				}
+				_ => None,
+			};
+			if let Some(button) = button {
+				events.push(egui::Event::PointerButton {
+					pos: pointer,
+					button,
+					pressed,
+					modifiers: egui::Modifiers::default(),
+				});
+			}
+		}
+		if sent_engage && !kms.active() {
+			println!("ov focus 0");
+			let _ = std::io::stdout().flush();
+			sent_engage = false;
 		}
 
 		// Live stats from the video presenter ([fps, mbit, max_gap_ms]). Previously only fps +
@@ -1359,18 +1470,53 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 					video::STALLED.store(true, Ordering::Relaxed);
 				}
 			}
+			// A keyframe / recovery wait on a lossy link: say so instead of an unexplained
+			// frozen picture (the session is alive; frames resume under the pill).
+			const RECOVER_AFTER_MS: u64 = 400;
+			let waiting = last != 0
+				&& !video::SWITCHING.load(Ordering::Relaxed)
+				&& crate::stream::rtp::WAITING.load(Ordering::Relaxed)
+				&& video::mono_ms_pub().saturating_sub(last) >= RECOVER_AFTER_MS;
+			RECOVERING.store(waiting, Ordering::Relaxed);
 		}
 
 		// ---- Render: video first (opaque), then egui overlay on top (blended) ----
 		use glow::HasContext;
-		gl.disable(glow::BLEND);
-		gl.viewport(0, 0, w as i32, h as i32);
-		gl.clear_color(0.0, 0.0, 0.0, 1.0);
-		gl.clear(glow::COLOR_BUFFER_BIT);
+		// KMS-LEASE: hold the output for the whole fullscreen game session — overlay open or closed,
+		// input engaged or not (every release is a modeset + a WM-shrunk toplevel for seconds).
+		// X can't draw its cursor on a leased output, so while leased the renderer draws the local
+		// cursor itself whenever X would show it (`local_ptr`). No GL video draw while leased.
+		// Game mode only: remote-desktop sessions keep the X path (separate windows such as the
+		// file manager stay visible, and the session is not a fullscreen game). `update` itself
+		// also requires the window to be fullscreen.
+		let game = !MODE_REMOTE.load(Ordering::SeqCst);
+		kms.update(win_visible && game, xd, win, w, h, &gl, dpy_ptr, &get_proc);
+		// KMS-LEASE: the renderer-drawn local cursor (egui points), when X would show one.
+		let local_ptr = if want_hidden {
+			None
+		} else {
+			kms.pointer_px().map(|(x, y)| egui::pos2(x / ppp, y / ppp))
+		};
+		if let Some(p) = local_ptr {
+			if open {
+				// egui hover state follows our pointer, not X's.
+				events.insert(0, egui::Event::PointerMoved(p));
+			}
+		}
+		// While leased the WM may shrink the X window (the output reads as disconnected): lay the
+		// chrome out at the leased mode for the rest of this iteration.
+		let (w, h) = kms.draw_size().unwrap_or((w, h));
+		if !kms.active() {
+			gl.disable(glow::BLEND);
+			gl.viewport(0, 0, w as i32, h as i32);
+			gl.clear_color(0.0, 0.0, 0.0, 1.0);
+			gl.clear(glow::COLOR_BUFFER_BIT);
+		}
 		// New-host reuse (app sent `show`): drop the previous host's held frame + hide the
 		// window so its last view isn't shown while the new stream spins up (the webview
 		// "waiting" loader shows until the new first frame maps below). Chrome-tab reset.
 		if video::RESET_VIEW.swap(false, Ordering::SeqCst) {
+			kms.release(&gl, "new host"); // KMS-LEASE
 			presenter.reset();
 			if win_visible {
 				xlib::XUnmapWindow(xd, win);
@@ -1378,7 +1524,18 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 				win_visible = false;
 			}
 		}
-		let have_video = presenter.draw(&gl, w as i32, h as i32);
+		// KMS-LEASE: while leased only pick the frame here; `kms.present` below puts it on a plane.
+		let mut kms_frame = (std::ptr::null_mut(), false);
+		let have_video = if kms.active() {
+			kms_frame = presenter.take_frame();
+			presenter.stats_tick();
+			!kms_frame.0.is_null()
+		} else {
+			presenter.draw(&gl, w as i32, h as i32)
+		};
+		kms.frame_ok = crate::kms_lease::frame_ok(presenter.current_frame());
+		let mut kms_ov = crate::kms_lease::Overlay::Empty;
+		let mut kms_hash = 0u64;
 
 		// Reveal the video window the moment the first frame lands. Embedded starts hidden
 		// (the webview "waiting for the host" loader shows) until here, so a not-yet-sharing
@@ -1483,19 +1640,28 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 					overlay::draw_switching(ctx);
 				} else if video::STALLED.load(Ordering::Relaxed) {
 					overlay::draw_stalled(ctx);
+				} else if RECOVERING.load(Ordering::Relaxed) {
+					overlay::draw_recovering(ctx);
 				}
 				paint_cursor(ctx);
+				if let Some(p) = local_ptr {
+					paint_local_cursor(ctx, p);
+				}
 			});
 			for c in cmds {
 				emit_cmd(&mut state, c);
 			}
-			gl.viewport(0, 0, w as i32, h as i32);
 			let prims = egui_ctx.tessellate(full.shapes, full.pixels_per_point);
-			painter.paint_and_update_textures(
+			paint_egui(
+				&gl,
+				&mut painter,
+				&mut kms,
 				[w, h],
 				full.pixels_per_point,
 				&prims,
 				&mut full.textures_delta,
+				&mut kms_ov,
+				&mut kms_hash,
 			);
 		} else {
 			// Expire the transient helper hint after its window; fade it out smoothly
@@ -1517,12 +1683,15 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 			let hint_text = hint;
 			let switching = video::SWITCHING.load(Ordering::Relaxed);
 			let stalled = video::STALLED.load(Ordering::Relaxed);
+			let recovering = RECOVERING.load(Ordering::Relaxed);
 			if state.stats_hud
 				|| state.overlay_btn
 				|| hint_text.is_some()
 				|| cursor_draw.is_some()
+				|| local_ptr.is_some()
 				|| switching
 				|| stalled
+				|| recovering
 				|| !state.chat_toasts.is_empty()
 			{
 				// Closed-state chrome: the mini stats HUD, the Parsec-style open button
@@ -1545,6 +1714,8 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 						// Stream-stopped indicator: surfaces the stall state that the webview's
 						// .stall div cannot show because the mpv --wid surface composites on top.
 						overlay::draw_stalled(ctx);
+					} else if recovering {
+						overlay::draw_recovering(ctx);
 					}
 					if state.stats_hud {
 						overlay::draw_hud(ctx, &state);
@@ -1557,19 +1728,47 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 						overlay::draw_hint(ctx, text, *alpha);
 					}
 					paint_cursor(ctx);
+					if let Some(p) = local_ptr {
+						paint_local_cursor(ctx, p);
+					}
 				});
-				gl.viewport(0, 0, w as i32, h as i32);
 				let prims = egui_ctx.tessellate(full.shapes, full.pixels_per_point);
-				painter.paint_and_update_textures(
+				paint_egui(
+					&gl,
+					&mut painter,
+					&mut kms,
 					[w, h],
 					full.pixels_per_point,
 					&prims,
 					&mut full.textures_delta,
+					&mut kms_ov,
+					&mut kms_hash,
 				);
 			}
 		}
 
-		egl.swap_buffers(display, surface).ok();
+		if kms.active() {
+			// KMS-LEASE: atomic commit to the planes; paces the loop on the page flip (any
+			// failure hands the output back and the next iteration draws through X again).
+			kms.present(&gl, kms_frame.0, kms_frame.1, kms_ov, kms_hash, &mut frame_seen);
+			if crate::kms_lease::DBG_DUMP.swap(false, Ordering::SeqCst) {
+				kms.debug_dump(&gl);
+			}
+		} else {
+			let swap_t0 = std::time::Instant::now();
+			egl.swap_buffers(display, surface).ok();
+			let swap_ms = swap_t0.elapsed().as_millis();
+			if swap_ms >= 250 {
+				// A present that blocks this long is a stall, not pacing (the freeze above).
+				eprintln!("pulsar-render: present stalled {swap_ms} ms in eglSwapBuffers");
+			}
+			// Without a vblank wait (swap interval 0) nothing else paces this loop: after presenting, sleep
+			// until the decoder publishes a new frame, redrawing at least ~60×/s so the overlay, hints and
+			// cursor stay live. (Measured: the busy loop took the render thread to 41 % CPU.)
+			if vsync == 0 {
+				frame_seen = video::wait_frame(frame_seen, std::time::Duration::from_millis(16));
+			}
+		}
 		let _ = have_video;
 
 		// Emit a stats line for the host (~1 Hz): same format the lib.rs parser reads.
@@ -1593,11 +1792,66 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 	// The render loop has exited, so the main thread no longer holds MBX: do the real
 	// drain+free here (the SIGINT/SIGTERM handler only set the atomic — see on_stop).
 	video::stop_decode();
+	kms.release(&gl, "exit"); // KMS-LEASE
 	presenter.release();
 	painter.destroy();
 	egl.make_current(display, None, None, None).ok();
 	xlib::XDestroyWindow(xd, win);
 	xlib::XCloseDisplay(xd);
+}
+
+/// KMS-LEASE: put one egui frame on screen — into the overlay-plane buffer while leased (only
+/// when its output changed), else into the X window's framebuffer.
+#[allow(clippy::too_many_arguments)]
+unsafe fn paint_egui(
+	gl: &glow::Context,
+	painter: &mut egui_glow::Painter,
+	kms: &mut crate::kms_lease::Ctl,
+	size: [u32; 2],
+	ppp: f32,
+	prims: &[egui::ClippedPrimitive],
+	delta: &mut egui::TexturesDelta,
+	kms_ov: &mut crate::kms_lease::Overlay,
+	kms_hash: &mut u64,
+) {
+	use glow::HasContext;
+	if let Some(k) = kms.lease.as_mut() {
+		*kms_hash = crate::kms_lease::prims_hash(prims, delta);
+		*kms_ov = crate::kms_lease::Overlay::Keep;
+		if *kms_hash != k.ov_hash && k.begin_overlay(gl) {
+			painter.paint_and_update_textures(size, ppp, prims, delta);
+			*kms_ov = crate::kms_lease::Overlay::Drawn;
+		} else if !delta.is_empty() {
+			// Not painted this frame: still apply the texture delta.
+			painter.paint_and_update_textures(size, ppp, &[], delta);
+			k.ov_hash = 0; // repaint next frame
+		}
+	} else {
+		gl.viewport(0, 0, size[0] as i32, size[1] as i32);
+		painter.paint_and_update_textures(size, ppp, prims, delta);
+	}
+}
+
+/// KMS-LEASE: the local pointer drawn by the renderer (X can't draw its cursor on a leased
+/// output): a classic white arrow with a black outline, tip at `p` (egui points).
+fn paint_local_cursor(ctx: &egui::Context, p: egui::Pos2) {
+	// Arrow outline (points, tip at 0,0) and its triangulation (the shape is concave).
+	const PTS: [(f32, f32); 7] = [(0.0, 0.0), (0.0, 17.0), (4.5, 13.0), (7.5, 19.5), (10.0, 18.5), (7.0, 12.0), (12.0, 12.0)];
+	const TRIS: [[u32; 3]; 5] = [[0, 1, 2], [0, 2, 5], [0, 5, 6], [2, 3, 4], [2, 4, 5]];
+	let at = |i: usize| egui::pos2(p.x + PTS[i].0, p.y + PTS[i].1);
+	let mut mesh = egui::Mesh::default();
+	for i in 0..PTS.len() {
+		mesh.colored_vertex(at(i), egui::Color32::WHITE);
+	}
+	for t in TRIS {
+		mesh.add_triangle(t[0], t[1], t[2]);
+	}
+	let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("pulsar-local-cursor")));
+	painter.add(egui::Shape::mesh(mesh));
+	painter.add(egui::Shape::closed_line(
+		(0..PTS.len()).map(at).collect(),
+		egui::Stroke::new(1.0, egui::Color32::BLACK),
+	));
 }
 
 fn emit_cmd(state: &mut OverlayState, c: OverlayCmd) {

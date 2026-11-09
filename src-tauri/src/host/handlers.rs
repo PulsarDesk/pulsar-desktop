@@ -5,6 +5,9 @@
 
 use super::*;
 
+/// Wire pacer shared by the video forwarder's video, parity and retransmit datagrams.
+mod pacer;
+
 /// Windows: stream the host's system audio via **WASAPI loopback** (no
 /// `virtual-audio-capturer` / Stereo Mix device required). Spawns the encoder ffmpeg
 /// reading raw PCM on stdin (Opus/RTP to `dest`) plus a capture thread that feeds it
@@ -196,6 +199,11 @@ pub(super) fn spawn_loopback_audio(
 /// (`process_loopback_format` = 48 kHz stereo f32) and has no "default endpoint changed"
 /// notion (it follows the process, not an endpoint), so the encoder's `-f/-ar/-ac` is fixed
 /// for the session and the capture either runs until the pipe breaks or errors out.
+///
+/// `mode` picks the audio relative to `pid`'s tree: `Include` = only that app (co-op),
+/// `Exclude` = everything but it (the host passes its own PID for the whole desktop; see
+/// `start_audio_and_mute`). Returns `true` only once the capture is live, so the caller
+/// can fall back to the default-endpoint loopback when activation fails.
 #[cfg(windows)]
 pub(super) fn spawn_process_loopback_audio(
 	procs: &Arc<Mutex<Vec<Child>>>,
@@ -203,6 +211,7 @@ pub(super) fn spawn_process_loopback_audio(
 	dest: &str,
 	pid: u32,
 	req_layout: pulsar_core::audio::ChannelLayout,
+	mode: pulsar_core::audio::ProcessLoopbackMode,
 ) -> bool {
 	use std::process::Stdio;
 	let fmt = pulsar_core::audio::process_loopback_format();
@@ -255,17 +264,41 @@ pub(super) fn spawn_process_loopback_audio(
 		}
 	};
 	crate::job::assign(&child); // tie ffmpeg to Pulsar's lifetime (job.rs), like spawn_tracked
-	procs.lock().unwrap().push(child);
+	let (live_tx, live_rx) = std::sync::mpsc::channel::<Result<(), String>>();
 	std::thread::spawn(move || {
 		// Runs until the pipe breaks (ffmpeg killed on teardown) or WASAPI errors — both
 		// expected. A failure here means the per-app capture stopped; the session keeps its
 		// video and (if the user toggles) can re-stream. No re-init loop: process-loopback
 		// has no default-endpoint-change recovery to do.
-		if let Err(e) = pulsar_core::audio::run_process_loopback_capture(stdin, pid) {
-			tracing::warn!(pid, "process-loopback capture ended: {e}");
+		let started = live_tx.clone();
+		let r = pulsar_core::audio::run_process_loopback_capture_mode(stdin, pid, mode, move || {
+			let _ = started.send(Ok(()));
+		});
+		if let Err(e) = r {
+			tracing::warn!(pid, ?mode, "process-loopback capture ended: {e}");
+			let _ = live_tx.send(Err(e)); // ignored once the capture was live
 		}
 	});
-	tracing::info!(pid, "audio: per-process WASAPI loopback (co-op per-app isolation)");
+	// Activation takes milliseconds; wait for it so a failure falls back instead of
+	// leaving the session silent.
+	match live_rx.recv_timeout(std::time::Duration::from_secs(2)) {
+		Ok(Ok(())) => {}
+		other => {
+			tracing::warn!(pid, ?mode, ?other, "audio: process-loopback did not start");
+			let _ = child.kill();
+			let _ = child.wait();
+			return false;
+		}
+	}
+	procs.lock().unwrap().push(child);
+	match mode {
+		pulsar_core::audio::ProcessLoopbackMode::Include => {
+			tracing::info!(pid, "audio: per-process WASAPI loopback (co-op per-app isolation)")
+		}
+		pulsar_core::audio::ProcessLoopbackMode::Exclude => tracing::info!(
+			"audio: system mix via process loopback (all but Pulsar; ignores the host's volume and mute)"
+		),
+	}
 	true
 }
 
@@ -961,7 +994,14 @@ fn start_audio_and_mute(
 			// failure we fall through to the default-endpoint loopback unchanged (no regression).
 			let process_started = match target_pid {
 				Some(pid) if pulsar_core::audio::process_loopback_supported() => {
-					spawn_process_loopback_audio(procs, ffmpeg, &dest, pid, neg_layout)
+					spawn_process_loopback_audio(
+						procs,
+						ffmpeg,
+						&dest,
+						pid,
+						neg_layout,
+						pulsar_core::audio::ProcessLoopbackMode::Include,
+					)
 				}
 				Some(_) => {
 					tracing::info!(
@@ -980,7 +1020,28 @@ fn start_audio_and_mute(
 			// program audio) and the client would hear silence or the wrong source. Prefer the
 			// loopback-of-redirected-sink path; only if that fails too, fall through to dshow.
 			let pinned_active = pinned.is_some();
+			// Whole desktop: capture every process except Pulsar via process loopback. The
+			// default-endpoint loopback taps AFTER the endpoint's volume and mute, so a host
+			// muted or at 0 % streamed pure silence (measured: Realtek host muted at 0 %,
+			// endpoint loopback silent, this path −14 dBFS on a test tone). Only Pulsar's own
+			// process tree is left out (its WebView2 renders outside that tree, measured).
+			// Stereo only (fixed capture format): a surround request keeps the endpoint path,
+			// as do a redirect to the virtual sink and a user-named capture device.
+			let system_started = !process_started
+				&& !pinned_active
+				&& acfg.audio_loopback()
+				&& neg_layout.channels() <= 2
+				&& pulsar_core::audio::process_loopback_supported()
+				&& spawn_process_loopback_audio(
+					procs,
+					ffmpeg,
+					&dest,
+					std::process::id(),
+					neg_layout,
+					pulsar_core::audio::ProcessLoopbackMode::Exclude,
+				);
 			process_started
+				|| system_started
 				|| ((pinned_active || acfg.audio_loopback())
 					&& spawn_loopback_audio(procs, ffmpeg, &dest, pinned, neg_layout))
 		};
@@ -1071,6 +1132,13 @@ fn spawn_media_forwarders(
 	// forwarder sends Reed-Solomon parity per frame (`rs`) or XOR groups of `1/ratio`
 	// datagrams; the ratio is read live (0 = off).
 	fec: Option<(bool, Arc<std::sync::atomic::AtomicU16>)>,
+	// Live target video bitrate (kbps, 0 = unknown) the wire pacer derives its rate from;
+	// updated by `make_on_stream` on every request, including the live fast paths that keep
+	// these forwarders running.
+	pace_target_kbps: Arc<std::sync::atomic::AtomicU32>,
+	// Per-session send counters (first copies / parity / retransmits) the host's FEC policy
+	// rebuilds pre-repair loss from; bumped when a datagram actually leaves the pacer.
+	sent: Arc<pulsar_core::service::media::MediaSendStats>,
 ) -> Option<(u16, u16)> {
 	use pulsar_core::service::media;
 	let bind = || -> Option<(tokio::net::UdpSocket, u16)> {
@@ -1095,7 +1163,12 @@ fn spawn_media_forwarders(
 	*nack_slot.lock().unwrap() = Some(nack_tx);
 
 	let vtx = media_tx.clone();
+	// `PULSAR_MOS_PACE=0` puts every datagram on the wire the moment it is ready (the old
+	// behaviour), for A/B against the pacer.
+	let pace_on = std::env::var("PULSAR_MOS_PACE").map(|v| v != "0").unwrap_or(true);
 	let vh = tokio::spawn(async move {
+		use pacer::{Class, Pacer};
+		use std::sync::atomic::Ordering;
 		// seq → datagram retransmit ring (linear scan is fine at this size).
 		let mut ring: std::collections::VecDeque<(u16, Vec<u8>)> =
 			std::collections::VecDeque::with_capacity(NACK_RING);
@@ -1103,13 +1176,83 @@ fn spawn_media_forwarders(
 		let mut fec_rs = media::RsFecEncoder::new(0.0);
 		let mut fec_logged: u16 = 0;
 		let mut buf = vec![0u8; 2048];
-		// 1 Hz throughput meter (intake pkts/bytes + session send failures) — the
-		// "video reaches the client mangled/not at all" debugging needs to know
-		// WHERE the chain loses data, and this stage was silent.
+		// Every video-path datagram (video, its FEC parity, NACK retransmits) leaves through ONE
+		// pacer, so parity and retransmits share the video's budget instead of bursting on top
+		// of it (see pacer.rs for why and how).
+		let mut pacer = Pacer::new(pace_on, std::time::Instant::now());
+		// 2 s measurement window (intake + what actually left, per class) — the "video reaches
+		// the client mangled/not at all" debugging needs to know WHERE the chain loses data,
+		// and a field test on a poor link must tell congestion from policing/MTU loss: the
+		// client logs what it received per window, this logs what left the host.
 		let (mut m_pkts, mut m_bytes, mut m_gaps) = (0u64, 0u64, 0u64);
+		let (mut m_nack, mut m_nack_miss, mut m_nack_unsent) = (0u64, 0u64, 0u64);
 		let mut m_last_seq: Option<u16> = None;
 		let mut m_at = std::time::Instant::now();
-		loop {
+		// RsFecEncoder holds a small frame's block open for the next frame (multi-frame
+		// blocks); when no frame follows (idle screen) the held parity is flushed once the
+		// intake has been quiet for the grouping span, so the last frames before a pause
+		// are protected too. `rs_held` = a block may be held (cleared after the flush).
+		const RS_IDLE_FLUSH: std::time::Duration = std::time::Duration::from_millis(25);
+		let mut last_video_at = std::time::Instant::now();
+		let mut rs_held = false;
+		'fwd: loop {
+			if rs_held && last_video_at.elapsed() >= RS_IDLE_FLUSH {
+				rs_held = false;
+				let now = std::time::Instant::now();
+				for parity in fec_rs.flush_pending() {
+					pacer.push(Class::Parity, parity, None, now);
+				}
+			}
+			// Put on the wire everything the pacer allows now. A failed VIDEO send means the
+			// session is gone; a failed parity/retransmit send is just skipped (as before).
+			while let Some((class, dg)) = pacer.pop(std::time::Instant::now()) {
+				if vtx.send(&dg).await.is_err() {
+					if class == Class::Video {
+						break 'fwd; // session gone
+					}
+					continue;
+				}
+				match class {
+					Class::Video => sent.add_video(dg.len()),
+					Class::Parity => sent.add_parity(dg.len()),
+					Class::Retransmit => sent.add_rtx(dg.len()),
+				}
+			}
+			if m_at.elapsed() >= std::time::Duration::from_secs(2) {
+				let now = std::time::Instant::now();
+				let win_ms = (now.duration_since(m_at).as_millis() as u64).max(1);
+				let st = pacer.take_stats();
+				tracing::info!(
+					window_ms = win_ms,
+					intake_pkts = m_pkts,
+					intake_kbps = m_bytes * 8 / win_ms,
+					gaps_before_intake = m_gaps,
+					video_pkts = st.video_pkts,
+					video_bytes = st.video_bytes,
+					parity_pkts = st.parity_pkts,
+					parity_bytes = st.parity_bytes,
+					rtx_pkts = st.rtx_pkts,
+					rtx_bytes = st.rtx_bytes,
+					nack_seqs = m_nack,
+					nack_miss = m_nack_miss,
+					nack_unsent = m_nack_unsent,
+					target_kbps = pace_target_kbps.load(Ordering::Relaxed),
+					pace_kbps = pacer.pace_kbps(now) as u64,
+					paced = pace_on,
+					max_qdelay_ms = st.max_qdelay_ms as u32,
+					drops = st.drops,
+					rtx_drops = st.rtx_drops,
+					"mos video forwarder throughput"
+				);
+				(m_pkts, m_bytes, m_gaps) = (0, 0, 0);
+				(m_nack, m_nack_miss, m_nack_unsent) = (0, 0, 0);
+				m_at = now;
+			}
+			let mut wake = pacer.next_wake(std::time::Instant::now());
+			if rs_held {
+				let flush_at = last_video_at + RS_IDLE_FLUSH;
+				wake = Some(wake.map_or(flush_at, |t| t.min(flush_at)));
+			}
 			tokio::select! {
 				r = vsock.recv(&mut buf) => {
 					// An oversized datagram makes recv return Err on Windows (WSAEMSGSIZE) —
@@ -1126,7 +1269,9 @@ fn spawn_media_forwarders(
 					if n < 13 || rtp[0] >> 6 != 2 || (rtp[1] & 0x7F) != 96 {
 						continue;
 					}
-					if let Some(seq) = media::rtp_seq(rtp) {
+					let now = std::time::Instant::now();
+					let seq = media::rtp_seq(rtp);
+					if let Some(seq) = seq {
 						if let Some(last) = m_last_seq {
 							let d = media::seq_forward(last, seq);
 							if d > 1 && d < 0x8000 {
@@ -1141,46 +1286,35 @@ fn spawn_media_forwarders(
 					}
 					m_pkts += 1;
 					m_bytes += n as u64;
-					if m_at.elapsed().as_secs() >= 1 {
-						tracing::info!(
-							pkts = m_pkts,
-							mbit = (m_bytes * 8) / 1_000_000,
-							gaps_before_intake = m_gaps,
-							"mos video forwarder throughput"
-						);
-						(m_pkts, m_bytes, m_gaps) = (0, 0, 0);
-						m_at = std::time::Instant::now();
-					}
-					if vtx.send(&media::frame(media::TAG_VIDEO, rtp)).await.is_err() {
-						break; // session gone
-					}
+					let milli = fec.as_ref().map_or(0, |(_, r)| r.load(Ordering::Relaxed));
+					pacer.set_target(pace_target_kbps.load(Ordering::Relaxed), milli as f32 / 1000.0, now);
+					pacer.push(Class::Video, media::frame(media::TAG_VIDEO, rtp), seq, now);
 					// FEC parity behind every frame / group (zero-RTT repair on lossy paths).
-					if let Some((rs, ratio)) = fec.as_ref() {
-						let milli = ratio.load(std::sync::atomic::Ordering::Relaxed);
+					// Queued right behind the packet that completed its frame/group, so it
+					// leaves straight after that data, inside the same pacing budget.
+					if let Some((rs, _)) = fec.as_ref() {
 						if milli != fec_logged {
 							fec_logged = milli;
 							tracing::info!(pct = milli as f32 / 10.0, rs, "fec parity ratio");
 						}
-						if let Some(seq) = media::rtp_seq(rtp) {
+						if let Some(seq) = seq {
 							if *rs {
 								let want = milli as f32 / 1000.0;
 								if (want - fec_rs.ratio()).abs() > 1e-4 {
 									fec_rs.set_ratio(want);
 								}
 								for parity in fec_rs.push(seq, rtp) {
-									if vtx.send(&parity).await.is_err() {
-										break;
-									}
+									pacer.push(Class::Parity, parity, None, now);
 								}
+								last_video_at = now;
+								rs_held = want > 0.0;
 							} else {
 								let n: u8 = if milli == 0 { 0 } else { (1000 / milli.max(1)).clamp(5, 32) as u8 };
 								if n != fec_xor.n() {
 									fec_xor.set_n(n);
 								}
 								if let Some(parity) = fec_xor.push(seq, rtp) {
-									if vtx.send(&parity).await.is_err() {
-										break;
-									}
+									pacer.push(Class::Parity, parity, None, now);
 								}
 							}
 						}
@@ -1203,12 +1337,36 @@ fn spawn_media_forwarders(
 						}
 						want.insert(seq);
 					}
+					m_nack += want.len() as u64;
+					// A seq still waiting in the pacer (original not sent yet, or a retransmit
+					// already queued) needs no second copy: it is about to leave anyway.
+					let unsent = pacer.unsent_seqs();
+					let now = std::time::Instant::now();
+					let mut hit = 0u64;
 					for (s, pkt) in ring.iter() {
 						if want.contains(s) {
-							let _ = vtx.send(&media::frame(media::TAG_VIDEO, pkt)).await;
+							hit += 1;
+							if unsent.contains(s) {
+								m_nack_unsent += 1;
+							} else {
+								// Retransmits go AHEAD of queued video (the client is already
+								// stalled on them), through the same budget. Past their share of the
+								// wire (`pacer::RTX_SHARE`) the pacer drops them instead: in a loss
+								// storm they would only feed the bottleneck that drops them.
+								pacer.push(Class::Retransmit, media::frame(media::TAG_VIDEO, pkt), Some(*s), now);
+							}
 						}
 					}
+					m_nack_miss += (want.len() as u64).saturating_sub(hit);
 				}
+				// The pacer's head datagram falls due (a whole-ms tokio timer; the pacer
+				// batches whatever fell due in between).
+				_ = async {
+					match wake {
+						Some(t) => tokio::time::sleep_until(tokio::time::Instant::from_std(t)).await,
+						None => std::future::pending::<()>().await,
+					}
+				} => {}
 			}
 		}
 	});
@@ -1407,6 +1565,7 @@ pub(super) fn make_on_stream(
 	nack_slot: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Vec<u16>>>>>,
 	fwd_slot: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 	fec_n: Arc<std::sync::atomic::AtomicU16>,
+	media_sent: Arc<pulsar_core::service::media::MediaSendStats>,
 	#[cfg(target_os = "linux")] restore_token: Arc<Mutex<Option<String>>>,
 	#[cfg(target_os = "linux")] cap_slot: Arc<Mutex<Option<pulsar_core::capture::WaylandCapture>>>,
 	#[cfg(target_os = "linux")] libav_slot: Arc<Mutex<Option<super::libav::LibavHost>>>,
@@ -1458,7 +1617,18 @@ pub(super) fn make_on_stream(
 	// now-frozen encode-ms label for the rest of the session).
 	#[cfg(windows)]
 	let mut stats_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>> = None;
+	// The video target the media forwarder's wire pacer paces against. Shared with the running
+	// forwarder and refreshed on EVERY request below, before any fast path returns: an ABR step
+	// is applied live (the forwarders keep running), so they'd otherwise pace a stale rate.
+	let pace_target_kbps = Arc::new(std::sync::atomic::AtomicU32::new(0));
 	move |req: StreamReq, addr: SocketAddr| {
+		// Client-requested bitrate wins; 0 falls back to the host config (as the encoders do).
+		let eff_target = if req.bitrate_kbps > 0 {
+			req.bitrate_kbps
+		} else {
+			stream_cfg.lock().unwrap().bitrate_kbps
+		};
+		pace_target_kbps.store(eff_target, std::sync::atomic::Ordering::Relaxed);
 		// SCREEN ADAPTATION (Parsec-style) — run FIRST, before any fast-path return, so every
 		// restream re-evaluates it: switch the captured monitor to the best-fit display mode for
 		// the client's split pane, and revert on a later `adapt: None` (full teardown reverts via
@@ -1626,6 +1796,8 @@ pub(super) fn make_on_stream(
 				&nack_slot,
 				&fwd_slot,
 				(req.fec || req.fec_rs).then(|| (req.fec_rs, fec_n.clone())),
+				pace_target_kbps.clone(),
+				media_sent.clone(),
 			) {
 				Some((vp, ap)) => (
 					SocketAddr::new(lo, vp),
@@ -1686,15 +1858,14 @@ pub(super) fn make_on_stream(
 				.lock()
 				.unwrap()
 				.insert(sid, (peer.clone(), out_tx.clone()));
-			// Open or update the connections window: bring forward for Remote, leave
-			// minimized for Game. If the window was already opened minimized at accept
-			// time, this upgrades it to the correct focus/visibility for the real mode.
-			// Remote first-stream brings the window forward; GAME reveals it WITHOUT stealing
-			// focus (so a gaming connection is visibly listed on the host too — G1).
+			// Open or update the connections window: bring forward for Remote, keep it
+			// minimized (taskbar only) for Game — it must not cover the game, steal its focus
+			// or appear in a Desktop game stream; the host opens it from the sidebar. If the
+			// window was opened minimized at accept time, Remote upgrades it here.
 			crate::connections::open_or_update(
 				&app_h,
 				if req.game_mode {
-					crate::connections::Surface::Reveal
+					crate::connections::Surface::Background
 				} else {
 					crate::connections::Surface::Forward
 				},
@@ -2481,6 +2652,10 @@ pub(super) fn make_on_stream(
 		// post-resolve `if native_started` branch can spawn the encode-stat reporter thread.
 		#[allow(unused_mut)]
 		let mut native_enc_us: Option<std::sync::Arc<std::sync::atomic::AtomicU32>> = None;
+		// The native capture's live numbers (source DXGI/WGC, encode tick, fresh fps), logged by
+		// the same reporter thread every 30 s.
+		#[cfg(windows)]
+		let mut native_stats: Option<std::sync::Arc<pulsar_capture::LiveStats>> = None;
 		// Effective per-window (WGC) capture target for THIS stream (Phase 2b co-op): the client's
 		// explicit pick (`req.window_hwnd`, from its window picker) wins; otherwise the window the
 		// resolver discovered for a game this session launched in game mode (`launched_hwnd`). When
@@ -2538,6 +2713,8 @@ pub(super) fn make_on_stream(
 				// Periodic intra refresh instead of scheduled IDRs when the client asked for
 				// it (a Linux client that resumes on a partial picture); applied at (re)build.
 				intra_refresh: req.loss_recovery == pulsar_core::service::LossRecovery::IntraRefresh,
+				// Reference-frame invalidation for a client that resumes at the recovery tag.
+				rfi: req.rfi,
 				draw_mouse: true,
 				// Phase 2b co-op: when the session targets a specific WINDOW (client-picked via
 				// `req.window_hwnd`, or the game this session launched in game mode), capture that
@@ -2564,6 +2741,7 @@ pub(super) fn make_on_stream(
 					// changes and re-resolve display_rect/set_monitor even when the index is unchanged (C8).
 					*native_gen_arc.lock().unwrap() = Some(h.build_gen_arc());
 					native_enc_us = Some(h.encode_us_arc()); // G2: before h is moved into the slot
+					native_stats = Some(h.stats_arc());
 					*native_slot.lock().unwrap() = Some(h);
 					true
 				}
@@ -2690,6 +2868,10 @@ pub(super) fn make_on_stream(
 			if let Some(enc_us) = native_enc_us.clone() {
 				let stats_enc = stats_out.clone();
 				let label_enc = base_label.clone();
+				#[cfg(windows)]
+				let cap_stats = native_stats.clone();
+				#[cfg(windows)]
+				let mut ticks: u32 = 0;
 				// Bind this reporter to the stream generation: a slow-path restream/teardown flips
 				// this flag (above) so THIS thread exits instead of lingering and re-pushing the old
 				// stream's now-frozen encode-ms label. Store it so the next restream can cancel us.
@@ -2706,6 +2888,23 @@ pub(super) fn make_on_stream(
 					if cancel.load(std::sync::atomic::Ordering::Relaxed) {
 						break;
 					}
+					#[cfg(windows)]
+					{
+						ticks = ticks.wrapping_add(1);
+					}
+					#[cfg(windows)]
+					if let Some(cs) = cap_stats.as_ref().filter(|_| ticks % 60 == 4) {
+						let c = cs.snapshot();
+						tracing::info!(
+							source = c.source,
+							tick_p50_ms = c.submit_p50_us as f32 / 1000.0,
+							tick_p90_ms = c.submit_p90_us as f32 / 1000.0,
+							fresh_per_s = c.fresh_per_s,
+							rfi_recovered = c.rfi_recovered,
+							rfi_declined = c.rfi_declined,
+							"native capture"
+						);
+					}
 					let us = enc_us.load(std::sync::atomic::Ordering::Relaxed);
 					if us == 0 {
 						continue;
@@ -2714,9 +2913,19 @@ pub(super) fn make_on_stream(
 					// must NOT: this per-session channel is shared with chat/clipboard/file-manager
 					// replies, so a momentary backlog would otherwise permanently kill the live
 					// stream's encode-ms stat.
+					// The measured capture path may encode on the display GPU itself (Media
+					// Foundation) instead of NVENC: name the encoder that actually runs.
+					#[cfg(windows)]
+					let label_now = if cap_stats.as_ref().is_some_and(|c| c.snapshot().source == "dxgi-mf") {
+						label_enc.replacen(HwEncoder::Nvenc.label(), HwEncoder::MediaFoundation.label(), 1)
+					} else {
+						label_enc.clone()
+					};
+					#[cfg(not(windows))]
+					let label_now = label_enc.clone();
 					if let Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) = stats_enc.try_send(
 						DataMsg::Stats(format!(
-							"{label_enc} · {:.1} {}",
+							"{label_now} · {:.1} {}",
 							us as f32 / 1000.0,
 							crate::i18n::t("stream.msEncode")
 						)),
@@ -2831,7 +3040,15 @@ pub(super) fn make_on_stream(
 			// index: when the native NVENC failure pruned nvenc, candidate 0 is already a
 			// different encoder, and the stats panel would otherwise claim NVENC forever.
 			let labeled_enc = encoder;
-			let on_settled = move |enc: pipeline::HwEncoder| {
+			let rot_settle = stats_out.clone();
+			let planned_capture = capture;
+			let on_settled = move |enc: pipeline::HwEncoder, cap: pipeline::CaptureMethod| {
+				// GDI grabs the LOGICAL (already upright) desktop, unlike ddagrab's unrotated
+				// duplication surface: once the chain lands on gdigrab after a ddagrab start,
+				// retract the rotation reported for ddagrab or the client double-rotates.
+				if cap == CaptureMethod::Gdigrab && planned_capture != CaptureMethod::Gdigrab {
+					let _ = rot_settle.try_send(DataMsg::DisplayRotation(0));
+				}
 				if enc == labeled_enc {
 					return;
 				}
@@ -2907,7 +3124,9 @@ pub(super) fn make_on_stream(
 		} else {
 			None
 		};
-		let reported_rotation = if native_started {
+		// gdigrab (GDI) captures the logical desktop — already upright — so it carries no
+		// rotation either; only the ffmpeg ddagrab path streams the unrotated surface.
+		let reported_rotation = if native_started || capture == CaptureMethod::Gdigrab {
 			0
 		} else {
 			#[cfg(windows)]
@@ -3326,6 +3545,10 @@ pub(super) fn make_on_file(app_h: AppHandle, peer: String, sid: u64) -> impl FnM
 				};
 				let ok = saved.is_some();
 				let written = saved.as_ref().map(|(_, b)| *b).unwrap_or(0);
+				// Pulsar's own toast on this (receiving) side: "file arrived", click = folder.
+				if let Some((p, _)) = saved.as_ref() {
+					crate::toast::file_received(&app_h_owned, &peer_owned, p);
+				}
 				// Use the actual on-disk filename (may have a dedup suffix like " (1)")
 				// instead of name_owned so the UI flash and session log name the file the
 				// user can actually open.

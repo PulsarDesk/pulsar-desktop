@@ -31,15 +31,17 @@ mod decode;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod gpu;
 #[cfg(all(unix, not(target_os = "macos")))]
+mod kms_lease;
+#[cfg(all(unix, not(target_os = "macos")))]
 mod linux;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod video;
 
-// Shared streaming types + RTP depacketizer for the native-decode backends (Win MF, mac VT).
-// Linux uses ffmpeg's own RTP demux, so it doesn't need this.
-// (Also compiled for `cargo test` on Linux: the depacketizer + reorder buffer are pure
-// Rust and their unit tests are the only coverage the Windows/macOS media path gets on CI.)
-#[cfg(any(target_os = "windows", target_os = "macos", test))]
+// Shared streaming types + RTP depacketizer for the native-decode backends (Win MF, mac VT,
+// Linux libavcodec — the Linux renderer feeds the decoder from it unless
+// `PULSAR_LINUX_DEMUX=ffmpeg` brings back libavformat's RTP demux). Pure Rust, unit-tested
+// on every host.
+#[cfg(any(target_os = "windows", unix, test))]
 mod stream;
 
 // Windows: native zero-copy renderer (child HWND + D3D11 + Media Foundation decode).

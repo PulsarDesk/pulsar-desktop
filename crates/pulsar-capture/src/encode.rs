@@ -83,8 +83,12 @@ use crate::Codec;
 
 mod d3d;
 mod encoder;
+// The display GPU's own hardware encoder via Media Foundation (measured against NVENC).
+pub(crate) mod mf;
 mod new;
 pub(crate) mod nvenc;
+// GPU-free encoder decisions (reference-buffer depth, RFI vs keyframe, keyframe schedule).
+mod policy;
 mod submit;
 
 // Re-export the public API at the original `crate::encode::*` paths. `lib.rs` uses
@@ -192,7 +196,7 @@ unsafe fn probe_nvenc_codecs() -> Result<Vec<Codec>, String> {
 }
 
 /// Diagnostic log to a fixed file (the native encoder runs in the GUI host with no console).
-fn cap_dbg(msg: &str) {
+pub(crate) fn cap_dbg(msg: &str) {
 	use std::io::Write;
 	if let Ok(mut f) = std::fs::OpenOptions::new()
 		.create(true)
@@ -225,4 +229,22 @@ pub struct EncParams {
 	/// Host display rotation (degrees CW: 0/90/180/270). The BGRA→NV12 Blt rotates the captured
 	/// frame by this so the STREAM is already upright for the viewer (no client-side rotation).
 	pub rotation: u32,
+	/// Reference-frame invalidation (the client asked, `StreamReq::rfi`): keep a deep reference
+	/// buffer (`policy::rfi_dpb`) so a lost one can be skipped (`Encoder::invalidate_lost`).
+	pub rfi: bool,
+}
+
+/// The SEI NAL that tags an RFI recovery frame (user_data_unregistered with
+/// `pulsar_core`'s `RFI_RECOVERY_UUID`, mirrored here: the capture crate has no core dep).
+pub(crate) fn recovery_sei(codec: Codec) -> Vec<u8> {
+	const UUID: [u8; 16] = *b"PULSAR-RFI-RECOV";
+	let mut v = vec![0, 0, 0, 1];
+	match codec {
+		Codec::H265 => v.extend_from_slice(&[0x4E, 0x01]), // prefix SEI (39), layer 0, tid 1
+		_ => v.push(0x06),                                // H.264 SEI
+	}
+	v.extend_from_slice(&[0x05, 0x10]); // payload type 5, size 16
+	v.extend_from_slice(&UUID);
+	v.push(0x80); // rbsp trailing bits
+	v
 }

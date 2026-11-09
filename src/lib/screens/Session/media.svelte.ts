@@ -1,17 +1,17 @@
-// The video + audio + live-stats engine for a remote-play session, lifted verbatim out of
+// The video + live-stats engine for a remote-play session, lifted verbatim out of
 // Session.svelte so the component stays under the size budget. It owns all the streaming
 // metric state, the host-summary derivations, and the WebSocket/timer effects. Inputs that
 // change over the session lifetime are passed as GETTERS so the effects re-run exactly when
 // they did inline (reading the getter inside the effect tracks the source $state/prop).
 //
 // Behaviour is identical to the original inline script: same effect bodies, same teardown,
-// same WebCodecs sink wiring. Instantiated once at component init (so its $effect()s register
+// same wiring. Instantiated once at component init (so its $effect()s register
 // in the component's reactive scope and tear down with it).
 
 // Video is rendered NATIVELY in-app on every platform now (pulsar-render: rkmpp on Linux,
 // Media Foundation+D3D11 on Windows; mpv/VideoToolbox on macOS) — the webview WebCodecs
-// video path was removed (too slow). Only audio still decodes in the webview (WebAudio).
-import { startOpusAudio } from '#lib/opus-audio.js';
+// video path was removed (too slow). Audio plays natively too (src-tauri/src/native_audio.rs,
+// libopus + SDL3): nothing of the stream reaches the webview.
 import { onPlayDecoder, onPlayRtt, onPlayStats, onPlayVStats } from '#lib/api.js';
 import { t } from '#lib/i18n.svelte.js';
 
@@ -25,7 +25,6 @@ import { listenScope } from '#lib/api.events.js';
 type Inputs = {
 	playId: () => number;
 	wsPort: () => number;
-	audioWsPort: () => number;
 	native: () => boolean;
 	embedded: () => boolean;
 	// True while a codec/encoder/resolution switch is in flight: the host restarts
@@ -62,7 +61,6 @@ export class SessionMedia {
 	decoderCodec = $state('');
 	// Host encode summary string "codec · encoder · 1080p · 60fps", pushed by the host.
 	hostStats = $state('');
-	audioErr = $state('');
 
 	// Split the host summary into its parts so the panel can lay them out in clean rows
 	// (the single cramped string used to overflow). Order matches lib.rs's format!.
@@ -127,27 +125,6 @@ export class SessionMedia {
 				})
 			);
 			return scope.dispose;
-		});
-
-		// Audio: a second loopback WebSocket carries the host's Opus stream; decode +
-		// play it (best-effort — silent if the webview lacks WebCodecs audio).
-		$effect(() => {
-			const audioWsPort = inputs.audioWsPort();
-			if (!audioWsPort) return;
-			this.audioErr = '';
-			const sink = startOpusAudio((m) => (this.audioErr = m));
-			let ws: WebSocket | null = null;
-			try {
-				ws = new WebSocket(`ws://127.0.0.1:${audioWsPort}`);
-				ws.binaryType = 'arraybuffer';
-				ws.onmessage = (ev) => sink.push(new Uint8Array(ev.data as ArrayBuffer));
-			} catch {
-				/* audio is optional; ignore connect failures */
-			}
-			return () => {
-				ws?.close();
-				sink.close();
-			};
 		});
 
 		// RTT (keepalive ping/pong) + host encode summary arrive as events from the play

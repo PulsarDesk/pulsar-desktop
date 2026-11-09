@@ -7,6 +7,7 @@ use std::ptr;
 use super::d3d::chk;
 use super::encoder::Encoder;
 use super::nvenc;
+use super::policy;
 use crate::Frame;
 use windows::core::Interface; // `.as_raw()` for the cached-input-view source-pointer key (B3)
 use windows::core::BOOL;
@@ -23,7 +24,9 @@ impl Encoder {
 	/// packetize the Annex-B AU to RTP, unmap. `is_new==false` still encodes (steady
 	/// cadence; NVENC emits a tiny P-frame). Per-frame errors are non-fatal upstream,
 	/// but we NEVER leave the input resource mapped on an early return.
-	pub unsafe fn submit(&mut self, frame: &Frame, pts: i64) -> Result<(), String> {
+	/// `pts` = frame index (NVENC's input timestamp); `rtp_ts_90k` = the frame's capture time
+	/// in 90 kHz ticks, stamped on its RTP packets.
+	pub unsafe fn submit(&mut self, frame: &Frame, pts: i64, rtp_ts_90k: u32) -> Result<(), String> {
 		if self.closed {
 			return Err("submit after close".into());
 		}
@@ -107,12 +110,19 @@ impl Encoder {
 			// (~4 s) for the next keyframe — the "switch takes 5-8 s". So for the first ~1.5 s of a
 			// fresh encoder emit an IDR every ~250 ms (~6 keyframes) so the client reliably catches
 			// one within a quarter second even with a miss; then settle to the rare safety GOP.
+			// Except on a low-budget stream (WAN / mobile): there each catch-up keyframe is a burst
+			// of many frames' budget on an already full link — and every ladder step rebuilds the
+			// encoder — so a fresh encoder sends ONE keyframe and a client that misses it asks
+			// (its keyframe request / renderer fallback). See `policy::scheduled_idr`.
 			let interval = self.idr_interval.max(1) as u64;
-			let fast_step = (self.fps / 4).max(1) as u64; // ~every 250 ms (fps-scaled)
-			let fast_window = self.fps as u64; // first ~1 s after (re)start → ~4 keyframes
+			let catch_up = !policy::low_budget(
+				self.enc_config.rcParams.averageBitRate,
+				self.width,
+				self.height,
+				self.fps,
+			);
 			let force_idr = self.force_idr_once
-				|| self.frame_idx % interval == 0
-				|| (self.frame_idx < fast_window && self.frame_idx % fast_step == 0);
+				|| policy::scheduled_idr(self.frame_idx, interval, self.fps, catch_up);
 			// NB: `force_idr_once` is NOT cleared here — it is a client keyframe request
 			// (`MediaNack([0])` / decoder rebuild) and must survive a transient encode/lock
 			// failure. It is consumed only AFTER a successful encode + bitstream lock below.
@@ -144,6 +154,15 @@ impl Encoder {
 			// the IDR instead of silently dropping the client's keyframe request (which would leave
 			// a rebuilt-decoder client frozen until the multi-second safety GOP).
 			self.force_idr_once = false;
+			// What RFI needs to know of this frame (an IDR empties the reference buffer) and the
+			// window's keyframe/overshoot numbers.
+			let idr = force_idr || lock.pictureType == nvenc::NV_ENC_PIC_TYPE_IDR;
+			self.refs.record(rtp_ts_90k, pts as u64, idr);
+			let now = std::time::Instant::now();
+			self.win.add(now, lock.bitstreamSizeInBytes as usize, idr);
+			if let Some(line) = self.win.take(now, self.enc_config.rcParams.averageBitRate, self.fps) {
+				super::cap_dbg(&line);
+			}
 
 			// Hand the Annex-B AU (in the locked buffer, valid only until Unlock) to the
 			// dedicated RTP sender thread. `RtpEgress::send_access_unit` copies it into an owned
@@ -162,10 +181,17 @@ impl Encoder {
 				// every AU; a non-zero layer_id or a bogus NAL type in the dump implicates the
 				// encoder config, a clean dump implicates the packetizer (rtp.rs).
 				dump_bitstream(annexb);
-				// Rescale pts (frame index, 1/fps units) → 90 kHz RTP ticks. Truncate/wrap;
-				// the client tolerates it (it uses ts only for AU grouping/jitter).
-				let pts_90k = ((pts as i128 * 90_000) / self.fps as i128) as u32;
-				self.rtp.send_access_unit(annexb, pts_90k);
+				// The capture-time RTP timestamp (see lib.rs): the client's delay estimator needs
+				// real send spacing, which a frame-index clock only gives at exactly the nominal fps.
+				if self.mark_recovery {
+					// RFI recovery frame: the client resumes decoding at this tag.
+					let mut au = super::recovery_sei(self.codec);
+					au.extend_from_slice(annexb);
+					self.rtp.send_access_unit(&au, rtp_ts_90k);
+					self.mark_recovery = false;
+				} else {
+					self.rtp.send_access_unit(annexb, rtp_ts_90k);
+				}
 			}
 
 			// Unlock the bitstream (always — the copy inside send_access_unit already took the

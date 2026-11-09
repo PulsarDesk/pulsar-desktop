@@ -1,0 +1,29 @@
+#!/bin/bash
+# The Orange Pi 5B image's session: Pulsar fullscreen in game mode, dark theme.
+#
+# The UI keeps these in the webview's localStorage (pulsar.ui.v1, pulsar.theme.v1), and a
+# remote-mode session can flip ui.appMode back to 'remote', so they are forced on every start.
+# On the first boot the store does not exist yet: it is created with WebKit's schema.
+set -u
+DB="$HOME/.local/share/dev.pulsar.app/localstorage/tauri_localhost_0.localstorage"
+mkdir -p "$(dirname "$DB")"
+python3 - "$DB" <<'PY'
+import json, sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+db.execute(
+    "CREATE TABLE IF NOT EXISTS ItemTable "
+    "(key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB NOT NULL ON CONFLICT FAIL)"
+)
+def put(key, text):
+    db.execute("INSERT OR REPLACE INTO ItemTable(key, value) VALUES(?, ?)",
+               (key, sqlite3.Binary(text.encode("utf-16-le"))))
+row = db.execute("SELECT value FROM ItemTable WHERE key = 'pulsar.ui.v1'").fetchone()
+ui = json.loads(row[0].decode("utf-16-le")) if row else {}
+ui["appMode"] = "game"
+ui["gamingFullscreen"] = True
+put("pulsar.ui.v1", json.dumps(ui, separators=(",", ":")))
+put("pulsar.theme.v1", "dark")
+db.commit()
+db.close()
+PY
+exec /usr/bin/pulsar

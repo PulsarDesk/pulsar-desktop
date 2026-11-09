@@ -29,10 +29,17 @@ impl CaptureDevice {
 		// Live monitor switch: when the host writes an output index here (≠ u32::MAX and ≠ the
 		// current output), we return `RunExit::Switch(idx)` so the caller rebuilds on it.
 		requested_output: &AtomicU32,
+		// Set by the capture thread (the source probe) to rebuild on the SAME output.
+		rebuild: &AtomicBool,
 		stop: &AtomicBool,
 		mut on_frame: impl FnMut(&Frame),
 	) -> RunExit {
 		let fps = client_fps.max(1);
+		// Encode a fresh frame the moment it is acquired (see step 2). `PULSAR_EMIT_ON_ARRIVAL=0`
+		// restores the old slot-deadline emission for an A/B measurement.
+		let emit_on_arrival = std::env::var("PULSAR_EMIT_ON_ARRIVAL")
+			.map(|v| v != "0")
+			.unwrap_or(true);
 		// NOTE: the display keep-alive (Sunshine SetThreadExecutionState) and the TIME_CRITICAL
 		// thread priority are engaged ONCE for the whole capture-thread life by `lib.rs`'s thread
 		// body (`_wake` / `_prio`). We must NOT re-engage them here: SetThreadExecutionState is
@@ -95,6 +102,9 @@ impl CaptureDevice {
 			if req_out != u32::MAX && req_out != self.output_idx {
 				return RunExit::Switch(req_out);
 			}
+			if rebuild.swap(false, Ordering::AcqRel) {
+				return RunExit::Switch(self.output_idx);
+			}
 
 			let now0 = self.qpc.now_ns();
 			let mut deadline = start + frame_no * interval_ns;
@@ -125,11 +135,18 @@ impl CaptureDevice {
 			};
 			let cap = self.snapshot(wait_ms, draw_cursor);
 
-			// 2. Pace: if the real frame arrived before the deadline, sleep the remainder so
-			//    the encoder still sees an even cadence (hi-res; returns at once if we're late).
-			let now2 = self.qpc.now_ns();
-			if deadline > now2 {
-				timer.sleep_for(std::time::Duration::from_nanos((deadline - now2) as u64));
+			// 2. Pace. A fresh frame is encoded AT ONCE and the rest of its slot is slept AFTER
+			//    it (step 4) — one frame per slot either way. Holding it to the slot deadline
+			//    (the old even cadence) added up to a whole frame interval of latency: half on
+			//    average, ~4 ms at 120 fps and ~8 ms at 60. The RTP timestamp is the capture
+			//    time, so the client needs no even send spacing. A timeout (reused surface)
+			//    still goes out at the deadline.
+			let fresh = emit_on_arrival && matches!(cap, Capture::Frame);
+			if !fresh {
+				let now2 = self.qpc.now_ns();
+				if deadline > now2 {
+					timer.sleep_for(std::time::Duration::from_nanos((deadline - now2) as u64));
+				}
 			}
 
 			match cap {
@@ -228,6 +245,7 @@ impl CaptureDevice {
 				// Capture::Frame and the Capture::Timeout reuse path alike, so a cursor over a
 				// static desktop still moves). Returns `present` when the cursor was drawn,
 				// else the clean `pool` — either way a valid BGRA texture the encoder reads.
+				let present_ns = if is_new { self.last_present_ns } else { 0 };
 				if let Some(texture) = self.composite_cursor(draw_cursor) {
 					let frame = Frame {
 						texture,
@@ -238,8 +256,16 @@ impl CaptureDevice {
 						// Consume the one-shot: the first frame emitted after a same-res reinit
 						// carries the forced-IDR request; later frames clear it.
 						force_idr: std::mem::take(&mut force_next_idr),
+						present_ns,
 					};
 					on_frame(&frame);
+				}
+			}
+			// 4. One frame per slot: after an on-arrival emit, sleep out the rest of the slot.
+			if fresh {
+				let now3 = self.qpc.now_ns();
+				if deadline > now3 {
+					timer.sleep_for(std::time::Duration::from_nanos((deadline - now3) as u64));
 				}
 			}
 		}
@@ -294,6 +320,9 @@ impl CaptureDevice {
 		// change). We still treat it as a frame so cursor motion shows, but mark is_new
 		// off the accumulated-frames count so the encoder can prefer a tiny P-frame.
 		let desktop_changed = info.LastPresentTime != 0;
+		if desktop_changed {
+			self.last_present_ns = self.qpc.ticks_to_ns(info.LastPresentTime);
+		}
 
 		// Copy the acquired surface into our pool texture so we can ReleaseFrame right
 		// away (DXGI only holds ONE frame; not releasing promptly stalls capture).

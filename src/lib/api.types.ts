@@ -36,8 +36,6 @@ export interface PlayInfo {
 	transport: string;
 	/** Loopback WebSocket port the webview opens to receive the RTP video. */
 	ws_port: number;
-	/** Loopback WebSocket port the webview opens to receive the Opus audio (0 = none). */
-	audio_ws_port: number;
 	/** True if the host is this same machine — control is disabled (feedback loop). */
 	local: boolean;
 	/** True when the native ffplay renderer is in use (no webview video canvas). */

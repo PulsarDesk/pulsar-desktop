@@ -1,10 +1,8 @@
-//! Local **UDP(RTP) → WebSocket** relay for the embedded video viewer.
+//! Local media intake: the UDP ports the host's RTP reaches on this machine.
 //!
-//! The host streams RTP/H.264 to a UDP port on this machine. The webview can't
-//! read UDP, so we re-broadcast every datagram over a loopback WebSocket; the
-//! SvelteKit `SessionView` connects to it, depacketizes the RTP in JS, and feeds
-//! the frames to a `VideoDecoder` (WebCodecs) rendered on a `<canvas>` — no
-//! separate `ffplay` window, low latency.
+//! Audio is broadcast in-process to the native player ([`crate::native_audio`]); nothing
+//! about it touches the webview. Video keeps its older UDP→WebSocket relay (from the removed
+//! in-webview WebCodecs viewer).
 
 use std::sync::Arc;
 
@@ -22,12 +20,7 @@ pub struct Viewer {
 	pub ws_port: u16,
 	/// UDP port the host should stream **audio** (Opus RTP) to.
 	pub audio_port: u16,
-	/// Loopback WebSocket port the webview connects to for **audio**.
-	pub audio_ws_port: u16,
-	/// Broadcast of received **audio** RTP datagrams. Webview clients read the WebSocket;
-	/// the Linux native client subscribes here to feed a native player (WebKitGTK can't
-	/// decode Opus via WebCodecs, so its webview audio path is silent).
-	#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+	/// Broadcast of received **audio** RTP datagrams (the native player subscribes).
 	audio_tx: broadcast::Sender<Vec<u8>>,
 	tasks: Vec<JoinHandle<()>>,
 }
@@ -39,58 +32,37 @@ impl Viewer {
 		}
 	}
 
-	/// Forward every received audio RTP datagram to a loopback UDP port (where a native
-	/// ffmpeg/mpv decodes the Opus and plays it). The task ends when the viewer is dropped
-	/// (the broadcast closes). Used on Linux, where the webview can't play the Opus stream.
-	#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-	pub fn forward_audio_to_loopback(&mut self, dest_port: u16) {
-		let mut rx = self.audio_tx.subscribe();
-		self.tasks.push(tokio::spawn(async move {
-			let sock = match UdpSocket::bind("127.0.0.1:0").await {
-				Ok(s) => s,
-				Err(_) => return,
-			};
-			let dest: std::net::SocketAddr = ([127, 0, 0, 1], dest_port).into();
-			loop {
-				match rx.recv().await {
-					Ok(pkt) => {
-						let _ = sock.send_to(&pkt, dest).await;
-					}
-					Err(broadcast::error::RecvError::Lagged(_)) => continue,
-					Err(broadcast::error::RecvError::Closed) => break,
-				}
-			}
-		}));
+	/// Every audio RTP datagram from now on. Closes when the viewer stops.
+	pub fn audio_packets(&self) -> broadcast::Receiver<Vec<u8>> {
+		self.audio_tx.subscribe()
 	}
 }
 
-/// Start the relays: one UDP→WS pair for video and one for audio. The webview
-/// connects to each WebSocket, depacketizes the RTP in JS, and decodes (WebCodecs
-/// for video, WebAudio for the Opus audio).
+/// Start the intake: video (UDP + its WebSocket relay) and audio (UDP, broadcast only).
 ///
 /// `loopback_only`: media-over-session is negotiated, so the RTP arrives via the
 /// session demuxer ON THIS MACHINE — bind the intake sockets to 127.0.0.1 (nothing
 /// external may feed them; zero externally-reachable media ports).
 pub async fn start(loopback_only: bool) -> std::io::Result<Viewer> {
 	let mut tasks = Vec::new();
-	let (media_port, ws_port, _video_tx) = relay(&mut tasks, loopback_only).await?;
-	let (audio_port, audio_ws_port, audio_tx) = relay(&mut tasks, loopback_only).await?;
+	let (media_port, ws_port, _video_tx) = relay(&mut tasks, loopback_only, true).await?;
+	let (audio_port, _, audio_tx) = relay(&mut tasks, loopback_only, false).await?;
 	Ok(Viewer {
 		media_port,
 		ws_port,
 		audio_port,
-		audio_ws_port,
 		audio_tx,
 		tasks,
 	})
 }
 
-/// Bind one UDP→WebSocket relay (an ephemeral UDP port for the host's RTP + a
-/// loopback WebSocket the webview reads), spawn its two pump tasks onto `tasks`,
-/// and return `(udp_port, ws_port)`. Used once for video and once for audio.
+/// Bind one intake (an ephemeral UDP port for the host's RTP, re-broadcast in-process) and,
+/// with `ws`, a loopback WebSocket that relays it too. Spawns the pump tasks onto `tasks` and
+/// returns `(udp_port, ws_port, broadcast)`; `ws_port` is 0 without `ws`.
 async fn relay(
 	tasks: &mut Vec<JoinHandle<()>>,
 	loopback_only: bool,
+	ws: bool,
 ) -> std::io::Result<(u16, u16, broadcast::Sender<Vec<u8>>)> {
 	// Legacy direct flows need `0.0.0.0` so the host can reach us over LAN; under
 	// media-over-session the feeder is the local demuxer → loopback-only. Bind via
@@ -113,8 +85,6 @@ async fn relay(
 	sock.bind(&bind_ip.parse::<std::net::SocketAddr>().unwrap().into())?;
 	let udp = Arc::new(UdpSocket::from_std(sock.into())?);
 	let media_port = udp.local_addr()?.port();
-	let ws_listener = TcpListener::bind("127.0.0.1:0").await?;
-	let ws_port = ws_listener.local_addr()?.port();
 
 	let (tx, _rx) = broadcast::channel::<Vec<u8>>(8192);
 
@@ -133,6 +103,12 @@ async fn relay(
 		}
 	});
 
+	tasks.push(t_udp);
+	if !ws {
+		return Ok((media_port, 0, tx));
+	}
+	let ws_listener = TcpListener::bind("127.0.0.1:0").await?;
+	let ws_port = ws_listener.local_addr()?.port();
 	// Accept webview WebSocket connections; each forwards the broadcast.
 	let tx_ws = tx.clone();
 	let t_ws = tokio::spawn(async move {
@@ -165,7 +141,6 @@ async fn relay(
 		}
 	});
 
-	tasks.push(t_udp);
 	tasks.push(t_ws);
 	Ok((media_port, ws_port, tx))
 }
@@ -175,6 +150,28 @@ mod tests {
 	use super::*;
 	use futures_util::StreamExt;
 	use std::time::Duration;
+
+	#[tokio::test]
+	async fn audio_reaches_the_native_player_and_no_websocket() {
+		let v = start(true).await.unwrap();
+		let mut rx = v.audio_packets();
+		let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+		sender
+			.send_to(b"opus-rtp", ("127.0.0.1", v.audio_port))
+			.await
+			.unwrap();
+		let got = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+			.await
+			.expect("an audio datagram in time")
+			.unwrap();
+		assert_eq!(got, b"opus-rtp");
+		v.stop();
+		// Stopping the viewer closes the stream, which ends the player.
+		assert!(matches!(
+			tokio::time::timeout(Duration::from_secs(2), rx.recv()).await,
+			Ok(Err(broadcast::error::RecvError::Closed))
+		));
+	}
 
 	#[tokio::test]
 	async fn forwards_udp_datagrams_to_the_websocket() {

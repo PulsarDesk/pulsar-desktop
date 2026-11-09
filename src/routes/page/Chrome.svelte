@@ -14,6 +14,9 @@
 		gaming: boolean;
 		/** Flip the app-level personality (remote ↔ gaming). */
 		onToggleMode: () => void;
+		/** A connection is open (a client session or one this machine hosts): the mode can't
+		 *  change, since the open session belongs to the current personality. */
+		modeLocked?: boolean;
 		/** Current split layout ('off' = normal single-tab flow) — lights up the button. */
 		splitMode?: 'off' | 'h2' | 'v2' | 'grid4';
 		/** Open the split-layout chooser (SplitPicker). */
@@ -29,6 +32,7 @@
 		onToggleTheme,
 		gaming,
 		onToggleMode,
+		modeLocked = false,
 		splitMode = 'off',
 		onSplit,
 		fullscreen = false,
@@ -153,10 +157,13 @@
 			class="game-btn"
 			class:on={gaming}
 			use:navItem={gaming}
-			title={t('chrome.gamingMode')}
+			title={modeLocked ? t('chrome.gamingLocked') : t('chrome.gamingMode')}
 			aria-label={t('chrome.gamingToggle')}
 			aria-pressed={gaming}
-			onclick={onToggleMode}
+			disabled={modeLocked}
+			onclick={() => {
+				if (!modeLocked) onToggleMode();
+			}}
 		>
 			<Icon name="gaming" size={16} />
 		</button>
@@ -277,9 +284,13 @@
 			color var(--dur) var(--ease),
 			border-color var(--dur) var(--ease);
 	}
-	.game-btn:hover {
+	.game-btn:hover:not(:disabled) {
 		background: var(--surface-3);
 		color: var(--text);
+	}
+	.game-btn:disabled {
+		opacity: 0.45;
+		cursor: not-allowed;
 	}
 	/* Active = gaming mode on: cyan accent (the accent family is already cyan via
 	   data-gaming, so this reads as the lit-up gaming control). */

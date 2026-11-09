@@ -16,10 +16,18 @@ export type Encoder =
 
 export interface UiSettings {
 	quality: string;
+	/** Legacy, unused (never applied to a stream); kept so old stores still parse. */
 	res: string;
+	/** Legacy, unused (never applied to a stream); kept so old stores still parse. */
 	fps: number;
-	/** Game-overlay video bitrate in Mbit (0 = automatic / host default). */
+	/** Video bitrate limit in Mbit (0 = automatic). The adaptive controller's ceiling: it
+	 *  still lowers the rate on a weak link. Picked in the session menu, applied on connect. */
 	bitrate: number;
+	/** Stream resolution picked in the session menu ('auto', a preset like '1080p', or 'WxH'),
+	 *  applied on the next connect. */
+	streamRes: string;
+	/** Stream frame rate picked in the session menu (0 = automatic), applied on connect. */
+	streamFps: number;
 	codec: VideoCodec;
 	/** Host-side hardware encoder. */
 	encoder: Encoder;
@@ -132,6 +140,8 @@ const DEFAULTS: UiSettings = {
 	res: '1440p',
 	fps: 60,
 	bitrate: 0,
+	streamRes: 'auto',
+	streamFps: 0,
 	codec: 'auto',
 	encoder: 'auto',
 	hdr: false,
@@ -140,7 +150,9 @@ const DEFAULTS: UiSettings = {
 	record: false,
 	tray: true,
 	debug: false,
-	framePacing: true,
+	// Off by default (2026-11-08): pacing buffers ~1-2 frames — latency the maintainer would
+	// rather not pay by default. On = smoother under network/decode jitter.
+	framePacing: false,
 	statsHud: false,
 	overlayButton: true,
 	overlayBtnPos: { x: 90, y: 70 },
@@ -167,7 +179,14 @@ function load(): UiSettings {
 		delete saved.decoder; // removed: the decoder is auto-selected and shown read-only
 		// 'quicksync' was the old UI value; the wire/host vocabulary is 'qsv'.
 		if ((saved.encoder as string) === 'quicksync') saved.encoder = 'qsv';
-		return { ...DEFAULTS, ...saved };
+		// One-time move to the new pacing default: every earlier save stored `framePacing: true`
+		// (the old default) whether or not the user ever touched it, so flip it once.
+		const migrated = saved as Partial<UiSettings> & { pacingOffV2?: boolean };
+		if (!migrated.pacingOffV2) {
+			migrated.framePacing = false;
+			migrated.pacingOffV2 = true;
+		}
+		return { ...DEFAULTS, ...migrated };
 	} catch {
 		return { ...DEFAULTS };
 	}

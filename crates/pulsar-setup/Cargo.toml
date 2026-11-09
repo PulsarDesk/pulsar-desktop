@@ -31,10 +31,13 @@ path = "src/main.rs"
 # defaults, and winit refuses to compile with no backend. Both are no-ops on Windows.
 eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
 zip = { version = "9", default-features = false, features = ["deflate"] }
+# The window handle for the DWM rounded-corner request (the same 0.6 eframe uses).
+raw-window-handle = "0.6"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
 	"Win32_Foundation",
+	"Win32_Graphics_Dwm",
 	"Win32_System_Registry",
 	"Win32_Security",
 	"Win32_UI_Shell",

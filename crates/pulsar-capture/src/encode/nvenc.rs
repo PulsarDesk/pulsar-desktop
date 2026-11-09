@@ -90,6 +90,28 @@ pub const NV_ENC_PARAMS_RC_CBR: u32 = 0x2; // NV_ENC_PARAMS_RC_MODE
 pub const NV_ENC_TUNING_INFO_LOW_LATENCY: u32 = 2;
 pub const NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY: u32 = 3;
 pub const NV_ENC_H264_ENTROPY_CODING_MODE_CABAC: u32 = 1;
+// NV_ENC_MULTI_PASS (NV_ENC_RC_PARAMS::multiPass).
+pub const NV_ENC_MULTI_PASS_DISABLED: u32 = 0x0;
+/// Two-pass rate control with a quarter-resolution first pass (Sunshine's default; see
+/// `policy::use_two_pass` for when Pulsar uses it).
+pub const NV_ENC_TWO_PASS_QUARTER_RESOLUTION: u32 = 0x1;
+// NV_ENC_NUM_REF_FRAMES_1: predict from ONE reference (the deep DPB is only the RFI fallback).
+pub const NV_ENC_NUM_REF_FRAMES_1: u32 = 0x1;
+// NV_ENC_PIC_TYPE (NV_ENC_LOCK_BITSTREAM::pictureType) of an IDR picture.
+pub const NV_ENC_PIC_TYPE_IDR: u32 = 0x03;
+// NV_ENC_CAPS ordinals (nvEncodeAPI.h 12.2 enum order — implicit values from 0).
+pub const NV_ENC_CAPS_SUPPORT_REF_PIC_INVALIDATION: u32 = 28;
+pub const NV_ENC_CAPS_SUPPORT_MULTIPLE_REF_FRAMES: u32 = 47;
+pub const NV_ENC_CAPS_PARAM_VER: u32 = struct_version(1);
+
+/// `NV_ENC_CAPS_PARAM` — one capability to query with `nvEncGetEncodeCaps`.
+#[repr(C)]
+pub struct NV_ENC_CAPS_PARAM {
+	pub version: u32,
+	pub capsToQuery: u32,
+	pub reserved: [u32; 62],
+}
+
 // NV_ENC_RC_FLAGS bit: zero reorder delay.
 // zeroReorderDelay is bit 9 of the NV_ENC_RC_PARAMS bitfield word. (0x4 is bit 2 =
 // enableInitialRCQP — the old value wrongly armed initial-QP RC; harmless only while the
@@ -190,6 +212,8 @@ pub type PFN_GetLastErrorString = unsafe extern "C" fn(*mut c_void) -> *const i8
 pub type PFN_GetEncodeGUIDCount = unsafe extern "C" fn(*mut c_void, *mut u32) -> NVENCSTATUS;
 pub type PFN_GetEncodeGUIDs =
 	unsafe extern "C" fn(*mut c_void, *mut GUID, u32, *mut u32) -> NVENCSTATUS;
+pub type PFN_GetEncodeCaps =
+	unsafe extern "C" fn(*mut c_void, GUID, *mut NV_ENC_CAPS_PARAM, *mut i32) -> NVENCSTATUS;
 
 // NV_ENCODE_API_FUNCTION_LIST as laid out in nvEncodeAPI.h (12.x). Slots we don't
 // call are opaque pointers so we never mis-spell a signature; ORDER is what matters.
@@ -204,7 +228,7 @@ pub struct NV_ENCODE_API_FUNCTION_LIST {
 	pub nvEncGetEncodeGUIDs: Option<PFN_GetEncodeGUIDs>,
 	pub nvEncGetInputFormatCount: *mut c_void,
 	pub nvEncGetInputFormats: *mut c_void,
-	pub nvEncGetEncodeCaps: *mut c_void,
+	pub nvEncGetEncodeCaps: Option<PFN_GetEncodeCaps>,
 	pub nvEncGetEncodePresetCount: *mut c_void,
 	pub nvEncGetEncodePresetGUIDs: *mut c_void,
 	pub nvEncGetEncodePresetConfig: *mut c_void,
@@ -328,8 +352,12 @@ pub struct NV_ENC_CONFIG_H264 {
 	pub maxNumRefFrames: u32,
 	sliceMode: u32,
 	sliceModeData: u32,
-	// h264VUIParameters (NV_ENC_CONFIG_H264_VUI_PARAMETERS) — opaque pad of its size.
-	h264VUIParameters: [u32; 30],
+	// h264VUIParameters (NV_ENC_CONFIG_H264_VUI_PARAMETERS) — opaque pad of its size: 16 named
+	// u32 fields + reserved[12] = 28 u32 (SDK 12.2). It was declared 30, which shifted every
+	// field below by 8 bytes: `set_chromaFormatIDC` wrote the SDK's useBFramesAsRef and
+	// `set_numRefL0` its outputBitDepth (= 1, an invalid depth the driver tolerated) — the
+	// single-reference pin never reached the encoder. The offset asserts below pin the layout.
+	h264VUIParameters: [u32; 28],
 	pub ltrNumFrames: u32,
 	ltrTrustMode: u32,
 	pub chromaFormatIDC: u32, // we keep this nameable too (set_chromaFormatIDC mirrors it)
@@ -337,7 +365,9 @@ pub struct NV_ENC_CONFIG_H264 {
 	useBFramesAsRef: u32,
 	numRefL0: u32,
 	numRefL1: u32,
-	pub reserved1: [u32; 267],
+	outputBitDepth: u32,
+	inputBitDepth: u32,
+	pub reserved1: [u32; 265],
 	pub reserved2: [*mut c_void; 64],
 }
 impl NV_ENC_CONFIG_H264 {
@@ -386,14 +416,19 @@ pub struct NV_ENC_CONFIG_HEVC {
 	pub sliceMode: u32,
 	pub sliceModeData: u32,
 	pub maxTemporalLayersMinus1: u32,
-	// hevcVUIParameters (NV_ENC_CONFIG_HEVC_VUI_PARAMETERS) — same layout/size as the
-	// H.264 VUI struct: opaque pad of its size (30 u32s).
-	hevcVUIParameters: [u32; 30],
+	// hevcVUIParameters (NV_ENC_CONFIG_HEVC_VUI_PARAMETERS) — a typedef of the H.264 VUI
+	// struct: opaque pad of its size (28 u32s; was 30, which put `numRefL0` on the SDK's
+	// tfLevel — see the H.264 note).
+	hevcVUIParameters: [u32; 28],
 	pub ltrTrustMode: u32,
-	pub ltrRefNumFrames: u32, // (ltrTrustMode pair / numRefL fields in 12.x)
-	pub numRefL0: u32,
+	pub useBFramesAsRef: u32,
+	pub numRefL0: u32, // NV_ENC_NUM_REF_FRAMES
 	pub numRefL1: u32,
-	pub reserved1: [u32; 214],
+	pub tfLevel: u32,
+	pub disableDeblockingFilterIDC: u32,
+	pub outputBitDepth: u32,
+	pub inputBitDepth: u32,
+	pub reserved1: [u32; 210],
 	pub reserved2: [*mut c_void; 64],
 }
 impl NV_ENC_CONFIG_HEVC {
@@ -411,25 +446,27 @@ pub const NV_ENC_HEVC_FLAG_INTRA_REFRESH: u32 = 1 << 8;
 /// outputRecoveryPointSEI:9, enableIntraRefresh:10, enableConstrainedEncoding:11,
 /// repeatSPSPPS:12 — consistent with the `1 << 12` the code already uses for repeatSPSPPS).
 pub const NV_ENC_H264_FLAG_INTRA_REFRESH: u32 = 1 << 10;
-/// AV1 `enableIntraRefresh` (bit 5 of the AV1 bitfield word, see the layout comment).
-pub const NV_ENC_AV1_FLAG_INTRA_REFRESH: u32 = 1 << 5;
+/// AV1 `enableIntraRefresh` (bit 6 of the AV1 bitfield word, see the layout comment).
+pub const NV_ENC_AV1_FLAG_INTRA_REFRESH: u32 = 1 << 6;
 /// `NVENC_INFINITE_GOPLENGTH`: intra refresh requires an infinite GOP (no scheduled IDRs —
 /// recovery is the rolling wave, plus the on-demand forced IDR).
 pub const NVENC_INFINITE_GOPLENGTH: u32 = 0xFFFF_FFFF;
 /// HEVC `chromaFormatIDC` = 1 (4:2:0) packed at bits 9..10.
 pub const NV_ENC_HEVC_CHROMA_420: u32 = 1 << 9;
 
-// NV_ENC_CONFIG_AV1 — AV1 codec config (nvEncodeAPI.h, 12.x). Layout:
+// NV_ENC_CONFIG_AV1 — AV1 codec config (nvEncodeAPI.h, 12.2). Layout:
 //   level, tier, minPartSize, maxPartSize (4 × u32), then ONE bitfield word `flags`
 //   packing (LSB→MSB): outputAnnexBFormat:1, enableTimingInfo:1, enableDecoderModelInfo:1,
-//   enableSeqHdrField:1, repeatSeqHdr:1, enableIntraRefresh:1, chromaFormatIDC:2,
-//   enableBitstreamPadding:1, enableCustomTileConfig:1, enableFilmGrainParams:1,
-//   inputPixelBitDepthMinus8:3, pixelBitDepthMinus8:3, reserved:15.
-//   → repeatSeqHdr = bit 4, chromaFormatIDC at bits 6..7 (1 = 4:2:0 ⇒ 1<<6). NVENC AV1
-//   emits OBUs; we leave outputAnnexBFormat (bit 0) clear (default low-overhead OBU stream).
+//   enableFrameIdNumbers:1, disableSeqHdr:1, repeatSeqHdr:1, enableIntraRefresh:1,
+//   chromaFormatIDC:2, enableBitstreamPadding:1, enableCustomTileConfig:1,
+//   enableFilmGrainParams:1, reserved4:6, reserved:14.
+//   → repeatSeqHdr = bit 5, enableIntraRefresh = bit 6, chromaFormatIDC at bits 7..8
+//   (1 = 4:2:0 ⇒ 1<<7). (The old comment missed enableFrameIdNumbers + disableSeqHdr, so the
+//   "repeatSeqHdr" bit we set was disableSeqHdr and the "4:2:0" bit enableIntraRefresh.) NVENC
+//   AV1 emits OBUs; we leave outputAnnexBFormat (bit 0) clear (default low-overhead OBU stream).
 //   Then scalar fields: idrPeriod, intraRefreshPeriod, intraRefreshCnt, maxNumRefFramesInDPB,
-//   numTileColumns, numTileRows, … VUI … reserved.
-// Reserved pad is GENEROUS to cover the header's reserved1/reserved2 tails.
+//   numTileColumns, numTileRows, reserved2, tileWidths*, tileHeights*, … reserved.
+// Reserved pad matches the header's reserved1/reserved3 tails (size assert below).
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct NV_ENC_CONFIG_AV1 {
@@ -444,8 +481,9 @@ pub struct NV_ENC_CONFIG_AV1 {
 	pub maxNumRefFramesInDPB: u32,
 	pub numTileColumns: u32,
 	pub numTileRows: u32,
-	pub reserved1Field: u32,
-	pub idrPeriodField: u32,
+	pub reserved2Field: u32,
+	pub tileWidths: *mut u32,
+	pub tileHeights: *mut u32,
 	pub maxTemporalLayersMinus1: u32,
 	pub colorPrimaries: u32,
 	pub transferCharacteristics: u32,
@@ -453,12 +491,13 @@ pub struct NV_ENC_CONFIG_AV1 {
 	pub colorRange: u32,
 	pub chromaSamplePosition: u32,
 	pub useBFramesAsRef: u32,
+	pub filmGrainParams: *mut c_void,
 	pub numFwdRefs: u32,
 	pub numBwdRefs: u32,
 	pub outputBitDepth: u32,
 	pub inputBitDepth: u32,
-	pub reserved1: [u32; 222],
-	pub reserved2: [*mut c_void; 64],
+	pub reserved1: [u32; 233],
+	pub reserved3: [*mut c_void; 62],
 }
 impl NV_ENC_CONFIG_AV1 {
 	/// OR named AV1 bitfield bits in (preserving the preset's reserved bits).
@@ -466,11 +505,11 @@ impl NV_ENC_CONFIG_AV1 {
 		self.flags |= bits;
 	}
 }
-/// AV1 `repeatSeqHdr` bit (bit 4 of the AV1 bitfield word) — re-emit the sequence header
+/// AV1 `repeatSeqHdr` bit (bit 5 of the AV1 bitfield word) — re-emit the sequence header
 /// OBU on each key frame so a late-joining client always has it (HEVC repeatSPSPPS analog).
-pub const NV_ENC_AV1_FLAG_REPEAT_SEQ_HDR: u32 = 1 << 4;
-/// AV1 `chromaFormatIDC` = 1 (4:2:0) packed at bits 6..7.
-pub const NV_ENC_AV1_CHROMA_420: u32 = 1 << 6;
+pub const NV_ENC_AV1_FLAG_REPEAT_SEQ_HDR: u32 = 1 << 5;
+/// AV1 `chromaFormatIDC` = 1 (4:2:0) packed at bits 7..8.
+pub const NV_ENC_AV1_CHROMA_420: u32 = 1 << 7;
 
 // The codec-config union (H264 / HEVC / AV1). NV_ENC_CONFIG_H264 with its generous
 // reserved pad is the largest member, so the union is correctly sized for all three.
@@ -503,8 +542,9 @@ pub struct NV_ENC_CONFIG {
 #[repr(C)]
 pub struct NV_ENC_PRESET_CONFIG {
 	pub version: u32,
+	pub reserved: u32,
 	pub presetCfg: NV_ENC_CONFIG,
-	pub reserved1: [u32; 255],
+	pub reserved1: [u32; 256],
 	pub reserved2: [*mut c_void; 64],
 }
 
@@ -536,12 +576,17 @@ pub struct NV_ENC_INITIALIZE_PARAMS {
 	pub encodeConfig: *mut NV_ENC_CONFIG,
 	pub maxEncodeWidth: u32,
 	pub maxEncodeHeight: u32,
-	pub maxMEHintCountsPerBlock: [u32; 2],
+	// NVENC_EXTERNAL_ME_HINT_COUNTS_PER_BLOCKTYPE[2]: each element is ONE packed bitfield word
+	// + reserved1[3] = 16 bytes. Declaring it as [u32; 2] (8 bytes) put `tuningInfo` 24 bytes
+	// early: the driver read tuningInfo = 0 → every init failed with "Presets P1-P7 are only
+	// supported with valid NV_ENC_INITIALIZE_PARAMS::tuningInfo" (status 8) and the host fell
+	// back to the ffmpeg chain on every stream (re)start. The asserts below pin the layout.
+	pub maxMEHintCountsPerBlock: [[u32; 4]; 2],
 	pub tuningInfo: u32,
 	pub bufferFormat: u32,
 	pub numStateBuffers: u32,
 	pub outputStatsLevel: u32,
-	pub reserved: [u32; 287],
+	pub reserved: [u32; 284],
 	pub reserved2: [*mut c_void; 64],
 }
 impl NV_ENC_INITIALIZE_PARAMS {
@@ -560,6 +605,56 @@ impl NV_ENC_INITIALIZE_PARAMS {
 // whole NV_ENC_CONFIG (the bitrate bug this fixed). A compile error here means the layout drifted.
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(core::mem::offset_of!(NV_ENC_INITIALIZE_PARAMS, encodeConfig) == 88);
+// SDK 12.2 nvEncodeAPI.h (x64): tuningInfo at 136, whole struct 1800 bytes; the reconfigure
+// struct embeds it at 8 and its resetEncoder/forceIDR word follows at 1808.
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(core::mem::offset_of!(NV_ENC_INITIALIZE_PARAMS, tuningInfo) == 136);
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(core::mem::size_of::<NV_ENC_INITIALIZE_PARAMS>() == 1800);
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(core::mem::offset_of!(NV_ENC_RECONFIGURE_PARAMS, flags) == 1808);
+// SDK 12.2 (x64) codec-config layout: the fields we write after the VUI block must sit where the
+// driver reads them (the 30-u32 VUI pad had shifted them 8 bytes), and NV_ENC_CONFIG must have
+// the SDK size (union = the H.264 member, 1792 bytes; whole config 3584).
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(core::mem::offset_of!(NV_ENC_CONFIG_H264, maxNumRefFrames) == 60);
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(core::mem::offset_of!(NV_ENC_CONFIG_H264, chromaFormatIDC) == 192);
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(core::mem::offset_of!(NV_ENC_CONFIG_H264, numRefL0) == 204);
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(core::mem::size_of::<NV_ENC_CONFIG_H264>() == 1792);
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(core::mem::offset_of!(NV_ENC_CONFIG_HEVC, maxNumRefFramesInDPB) == 32);
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(core::mem::offset_of!(NV_ENC_CONFIG_HEVC, numRefL0) == 184);
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(core::mem::size_of::<NV_ENC_CONFIG_HEVC>() == 1560);
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(core::mem::offset_of!(NV_ENC_CONFIG_AV1, maxNumRefFramesInDPB) == 32);
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(core::mem::size_of::<NV_ENC_CONFIG_AV1>() == 1552);
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(core::mem::size_of::<NV_ENC_CODEC_CONFIG>() == 1792);
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(core::mem::offset_of!(NV_ENC_CONFIG, rcParams) == 40);
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(core::mem::offset_of!(NV_ENC_CONFIG, encodeCodecConfig) == 168);
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(core::mem::size_of::<NV_ENC_CONFIG>() == 3584);
+// NV_ENC_RC_PARAMS: 128 bytes; the scalars we set at their SDK offsets.
+const _: () = assert!(core::mem::size_of::<NV_ENC_RC_PARAMS>() == 128);
+const _: () = assert!(core::mem::offset_of!(NV_ENC_RC_PARAMS, lowDelayKeyFrameScale) == 92);
+const _: () = assert!(core::mem::offset_of!(NV_ENC_RC_PARAMS, multiPass) == 100);
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(core::mem::offset_of!(NV_ENC_PRESET_CONFIG, presetCfg) == 8);
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(core::mem::size_of::<NV_ENC_PRESET_CONFIG>() == 5128);
+// The lock-bitstream [out] fields we read (pictureType tells an IDR apart).
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(core::mem::offset_of!(NV_ENC_LOCK_BITSTREAM, bitstreamSizeInBytes) == 36);
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(core::mem::offset_of!(NV_ENC_LOCK_BITSTREAM, pictureType) == 64);
 
 #[repr(C)]
 pub struct NV_ENC_REGISTER_RESOURCE {
@@ -706,6 +801,9 @@ mod tests {
 		assert_eq!(h.flags, (1 << 7) | (1 << 9)); // repeatSPSPPS(7) + chromaFormatIDC=1(9)
 		let mut a = unsafe { std::mem::zeroed::<NV_ENC_CONFIG_AV1>() };
 		a.set_flags(NV_ENC_AV1_FLAG_REPEAT_SEQ_HDR | NV_ENC_AV1_CHROMA_420);
-		assert_eq!(a.flags, (1 << 4) | (1 << 6)); // repeatSeqHdr(4) + chromaFormatIDC=1(6)
+		assert_eq!(a.flags, (1 << 5) | (1 << 7)); // repeatSeqHdr(5) + chromaFormatIDC=1(7)
+		// …and never disableSeqHdr (bit 4) or enableIntraRefresh (bit 6) by accident.
+		assert_eq!(a.flags & ((1 << 4) | (1 << 6)), 0);
+		assert_eq!(NV_ENC_AV1_FLAG_INTRA_REFRESH, 1 << 6);
 	}
 }

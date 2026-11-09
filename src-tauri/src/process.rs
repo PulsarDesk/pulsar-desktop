@@ -27,8 +27,10 @@ pub fn linux_displays() -> Vec<LinuxDisplay> {
 		// enumerate Wayland outputs here.
 		return Vec::new();
 	}
+	// `--current`: the state X already knows. A plain query makes the server re-probe every
+	// output and re-read the EDIDs, stalling X (its Present events with it) each time.
 	let mut cmd = std::process::Command::new("xrandr");
-	cmd.arg("--query");
+	cmd.arg("--current");
 	no_window(&mut cmd);
 	let Ok(out) = cmd.output() else {
 		return Vec::new();
@@ -84,6 +86,7 @@ pub fn host_displays() -> Vec<pulsar_core::service::DisplayInfo> {
 				// the iteration order matches `display_idx`. Advertise this monitor's available
 				// resolutions for the session menu + the screen-adaptation best-fit picker.
 				modes: enum_display_modes(&name),
+				refresh_hz: display_refresh_hz(&name),
 				idx,
 				name,
 				width,
@@ -106,6 +109,7 @@ pub fn host_displays() -> Vec<pulsar_core::service::DisplayInfo> {
 				// X11 mode enumeration is not wired here; the client falls back to its fixed
 				// resolution presets (and screen adaptation is Windows-only anyway).
 				modes: Vec::new(),
+				refresh_hz: if primary { crate::util::host_panel_hz().unwrap_or(0) } else { 0 },
 			})
 			.collect();
 	}
@@ -113,6 +117,21 @@ pub fn host_displays() -> Vec<pulsar_core::service::DisplayInfo> {
 	{
 		Vec::new()
 	}
+}
+
+/// Current refresh rate (Hz) of the GDI display `dev_name` ("DISPLAY1"); 0 = unknown.
+#[cfg(windows)]
+fn display_refresh_hz(dev_name: &str) -> u32 {
+	use windows_sys::Win32::Graphics::Gdi::{EnumDisplaySettingsW, DEVMODEW, ENUM_CURRENT_SETTINGS};
+	let wide: Vec<u16> = format!(r"\\.\{dev_name}").encode_utf16().chain(std::iter::once(0u16)).collect();
+	unsafe {
+		let mut dm: DEVMODEW = std::mem::zeroed();
+		dm.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+		if EnumDisplaySettingsW(wide.as_ptr(), ENUM_CURRENT_SETTINGS, &mut dm) != 0 && dm.dmDisplayFrequency > 1 {
+			return dm.dmDisplayFrequency;
+		}
+	}
+	0
 }
 
 /// Enumerate a monitor's available resolutions via `EnumDisplaySettingsW` on its GDI device
@@ -798,7 +817,7 @@ pub fn drain_procs(procs: &Arc<Mutex<Vec<Child>>>, epoch: &ProcEpoch) {
 /// THIS GPU, and a probe can false-fail on a hybrid box) — watching the real encode
 /// child is the only signal that is authoritative on every machine. Runs on its own
 /// thread so StartStream returns immediately and the stream self-heals in the
-/// background. `on_settled(encoder)` fires once a candidate proves healthy; `on_failed()`
+/// background. `on_settled(encoder, capture)` fires once a candidate proves healthy; `on_failed()`
 /// fires when every candidate died.
 ///
 /// `epoch`/`epoch_at_spawn` bind the chain to ONE stream generation: every candidate is
@@ -813,7 +832,7 @@ pub fn spawn_encode_with_fallback(
 	candidates: Vec<(HwEncoder, CaptureMethod)>,
 	mk_args: impl Fn(HwEncoder, CaptureMethod) -> Vec<String> + Send + 'static,
 	on_ms: impl Fn(f32) + Send + Sync + Clone + 'static,
-	on_settled: impl Fn(HwEncoder) + Send + 'static,
+	on_settled: impl Fn(HwEncoder, CaptureMethod) + Send + 'static,
 	on_failed: impl FnOnce() + Send + 'static,
 ) {
 	use std::sync::atomic::Ordering;
@@ -940,7 +959,7 @@ pub fn spawn_encode_with_fallback(
 				if i > 0 {
 					tracing::info!(encoder = ?enc, capture = ?cap, attempt = i + 1, "encode fallback settled on a working encoder");
 				}
-				on_settled(enc);
+				on_settled(enc, cap);
 				return;
 			}
 			// Dead candidate: kill it (if it hasn't exited already), drop it from `procs`,
@@ -1237,8 +1256,32 @@ pub fn vidsink_bin(app: &AppHandle) -> String {
 /// video is the separate native mpv child until the Metal renderer phase) — same egui overlay.
 /// A workspace crate, dropped next to the app exe. Resolution is path-based (bundled resources
 /// dir, then next to the exe), so it is platform-agnostic.
+/// The main window's display scale factor (f64 bits; 0 = unknown), kept current from the
+/// window's ScaleFactorChanged events. The Linux renderer gets it as `PULSAR_UI_SCALE` so its
+/// egui overlay grows with the app UI on HiDPI screens (Windows reads the DPI itself; macOS'
+/// eframe gets it from winit).
+static UI_SCALE_BITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn set_ui_scale(scale: f64) {
+	if scale.is_finite() && scale > 0.0 {
+		UI_SCALE_BITS.store(scale.to_bits(), std::sync::atomic::Ordering::Relaxed);
+	}
+}
+
+pub fn ui_scale() -> Option<f64> {
+	match UI_SCALE_BITS.load(std::sync::atomic::Ordering::Relaxed) {
+		0 => None,
+		b => Some(f64::from_bits(b)),
+	}
+}
+
 #[cfg(any(unix, target_os = "windows"))]
 pub fn render_bin(app: &AppHandle) -> String {
+	// `PULSAR_RENDER_BIN=<path>` runs another renderer build (testing one without rebuilding
+	// the app).
+	if let Some(p) = std::env::var_os("PULSAR_RENDER_BIN").filter(|p| !p.is_empty()) {
+		return p.to_string_lossy().into_owned();
+	}
 	bundled_bin(app, "pulsar-render")
 }
 

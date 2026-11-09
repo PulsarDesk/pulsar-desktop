@@ -9,6 +9,7 @@
 
 import { api } from '#lib/api.js';
 import { ui, saveUi, type Encoder, type VideoCodec } from '#lib/settings.svelte.js';
+import { resToWh } from '#lib/streamPicks.js';
 
 type Inputs = {
 	playId: () => number;
@@ -29,11 +30,15 @@ export class SessionControls {
 		this.#switchTimer = setTimeout(() => (this.switching = false), ms);
 	}
 
-	// Stream resolution requested from the host, changed live from the menu.
-	// 'auto' = let the host use its own configured size.
-	streamRes = $state<'auto' | '720p' | '1080p' | '1440p' | '4K'>('auto');
-	// Live frame-rate switch ('auto' = host default). The host restarts ffmpeg with it.
-	streamFps = $state<'auto' | '30' | '60' | '120'>('auto');
+	// Stream resolution requested from the host, changed live from the menu and saved
+	// (ui.streamRes) for the next connect. 'auto' = let the host use its own configured size.
+	streamRes = $state<'auto' | '720p' | '1080p' | '1440p' | '4K'>(
+		ui.streamRes as 'auto' | '720p' | '1080p' | '1440p' | '4K'
+	);
+	// Live frame-rate switch ('auto' = host default), saved (ui.streamFps) for the next connect.
+	streamFps = $state<'auto' | '30' | '60' | '120'>(
+		ui.streamFps > 0 ? (String(ui.streamFps) as '30' | '60' | '120') : 'auto'
+	);
 	// Live bitrate switch in Mbit (0 = auto / host default). Persisted via ui.bitrate.
 	streamBitrate = $state<number>(ui.bitrate);
 	// Live quality/perf profile. Two-tier (latency|quality); ephemeral (default latency in
@@ -73,42 +78,23 @@ export class SessionControls {
 			}
 		});
 
-		// The persisted bitrate renders as the ACTIVE menu/overlay selection, so push it to
-		// the host once the play is live — start_remote_play carries no bitrate, so without
-		// this the host streams its default while the UI claims e.g. "20 Mbit". One-shot,
-		// NOT native-gated (the webview menu shows it too); 0 = auto → nothing to send.
-		let bitrateApplied = false;
-		$effect(() => {
-			if (inputs.playId() >= 0 && !bitrateApplied) {
-				bitrateApplied = true;
-				if (ui.bitrate > 0)
-					api.setPlayBitrate(inputs.playId(), ui.bitrate * 1000).catch(() => {});
-			}
-		});
+		// The saved bitrate / resolution / fps picks are applied by start_remote_play itself
+		// (see sessions.svelte.ts → `savedStreamPicks`), so the first request already carries them.
 	}
 
 	// Accepts a preset ('auto'/'720p'/'1080p'/'1440p'/'4K') OR an explicit "WxH" string (the overlay's
 	// per-display real-mode list emits the latter) — both resolve to a width/height for the host.
 	setRes = (v: string) => {
 		this.streamRes = v as 'auto' | '720p' | '1080p' | '1440p' | '4K';
+		ui.streamRes = v;
+		saveUi();
 		const playId = this.#in.playId();
 		if (playId < 0) return;
 		// The host kills its current encoder and rebuilds capture at the new geometry
 		// (set_play_resolution in session_cmds.rs). A 4K NVENC/DXGI rebuild can easily
 		// exceed 3 s, so suppress the stall detector for 4 s.
 		this.#beginSwitch(4000);
-		const wh = /^(\d+)x(\d+)$/.exec(v);
-		const [w, h] = wh
-			? [Number(wh[1]), Number(wh[2])]
-			: v === '4K'
-				? [3840, 2160]
-				: v === '1440p'
-					? [2560, 1440]
-					: v === '1080p'
-						? [1920, 1080]
-						: v === '720p'
-							? [1280, 720]
-							: [0, 0];
+		const [w, h] = resToWh(v);
 		api.setPlayResolution(playId, w, h).catch(() => {});
 	};
 	// Screen adaptation (overlay "Ekran uyarlama"): `on` with the pane's pixel size (w,h) asks
@@ -122,14 +108,24 @@ export class SessionControls {
 		this.#beginSwitch(4000);
 		api.setPlayAdapt(playId, w, h, on).catch(() => {});
 	};
+	#fpsTimer: ReturnType<typeof setTimeout> | null = null;
 	setFps = (v: 'auto' | '30' | '60' | '120') => {
 		this.streamFps = v;
+		ui.streamFps = v === 'auto' ? 0 : Number(v);
+		saveUi();
 		const playId = this.#in.playId();
 		if (playId < 0) return;
-		// The host restarts ffmpeg with the new frame rate (same pipeline rebuild as a
-		// codec switch); suppress the stall detector for the same window.
-		this.#beginSwitch(2800);
-		api.setPlayFps(playId, v === 'auto' ? 0 : Number(v)).catch(() => {});
+		// Every fps change restarts the host encoder. Stepping through the menu's options
+		// (30 → 60 → 120 → auto) used to fire one restart per step — a storm of back-to-back
+		// rebuilds that wrecked the stream for minutes. Apply only the choice that sticks.
+		if (this.#fpsTimer) clearTimeout(this.#fpsTimer);
+		this.#fpsTimer = setTimeout(() => {
+			this.#fpsTimer = null;
+			// The host restarts the encoder with the new frame rate (same pipeline rebuild as a
+			// codec switch); suppress the stall detector for the same window.
+			this.#beginSwitch(2800);
+			api.setPlayFps(playId, v === 'auto' ? 0 : Number(v)).catch(() => {});
+		}, 700);
 	};
 	setBitrate = (v: number) => {
 		this.streamBitrate = v;

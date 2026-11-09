@@ -7,7 +7,7 @@
 // component. `playId`/`menuOpen` are read through getters (the inbound unread-count logic and
 // the API calls track them as they did inline).
 
-import { api, copyText, readClipboard, onChatMsg, onDataClip } from '#lib/api.js';
+import { api, copyText, readClipboard, onChatMsg, onDataClip, onPlayNotice } from '#lib/api.js';
 import { listenScope } from '#lib/api.events.js';
 import { t } from '#lib/i18n.svelte.js';
 
@@ -52,6 +52,12 @@ export class SessionSideChannels {
 					copyText(e.text).catch(() => {});
 					this.flash(t('session.clipboardRecv'));
 					api.renderToast(inputs.playId(), t('session.clipboardRecv')).catch(() => {});
+				}),
+				// Stream notices the app sends when there is no native renderer to toast them
+				// (already localized on the Rust side).
+				onPlayNotice((e) => {
+					if (e.id !== inputs.playId()) return;
+					this.flash(e.text);
 				})
 			);
 			return scope.dispose;

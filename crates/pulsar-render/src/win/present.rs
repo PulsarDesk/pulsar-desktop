@@ -12,7 +12,9 @@ use windows::Win32::Graphics::Direct3D11::{
 	D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
 	D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
 	D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
-	D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM,
+	D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_ROTATION_180,
+	D3D11_VIDEO_PROCESSOR_ROTATION_270, D3D11_VIDEO_PROCESSOR_ROTATION_90,
+	D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY, D3D11_VIDEO_PROCESSOR_STREAM,
 	D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VPIV_DIMENSION_TEXTURE2D,
 	D3D11_VPOV_DIMENSION_TEXTURE2D,
 };
@@ -32,6 +34,37 @@ pub fn set_fit(mode: &str) {
 		_ => 0,
 	};
 	FIT_MODE.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Host display rotation (degrees CW: 0/90/180/270) the stream still carries — the host's
+/// ffmpeg `ddagrab` path streams the UNROTATED Desktop Duplication surface and reports the
+/// display orientation over `DataMsg::DisplayRotation` (the app forwards it as `rotate <deg>`).
+/// The Blt rotates the frame CW by this — the same convention `pulsar-capture` uses when it
+/// bakes the rotation host-side — so a rotated / portrait host shows upright. 0 = identity.
+static ROTATION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+pub fn set_rotation(deg: u32) {
+	let d = match deg % 360 {
+		90 => 90,
+		180 => 180,
+		270 => 270,
+		_ => 0,
+	};
+	ROTATION.store(d, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn rotation() -> u32 {
+	ROTATION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Upright (DISPLAYED) size of an `iw×ih` decoded frame under the current rotation —
+/// 90/270 swap the axes. Everything the viewer sees (fit rects, cursor, reported stream
+/// dims for the input letterbox) works in this space.
+pub fn displayed_dims(iw: u32, ih: u32) -> (u32, u32) {
+	match rotation() {
+		90 | 270 => (ih, iw),
+		_ => (iw, ih),
+	}
 }
 
 pub fn fit_label() -> &'static str {
@@ -186,14 +219,22 @@ impl Present {
 		Ok(())
 	}
 
-	/// Fit-mode (source, dest) rects for the current sizes (see `fit_rects`).
+	/// Fit-mode (source, dest) rects for the current sizes (see `fit_rects`). `fit_rects` works
+	/// in the DISPLAYED (upright) space; the VideoProcessor's source rect is pre-rotation, so
+	/// map the (displayed-space) source crop back onto the decoded frame.
 	fn blt_rects(&self) -> (RECT, RECT) {
-		let (s, d) = fit_rects(
-			self.in_w as f32,
-			self.in_h as f32,
-			self.out_w as f32,
-			self.out_h as f32,
-		);
+		let (iw, ih) = (self.in_w as f32, self.in_h as f32);
+		let (vw, vh) = displayed_dims(self.in_w, self.in_h);
+		let (s, d) = fit_rects(vw as f32, vh as f32, self.out_w as f32, self.out_h as f32);
+		let (x, y, w, h) = s;
+		// Inverse of the CW rotation, per corner: displayed (X,Y) → input
+		//   90:  (Y, ih − X)   180: (iw − X, ih − Y)   270: (iw − Y, X)
+		let s = match rotation() {
+			90 => (y, ih - (x + w), h, w),
+			180 => (iw - (x + w), ih - (y + h), w, h),
+			270 => (iw - (y + h), x, h, w),
+			_ => s,
+		};
 		let to_rect = |(x, y, w, h): (f32, f32, f32, f32)| RECT {
 			left: x as i32,
 			top: y as i32,
@@ -201,6 +242,15 @@ impl Present {
 			bottom: (y + h) as i32,
 		};
 		(to_rect(s), to_rect(d))
+	}
+
+	/// Where the video lands in the window, as fractions of the client area
+	/// `(x0, y0, x1, y1)` (fit letterbox / stretch / rotation all applied). The app confines
+	/// the cursor to exactly this area while control is engaged.
+	pub fn dest_frac(&self) -> (f32, f32, f32, f32) {
+		let (_, d) = self.blt_rects();
+		let (w, h) = (self.out_w.max(1) as f32, self.out_h.max(1) as f32);
+		(d.left as f32 / w, d.top as f32 / h, d.right as f32 / w, d.bottom as f32 / h)
 	}
 
 	/// Convert+scale the NV12 `src` onto the swapchain `back` buffer (RGB). One GPU Blt.
@@ -243,6 +293,16 @@ impl Present {
 			.VideoProcessorSetStreamSourceRect(&self.vproc, 0, true, Some(&src_r));
 		self.vctx
 			.VideoProcessorSetStreamDestRect(&self.vproc, 0, true, Some(&dst));
+		// Host-rotation correction (see ROTATION). Set every Blt: it's a cheap state write and
+		// a rebuilt processor (resize) starts from IDENTITY.
+		let rot = match rotation() {
+			90 => D3D11_VIDEO_PROCESSOR_ROTATION_90,
+			180 => D3D11_VIDEO_PROCESSOR_ROTATION_180,
+			270 => D3D11_VIDEO_PROCESSOR_ROTATION_270,
+			_ => D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY,
+		};
+		self.vctx
+			.VideoProcessorSetStreamRotation(&self.vproc, 0, rot != D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY, rot);
 
 		let mut stream = D3D11_VIDEO_PROCESSOR_STREAM {
 			Enable: true.into(),

@@ -6,6 +6,12 @@
 //! WGC captures a single *window* by HWND — letting two panes share one monitor or
 //! target two different app windows.
 //!
+//! It also captures a whole MONITOR (`create_monitor`) on a device of OUR choice — the NVIDIA
+//! one. On a hybrid laptop whose panel belongs to the iGPU, Windows then hands the composed
+//! desktop to NVIDIA itself (GPU-side) instead of the encoder's CPU staging hop, and a monitor
+//! this process already duplicates (a second session on the same screen — DXGI refuses with
+//! E_INVALIDARG) can be captured again. `path.rs` decides, by measurement, when to use it.
+//!
 //! ## Why this mirrors `CaptureDevice` exactly
 //! `lib.rs`'s capture thread is written against a small surface: `device` + `context`
 //! (handed to `Encoder::new`), `target_size`/`native_size`/`rotation_deg` (encode
@@ -49,13 +55,13 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
-use windows::core::Interface;
-use windows::Foundation::TimeSpan;
+use windows::core::{Interface, PCWSTR};
+use windows::Foundation::{TimeSpan, TypedEventHandler};
 use windows::Graphics::Capture::{
     Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
 };
 use windows::Graphics::DirectX::DirectXPixelFormat;
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, WAIT_OBJECT_0};
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0,
     D3D_FEATURE_LEVEL_11_1,
@@ -75,6 +81,7 @@ use windows::Win32::System::WinRT::Direct3D11::{
     CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
 };
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
+use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
 use windows::Win32::UI::WindowsAndMessaging::IsWindow;
 
 use crate::dxgi::RunExit;
@@ -97,8 +104,8 @@ pub struct WgcCaptureDevice {
     pub context: ID3D11DeviceContext,
 
     // --- private WGC state ---
-    /// The captured window (kept to detect close + re-query size).
-    hwnd: HWND,
+    /// The captured window (kept to detect close + re-query size); `None` = a whole monitor.
+    hwnd: Option<HWND>,
     /// The WinRT capture item (HWND→item). Holds a Closed event we don't subscribe to;
     /// we detect closure by `IsWindow(hwnd)` + `TryGetNextFrame` returning errors instead.
     item: GraphicsCaptureItem,
@@ -125,6 +132,12 @@ pub struct WgcCaptureDevice {
     output_idx: u32,
     /// Session-stop flag (cloned from the capture thread's `stop`); polled in `run`.
     stop: Arc<AtomicBool>,
+    /// Auto-reset event the pool's FrameArrived handler sets, so `run` waits for the next
+    /// frame instead of polling once per tick (a fresh frame is encoded as it arrives).
+    arrived: HANDLE,
+    arrived_token: i64,
+    /// `SystemRelativeTime` (QPC ns) of the frame last copied into `tex` → `Frame::present_ns`.
+    last_present_ns: i64,
 }
 
 /// Outcome of one `pump_latest` drain: a fresh frame was copied into `tex`, no new frame arrived
@@ -167,23 +180,56 @@ impl WgcCaptureDevice {
         //    window; a separate NVENC device is built by the encoder when the vendors differ.
         let (device, context) = Self::create_device()?;
 
-        // SetMaximumFrameLatency(1): keep capture→encode queueing minimal (same as DXGI).
-        if let Ok(dxgi_dev) = device.cast::<IDXGIDevice1>() {
-            let _ = dxgi_dev.SetMaximumFrameLatency(1);
-        }
-
-        // 2. Wrap our D3D11 device as a WinRT IDirect3DDevice (the frame pool/session API
-        //    takes the WinRT handle, not the raw ID3D11Device). Bridge via the DXGI device.
-        let dxgi_device: IDXGIDevice = device.cast()?;
-        let inspectable = CreateDirect3D11DeviceFromDXGIDevice(&dxgi_device)?;
-        let rt_device: windows::Graphics::DirectX::Direct3D11::IDirect3DDevice =
-            inspectable.cast()?;
-
-        // 3. HWND → GraphicsCaptureItem via the activation-factory interop. The factory is
+        // 2. HWND → GraphicsCaptureItem via the activation-factory interop. The factory is
         //    cached + bootstraps the process MTA on first use (windows_core::factory).
         let interop: IGraphicsCaptureItemInterop =
             windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
         let item: GraphicsCaptureItem = interop.CreateForWindow(hwnd)?;
+        Self::start(device, context, Some(hwnd), item, output_idx, stop)
+    }
+
+    /// Build a WGC capture of the whole MONITOR at `output_idx` (DXGI attached-output order,
+    /// the same index `CaptureDevice::create` takes). The device lives on the NVIDIA adapter
+    /// when there is one: WGC delivers the composed desktop onto it GPU-side, so the encoder
+    /// takes its same-device path even when the monitor belongs to the iGPU.
+    pub unsafe fn create_monitor(output_idx: u32, stop: Arc<AtomicBool>) -> windows::core::Result<Self> {
+        let factory: IDXGIFactory1 = CreateDXGIFactory1()?;
+        let (out_adapter, output, actual_idx) =
+            crate::dxgi::CaptureDevice::find_output(&factory, output_idx)?;
+        let hmon = output.GetDesc()?.Monitor;
+        let adapter = crate::path::nvidia_adapter(&factory).unwrap_or(out_adapter);
+        let (device, context) = Self::create_device_on(&adapter)?;
+        let interop: IGraphicsCaptureItemInterop =
+            windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
+        let item: GraphicsCaptureItem = interop.CreateForMonitor(hmon)?;
+        Self::start(device, context, None, item, actual_idx, stop)
+    }
+
+    /// The common tail of `create`/`create_monitor`: WinRT device, frame pool, frame-arrival
+    /// event, session, start.
+    unsafe fn start(
+        device: ID3D11Device,
+        context: ID3D11DeviceContext,
+        hwnd: Option<HWND>,
+        item: GraphicsCaptureItem,
+        output_idx: u32,
+        stop: Arc<AtomicBool>,
+    ) -> windows::core::Result<Self> {
+        // SetMaximumFrameLatency(1): keep capture→encode queueing minimal (same as DXGI), and
+        // the same max GPU scheduling priority as the DXGI device (PULSAR_GPU_PRIO=0 disables).
+        if let Ok(dxgi_dev) = device.cast::<IDXGIDevice1>() {
+            let _ = dxgi_dev.SetMaximumFrameLatency(1);
+            if std::env::var("PULSAR_GPU_PRIO").map(|v| v != "0").unwrap_or(true) {
+                let _ = dxgi_dev.SetGPUThreadPriority(7);
+            }
+        }
+
+        // Wrap our D3D11 device as a WinRT IDirect3DDevice (the frame pool/session API takes
+        // the WinRT handle, not the raw ID3D11Device). Bridge via the DXGI device.
+        let dxgi_device: IDXGIDevice = device.cast()?;
+        let inspectable = CreateDirect3D11DeviceFromDXGIDevice(&dxgi_device)?;
+        let rt_device: windows::Graphics::DirectX::Direct3D11::IDirect3DDevice =
+            inspectable.cast()?;
 
         // Initial capture size: the item's reported extent (client area). WGC uses the item
         // Size for the pool; content can resize later → we Recreate the pool then.
@@ -204,7 +250,32 @@ impl WgcCaptureDevice {
         // it onto GraphicsCaptureSession; on a Win10 build lacking it the call returns an error
         // HRESULT which we ignore — capture still works, just with the (older-OS) border.
         let _ = session.SetIsBorderRequired(false);
-        session.StartCapture()?;
+        // Win11 24H2+: no minimum spacing between delivered frames (1 ms); older builds lack
+        // the property and keep their default.
+        let _ = session.SetMinUpdateInterval(TimeSpan { Duration: 10_000 });
+
+        // Frame arrival → an auto-reset event `run` waits on (the pool is free-threaded: the
+        // handler runs on a system thread, so it only signals).
+        let arrived = CreateEventW(None, false, false, PCWSTR::null())?;
+        let ev = arrived.0 as isize;
+        let handler = TypedEventHandler::<Direct3D11CaptureFramePool, windows::core::IInspectable>::new(
+            move |_, _| {
+                let _ = SetEvent(HANDLE(ev as *mut core::ffi::c_void));
+                Ok(())
+            },
+        );
+        let arrived_token = match pool.FrameArrived(&handler) {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = CloseHandle(arrived);
+                return Err(e);
+            }
+        };
+        if let Err(e) = session.StartCapture() {
+            let _ = pool.RemoveFrameArrived(arrived_token);
+            let _ = CloseHandle(arrived);
+            return Err(e);
+        }
 
         let mut me = WgcCaptureDevice {
             device,
@@ -219,6 +290,9 @@ impl WgcCaptureDevice {
             height,
             output_idx,
             stop,
+            arrived,
+            arrived_token,
+            last_present_ns: 0,
         };
         me.build_pool_texture()?;
         Ok(me)
@@ -259,6 +333,29 @@ impl WgcCaptureDevice {
         D3D11CreateDevice(
             None,
             D3D_DRIVER_TYPE_HARDWARE,
+            windows::Win32::Foundation::HMODULE::default(),
+            flags,
+            Some(&levels),
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            Some(&mut lvl),
+            Some(&mut context),
+        )?;
+        Ok((device.unwrap(), context.unwrap()))
+    }
+
+    /// A D3D11 device on a specific adapter (the NVIDIA one for a monitor capture).
+    unsafe fn create_device_on(
+        adapter: &IDXGIAdapter1,
+    ) -> windows::core::Result<(ID3D11Device, ID3D11DeviceContext)> {
+        let levels = [D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0];
+        let flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
+        let mut device: Option<ID3D11Device> = None;
+        let mut context: Option<ID3D11DeviceContext> = None;
+        let mut lvl = D3D_FEATURE_LEVEL_11_0;
+        D3D11CreateDevice(
+            adapter,
+            D3D_DRIVER_TYPE_UNKNOWN,
             windows::Win32::Foundation::HMODULE::default(),
             flags,
             Some(&levels),
@@ -350,12 +447,23 @@ impl WgcCaptureDevice {
     pub unsafe fn run(
         &mut self,
         client_fps: u32,
-        _draw_cursor: bool,
-        _requested_output: &AtomicU32,
+        draw_cursor: bool,
+        requested_output: &AtomicU32,
+        rebuild: &AtomicBool,
         stop: &AtomicBool,
         mut on_frame: impl FnMut(&Frame),
     ) -> RunExit {
         use crate::dxgi::platform::{HiResTimer, Qpc};
+
+        // A monitor capture honours the cursor flag like the DXGI path (WGC composites the
+        // cursor itself); a window capture keeps WGC's default (on).
+        if self.hwnd.is_none() {
+            let _ = self.session.SetIsCursorCaptureEnabled(draw_cursor);
+        }
+        // Encode a fresh frame the moment it arrives (see the DXGI loop, pacing.rs step 2).
+        let emit_on_arrival = std::env::var("PULSAR_EMIT_ON_ARRIVAL")
+            .map(|v| v != "0")
+            .unwrap_or(true);
 
         let fps = client_fps.max(1);
         let interval_ns: i64 = 1_000_000_000i64 / fps as i64;
@@ -376,10 +484,24 @@ impl WgcCaptureDevice {
             // is_new for THIS tick: true when we pulled a fresh WGC frame, false on the paced
             // reuse path (no new frame this interval) — drives Frame.is_new like the DXGI loop.
             let last_was_new;
-            // The window closing is terminal for a per-window source: stop so the host tears
-            // the session down (it can re-pick a target). Cheap user32 check each tick.
-            if !IsWindow(Some(self.hwnd)).as_bool() {
-                return RunExit::Stop;
+            match self.hwnd {
+                // The window closing is terminal for a per-window source: stop so the host tears
+                // the session down (it can re-pick a target). Cheap user32 check each tick.
+                Some(hwnd) => {
+                    if !IsWindow(Some(hwnd)).as_bool() {
+                        return RunExit::Stop;
+                    }
+                }
+                // A monitor source follows the session-menu monitor picker like the DXGI loop.
+                None => {
+                    let req = requested_output.swap(u32::MAX, Ordering::AcqRel);
+                    if req != u32::MAX && req != self.output_idx {
+                        return RunExit::Switch(req);
+                    }
+                }
+            }
+            if rebuild.swap(false, Ordering::AcqRel) {
+                return RunExit::Switch(self.output_idx);
             }
 
             // A17: re-anchor the cadence on a big overrun (a stall / long encode / scheduler
@@ -397,8 +519,21 @@ impl WgcCaptureDevice {
 
             // 1. Drain the freshest frame: WGC's free-threaded pool buffers up to POOL_BUFFERS
             //    frames; pull the MOST RECENT (drop older ones) to minimize latency, copy it
-            //    into the stable `tex`. `Idle` (no new frame this interval) → reuse last `tex`.
-            match self.pump_latest() {
+            //    into the stable `tex`. Nothing queued → wait for the FrameArrived event until
+            //    the deadline. `Idle` (no new frame this interval) → reuse last `tex`.
+            let mut pumped = self.pump_latest();
+            while emit_on_arrival && matches!(pumped, Ok(Pump::Idle) | Err(_)) {
+                let now = qpc.now_ns();
+                if now >= deadline {
+                    break;
+                }
+                let ms = ((deadline - now + 999_999) / 1_000_000) as u32;
+                if WaitForSingleObject(self.arrived, ms) != WAIT_OBJECT_0 {
+                    break;
+                }
+                pumped = self.pump_latest();
+            }
+            match pumped {
                 Ok(Pump::Fresh) => {
                     have_content = true;
                     last_was_new = true;
@@ -426,10 +561,14 @@ impl WgcCaptureDevice {
                 }
             }
 
-            // 2. Pace to the deadline with the hi-res timer (returns at once if we're late).
-            let now2 = qpc.now_ns();
-            if deadline > now2 {
-                timer.sleep_for(std::time::Duration::from_nanos((deadline - now2) as u64));
+            // 2. Pace to the deadline with the hi-res timer (returns at once if we're late) —
+            //    AFTER the emit for a fresh frame (step 4), before it for a reused surface.
+            let fresh = emit_on_arrival && last_was_new;
+            if !fresh {
+                let now2 = qpc.now_ns();
+                if deadline > now2 {
+                    timer.sleep_for(std::time::Duration::from_nanos((deadline - now2) as u64));
+                }
             }
 
             // 3. Emit the current stable texture (fresh or reused) once we have any content.
@@ -445,8 +584,16 @@ impl WgcCaptureDevice {
                         // pump_latest → the Pump::Resized arm above) so the encoder is rebuilt at the
                         // new size and forces its own fresh IDR. Steady-state frames never force one.
                         force_idr: false,
+                        present_ns: if last_was_new { self.last_present_ns } else { 0 },
                     };
                     on_frame(&frame);
+                }
+            }
+            // 4. One frame per slot: after an on-arrival emit, sleep out the rest of the slot.
+            if fresh {
+                let now3 = qpc.now_ns();
+                if deadline > now3 {
+                    timer.sleep_for(std::time::Duration::from_nanos((deadline - now3) as u64));
                 }
             }
         }
@@ -460,6 +607,7 @@ impl WgcCaptureDevice {
     /// failure.
     unsafe fn pump_latest(&mut self) -> windows::core::Result<Pump> {
         let mut got: Option<ID3D11Texture2D> = None;
+        let mut got_ns: i64 = 0;
         let mut resized = false;
 
         // TryGetNextFrame returns Ok(frame) while frames are queued and an error / null when
@@ -483,6 +631,8 @@ impl WgcCaptureDevice {
             let access: IDirect3DDxgiInterfaceAccess = surface.cast()?;
             let tex: ID3D11Texture2D = access.GetInterface()?;
             got = Some(tex);
+            // When DWM composed it — 100 ns units on the QPC clock (the `Qpc::now_ns` base).
+            got_ns = frame.SystemRelativeTime().map(|t| t.Duration * 100).unwrap_or(0);
             // `frame` drops here, returning its buffer to the pool — keep looping for a newer one.
         }
 
@@ -503,6 +653,7 @@ impl WgcCaptureDevice {
         // Straight GPU→GPU blit (same B8G8R8A8 format, same size) on the immediate context —
         // the encoder reads `dst` next. Same pattern as the DXGI `snapshot` CopyResource.
         self.context.CopyResource(dst, &src);
+        self.last_present_ns = got_ns;
         Ok(Pump::Fresh)
     }
 }
@@ -512,7 +663,11 @@ impl Drop for WgcCaptureDevice {
         // Closing the session stops capture; closing the pool releases its buffers. Both are
         // best-effort — the COM refs drop regardless. `item`/`rt_device`/`device` drop after.
         let _ = self.session.Close();
+        let _ = self.pool.RemoveFrameArrived(self.arrived_token);
         let _ = self.pool.Close();
+        unsafe {
+            let _ = CloseHandle(self.arrived);
+        }
         let _ = &self.item;
         let _ = self.stop.load(Ordering::Relaxed);
     }

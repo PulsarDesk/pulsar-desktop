@@ -11,7 +11,7 @@ use windows::Win32::Graphics::Direct3D::{
 use windows::Win32::Graphics::Direct3D11::{
 	D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11RenderTargetView, ID3D11Texture2D,
 	D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-	D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+	D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::{
@@ -77,6 +77,8 @@ pub struct CaptureDevice {
 	/// Loop-local state shared between `snapshot` (writes) and `run` (reads) without an
 	/// extra return value; only the single capture thread touches it.
 	pub(super) last_was_new: bool,
+	/// QPC ns of the last real desktop update (`LastPresentTime`) → `Frame::present_ns`.
+	pub(super) last_present_ns: i64,
 
 	// --- cursor compositing state (Sunshine technique; see CursorCompositor above) ---
 	/// The texture handed to the encoder when `draw_cursor` is on: a per-tick copy of the
@@ -160,6 +162,7 @@ impl CaptureDevice {
 			output_idx,
 			qpc: Qpc::new(),
 			last_was_new: false,
+			last_present_ns: 0,
 			present: None,
 			cursor: CursorState::default(),
 			compositor: None,
@@ -286,7 +289,7 @@ impl CaptureDevice {
 	///   fallback fires. Callers MUST store `actual_idx` into `CaptureDevice::output_idx`
 	///   so that `current_output()` / `build_gen` report the monitor that is actually being
 	///   captured, not the stale/invalid requested index (C8).
-	pub(super) unsafe fn find_output(
+	pub(crate) unsafe fn find_output(
 		factory: &IDXGIFactory1,
 		output_idx: u32,
 	) -> windows::core::Result<(IDXGIAdapter1, IDXGIOutput1, u32)> {
@@ -364,18 +367,30 @@ impl CaptureDevice {
 		let mut context: Option<ID3D11DeviceContext> = None;
 		let mut got_level = D3D_FEATURE_LEVEL_11_0;
 		// BGRA_SUPPORT is required: Desktop Duplication surfaces are B8G8R8A8_UNORM and the
-		// VideoProcessor / D2D interop assumes BGRA-capable devices.
-		D3D11CreateDevice(
-			adapter, // explicit adapter ⇒ DRIVER_TYPE_UNKNOWN
-			D3D_DRIVER_TYPE_UNKNOWN,
-			HMODULE::default(), // software rasterizer module: none (null HMODULE)
+		// VideoProcessor / D2D interop assumes BGRA-capable devices. VIDEO_SUPPORT lets the
+		// display GPU's own encoder (encode/mf.rs) and its VideoProcessor run on this device —
+		// without it if the driver refuses.
+		let mut r = Err(windows::core::Error::empty());
+		for flags in [
+			D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
 			D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-			Some(&levels),
-			D3D11_SDK_VERSION,
-			Some(&mut device),
-			Some(&mut got_level),
-			Some(&mut context),
-		)?;
+		] {
+			r = D3D11CreateDevice(
+				adapter, // explicit adapter ⇒ DRIVER_TYPE_UNKNOWN
+				D3D_DRIVER_TYPE_UNKNOWN,
+				HMODULE::default(), // software rasterizer module: none (null HMODULE)
+				flags,
+				Some(&levels),
+				D3D11_SDK_VERSION,
+				Some(&mut device),
+				Some(&mut got_level),
+				Some(&mut context),
+			);
+			if r.is_ok() {
+				break;
+			}
+		}
+		r?;
 		// Both out-params are populated on S_OK; unwrap is sound here.
 		Ok((device.unwrap(), context.unwrap()))
 	}

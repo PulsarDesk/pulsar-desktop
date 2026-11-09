@@ -1,0 +1,24 @@
+# X session of the Pulsar kiosk (started by ~/.bash_profile on tty1).
+xset s off -dpms s noblank
+# 1080p at the display's top rate: 120 Hz where the TV/monitor offers it, else its default.
+# TVs re-pick their preferred mode (often 4K60) on every power-on, so keep re-applying it.
+# `xrandr --current` reads the state X already has; a plain `xrandr` would make the server
+# re-probe every output and re-read the EDID every few seconds, stalling X each time.
+keep_mode() {
+	while true; do
+		out="$(xrandr --current | awk '/ connected/ { print $1; exit }')"
+		cur="$(xrandr --current | awk '/\*/ { print $1; exit }')"
+		if [ -n "$out" ] && [ "$cur" != "1920x1080" ]; then
+			xrandr --output "$out" --mode 1920x1080 --rate 120 2>/dev/null ||
+				xrandr --output "$out" --mode 1920x1080 2>/dev/null || true
+		fi
+		sleep 5
+	done
+}
+keep_mode &
+openbox &
+# Restart Pulsar if it exits; quitting it is not a way out of the kiosk.
+while true; do
+	/usr/local/bin/pulsar-kiosk
+	sleep 2
+done

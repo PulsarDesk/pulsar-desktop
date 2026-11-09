@@ -14,6 +14,8 @@ export interface Config {
 	/** Run the relay inside this app and register against it (Settings → Ağ toggle). */
 	use_local_relay: boolean;
 	network_mode: NetworkMode;
+	/** Map Pulsar's UDP port on the router (NAT-PMP / UPnP) for direct P2P (default on). */
+	port_mapping?: boolean;
 	device_name: string;
 	language: Language;
 	unattended_access: boolean;
@@ -38,6 +40,8 @@ export interface Config {
 	/** (Windows) Relaunch elevated (UAC) at startup so the host can control elevated app windows.
 	 * Default true; applied at startup → needs an app restart. */
 	request_admin?: boolean;
+	/** Hold a new session on "optimizing stream" until the bitrate settles (default on). */
+	pre_optimize_stream?: boolean;
 	/** Host: show a controlling client's name next to the pointer (remote sessions). Default true. */
 	show_remote_cursor?: boolean;
 	/** Client: let the host show this device's name next to the pointer. Default true. */
@@ -97,3 +101,13 @@ export interface SessionStats {
 	latency: number;
 	bitrate: number;
 }
+
+/** One Pulsar toast notice (toast.rs): `file-in` = a file arrived (`file-del` / `file-mod`
+ * reserved for remote delete/rename). Clicking opens `path`'s folder with it selected. */
+export type PulsarToast = {
+	id: number;
+	kind: 'file-in' | 'file-del' | 'file-mod';
+	name: string;
+	peer: string;
+	path: string | null;
+};

@@ -134,9 +134,6 @@ pub(crate) struct PlayInfo {
 	pub(crate) id: u64,
 	pub(crate) transport: String,
 	pub(crate) ws_port: u16,
-	/// Loopback WebSocket port the webview reads **audio** (Opus) from; 0 when audio
-	/// isn't being received.
-	pub(crate) audio_ws_port: u16,
 	/// True when the host is this same machine (loopback P2P) — control would be a
 	/// cursor feedback loop, so the UI disables it.
 	pub(crate) local: bool,
@@ -165,6 +162,16 @@ pub(crate) struct PlayInfo {
 pub(crate) struct ConnPhase {
 	pub(crate) target: String,
 	pub(crate) transport: String,
+}
+
+/// The session-start bandwidth probe's result for the Connecting screen, emitted as
+/// `conn-probe` (keyed by the target): the measured rate (kbit/s) and whether every train
+/// kept up (the path carries at least that).
+#[derive(Clone, Serialize)]
+pub(crate) struct ConnProbe {
+	pub(crate) target: String,
+	pub(crate) kbps: u32,
+	pub(crate) at_least: bool,
 }
 
 /// Round-trip time (ms) for a play session, emitted as the `play-rtt` event.

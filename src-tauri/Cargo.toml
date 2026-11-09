@@ -72,6 +72,10 @@ rfd = "0.17"
 # time (CI runners + the Pi have them). Lives in the app crate only, so `cargo test
 # -p pulsar-core` (the fast headless loop) never compiles SDL.
 sdl3-sys = { version = "0.7", default-features = false, features = ["build-from-source", "link-static"] }
+# Client audio decode: libopus (built from source by opusic-sys with CMake, like SDL3 above),
+# in-process — the host's Opus/RTP stream is decoded here and played through SDL3
+# (src/native_audio.rs, Moonlight's model) on every desktop platform.
+opus = "0.4"
 
 # Raw Win32 for true taskbar-covering fullscreen (borderless-fullscreen via SetWindowPos).
 [target.'cfg(windows)'.dependencies]
@@ -83,6 +87,8 @@ windows-sys = { version = "0.61", features = [
 	"Win32_Graphics_Gdi",
 	"Win32_Graphics_Dwm", # io_cmds: kill the 1px border + rounded corners on the frameless fullscreen cover
 	"Win32_UI_WindowsAndMessaging",
+	"Win32_UI_Accessibility", # kbdhook: EVENT_SYSTEM_FOREGROUND watcher (drop control when another app takes over)
+	"Win32_Devices_Display", # util: QueryDisplayConfig — the configured refresh under Dynamic refresh rate
 	"Win32_UI_Shell", # main.rs: ShellExecuteW("runas") to relaunch elevated (request_admin / UAC)
 	"Win32_System_Threading", # also load-bearing for JOBOBJECT_EXTENDED_LIMIT_INFORMATION (IO_COUNTERS)
 	"Win32_System_JobObjects", # job.rs: kill orphaned ffmpeg/ffplay when Pulsar dies (needs Threading + Security)

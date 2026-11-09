@@ -6,10 +6,11 @@
 //!
 //! Focus policy is decided by the *incoming connection's mode* (set on the
 //! `StreamReq`): a **Remote** connection brings the window forward (like the approval
-//! popup); a **Game** connection opens it **hidden** so it neither steals focus from
-//! the fullscreen game running on this host for the client nor appears in the client's
-//! game stream. The host can reveal a hidden window via the sidebar button
-//! (`show_connections`).
+//! popup); a **Game** connection keeps it **minimized** (taskbar only) so it neither steals
+//! focus from the game running on this host for the client nor shows up in the client's
+//! stream (a Desktop game stream captures the whole screen) — a host chat message doesn't
+//! pop it either. The host opens it from the sidebar button (`show_connections`).
+//! (Maintainer decision 2026-11-09; it used to be shown unfocused for a game session.)
 
 use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
@@ -21,18 +22,15 @@ const LABEL: &str = "connections";
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Surface {
 	/// Brand-new window opens MINIMIZED (taskbar only); an existing window left as-is.
-	/// Used at accept time, before the mode is known.
+	/// Used at accept time (mode unknown) and for everything a GAME session triggers.
 	Background,
-	/// Un-minimize + show but do NOT steal focus — a GAME first-stream: the host gets a
-	/// visible indication without yanking focus off a fullscreen game it may be playing.
-	Reveal,
 	/// Un-minimize + show + focus — a REMOTE first-stream, and the sidebar reveal button.
 	Forward,
 }
 
 /// Open the connections window (if absent) or, when it already exists, bring it
-/// forward only for a Remote connection. `bring_forward == false` (Game) opens a
-/// brand-new window **hidden** and leaves an existing one untouched (background).
+/// forward only for [`Surface::Forward`]. [`Surface::Background`] opens a brand-new
+/// window minimized and leaves an existing one untouched.
 ///
 /// All window operations run on the main (event-loop) thread via
 /// `run_on_main_thread`: this is called from a tokio worker thread (the serve loop),
@@ -47,12 +45,6 @@ pub(crate) fn open_or_update(app: &AppHandle, surface: Surface) {
 					let _ = win.unminimize();
 					let _ = win.show();
 					let _ = win.set_focus();
-				}
-				// Game first-stream: make it visible (un-minimize + show) WITHOUT focus, so
-				// the host sees the active-connection list without losing the game.
-				Surface::Reveal => {
-					let _ = win.unminimize();
-					let _ = win.show();
 				}
 				Surface::Background => {}
 			}
@@ -75,10 +67,8 @@ pub(crate) fn open_or_update(app: &AppHandle, surface: Surface) {
 				Surface::Forward => {
 					let _ = win.set_focus();
 				}
-				// Game first-stream: leave it visible+unfocused as built (a present indication).
-				Surface::Reveal => {}
-				// Accept time (mode unknown): send it to the taskbar so it doesn't cover the
-				// streamed game / steal focus until the first stream upgrades it.
+				// Accept time (mode unknown) or a game session: send it to the taskbar so it
+				// doesn't cover the streamed game or steal its focus.
 				Surface::Background => {
 					let _ = win.minimize();
 				}

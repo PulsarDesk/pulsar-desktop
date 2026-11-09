@@ -1421,7 +1421,7 @@ version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab8ecd87370524b461f8557c119c405552c396ed91fc0a8eec68679eab26f94a"
 dependencies = [
- "libloading 0.7.4",
+ "libloading 0.8.9",
 ]
 
 [[package]]
@@ -3959,7 +3959,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 1.3.1",
+ "proc-macro-crate 3.5.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -4429,6 +4429,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "opus"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33718946cc77d4032911d4efe03a66dbcbfbd2bb16c3da06aaeadcc637c32216"
+dependencies = [
+ "opusic-sys",
+]
+
+[[package]]
+name = "opusic-sys"
+version = "0.7.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "986d749e9dc12035f11bf3ecc83a2a696ff7534d4143be9469a4a0faa25b9fd1"
+dependencies = [
+ "cmake",
+]
+
+[[package]]
 name = "orbclient"
 version = "0.3.55"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4464,7 +4482,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.45.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4906,7 +4924,7 @@ dependencies = [
 [[package]]
 name = "pulsar-core"
 version = "0.1.0-dev.27"
-source = "git+https://github.com/PulsarDesk/pulsar-core#b2ffe43aef3f9d3c97e430d8537a56611704aee4"
+source = "git+https://github.com/PulsarDesk/pulsar-core#ea52e96a4652ed53cc32702f6a92cca70f38c589"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -4943,11 +4961,12 @@ dependencies = [
 [[package]]
 name = "pulsar-proto"
 version = "0.1.0-dev.27"
-source = "git+https://github.com/PulsarDesk/pulsar-proto#47603927930d9b504ef0bb3fe8ff97ade7947b30"
+source = "git+https://github.com/PulsarDesk/pulsar-proto#f0c7612344028cf64d2e938760af6213ac00b488"
 dependencies = [
  "bincode",
  "rand",
  "serde",
+ "serde_bytes",
  "sha2 0.11.1",
 ]
 
@@ -4996,6 +5015,7 @@ name = "pulsar-setup"
 version = "0.1.0-dev.27"
 dependencies = [
  "eframe",
+ "raw-window-handle",
  "windows-sys 0.61.2",
  "winresource",
  "zip 9.0.5",
@@ -5017,6 +5037,7 @@ dependencies = [
  "libc",
  "libloading 0.9.0",
  "libmpv-sys",
+ "opus",
  "pulsar-capture",
  "pulsar-core",
  "pulsar-relay",
@@ -5216,7 +5237,7 @@ dependencies = [
 [[package]]
 name = "reed-solomon-erasure"
 version = "6.0.0"
-source = "git+https://github.com/PulsarDesk/pulsar-core#b2ffe43aef3f9d3c97e430d8537a56611704aee4"
+source = "git+https://github.com/PulsarDesk/pulsar-core#ea52e96a4652ed53cc32702f6a92cca70f38c589"
 dependencies = [
  "libm",
  "lru",
@@ -5675,6 +5696,16 @@ dependencies = [
  "serde",
  "serde_core",
  "typeid",
+]
+
+[[package]]
+name = "serde_bytes"
+version = "0.11.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5d440709e79d88e51ac01c4b72fc6cb7314017bb7da9eeff678aa94c10e3ea8"
+dependencies = [
+ "serde",
+ "serde_core",
 ]
 
 [[package]]
@@ -6597,7 +6628,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.5",
  "windows-sys 0.61.2",
@@ -7278,7 +7309,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vigem-client"
 version = "0.1.4"
-source = "git+https://github.com/PulsarDesk/pulsar-core#b2ffe43aef3f9d3c97e430d8537a56611704aee4"
+source = "git+https://github.com/PulsarDesk/pulsar-core#ea52e96a4652ed53cc32702f6a92cca70f38c589"
 dependencies = [
  "winapi",
 ]

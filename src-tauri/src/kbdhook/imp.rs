@@ -16,12 +16,14 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 	CallNextHookEx, DispatchMessageW, GetMessageW, PostThreadMessageW, SetWindowsHookExW,
 	TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, LLKHF_UP,
 	LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_LBUTTONDOWN,
-	WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT,
+	WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT,
 	WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
 };
 
 mod keymap;
 use keymap::{scancode_to_evdev, vk_to_evdev};
+use windows_sys::Win32::UI::WindowsAndMessaging::{KillTimer, PeekMessageW, SetTimer, PM_NOREMOVE, WM_TIMER};
+
 
 /// Mutable globals the callback reaches through a `OnceLock<Mutex<…>>`. The
 /// callback is `extern "system"` and cannot capture, so everything it needs is
@@ -92,6 +94,17 @@ static LAST_PLAY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::n
 /// here — otherwise same-session preservation never fires (ENABLED is already false by
 /// the time enable() runs). A different id ignores this and starts disengaged.
 static ENGAGED_MEMO: AtomicBool = AtomicBool::new(false);
+/// When `engage()` last flipped ENGAGED on — lets `enable()` tell a fresh click-to-engage
+/// (the renderer's click that raced the frontend's arm) from a stale flag.
+static ENGAGED_AT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+fn recently_engaged() -> bool {
+	ENGAGED_AT
+		.lock()
+		.unwrap_or_else(|e| e.into_inner())
+		.map(|t| t.elapsed() < std::time::Duration::from_secs(3))
+		.unwrap_or(false)
+}
 /// CLI kiosk (`--connect`) auto-engages on the next `enable()` (same as Linux).
 static KIOSK_ENGAGE: AtomicBool = AtomicBool::new(false);
 /// True for the lifetime of a kiosk-started session: focus loss must NOT disengage
@@ -130,12 +143,40 @@ fn globals() -> &'static Mutex<Globals> {
 /// recovers mid-session). So coalescible motion may drop, but press/release EDGES
 /// `blocking_send` to wait for a slot. The hook + Interception capture run on plain
 /// `std::thread::spawn` threads (never a tokio worker), so blocking here is safe.
+/// Hand an input event to the forwarder thread. NEVER blocks: `fwd` runs on the
+/// WH_KEYBOARD_LL / WH_MOUSE_LL callback thread, and a callback that stalls past
+/// LowLevelHooksTimeout (~300 ms) makes Windows SILENTLY REMOVE that hook. The old
+/// `blocking_send` here did exactly that whenever the session channel was full — and the
+/// pointer-motion try_sends keep it full — so the first key after a burst of mouse moves
+/// killed the keyboard hook for good (mouse still working, no keys, no Ctrl+Alt+Z).
+/// One unbounded queue + one thread keeps the events in order; the thread does the
+/// (possibly blocking) send, still dropping coalescible motion when the channel is full.
 fn fwd(tx: &Sender<InputEvent>, ev: InputEvent) {
-	if crate::util::is_coalescible_input(&ev) {
-		let _ = tx.try_send(ev);
-	} else {
-		let _ = tx.blocking_send(ev);
-	}
+	use std::sync::mpsc;
+	use std::sync::OnceLock;
+	static Q: OnceLock<Mutex<mpsc::Sender<(Sender<InputEvent>, InputEvent)>>> = OnceLock::new();
+	let q = Q.get_or_init(|| {
+		let (qtx, qrx) = mpsc::channel::<(Sender<InputEvent>, InputEvent)>();
+		std::thread::Builder::new()
+			.name("kbdhook-fwd".into())
+			.spawn(move || {
+				for (tx, ev) in qrx {
+					if crate::util::is_coalescible_input(&ev) {
+						let _ = tx.try_send(ev);
+					} else {
+						if matches!(ev, InputEvent::Key { .. }) {
+							FWD_KEYS.fetch_add(1, Ordering::Relaxed);
+						}
+						if tx.blocking_send(ev).is_err() {
+							tracing::warn!("kbd forwarder: session channel closed");
+						}
+					}
+				}
+			})
+			.expect("spawn kbdhook forwarder");
+		Mutex::new(qtx)
+	});
+	let _ = q.lock().unwrap_or_else(|e| e.into_inner()).send((tx.clone(), ev));
 }
 
 /// Send up-strokes for every key still held on the host and clear the set — called
@@ -223,21 +264,92 @@ pub(super) fn arm_kiosk() {
 /// clip wouldn't survive. `None` = not confined (released). Set by `confine_to_video`.
 static CONFINE: Mutex<Option<(i32, i32, i32, i32)>> = Mutex::new(None);
 
-/// Re-apply the stored confine rect (cheap ClipCursor syscall; no window lookup). Called
-/// from the mouse handler so the trap survives focus flaps. No-op when not confined.
+/// The Pulsar main window while confined (the renderer child is looked up under it).
+static VIDEO_MAIN: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+/// Where the video sits inside the renderer window, as client fractions (from the renderer's
+/// `vidsink-vrect` line). `None` = not reported yet → the whole renderer window.
+static VIDEO_FRAC: Mutex<Option<(f32, f32, f32, f32)>> = Mutex::new(None);
+
+pub fn set_video_frac(x0: f32, y0: f32, x1: f32, y1: f32) {
+	*VIDEO_FRAC.lock().unwrap_or_else(|e| e.into_inner()) = Some((x0, y0, x1, y1));
+}
+
+/// The on-screen rectangle (screen px, LTRB) the video is actually drawn in: the renderer
+/// child window (`PulsarRenderChild`) narrowed to its picture area (letterbox bars / stretch /
+/// rotation as the renderer reports them). Falls back to the main window's client area.
+/// `None` when nothing usable is on screen (inactive tab parks the child 1x1 offscreen).
+fn content_rect() -> Option<(i32, i32, i32, i32)> {
+	use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
+	use windows_sys::Win32::Graphics::Gdi::ClientToScreen;
+	use windows_sys::Win32::UI::WindowsAndMessaging::{
+		FindWindowExW, GetClientRect, GetWindowRect, IsWindowVisible,
+	};
+	let main = VIDEO_MAIN.load(Ordering::SeqCst) as HWND;
+	if main.is_null() {
+		return None;
+	}
+	let class: Vec<u16> = "PulsarRenderChild\0".encode_utf16().collect();
+	let child = unsafe { FindWindowExW(main, std::ptr::null_mut(), class.as_ptr(), std::ptr::null()) };
+	let mut rc: RECT = unsafe { std::mem::zeroed() };
+	let (l, t, r, b, frac) = if !child.is_null() && unsafe { IsWindowVisible(child) } != 0 {
+		if unsafe { GetWindowRect(child, &mut rc) } == 0 {
+			return None;
+		}
+		let frac = *VIDEO_FRAC.lock().unwrap_or_else(|e| e.into_inner());
+		(rc.left, rc.top, rc.right, rc.bottom, frac)
+	} else {
+		if unsafe { GetClientRect(main, &mut rc) } == 0 {
+			return None;
+		}
+		let mut tl = POINT { x: rc.left, y: rc.top };
+		let mut br = POINT { x: rc.right, y: rc.bottom };
+		unsafe {
+			ClientToScreen(main, &mut tl);
+			ClientToScreen(main, &mut br);
+		}
+		(tl.x, tl.y, br.x, br.y, None)
+	};
+	let (w, h) = ((r - l) as f32, (b - t) as f32);
+	if w < 8.0 || h < 8.0 {
+		return None;
+	}
+	let (fx0, fy0, fx1, fy1) = match frac {
+		Some((a, b2, c, d)) if c > a && d > b2 => (a.clamp(0.0, 1.0), b2.clamp(0.0, 1.0), c.clamp(0.0, 1.0), d.clamp(0.0, 1.0)),
+		_ => (0.0, 0.0, 1.0, 1.0),
+	};
+	let rect = (
+		l + (w * fx0).round() as i32,
+		t + (h * fy0).round() as i32,
+		l + (w * fx1).round() as i32,
+		t + (h * fy1).round() as i32,
+	);
+	if rect.2 - rect.0 < 8 || rect.3 - rect.1 < 8 {
+		return None;
+	}
+	Some(rect)
+}
+
+/// Re-measure the video rect and re-apply the clip (the OS drops ClipCursor on focus and
+/// display changes; the window can move, resize or go fullscreen). Runs from hook_thread's
+/// timer — never inside a hook callback. No-op when not confined.
 fn reassert_confine() {
 	use windows_sys::Win32::Foundation::RECT;
 	use windows_sys::Win32::UI::WindowsAndMessaging::ClipCursor;
-	if let Some((l, t, r, b)) = *CONFINE.lock().unwrap() {
-		let rc = RECT {
-			left: l,
-			top: t,
-			right: r,
-			bottom: b,
-		};
-		unsafe {
-			ClipCursor(&rc);
-		}
+	if CONFINE.lock().unwrap().is_none() {
+		return;
+	}
+	let Some((l, t, r, b)) = content_rect() else {
+		return;
+	};
+	*CONFINE.lock().unwrap() = Some((l, t, r, b));
+	let rc = RECT {
+		left: l,
+		top: t,
+		right: r,
+		bottom: b,
+	};
+	unsafe {
+		ClipCursor(&rc);
 	}
 }
 
@@ -251,17 +363,13 @@ fn clear_confine() {
 	}
 }
 
-/// Confine the cursor to the MONITOR showing the streamed video while engaged, so the
-/// pointer can't wander onto another screen — but it can still move freely on that whole
-/// monitor (NOT trapped to the Pulsar window: the user can reach the rest of the screen
-/// and a click outside implicitly releases). `on=false` frees it (ClipCursor(NULL)).
-/// Picks the monitor under the Pulsar main window; no-confine if it can't resolve.
+/// Confine the cursor to the VIDEO itself while engaged — the picture area of the renderer
+/// window (letterbox bars excluded), so the pointer can neither leave Pulsar nor wander onto
+/// the app's own tabs/chrome; Ctrl+Alt+Z / 3xRightCtrl release it. `on=false` frees it
+/// (ClipCursor(NULL)). The rect is re-measured by `reassert_confine` every 500 ms.
 fn confine_to_video(app: &AppHandle, on: bool) {
 	use tauri::Manager as _;
-	use windows_sys::Win32::Foundation::HWND;
-	use windows_sys::Win32::Graphics::Gdi::{
-		GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-	};
+	use windows_sys::Win32::Foundation::{HWND, RECT};
 	use windows_sys::Win32::UI::WindowsAndMessaging::ClipCursor;
 
 	if !on {
@@ -281,27 +389,44 @@ fn confine_to_video(app: &AppHandle, on: bool) {
 	};
 	// Cache the window for the WH_MOUSE_LL absolute-pointer normalization (see handle_mouse_wh).
 	globals().lock().unwrap().video_hwnd = main_hwnd as isize;
+	VIDEO_MAIN.store(main_hwnd as isize, Ordering::SeqCst);
+	let Some((l, t, r, b)) = content_rect() else {
+		return;
+	};
+	*CONFINE.lock().unwrap() = Some((l, t, r, b));
+	let rc = RECT {
+		left: l,
+		top: t,
+		right: r,
+		bottom: b,
+	};
 	unsafe {
-		let mon = MonitorFromWindow(main_hwnd, MONITOR_DEFAULTTONEAREST);
-		let mut mi: MONITORINFO = std::mem::zeroed();
-		mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
-		if GetMonitorInfoW(mon, &mut mi) == 0 {
-			return;
-		}
-		let rc = mi.rcMonitor;
-		if rc.right <= rc.left || rc.bottom <= rc.top {
-			return;
-		}
-		*CONFINE.lock().unwrap() = Some((rc.left, rc.top, rc.right, rc.bottom));
 		ClipCursor(&rc);
 	}
 }
 
 /// Take control: start forwarding + suppressing input. Idempotent; emits
 /// `kbd-engaged` on the rising edge (drives the UI hint + renderer cursor state).
+/// The stream is stopped (renderer `ov stalled 1`): no engaging until it is back.
+static STREAM_STALLED: AtomicBool = AtomicBool::new(false);
+
+pub(super) fn set_stream_stalled(app: &AppHandle, stalled: bool) {
+	if STREAM_STALLED.swap(stalled, Ordering::SeqCst) != stalled {
+		tracing::info!(stalled, "stream stopped/resumed → input capture {}", if stalled { "released + locked" } else { "allowed" });
+	}
+	if stalled {
+		release_engage_why(app, "stream stopped");
+	}
+}
+
 pub(super) fn engage(app: &AppHandle) {
+	if STREAM_STALLED.load(Ordering::SeqCst) {
+		tracing::info!("engage refused: the stream is stopped");
+		return;
+	}
 	if !ENGAGED.swap(true, Ordering::SeqCst) {
-		tracing::info!("kbd capture ENGAGED");
+		*ENGAGED_AT.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
+		tracing::info!(kcalls = KCALLS.load(Ordering::Relaxed), app_focused = APP_FOCUSED.load(Ordering::SeqCst), "kbd capture ENGAGED");
 		// Trap the cursor to the streamed screen so it can't roam to another monitor.
 		confine_to_video(app, true);
 		let _ = app.emit("kbd-engaged", ());
@@ -312,8 +437,18 @@ pub(super) fn engage(app: &AppHandle) {
 /// back in). Emits `kbd-released` on the falling edge and releases any keys still
 /// held on the host.
 pub(super) fn release_engage(app: &AppHandle) {
+	release_engage_why(app, "api");
+}
+
+/// `release_engage` with the caller named in the log line (focus loss vs overlay vs API).
+pub(super) fn release_engage_why(app: &AppHandle, why: &str) {
+	pinch_end(true);
+	// Already disengaged (e.g. by a combo) but a clip is still in force: free it anyway.
+	if !ENGAGED.load(Ordering::SeqCst) && CONFINE.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+		clear_confine();
+	}
 	if ENGAGED.swap(false, Ordering::SeqCst) {
-		tracing::info!("kbd capture RELEASED");
+		tracing::info!(why, kcalls = KCALLS.load(Ordering::Relaxed), "kbd capture RELEASED");
 		confine_to_video(app, false); // free the cursor — local desktop usable again
 		// Collect flush events under the lock, then drop it BEFORE sending — `fwd`
 		// uses `blocking_send` which PANICS when called from a tokio worker thread
@@ -496,6 +631,7 @@ fn handle_key(evdev: u32, down: bool) -> bool {
 	// the g.held update at the bottom, so a combo_edge check on `held` would never see
 	// the first press (held lacks the key at combo-fire time for the same reason).
 	let combo_key = matches!(evdev, 50 | 16 | 88 | 44);
+
 	let combo_edge = if combo_key {
 		if down {
 			let edge = g.combo_held.insert(evdev);
@@ -574,6 +710,10 @@ fn handle_key(evdev: u32, down: bool) -> bool {
 		// (blocks disable()/set_focused() during recovery).
 		let (flush_tx, flush_evs, was_engaged, app_handle) = if ENGAGED.swap(false, Ordering::SeqCst) {
 			tracing::info!("kbd capture RELEASED (overlay combo, immediate)");
+			// Free the cursor too (the other release combos do): the menu must be usable and
+			// the pointer able to leave the window; without this the clip stayed until an
+			// Alt+Tab made Windows drop it.
+			clear_confine();
 			let (tx, evs) = flush_held_wh(&mut g);
 			(tx, evs, true, g.app.clone())
 		} else {
@@ -617,7 +757,11 @@ fn handle_key(evdev: u32, down: bool) -> bool {
 		&& g.shift_down
 		&& (ENGAGED.load(Ordering::SeqCst) || APP_FOCUSED.load(Ordering::SeqCst))
 	{
-		if let Some(app) = &g.app {
+		// Emit OUTSIDE the globals lock: the mouse hook callback takes that lock, and a
+		// Tauri IPC emit under it could stall the callback past LowLevelHooksTimeout.
+		let app_handle = g.app.clone();
+		drop(g);
+		if let Some(app) = &app_handle {
 			let _ = app.emit("fullscreen-toggle", ());
 		}
 		return true;
@@ -647,6 +791,8 @@ fn handle_key(evdev: u32, down: bool) -> bool {
 			g.held.insert(97);
 			let (flush_tx, flush_evs) = flush_held_wh(&mut g);
 			ENGAGED.store(false, Ordering::SeqCst);
+			tracing::info!("kbd capture RELEASED (3xRightCtrl)");
+			clear_confine();
 			let app_handle = g.app.clone();
 			drop(g);
 			send_flush_events(flush_tx, flush_evs);
@@ -662,6 +808,8 @@ fn handle_key(evdev: u32, down: bool) -> bool {
 	// — Parsec's detach shortcut, same behavior as 3×RightCtrl above.
 	if combo_edge && evdev == 44 && g.ctrl_down && g.alt_down {
 		ENGAGED.store(false, Ordering::SeqCst);
+		tracing::info!("kbd capture RELEASED (Ctrl+Alt+Z)");
+		clear_confine();
 		// Un-stick everything held on the host (the chord's up-strokes won't be forwarded).
 		// C16 fix: collect flush events + app handle under lock, drop guard BEFORE sending.
 		let (flush_tx, flush_evs) = flush_held_wh(&mut g);
@@ -820,6 +968,51 @@ fn handle_mouse(state: u16, flags: u16, rolling: i16, x: i32, y: i32) -> bool {
 /// pointer path is dead too), leaving the viewer unable to control the remote. `msg` is the
 /// WM_* message; `data` is MSLLHOOKSTRUCT.mouseData (wheel delta in the high word). Returns
 /// true to SUPPRESS the event locally (engaged → the cursor only drives the remote).
+/// Connected host injects real pinch gestures (`FEAT_PINCH`); set per session by play.rs.
+static HOST_PINCH: AtomicBool = AtomicBool::new(false);
+/// A touchpad pinch is being forwarded as `InputEvent::Pinch`.
+static PINCH_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Cumulative pinch scale (f64 bits) and when its last step arrived (ms, `now_ms`).
+static PINCH_SCALE_BITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PINCH_LAST_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Zoom per 120 units of the Ctrl + wheel Windows synthesizes for a touchpad pinch.
+const PINCH_STEP: f64 = 1.12;
+/// No pinch step for this long (and the synthesized Ctrl released) = the gesture ended.
+const PINCH_IDLE_MS: u64 = 200;
+
+pub fn set_host_pinch(on: bool) {
+	HOST_PINCH.store(on, Ordering::SeqCst);
+}
+
+fn now_ms() -> u64 {
+	static T0: OnceLock<std::time::Instant> = OnceLock::new();
+	T0.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
+}
+
+fn ctrl_down_locally() -> bool {
+	unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x11) as u16 & 0x8000 != 0 }
+}
+
+/// Close a forwarded pinch. `force` = control is going away (no idle/Ctrl checks).
+fn pinch_end(force: bool) {
+	if !PINCH_ACTIVE.load(Ordering::SeqCst) {
+		return;
+	}
+	if !force
+		&& (now_ms().saturating_sub(PINCH_LAST_MS.load(Ordering::SeqCst)) < PINCH_IDLE_MS || ctrl_down_locally())
+	{
+		return;
+	}
+	if !PINCH_ACTIVE.swap(false, Ordering::SeqCst) {
+		return;
+	}
+	let scale = f64::from_bits(PINCH_SCALE_BITS.load(Ordering::SeqCst));
+	let tx = globals().lock().unwrap_or_else(|e| e.into_inner()).tx.clone();
+	if let Some(tx) = tx {
+		fwd(&tx, InputEvent::Pinch { phase: 2, scale });
+	}
+}
+
 fn handle_mouse_wh(msg: u32, x: i32, y: i32, data: u32) -> bool {
 	use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
 	use windows_sys::Win32::Graphics::Gdi::ClientToScreen;
@@ -832,16 +1025,34 @@ fn handle_mouse_wh(msg: u32, x: i32, y: i32, data: u32) -> bool {
 	if !ENGAGED.load(Ordering::SeqCst) {
 		return false; // disengaged → local mouse untouched (click-to-engage gate)
 	}
-	let mut g = globals().lock().unwrap();
+	// try_lock, never block: this runs inside the WH_MOUSE_LL callback (see ll_keyboard_proc
+	// on why a stalled LL callback is fatal). Busy lock → drop this one event, still
+	// suppressing it locally while engaged (a lost move is invisible, the next one lands).
+	let Ok(mut g) = globals().try_lock() else {
+		return msg != WM_MOUSEMOVE;
+	};
 	let Some(tx) = g.tx.clone() else {
 		return false;
 	};
 	let hwnd = g.video_hwnd as HWND;
-	// Keep the cursor trapped to the streamed screen (the OS drops ClipCursor on the render
-	// child's focus flaps), mirroring handle_mouse.
-	reassert_confine();
+	// NO reassert_confine() here: ClipCursor needs the raw-input thread, which is blocked
+	// waiting for THIS callback to return — so every engaged mouse move stalled the hook
+	// thread until LowLevelHooksTimeout, and Windows silently REMOVED our keyboard hook
+	// (keys never reached the remote, Ctrl+Alt+Z / 3×RightCtrl dead). The confine is
+	// re-asserted from hook_thread's timer instead, outside any hook callback.
 	match msg {
 		WM_MOUSEMOVE => {
+			// Normalize against the VIDEO rect (the same one the cursor is clipped to): the
+			// main window's client area also holds the tab bar, which skewed the remote
+			// pointer. try_lock: never block in the hook callback.
+			let video = CONFINE.try_lock().ok().and_then(|c| *c);
+			if let Some((l, t, r, b)) = video.filter(|(l, t, r, b)| r - l > 1 && b - t > 1) {
+				drop(g);
+				let nx = ((x - l) as f64 / (r - l - 1) as f64).clamp(0.0, 1.0);
+				let ny = ((y - t) as f64 / (b - t - 1) as f64).clamp(0.0, 1.0);
+				fwd(&tx, InputEvent::PointerMotion { x: nx, y: ny });
+				return false;
+			}
 			// Normalize the absolute screen position against the video window's client rect.
 			if hwnd.is_null() {
 				return true;
@@ -866,8 +1077,14 @@ fn handle_mouse_wh(msg: u32, x: i32, y: i32, data: u32) -> bool {
 			};
 			drop(g);
 			if let Some((nx, ny)) = normalized {
-				let _ = tx.try_send(InputEvent::PointerMotion { x: nx, y: ny });
+				fwd(&tx, InputEvent::PointerMotion { x: nx, y: ny }); // queued: keeps order vs clicks
 			}
+			// Let the move through locally. This path sends ABSOLUTE positions read from the
+			// hook's `pt` — suppressing the move froze the real cursor, so every following
+			// `pt` was the frozen spot + one tiny delta and the remote pointer only jittered
+			// in place ("tries to move but doesn't"). The cursor stays trapped over the video
+			// by reassert_confine() (ClipCursor) and hidden by the renderer while engaged.
+			return false;
 		}
 		WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MBUTTONDOWN
 		| WM_MBUTTONUP => {
@@ -881,18 +1098,58 @@ fn handle_mouse_wh(msg: u32, x: i32, y: i32, data: u32) -> bool {
 			};
 			if down {
 				g.held_buttons.insert(button);
-			} else {
-				g.held_buttons.remove(&button);
+			} else if !g.held_buttons.remove(&button) {
+				// An UP whose DOWN we never saw: the click-to-engage press went to the
+				// renderer BEFORE control engaged. Let its release through locally (the
+				// renderer/OS button state stays consistent) and don't forward it — the
+				// engaging click must not reach the host at all.
+				drop(g);
+				return false;
 			}
 			drop(g);
 			fwd(&tx, InputEvent::PointerButton { button, down });
 		}
-		WM_MOUSEWHEEL => {
-			// High word of mouseData is a signed WHEEL_DELTA multiple (120 per notch).
-			let delta = (data >> 16) as i16 as f64 / 120.0;
+		WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
+			// High word of mouseData = signed wheel delta (120 per notch; precision touchpads
+			// send finer steps). The wire unit is BROWSER wheel pixels (100 per notch, +y =
+			// down, +x = right), what the host's injector and the Linux path use. Sending raw
+			// notches here (+1 = up) made Windows-client scrolling ~100x too slow AND inverted.
+			let raw = (data >> 16) as i16 as f64;
+			if raw == 0.0 {
+				drop(g);
+				return true;
+			}
+			let px = raw * 100.0 / 120.0;
+			let (dx, dy) = if msg == WM_MOUSEHWHEEL { (px, 0.0) } else { (0.0, -px) };
+			// Touchpad pinch-zoom arrives as Ctrl + wheel where Windows synthesizes the Ctrl
+			// (an injected key our keyboard hooks pass through, so the host never sees it).
+			// Ctrl down locally but not held on the host → wrap this wheel step in Ctrl so the
+			// remote app zooms instead of scrolling. A physically held (forwarded) Ctrl is
+			// already in `held`.
+			let ctrl_local = ctrl_down_locally();
+			let wrap_ctrl = ctrl_local && !g.held.contains(&29) && !g.held.contains(&97);
 			drop(g);
-			if delta != 0.0 {
-				let _ = tx.try_send(InputEvent::Scroll { dx: 0.0, dy: delta });
+			// Host injects real pinch gestures: forward the pinch itself (begin / scale / end)
+			// instead of Ctrl + wheel. The end is detected by hook_thread's pinch timer.
+			if wrap_ctrl && msg == WM_MOUSEWHEEL && HOST_PINCH.load(Ordering::SeqCst) {
+				let factor = PINCH_STEP.powf(raw / 120.0);
+				let was = PINCH_ACTIVE.swap(true, Ordering::SeqCst);
+				let prev = if was { f64::from_bits(PINCH_SCALE_BITS.load(Ordering::SeqCst)) } else { 1.0 };
+				let scale = (prev * factor).clamp(0.05, 20.0);
+				PINCH_SCALE_BITS.store(scale.to_bits(), Ordering::SeqCst);
+				PINCH_LAST_MS.store(now_ms(), Ordering::SeqCst);
+				if !was {
+					fwd(&tx, InputEvent::Pinch { phase: 0, scale: 1.0 });
+				}
+				fwd(&tx, InputEvent::Pinch { phase: 1, scale });
+				return true;
+			}
+			if wrap_ctrl {
+				fwd(&tx, InputEvent::Key { code: 29, down: true });
+			}
+			fwd(&tx, InputEvent::Scroll { dx, dy });
+			if wrap_ctrl {
+				fwd(&tx, InputEvent::Key { code: 29, down: false });
 			}
 		}
 		_ => {
@@ -909,8 +1166,12 @@ unsafe extern "system" fn ll_mouse_proc(ncode: i32, wparam: WPARAM, lparam: LPAR
 		return CallNextHookEx(std::ptr::null_mut(), ncode, wparam, lparam);
 	}
 	let ms = &*(lparam as *const MSLLHOOKSTRUCT);
-	// Never consume injected events (our own ClipCursor side effects, accessibility tools).
-	if ms.flags & LLMHF_INJECTED != 0 {
+	// Never consume injected events (our own ClipCursor side effects, accessibility tools)
+	// EXCEPT the wheel: Windows synthesizes touchpad pinch-zoom (Ctrl+wheel) and some
+	// precision-touchpad scrolling as injected wheel input, and while control is engaged that
+	// gesture belongs to the remote.
+	let wheel = matches!(wparam as u32, WM_MOUSEWHEEL | WM_MOUSEHWHEEL);
+	if ms.flags & LLMHF_INJECTED != 0 && !wheel {
 		return CallNextHookEx(std::ptr::null_mut(), ncode, wparam, lparam);
 	}
 	if handle_mouse_wh(wparam as u32, ms.pt.x, ms.pt.y, ms.mouseData) {
@@ -932,6 +1193,19 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, _sta
 	// the overlay floats over the live canvas — so it's unused here, kept for a shared
 	// signature.)
 	let same_session = LAST_PLAY.load(Ordering::SeqCst) == id;
+	// A different session starts unlocked: a stopped-stream lock must not outlive the session
+	// (its renderer reports the new stream's state itself).
+	if !same_session {
+		STREAM_STALLED.store(false, Ordering::SeqCst);
+	}
+	tracing::info!(
+		id,
+		same_session,
+		mouse,
+		memo = ENGAGED_MEMO.load(Ordering::SeqCst),
+		kiosk = KIOSK_ENGAGE.load(Ordering::SeqCst),
+		"kbd capture enable()"
+	);
 	LAST_PLAY.store(id, Ordering::SeqCst);
 	{
 		let mut g = globals().lock().unwrap();
@@ -956,11 +1230,18 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, _sta
 		// Restore the engagement this id had when last active (disable() cleared the live
 		// ENGAGED but stashed it in ENGAGED_MEMO). engage() emits kbd-engaged on the edge so
 		// the renderer cursor/hint resyncs; a remembered-disengaged session stays off.
+		// A LIVE engagement wins over a stale memo: a re-arm without a disable() in between
+		// (effect re-run on the same tab) used to clear the user's control silently.
 		if ENGAGED_MEMO.load(Ordering::SeqCst) {
 			engage(&app);
-		} else {
-			ENGAGED.store(false, Ordering::SeqCst);
+		} else if ENGAGED.load(Ordering::SeqCst) {
+			tracing::info!("kbd capture enable(): keeping the live engagement");
 		}
+	} else if ENGAGED.load(Ordering::SeqCst) && recently_engaged() {
+		// New id, but the renderer's click-to-engage (`ov engage` → engage_render) landed a
+		// moment BEFORE the frontend armed the capture — that click belongs to THIS session,
+		// so don't throw it away (the user had to click twice). Anything older is stale.
+		tracing::info!("kbd capture enable(): keeping the renderer's fresh engagement");
 	} else {
 		ENGAGED.store(false, Ordering::SeqCst);
 	}
@@ -1001,6 +1282,8 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, _sta
 /// Disarm: stop suppressing + forwarding, drop the sender, and tear the hook
 /// thread down cleanly (posts WM_QUIT, which exits the pump and unhooks).
 pub fn disable() {
+	tracing::info!(engaged = ENGAGED.load(Ordering::SeqCst), kcalls = KCALLS.load(Ordering::Relaxed), "kbd capture disable()");
+	pinch_end(true);
 	ENABLED.store(false, Ordering::SeqCst);
 	// Remember the engagement before dropping the live flag so a same-id re-arm (tab
 	// switch = disable()→enable()) can restore it. LAST_PLAY is deliberately kept too;
@@ -1043,7 +1326,7 @@ pub fn overlay_suspend(_suspend: bool) {}
 /// keyboard while the user is in another app — the mouse looked free (they clicked
 /// away) but every keystroke still went to the remote.
 pub fn set_focused(focused: bool) {
-	tracing::info!(focused, "app focus changed");
+	tracing::info!(focused, engaged = ENGAGED.load(Ordering::SeqCst), "app focus changed");
 	// A click over the live video lands on the pulsar-render CHILD (a separate
 	// process), which momentarily deactivates the Tauri webview window — Windows
 	// reports focused=false then true within milliseconds. Disengaging on that flap
@@ -1051,64 +1334,171 @@ pub fn set_focused(focused: bool) {
 	// into the recreate gap: "cursor moves but clicks do nothing"). Focus moving to
 	// a window whose TOP-LEVEL root is still ours is NOT the user leaving the app.
 	if !focused {
-		use windows_sys::Win32::System::Threading::GetCurrentProcessId;
-		use windows_sys::Win32::UI::WindowsAndMessaging::{
-			GetAncestor, GetForegroundWindow, GetWindowThreadProcessId, GA_ROOT,
-		};
-		let fg = unsafe { GetForegroundWindow() };
-		if !fg.is_null() {
-			let root = unsafe { GetAncestor(fg, GA_ROOT) };
-			let mut pid = 0u32;
-			unsafe { GetWindowThreadProcessId(root, &mut pid) };
-			if !root.is_null() && pid == unsafe { GetCurrentProcessId() } {
-				tracing::debug!("focus moved within our own window tree — keeping engagement");
+		match foreground_is_ours() {
+			FgOwner::Ours => {
+				tracing::info!("focus moved within our own window tree — keeping engagement");
 				return;
+			}
+			FgOwner::None => {
+				// GetForegroundWindow() is NULL while activation is in flight (the
+				// child/webview handoff) — decide on a settled reading instead of
+				// dropping control on a transient.
+				tracing::info!("focus lost with no foreground window — deferring the decision");
+				std::thread::spawn(|| {
+					std::thread::sleep(std::time::Duration::from_millis(150));
+					match foreground_is_ours() {
+						FgOwner::Ours => tracing::info!("deferred focus check: ours — keeping engagement"),
+						owner => {
+							tracing::info!(?owner, "deferred focus check: foreign — releasing");
+							focus_lost();
+						}
+					}
+				});
+				return;
+			}
+			owner => {
+				tracing::info!(?owner, "focus lost to another process");
 			}
 		}
 	}
 	APP_FOCUSED.store(focused, Ordering::SeqCst);
+	if !focused {
+		focus_lost();
+	}
+}
+
+/// Who owns the foreground window right now (diagnostic + the focus-loss gate).
+#[derive(Debug)]
+enum FgOwner {
+	Ours,
+	None,
+	Other { pid: u32, class: String },
+}
+
+fn foreground_is_ours() -> FgOwner {
+	use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+	use windows_sys::Win32::UI::WindowsAndMessaging::{
+		GetAncestor, GetClassNameW, GetForegroundWindow, GetWindowThreadProcessId, GA_ROOT,
+	};
+	let fg = unsafe { GetForegroundWindow() };
+	if fg.is_null() {
+		return FgOwner::None;
+	}
+	let root = unsafe { GetAncestor(fg, GA_ROOT) };
+	let root = if root.is_null() { fg } else { root };
+	let mut pid = 0u32;
+	unsafe { GetWindowThreadProcessId(root, &mut pid) };
+	if pid == unsafe { GetCurrentProcessId() } {
+		return FgOwner::Ours;
+	}
+	let mut buf = [0u16; 64];
+	let n = unsafe { GetClassNameW(fg, buf.as_mut_ptr(), buf.len() as i32) };
+	let class = String::from_utf16_lossy(&buf[..n.max(0) as usize]);
+	FgOwner::Other { pid, class }
+}
+
+/// The app really lost focus: drop the engagement (unless kiosk).
+fn focus_lost() {
+	APP_FOCUSED.store(false, Ordering::SeqCst);
 	// Kiosk sessions ignore focus loss entirely (see KIOSK_SESSION).
 	if KIOSK_SESSION.load(Ordering::SeqCst) {
 		return;
 	}
-	if !focused && ENGAGED.load(Ordering::SeqCst) {
+	if ENGAGED.load(Ordering::SeqCst) {
 		let app = globals().lock().unwrap().app.clone();
 		match app {
-			Some(app) => release_engage(&app),
+			Some(app) => release_engage_why(&app, "focus-loss"),
 			None => ENGAGED.store(false, Ordering::SeqCst),
 		}
 	}
 }
 
-/// Owns the hook for its lifetime: install → pump messages → uninstall.
+/// Owns the hooks for their lifetime: install → pump messages → uninstall.
+///
+/// The KEYBOARD hook lives on its OWN thread (`kbd_hook_thread`), the mouse hook on this one —
+/// RustDesk's layout (rdev grab: keyboard-only hook thread, `KEYBOARD_ONLY`). Sharing one
+/// thread, the keyboard hook stopped being called once control was engaged (the mouse hook
+/// kept firing): keys reached the local webview but never the remote, and the release combos
+/// (Ctrl+Alt+Z / 3×RightCtrl) were dead.
 fn hook_thread() {
 	unsafe {
 		let hmod = GetModuleHandleW(std::ptr::null());
-		let hook: HHOOK = SetWindowsHookExW(WH_KEYBOARD_LL, Some(ll_keyboard_proc), hmod, 0);
-		if hook.is_null() {
-			THREAD_STARTED.store(false, Ordering::SeqCst);
-			return;
+		// Keyboard hook thread first; it reports its id so disable() can stop it with us.
+		let (ktx, krx) = std::sync::mpsc::channel::<u32>();
+		let kbd = std::thread::Builder::new()
+			.name("kbdhook-kbd".into())
+			.spawn(move || kbd_hook_thread(ktx))
+			.ok();
+		let kbd_tid = krx.recv_timeout(std::time::Duration::from_secs(2)).unwrap_or(0);
+		if kbd_tid == 0 {
+			tracing::warn!("keyboard hook thread failed to start — no keyboard capture");
 		}
-		// MOUSE hook alongside the keyboard hook: without the Interception driver this is the
-		// ONLY way the viewer captures the mouse (the native renderer occludes the webview, so
-		// the JS pointer path is dead). Non-fatal if it fails — keyboard still works.
+		// MOUSE hook: without the Interception driver this is the ONLY way the viewer captures
+		// the mouse (the native renderer occludes the webview, so the JS pointer path is dead).
 		let mouse_hook: HHOOK = SetWindowsHookExW(WH_MOUSE_LL, Some(ll_mouse_proc), hmod, 0);
 		if mouse_hook.is_null() {
 			tracing::warn!("WH_MOUSE_LL hook install failed — mouse capture unavailable (keyboard still active)");
 		}
+		// Foreground watcher: with the renderer child holding the keyboard focus the app gets
+		// no Focused(false) when another app takes the foreground (Start, Win+L, a toast
+		// click...), so watch the foreground directly and drop control the moment it leaves us.
+		let fg_hook = windows_sys::Win32::UI::Accessibility::SetWinEventHook(
+			windows_sys::Win32::UI::WindowsAndMessaging::EVENT_SYSTEM_FOREGROUND,
+			windows_sys::Win32::UI::WindowsAndMessaging::EVENT_SYSTEM_FOREGROUND,
+			std::ptr::null_mut(),
+			Some(foreground_event),
+			0,
+			0,
+			windows_sys::Win32::UI::WindowsAndMessaging::WINEVENT_OUTOFCONTEXT,
+		);
 		let my_tid = GetCurrentThreadId();
+		tracing::debug!(tid = my_tid, kbd_tid, mouse_ok = !mouse_hook.is_null(), "kbd: LL hooks installed");
 		globals().lock().unwrap().hook_thread_id = my_tid;
-		// Required: LL hooks deliver via this thread's message queue.
 		let mut msg: MSG = std::mem::zeroed();
+		// Re-assert the cursor confine from here (outside any hook callback — see handle_mouse_wh).
+		let timer = SetTimer(std::ptr::null_mut(), 0, 500, None);
+		// Fast tick that closes a forwarded touchpad pinch once its steps stop.
+		let pinch_timer = SetTimer(std::ptr::null_mut(), 0, 50, None);
 		// GetMessageW returns 0 on WM_QUIT, -1 on error.
 		while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+			if msg.message == WM_TIMER && pinch_timer != 0 && msg.wParam == pinch_timer {
+				pinch_end(false);
+				continue;
+			}
+			if msg.message == WM_TIMER {
+				if ENGAGED.load(Ordering::SeqCst) {
+					reassert_confine();
+				}
+				// Health line for the keyboard hook (only when the count moved): a hook Windows
+				// silently removed shows up as a count that stops while keys are being typed.
+				static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+				let n = KCALLS.load(Ordering::Relaxed);
+				if LAST.swap(n, Ordering::Relaxed) != n {
+					tracing::debug!(kcalls = n, engaged = ENGAGED.load(Ordering::SeqCst), "kbd: keyboard hook alive");
+				}
+				continue;
+			}
 			TranslateMessage(&msg);
 			DispatchMessageW(&msg);
+		}
+		if timer != 0 {
+			KillTimer(std::ptr::null_mut(), timer);
+		}
+		if pinch_timer != 0 {
+			KillTimer(std::ptr::null_mut(), pinch_timer);
 		}
 		if !mouse_hook.is_null() {
 			UnhookWindowsHookEx(mouse_hook);
 		}
-		UnhookWindowsHookEx(hook);
+		if !fg_hook.is_null() {
+			windows_sys::Win32::UI::Accessibility::UnhookWinEvent(fg_hook);
+		}
+		if kbd_tid != 0 {
+			PostThreadMessageW(kbd_tid, WM_QUIT, 0, 0);
+		}
+		if let Some(h) = kbd {
+			let _ = h.join();
+		}
 		// Compare-and-clear: a fast disable()→enable() churn can spawn a NEW hook
 		// thread before this (old) one drains WM_QUIT. The new thread has already
 		// stored its own id; blindly zeroing here would clobber the LIVE thread's id,
@@ -1121,8 +1511,172 @@ fn hook_thread() {
 	}
 }
 
-/// The LL keyboard callback. Runs on the hook thread for every key system-wide.
+/// EVENT_SYSTEM_FOREGROUND callback (out-of-context, delivered on hook_thread's pump).
+unsafe extern "system" fn foreground_event(
+	_hook: windows_sys::Win32::UI::Accessibility::HWINEVENTHOOK,
+	_event: u32,
+	_hwnd: windows_sys::Win32::Foundation::HWND,
+	_id_object: i32,
+	_id_child: i32,
+	_thread: u32,
+	_time: u32,
+) {
+	if !ENGAGED.load(Ordering::SeqCst) || KIOSK_SESSION.load(Ordering::SeqCst) {
+		return;
+	}
+	if let FgOwner::Other { pid, class } = foreground_is_ours() {
+		tracing::info!(pid, %class, "foreground moved to another app while engaged");
+		focus_lost();
+	}
+}
+
+/// The keyboard-only LL hook thread: install, pump, uninstall on WM_QUIT (posted by
+/// `hook_thread` on teardown). Nothing else runs on this thread, so the keyboard callback
+/// is never queued behind mouse callbacks.
+fn kbd_hook_thread(report: std::sync::mpsc::Sender<u32>) {
+	unsafe {
+		let mut msg: MSG = std::mem::zeroed();
+		// Create this thread's message queue BEFORE hooking (PostThreadMessage target).
+		PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_NOREMOVE);
+		let hmod = GetModuleHandleW(std::ptr::null());
+		let hook: HHOOK = SetWindowsHookExW(WH_KEYBOARD_LL, Some(ll_keyboard_proc), hmod, 0);
+		if hook.is_null() {
+			tracing::warn!(err = %std::io::Error::last_os_error(), "WH_KEYBOARD_LL hook install failed");
+			let _ = report.send(0);
+			return;
+		}
+		let _ = report.send(GetCurrentThreadId());
+		// Installed ONCE for the thread's lifetime (RustDesk's rdev grab does the same): no
+		// periodic re-install. Heartbeat every 2 s while engaged — proves this thread is
+		// pumping (a blocked pump = no callbacks) and shows where keyboard focus sits.
+		let timer = SetTimer(std::ptr::null_mut(), 0, 2000, None);
+		while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+			if msg.message == WM_TIMER {
+				if ENGAGED.load(Ordering::SeqCst) {
+					tracing::info!(
+						kcalls = KCALLS.load(Ordering::Relaxed),
+						render_keys = RENDER_KEYS.load(Ordering::Relaxed),
+						render_hook_keys = RENDER_HOOK_KEYS.load(Ordering::Relaxed),
+						web_keys = WEB_KEYS.load(Ordering::Relaxed),
+						fwd_keys = FWD_KEYS.load(Ordering::Relaxed),
+						focus = %focus_owner(),
+						"kbd thread heartbeat"
+					);
+				}
+				continue;
+			}
+			TranslateMessage(&msg);
+			DispatchMessageW(&msg);
+		}
+		if timer != 0 {
+			KillTimer(std::ptr::null_mut(), timer);
+		}
+		UnhookWindowsHookEx(hook);
+	}
+}
+
+/// Diagnostic: the window with keyboard focus in the foreground thread, as "pid:class".
+fn focus_owner() -> String {
+	use windows_sys::Win32::UI::WindowsAndMessaging::{
+		GetClassNameW, GetGUIThreadInfo, GetWindowThreadProcessId, GUITHREADINFO,
+	};
+	unsafe {
+		let mut gti: GUITHREADINFO = std::mem::zeroed();
+		gti.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
+		if GetGUIThreadInfo(0, &mut gti) == 0 {
+			return "?".into();
+		}
+		let h = if gti.hwndFocus.is_null() { gti.hwndActive } else { gti.hwndFocus };
+		if h.is_null() {
+			return "none".into();
+		}
+		let mut pid = 0u32;
+		GetWindowThreadProcessId(h, &mut pid);
+		let mut buf = [0u16; 64];
+		let n = GetClassNameW(h, buf.as_mut_ptr(), buf.len() as i32);
+		format!("{pid}:{}", String::from_utf16_lossy(&buf[..n.max(0) as usize]))
+	}
+}
+
+/// Key edges that came in through the webview fallback (`web_key`) / were forwarded to the host.
+static WEB_KEYS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static RENDER_KEYS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static RENDER_HOOK_KEYS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static FWD_KEYS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A key edge the WEBVIEW saw (its keydown/keyup), fed into the same `handle_key` the LL hook
+/// uses — combos (Ctrl+Alt+Z, Ctrl+Shift+M/Q/F12, 3×RightCtrl), held-key bookkeeping and
+/// forwarding all behave identically.
+///
+/// Why: on some machines WH_KEYBOARD_LL is never called while Pulsar's WebView2 window has
+/// keyboard focus (seen 2026-11-07 on a Windows on ARM laptop: zero
+/// callbacks while the session window was focused, normal counts the moment another app was
+/// focused; the mouse hook kept working). The webview DOES get those keys, so it relays them.
+/// No double-send where the hook works: while engaged the hook suppresses every mapped key
+/// (returns 1), so the webview never sees it; while disengaged `handle_key` ignores plain keys
+/// and the hook already swallows the combo triggers.
+pub fn web_key(evdev: u32, down: bool) {
+	if !ENABLED.load(Ordering::SeqCst) {
+		return;
+	}
+	WEB_KEYS.fetch_add(1, Ordering::Relaxed);
+	queue_key(evdev, down);
+}
+
+/// A key edge the native renderer's child window received while it held the keyboard focus
+/// (it takes the focus on engage so the LL hook can capture Alt+Tab / Win). Reaching here
+/// means the hook did NOT swallow it, so it takes the same path as `web_key`.
+pub fn render_key(vk: u16, down: bool, from_hook: bool) {
+	if !ENABLED.load(Ordering::SeqCst) {
+		return;
+	}
+	if let Some(evdev) = vk_to_evdev(vk) {
+		if from_hook {
+			RENDER_HOOK_KEYS.fetch_add(1, Ordering::Relaxed);
+		} else {
+			RENDER_KEYS.fetch_add(1, Ordering::Relaxed);
+		}
+		queue_key(evdev, down);
+	}
+}
+
+/// Keyboard LL callbacks seen (cheap health counter, reported by hook_thread's timer).
+static KCALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Modifier state as the HOOK sees it (atomics, so the callback never takes a lock).
+static HOOK_CTRL: AtomicBool = AtomicBool::new(false);
+static HOOK_ALT: AtomicBool = AtomicBool::new(false);
+static HOOK_SHIFT: AtomicBool = AtomicBool::new(false);
+
+/// Hand a key edge to the worker that runs `handle_key` (combos, forwarding, held-key
+/// bookkeeping, `app.emit`). Never blocks: unbounded queue, one long-lived thread.
+fn queue_key(evdev: u32, down: bool) {
+	use std::sync::mpsc;
+	static Q: OnceLock<Mutex<mpsc::Sender<(u32, bool)>>> = OnceLock::new();
+	let q = Q.get_or_init(|| {
+		let (tx, rx) = mpsc::channel::<(u32, bool)>();
+		std::thread::Builder::new()
+			.name("kbdhook-keys".into())
+			.spawn(move || {
+				for (evdev, down) in rx {
+					let _ = handle_key(evdev, down);
+				}
+			})
+			.expect("spawn kbdhook key worker");
+		Mutex::new(tx)
+	});
+	// Uncontended (only the hook thread sends) — a lock-free fast path in practice.
+	let _ = q.lock().unwrap_or_else(|e| e.into_inner()).send((evdev, down));
+}
+
+/// The LL keyboard callback. It must return FAST and never block: once a callback overruns
+/// LowLevelHooksTimeout Windows SILENTLY REMOVES the hook for good — the viewer then sends no
+/// keys at all and Ctrl+Alt+Z / 3×RightCtrl can't release (seen on a Windows on ARM laptop
+/// 2026-11-07: the hook went dead after its first key while a pass-through callback kept
+/// working). So the callback only reads atomics, decides suppress-or-pass, and queues the
+/// edge; ALL logic (globals mutex, combo emits over Tauri IPC, logging, forwarding) runs on
+/// the `kbdhook-keys` worker. No tracing, no locks (beyond the uncontended queue) here.
 unsafe extern "system" fn ll_keyboard_proc(ncode: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+	KCALLS.fetch_add(1, Ordering::Relaxed);
 	// Per docs: if ncode < 0 we must pass through untouched.
 	if ncode < 0 || !ENABLED.load(Ordering::SeqCst) {
 		return CallNextHookEx(std::ptr::null_mut(), ncode, wparam, lparam);
@@ -1135,13 +1689,31 @@ unsafe extern "system" fn ll_keyboard_proc(ncode: i32, wparam: WPARAM, lparam: L
 	}
 	let msg = wparam as u32;
 	let down = matches!(msg, WM_KEYDOWN | WM_SYSKEYDOWN) && (kb.flags & LLKHF_UP == 0);
-	// Shared with the Interception path: forward + combo detection + suppress.
-	if let Some(evdev) = vk_to_evdev(kb.vkCode as u16) {
-		if handle_key(evdev, down) {
-			return 1; // SUPPRESS locally — the key only acts on the remote.
-		}
+	let Some(evdev) = vk_to_evdev(kb.vkCode as u16) else {
+		// Unknown VK (no evdev mapping): don't break the local machine — let it through.
+		return CallNextHookEx(std::ptr::null_mut(), ncode, wparam, lparam);
+	};
+	match evdev {
+		29 | 97 => HOOK_CTRL.store(down, Ordering::Relaxed),
+		56 | 100 => HOOK_ALT.store(down, Ordering::Relaxed),
+		42 | 54 => HOOK_SHIFT.store(down, Ordering::Relaxed),
+		_ => {}
 	}
-	// Unknown VK (no evdev mapping) or no active sender: don't break the local
-	// machine — let it through normally.
-	CallNextHookEx(std::ptr::null_mut(), ncode, wparam, lparam)
+	// Same suppress rule handle_key applies: engaged → every key acts only on the remote;
+	// disengaged-but-app-focused → only the Ctrl+Shift+M/Q/F12 combo triggers are eaten
+	// (their actions run on the worker), everything else types locally as normal.
+	let suppress = if ENGAGED.load(Ordering::SeqCst) {
+		true
+	} else {
+		matches!(evdev, 50 | 16 | 88)
+			&& HOOK_CTRL.load(Ordering::Relaxed)
+			&& HOOK_SHIFT.load(Ordering::Relaxed)
+			&& APP_FOCUSED.load(Ordering::SeqCst)
+	};
+	queue_key(evdev, down);
+	if suppress {
+		1 // SUPPRESS locally — the key only acts on the remote.
+	} else {
+		CallNextHookEx(std::ptr::null_mut(), ncode, wparam, lparam)
+	}
 }

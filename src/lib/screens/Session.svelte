@@ -32,6 +32,7 @@
 	import { listenScope } from '#lib/api.events.js';
 	import { setPeerIdentity } from '#lib/peers.svelte.js';
 	import { SessionInput } from './Session/input.svelte';
+	import { evdevCode } from '#lib/keymap.js';
 	import { SessionControls } from './Session/controls.svelte';
 	import { SessionSideChannels } from './Session/sidechannels.svelte';
 	import { SessionUi } from './Session/ui.svelte';
@@ -45,7 +46,6 @@
 		mode: 'remote' | 'game';
 		conn: 'direct' | 'relay';
 		wsPort?: number;
-		audioWsPort?: number;
 		selfId?: string;
 		native?: boolean;
 		embedded?: boolean;
@@ -79,7 +79,6 @@
 		mode,
 		conn,
 		wsPort = 0,
-		audioWsPort = 0,
 		selfId = '',
 		native = false,
 		embedded = false,
@@ -111,7 +110,6 @@
 		{
 			playId: () => playId,
 			wsPort: () => wsPort,
-			audioWsPort: () => audioWsPort,
 			native: () => native,
 			embedded: () => embedded,
 			// `controls` is declared just below; this getter is only read later from the 1 s
@@ -516,6 +514,45 @@
 		onEnd: () => onEnd(),
 		onToggleFullscreen: () => onToggleFullscreen(),
 		resetPanel: () => (sidechan.panel = 'menu')
+	});
+
+	// Windows native: relay the webview's own key events to the capture's key handler. On some
+	// machines the OS keyboard hook is never called while Pulsar's window has focus (the mouse
+	// hook still is), so the keys only ever reach THIS webview — without the relay nothing was
+	// typed on the host and Ctrl+Alt+Z / Ctrl+Shift+M were dead. Where the hook works it
+	// swallows these keys first (engaged: all of them; disengaged: the combo triggers), so the
+	// webview never sees them and nothing is sent twice. Rust decides engaged vs. combo vs. drop.
+	const isWindows = typeof navigator !== 'undefined' && /Windows/i.test(navigator.userAgent);
+	$effect(() => {
+		if (!isWindows || !native || playId < 0 || !active || dock.overlayOpen) return;
+		if (typeof window === 'undefined') return;
+		const relay = (e: KeyboardEvent, down: boolean) => {
+			if (input.controlling) return; // the VNC-style path already forwards these
+			const el = e.target as HTMLElement | null;
+			const editable =
+				!!el && (el.isContentEditable || /^(input|textarea|select)$/i.test(el.tagName));
+			// Disengaged typing in a field stays local (Rust would ignore it anyway).
+			if (!nativeEngaged && editable) return;
+			const code = evdevCode(e.code);
+			if (!code) return;
+			const combo =
+				(e.ctrlKey && e.shiftKey && /^(KeyM|KeyQ|F12)$/.test(e.code)) ||
+				(e.ctrlKey && e.altKey && e.code === 'KeyZ');
+			if (nativeEngaged || combo) {
+				// The key acts on the host (or is a Pulsar combo) — not on this webview.
+				e.preventDefault();
+				e.stopImmediatePropagation();
+			}
+			api.kbdWebKey(code, down).catch(() => {});
+		};
+		const kd = (e: KeyboardEvent) => relay(e, true);
+		const ku = (e: KeyboardEvent) => relay(e, false);
+		window.addEventListener('keydown', kd, true);
+		window.addEventListener('keyup', ku, true);
+		return () => {
+			window.removeEventListener('keydown', kd, true);
+			window.removeEventListener('keyup', ku, true);
+		};
 	});
 
 	// Keyboard relay for the overlay's NATIVE Chat composer: while the overlay is

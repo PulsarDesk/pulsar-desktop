@@ -79,6 +79,12 @@ windows = { version = "0.62", features = [
 	                                    #   IDirect3DDxgiInterfaceAccess::GetInterface (the
 	                                    #   WinRT-surface ↔ ID3D11Texture2D bridge)
 	"Win32_System_WinRT_Graphics_Capture", # IGraphicsCaptureItemInterop::CreateForWindow (HWND→item)
+
+	# --- Media Foundation hardware encoder of the display GPU (src/encode/mf.rs) ---
+	"Win32_Media_MediaFoundation",      # MFTEnumEx, IMFTransform, IMFDXGIDeviceManager, ICodecAPI, MF types
+	"Win32_System_Com",                 # CoInitializeEx, CoTaskMemFree
+	"Win32_System_Ole",                 # VARIANT (ICodecAPI values) needs Com + Ole
+	"Win32_System_Variant",             # VARIANT, VT_UI4 / VT_BOOL
 ] }
 # Interface (.cast::<T>()), Result, Error, GUID — used pervasively in the unsafe FFI
 # (GUID is reused for the NVENC codec/preset/profile GUID literals).

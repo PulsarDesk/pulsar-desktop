@@ -31,7 +31,7 @@ static RTT_DMS: AtomicU32 = AtomicU32::new(0);
 /// Frame-pacing toggle state (mirrored for the overlay's segmented control). This backend has no
 /// local video pipeline to pace — the value is purely reflected to the UI and emitted on change
 /// so the frontend persists it; the real pacing happens in the separate video renderer/mpv.
-static PACE: AtomicBool = AtomicBool::new(true);
+static PACE: AtomicBool = AtomicBool::new(false);
 /// View-fit mode (overlay Görüntü section / frontend-persisted value) — reflected to the UI and
 /// forwarded; the actual fit is applied by the video renderer, not this overlay-only window.
 static FIT: Mutex<String> = Mutex::new(String::new());
@@ -133,6 +133,8 @@ fn stdin_control() {
 			Some("rtt") => {
 				if let Some(ms) = it.next().and_then(|v| v.parse::<f32>().ok()) {
 					RTT_DMS.store((ms * 10.0) as u32, Ordering::Relaxed);
+					// Sizes the reorder buffer's early give-up on an unrepairable hole.
+					crate::stream::rtp::set_rtt_ms(ms);
 				}
 			}
 			// Adaptive streaming Phase 0.5: the RTT-derived RTP reorder wait (µs) for the
@@ -465,6 +467,10 @@ impl eframe::App for Overlay {
 			} else {
 				// Closing leaves the user prompted to click-to-control again.
 				arm_hint("click");
+				// Stream-restarting choices made in the menu apply now that it's closed.
+				for c in overlay::take_deferred(&mut self.ov_ui) {
+					self.emit_cmd(c);
+				}
 			}
 			// Drop any keystrokes relayed across the edge so they can't replay into the chat
 			// composer on the next open (the other backends clear their relay queue the same way).
@@ -690,6 +696,9 @@ pub fn run() {
 		options,
 		Box::new(move |cc| {
 			overlay::apply_theme(&cc.egui_ctx);
+			// eframe already applies the display's native scale (Retina 2.0); add the same 1.25
+			// base the Windows/Linux backends use so the overlay matches them relative to the UI.
+			cc.egui_ctx.set_zoom_factor(1.25);
 			Ok(Box::new(Overlay {
 				state,
 				ov_ui: Default::default(),

@@ -11,7 +11,7 @@
 //! `mppvideodec`).
 //!
 //! Split into submodules (re-exported here so existing `native_view::*` paths are unchanged):
-//! - `spawn` — free port / SDP writer / ffplay / vidsink / render / native-audio / mpv spawners.
+//! - `spawn` — free port / SDP writer / ffplay / vidsink / render / mpv spawners.
 //! - `ipc` — mpv JSON-IPC helpers (pause/resume, numeric property polling).
 //! - `mpvgl` — libmpv RENDER-API single-surface renderer into a `GtkGLArea` (Linux/X11).
 

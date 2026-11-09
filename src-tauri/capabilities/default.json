@@ -1,7 +1,7 @@
 {
 	"identifier": "default",
-	"description": "Core capability for the main window, the approval popups and the connections window.",
-	"windows": ["main", "approve-*", "connections"],
+	"description": "Core capability for the main window, the approval popups, the connections window and the per-session file windows.",
+	"windows": ["main", "approve-*", "connections", "files-*", "toast"],
 	"permissions": [
 		"core:default",
 		"core:window:allow-start-dragging",
