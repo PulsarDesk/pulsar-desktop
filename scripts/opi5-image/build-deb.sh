@@ -2,9 +2,11 @@
 # Build the Pulsar .deb that goes into the Orange Pi 5B image.
 #
 # It must be built on arm64 Ubuntu 22.04 with the Rockchip multimedia PPA, the same userland
-# the image ships: pulsar-render then links that PPA's libavcodec58, which carries the rkmpp
-# hardware decoders. The generic linux-arm64 release links Ubuntu's own libavcodec58 (no
-# rkmpp), which is why the image gets its own build.
+# the image ships: pulsar-render then links that PPA's FFmpeg 6 (libavcodec60), which carries
+# the rkmpp hardware decoders. The generic linux-arm64 release links Ubuntu's own libavcodec58
+# (no rkmpp), which is why the image gets its own build. A board that installs the .deb needs
+# that PPA's libavcodec60 too (the image has it; elsewhere: add the PPA, `apt install
+# libavcodec60`).
 #
 #   INSTALL_DEPS=1 scripts/opi5-image/build-deb.sh   # fresh container/VM: install everything
 #   scripts/opi5-image/build-deb.sh                  # deps already present (e.g. on the Pi)
@@ -56,7 +58,10 @@ fi
 export PATH="$HOME/.cargo/bin:$HOME/.bun/bin:$PATH"
 
 # The whole point of this build: the libavcodec it links must have the rkmpp decoders.
-if ! ffmpeg -hide_banner -decoders 2>/dev/null | grep -q rkmpp; then
+# (Captured first: under pipefail, `ffmpeg … | grep -q` fails when grep exits on its first
+# match and ffmpeg dies of SIGPIPE — which read as "no rkmpp" on a build that had it.)
+decoders="$(ffmpeg -hide_banner -decoders 2>/dev/null || true)"
+if ! grep -q rkmpp <<<"$decoders"; then
 	echo "build-deb: this ffmpeg has no rkmpp decoders — is the rockchip-multimedia PPA installed?" >&2
 	# What we have instead (a failed run says why: a missing library, a wrong binary…).
 	echo "--- $(command -v ffmpeg)" >&2
