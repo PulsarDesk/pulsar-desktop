@@ -58,6 +58,12 @@ export PATH="$HOME/.cargo/bin:$HOME/.bun/bin:$PATH"
 # The whole point of this build: the libavcodec it links must have the rkmpp decoders.
 if ! ffmpeg -hide_banner -decoders 2>/dev/null | grep -q rkmpp; then
 	echo "build-deb: this ffmpeg has no rkmpp decoders — is the rockchip-multimedia PPA installed?" >&2
+	# What we have instead (a failed run says why: a missing library, a wrong binary…).
+	echo "--- $(command -v ffmpeg)" >&2
+	ffmpeg -hide_banner -version 2>&1 | head -3 >&2 || true
+	ffmpeg -hide_banner -decoders 2>&1 | grep -i -E 'hevc|h264|error|cannot' | head -10 >&2 || true
+	ldd "$(command -v ffmpeg)" 2>&1 | grep -E 'not found|avcodec|rockchip|rga' >&2 || true
+	dpkg -l 'ffmpeg' 'libavcodec*' 'librockchip*' 'librga*' 2>/dev/null | grep '^ii' >&2 || true
 	exit 1
 fi
 
