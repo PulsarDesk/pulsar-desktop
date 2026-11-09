@@ -319,6 +319,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build the OPi5 .deb
         env:
+          # The container runs as root with HOME=/github/home; rustup-init refuses a HOME
+          # that differs from the euid's (/root).
+          HOME: /root
           INSTALL_DEPS: '1'
           PULSAR_VERSION: ${{ needs.prepare.outputs.version }}
           PULSAR_UPDATER_ENDPOINT: https://github.com/${{ github.repository }}/releases/download/updater-latest/latest-opi5.json
