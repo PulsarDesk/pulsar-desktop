@@ -8,9 +8,18 @@
 //! Pipeline: the viewer's audio UDP socket (fed by the media-over-session demuxer, or by the
 //! host on the legacy direct path) → broadcast → this player's thread: RTP header strip and
 //! sequence check → libopus decode, with packet-loss concealment for a short gap → an SDL3
-//! audio stream. The SDL queue is held near `PULSAR_AUDIO_TARGETMS` (default 30 ms) by
-//! nudging the playback rate (host and client clocks drift apart), and flushed once if it
-//! ever passes 120 ms (a startup burst or a long stall), so latency stays bounded.
+//! audio stream. The SDL queue is a sawtooth (+10 ms per packet, −one device buffer per device
+//! pull); its LOW point is held near a margin (`PULSAR_AUDIO_TARGETMS`, default 15 ms) by
+//! nudging the playback rate (slowly, at most ±2 %; host and client clocks drift apart by far
+//! less). Playback starts once margin + one device buffer is queued; a queue that runs dry
+//! (late packets: Wi-Fi jitter) raises the margin by 10 ms, up to 120 ms, and it eases back
+//! after 20 s without one. A queue far past the target is flushed and re-buffered, so latency
+//! stays bounded. SDL is asked for a 10 ms device buffer.
+//!
+//! The old steering held the queue right after each push near 30 ms and moved the rate up to
+//! ±3 % per packet. On a laptop whose device pulled ~100 ms at a time that could never hold:
+//! measured with a 1 kHz tone through a real session, it played 1030 Hz (+3 %, half a
+//! semitone) the whole run, with 114 dropouts and 478 clicks in 30 s — the "crackle".
 //!
 //! The SDL device opens on the first packet, so a session without audio never holds it.
 
@@ -73,9 +82,16 @@ pub fn start(mut rx: tokio::sync::broadcast::Receiver<Vec<u8>>) -> NativeAudio {
 /// The Opus payload and sequence number of an RTP datagram (header, CSRCs, extension and
 /// padding skipped). `None` for anything that is not RTP or carries no payload.
 pub(crate) fn rtp_opus(pkt: &[u8]) -> Option<(u16, &[u8])> {
+	rtp_audio(pkt).map(|(_, seq, payload)| (seq, payload))
+}
+
+/// [`rtp_opus`] plus the payload type: 97 = Opus, 98 = uncompressed L16
+/// (`pulsar_core::audio::{OPUS,L16}_PAYLOAD_TYPE`).
+pub(crate) fn rtp_audio(pkt: &[u8]) -> Option<(u8, u16, &[u8])> {
 	if pkt.len() < 12 || pkt[0] >> 6 != 2 {
 		return None;
 	}
+	let pt = pkt[1] & 0x7f;
 	let seq = u16::from_be_bytes([pkt[2], pkt[3]]);
 	let mut off = 12 + (pkt[0] & 0x0f) as usize * 4;
 	if pkt[0] & 0x10 != 0 {
@@ -88,7 +104,16 @@ pub(crate) fn rtp_opus(pkt: &[u8]) -> Option<(u16, &[u8])> {
 		end = end.checked_sub(*pkt.last()? as usize)?;
 	}
 	let payload = pkt.get(off..end)?;
-	(!payload.is_empty()).then_some((seq, payload))
+	(!payload.is_empty()).then_some((pt, seq, payload))
+}
+
+/// Decode an L16 payload (16-bit big-endian, interleaved stereo) into `out`; returns frames.
+fn decode_l16(payload: &[u8], out: &mut [f32]) -> usize {
+	let n = (payload.len() / 2).min(out.len()) / CHANNELS * CHANNELS;
+	for (o, b) in out[..n].iter_mut().zip(payload.chunks_exact(2)) {
+		*o = i16::from_be_bytes([b[0], b[1]]) as f32 / 32768.0;
+	}
+	n / CHANNELS
 }
 
 /// What to do with a packet, from its sequence number.
@@ -148,13 +173,18 @@ fn run(packets: mpsc::Receiver<Vec<u8>>, stop: Arc<AtomicBool>) {
 	// The host's frame length, learnt from the stream; a concealed packet is this long.
 	let mut frame = RATE as usize / 100;
 	let mut concealed: u64 = 0;
+	// Packet arrival times: the largest gap per stats window tells sender/network bursts apart
+	// from device-side chunking when the queue swings.
+	let mut last_arrival: Option<std::time::Instant> = None;
+	// The last uncompressed packet (L16), replayed (faded) for a lost one.
+	let mut last_l16: Vec<f32> = Vec::new();
 	while !stop.load(Ordering::Relaxed) {
 		let pkt = match packets.recv_timeout(Duration::from_millis(100)) {
 			Ok(p) => p,
 			Err(mpsc::RecvTimeoutError::Timeout) => continue,
 			Err(mpsc::RecvTimeoutError::Disconnected) => break,
 		};
-		let Some((n, payload)) = rtp_opus(&pkt) else {
+		let Some((pt, n, payload)) = rtp_audio(&pkt) else {
 			continue;
 		};
 		if out.is_none() {
@@ -164,18 +194,49 @@ fn run(packets: mpsc::Receiver<Vec<u8>>, stop: Arc<AtomicBool>) {
 			return; // logged by open()
 		};
 		match seq.step(n) {
-			Step::Late => continue,
+			Step::Late => {
+				sink.stats.late += 1;
+				continue;
+			}
 			Step::Restart => {
+				sink.stats.restarts += 1;
 				let _ = decoder.reset_state();
 			}
 			Step::Play { conceal } => {
 				for _ in 0..conceal {
-					if let Ok(got) = decoder.decode_float(&[], &mut pcm[..frame * CHANNELS], false) {
+					if pt == pulsar_core::audio::L16_PAYLOAD_TYPE {
+						// Uncompressed: no codec PLC — replay the last packet, halved each time, so
+						// a lost one is a dip rather than a hard gap.
+						for x in last_l16.iter_mut() {
+							*x *= 0.5;
+						}
+						sink.push(&last_l16);
+						concealed += 1;
+						sink.stats.concealed += 1;
+					} else if let Ok(got) = decoder.decode_float(&[], &mut pcm[..frame * CHANNELS], false) {
 						sink.push(&pcm[..got * CHANNELS]);
 						concealed += 1;
+						sink.stats.concealed += 1;
 					}
 				}
 			}
+		}
+		sink.stats.packets += 1;
+		let now = std::time::Instant::now();
+		if let Some(prev) = last_arrival.replace(now) {
+			let gap = now.duration_since(prev).as_secs_f32() * 1000.0;
+			sink.stats.gap_max_ms = sink.stats.gap_max_ms.max(gap);
+		}
+		if pt == pulsar_core::audio::L16_PAYLOAD_TYPE {
+			sink.stats.raw = true;
+			let got = decode_l16(payload, &mut pcm);
+			if got > 0 {
+				frame = got.min(MAX_FRAME);
+				last_l16.clear();
+				last_l16.extend_from_slice(&pcm[..got * CHANNELS]);
+				sink.push(&pcm[..got * CHANNELS]);
+			}
+			continue;
 		}
 		match decoder.decode_float(payload, &mut pcm, false) {
 			Ok(got) => {
@@ -190,22 +251,84 @@ fn run(packets: mpsc::Receiver<Vec<u8>>, stop: Arc<AtomicBool>) {
 	tracing::info!(concealed, "audio: native player stopped");
 }
 
+/// Per-window player counters, logged every [`STATS_EVERY`]. `dry` = the queue ran empty and
+/// the device played silence (a crackle); `in_hz` = decoded frames per wall-clock second.
+#[derive(Default)]
+struct Stats {
+	packets: u32,
+	late: u32,
+	restarts: u32,
+	concealed: u32,
+	frames: u64,
+	dry: u32,
+	flushes: u32,
+	gap_max_ms: f32,
+	/// The window carried uncompressed (L16) audio.
+	raw: bool,
+	q_min_ms: Option<f32>,
+	q_max_ms: f32,
+	ratio_min: Option<f32>,
+	ratio_max: f32,
+}
+
+const STATS_EVERY: Duration = Duration::from_secs(5);
+/// Largest playback-rate correction (±2 %). Real clock drift stays well under 0.1 %, so a
+/// healthy stream sits near 1.0 (the gain is slow); the headroom is for a source that does not
+/// run in real time — measured 2–3 % off on a host capturing a virtual sink — where a slight
+/// pitch bend beats a flush (a gap) every few seconds.
+const MAX_RATE_ADJ: f32 = 0.02;
+/// Queue error (ms) inside which the rate stays exactly 1.0.
+const DEADBAND_MS: f32 = 3.0;
+/// Rate change per ms of smoothed queue error past the deadband: 10 ms over → +0.5 %.
+const GAIN_PER_MS: f32 = 0.0005;
+/// Target growth on a dry queue, its ceiling, and how long without one before it eases back.
+const DRY_STEP_MS: f32 = 10.0;
+const MAX_TARGET_MS: f32 = 120.0;
+const EASE_AFTER: Duration = Duration::from_secs(20);
+
+/// Device buffer asked of SDL (10 ms). A device that pulls big chunks needs that much queued
+/// at every pull; the laptop this was measured on pulled ~100 ms at a time by default.
+const DEVICE_FRAMES: &std::ffi::CStr = c"480";
+/// Pushes per steering update (≈ 0.25 s at 10 ms packets).
+const STEER_EVERY: u32 = 25;
+
 /// SDL3 playback stream with the drift and latency bound described in the module docs.
 struct SdlOut {
 	stream: *mut sdl3_sys::audio::SDL_AudioStream,
-	target_bytes: i32,
-	high_bytes: i32,
+	bytes_per_ms: f32,
+	/// The device's buffer (what it pulls at a time), ms.
+	device_ms: f32,
+	base_target_ms: f32,
+	/// Margin the queue's LOW point is held at (its high point is this + one device pull).
+	target_ms: f32,
+	/// Smoothed low point of the queue (ms), the steering input.
+	level_ms: Option<f32>,
+	/// Lowest queue level seen since the last steering update.
+	win_min_ms: f32,
+	win_pushes: u32,
+	ratio: f32,
+	/// Playing; false = device paused while the queue fills to the target.
+	playing: bool,
+	last_dry: std::time::Instant,
+	stats: Stats,
+	stats_at: std::time::Instant,
 }
 
 impl SdlOut {
 	fn open() -> Option<SdlOut> {
 		use sdl3_sys::audio::{
-			SDL_AudioSpec, SDL_OpenAudioDeviceStream, SDL_ResumeAudioStreamDevice,
-			SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, SDL_AUDIO_F32,
+			SDL_AudioSpec, SDL_OpenAudioDeviceStream, SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,
+			SDL_AUDIO_F32,
 		};
 		use sdl3_sys::init::{SDL_InitSubSystem, SDL_QuitSubSystem, SDL_INIT_AUDIO};
 		// SAFETY: plain SDL3 C calls; AUDIO is its own subsystem and safe off the main thread.
 		unsafe {
+			// A small device buffer: SDL "will try" (not every backend honors it); the real size
+			// is read back below and the queue sized from it either way.
+			sdl3_sys::hints::SDL_SetHint(
+				sdl3_sys::hints::SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES,
+				DEVICE_FRAMES.as_ptr(),
+			);
 			if !SDL_InitSubSystem(SDL_INIT_AUDIO) {
 				tracing::warn!("audio: SDL_InitSubSystem(AUDIO) failed — no client audio");
 				return None;
@@ -226,49 +349,176 @@ impl SdlOut {
 				SDL_QuitSubSystem(SDL_INIT_AUDIO);
 				return None;
 			}
-			SDL_ResumeAudioStreamDevice(stream); // the device opens paused
-			let target_ms: usize = std::env::var("PULSAR_AUDIO_TARGETMS")
+			// The device opens paused and stays so until the prebuffer is in (see push).
+			let target_ms: f32 = std::env::var("PULSAR_AUDIO_TARGETMS")
 				.ok()
 				.and_then(|s| s.parse().ok())
-				.unwrap_or(30)
-				.max(1);
-			let bytes_per_ms = RATE as usize / 1000 * CHANNELS * 4;
-			tracing::info!(target_ms, "audio: native player up (libopus + SDL3)");
+				.unwrap_or(15.0f32)
+				.max(5.0);
+			let mut dev_spec = SDL_AudioSpec { format: SDL_AUDIO_F32, channels: 0, freq: 0 };
+			let mut dev_frames: std::ffi::c_int = 0;
+			let dev = sdl3_sys::audio::SDL_GetAudioStreamDevice(stream);
+			let device_ms = if sdl3_sys::audio::SDL_GetAudioDeviceFormat(dev, &mut dev_spec, &mut dev_frames)
+				&& dev_spec.freq > 0
+				&& dev_frames > 0
+			{
+				dev_frames as f32 * 1000.0 / dev_spec.freq as f32
+			} else {
+				10.0
+			};
+			tracing::info!(
+				target_ms,
+				device_ms,
+				device_hz = dev_spec.freq,
+				device_frames = dev_frames,
+				"audio: native player up (libopus + SDL3)"
+			);
+			let now = std::time::Instant::now();
 			Some(SdlOut {
 				stream,
-				target_bytes: (bytes_per_ms * target_ms) as i32,
-				high_bytes: (bytes_per_ms * 120) as i32,
+				bytes_per_ms: (RATE as usize / 1000 * CHANNELS * 4) as f32,
+				device_ms,
+				base_target_ms: target_ms,
+				target_ms,
+				level_ms: None,
+				win_min_ms: f32::MAX,
+				win_pushes: 0,
+				ratio: 1.0,
+				playing: false,
+				last_dry: now,
+				stats: Stats::default(),
+				stats_at: now,
 			})
 		}
 	}
 
-	/// Queue decoded interleaved PCM, then steer the playback rate so the queue stays near
-	/// the target: above it plays slightly faster, below it slightly slower (±3 %, inaudible
-	/// at steady drift). Never drops a chunk (that clicks), except one flush past `high_bytes`.
+	fn queued_ms(&self) -> f32 {
+		// SAFETY: `stream` is a live SDL audio stream owned by `self`.
+		let q = unsafe { sdl3_sys::audio::SDL_GetAudioStreamQueued(self.stream) };
+		q.max(0) as f32 / self.bytes_per_ms
+	}
+
+	fn set_ratio(&mut self, ratio: f32) {
+		// Tiny steps aren't worth a resampler update; a return to exactly 1.0 always is.
+		if (ratio - self.ratio).abs() < 0.0002 && !(ratio == 1.0 && self.ratio != 1.0) {
+			return;
+		}
+		self.ratio = ratio;
+		// SAFETY: as in queued_ms.
+		unsafe {
+			sdl3_sys::audio::SDL_SetAudioStreamFrequencyRatio(self.stream, ratio);
+		}
+	}
+
+	fn set_playing(&mut self, on: bool) {
+		use sdl3_sys::audio::{SDL_PauseAudioStreamDevice, SDL_ResumeAudioStreamDevice};
+		if self.playing == on {
+			return;
+		}
+		self.playing = on;
+		// SAFETY: as in queued_ms.
+		unsafe {
+			if on {
+				SDL_ResumeAudioStreamDevice(self.stream);
+			} else {
+				SDL_PauseAudioStreamDevice(self.stream);
+			}
+		}
+	}
+
+	/// Queue decoded interleaved PCM and steer the queue toward the target (module docs).
 	fn push(&mut self, pcm: &[f32]) {
-		use sdl3_sys::audio::{
-			SDL_ClearAudioStream, SDL_GetAudioStreamQueued, SDL_PutAudioStreamData,
-			SDL_SetAudioStreamFrequencyRatio,
-		};
+		use sdl3_sys::audio::{SDL_ClearAudioStream, SDL_PutAudioStreamData};
 		if pcm.is_empty() {
 			return;
 		}
-		// SAFETY: `stream` is a live SDL audio stream owned by `self`; SDL copies the buffer.
+		let now = std::time::Instant::now();
+		let before = self.queued_ms();
+		if self.playing && before <= 0.0 {
+			// Ran dry: the device has been playing silence — a crackle. Buffer more.
+			self.stats.dry += 1;
+			self.target_ms = (self.target_ms + DRY_STEP_MS).min(MAX_TARGET_MS);
+			self.last_dry = now;
+		} else if self.target_ms > self.base_target_ms && now.duration_since(self.last_dry) > EASE_AFTER {
+			self.target_ms = (self.target_ms - 5.0).max(self.base_target_ms);
+			self.last_dry = now;
+		}
+		// SAFETY: as in queued_ms; SDL copies the buffer.
 		unsafe {
 			SDL_PutAudioStreamData(
 				self.stream,
 				pcm.as_ptr() as *const std::ffi::c_void,
 				std::mem::size_of_val(pcm) as i32,
 			);
-			let q = SDL_GetAudioStreamQueued(self.stream);
-			if q > self.high_bytes {
-				SDL_ClearAudioStream(self.stream);
-				SDL_SetAudioStreamFrequencyRatio(self.stream, 1.0);
-			} else {
-				let err = (q - self.target_bytes) as f32 / self.target_bytes as f32;
-				let ratio = (1.0 + 0.5 * err).clamp(0.97, 1.03);
-				SDL_SetAudioStreamFrequencyRatio(self.stream, if ratio.is_finite() { ratio } else { 1.0 });
+		}
+		self.stats.frames += (pcm.len() / CHANNELS) as u64;
+		let after = self.queued_ms();
+		// The queue is a sawtooth: +10 ms per packet, −one device buffer per device pull. What
+		// must not hit zero is its LOW point, so that is what gets steered.
+		let full = self.target_ms + self.device_ms;
+		if !self.playing {
+			if after >= full {
+				self.level_ms = None;
+				self.win_min_ms = f32::MAX;
+				self.win_pushes = 0;
+				self.set_playing(true);
 			}
+		} else if after > full + 150.0 {
+			// Far past the target (a burst after a stall): drop it and re-buffer rather than
+			// play all of it late.
+			// SAFETY: as in queued_ms.
+			unsafe {
+				SDL_ClearAudioStream(self.stream);
+			}
+			self.stats.flushes += 1;
+			self.set_ratio(1.0);
+			self.set_playing(false);
+		} else {
+			self.win_min_ms = self.win_min_ms.min(before);
+			self.win_pushes += 1;
+			if self.win_pushes >= STEER_EVERY {
+				let low = self.win_min_ms;
+				let level = match self.level_ms {
+					Some(l) => l + 0.3 * (low - l),
+					None => low,
+				};
+				self.level_ms = Some(level);
+				self.win_min_ms = f32::MAX;
+				self.win_pushes = 0;
+				let err = level - self.target_ms;
+				let adj = if err.abs() <= DEADBAND_MS {
+					0.0
+				} else {
+					((err - DEADBAND_MS.copysign(err)) * GAIN_PER_MS).clamp(-MAX_RATE_ADJ, MAX_RATE_ADJ)
+				};
+				self.set_ratio(1.0 + adj);
+			}
+		}
+		let ratio = self.ratio;
+		let st = &mut self.stats;
+		st.q_min_ms = Some(st.q_min_ms.map_or(before, |m| m.min(before)));
+		st.q_max_ms = st.q_max_ms.max(after);
+		st.ratio_min = Some(st.ratio_min.map_or(ratio, |m| m.min(ratio)));
+		st.ratio_max = st.ratio_max.max(ratio);
+		let span = now.duration_since(self.stats_at);
+		if span >= STATS_EVERY {
+			tracing::info!(
+				packets = st.packets,
+				late = st.late,
+				restarts = st.restarts,
+				concealed = st.concealed,
+				in_hz = (st.frames as f32 / span.as_secs_f32()) as u32,
+				dry = st.dry,
+				flushes = st.flushes,
+				gap_max_ms = st.gap_max_ms as u32,
+				codec = if st.raw { "l16" } else { "opus" },
+				q_ms = format!("{:.0}-{:.0}", st.q_min_ms.unwrap_or(0.0), st.q_max_ms),
+				target_ms = self.target_ms,
+				ratio = format!("{:.4}-{:.4}", st.ratio_min.unwrap_or(1.0), st.ratio_max),
+				"audio: player stats"
+			);
+			self.stats = Stats::default();
+			self.stats_at = now;
 		}
 	}
 }
@@ -323,6 +573,19 @@ mod tests {
 		let mut v1 = rtp(1, &[1]);
 		v1[0] = 0x40; // RTP version 1
 		assert_eq!(rtp_opus(&v1), None);
+	}
+
+	#[test]
+	fn l16_packets_carry_their_payload_type_and_decode_to_floats() {
+		let mut pkt = rtp(7, &[0x40, 0x00, 0xc0, 0x00, 0x7f, 0xff, 0x80, 0x00]);
+		pkt[1] = pulsar_core::audio::L16_PAYLOAD_TYPE;
+		let (pt, seq, payload) = rtp_audio(&pkt).unwrap();
+		assert_eq!((pt, seq), (pulsar_core::audio::L16_PAYLOAD_TYPE, 7));
+		let mut out = [0f32; 8];
+		assert_eq!(decode_l16(payload, &mut out), 2, "two stereo frames");
+		assert_eq!(&out[..4], &[0.5, -0.5, 32767.0 / 32768.0, -1.0]);
+		// A trailing odd byte or half frame is dropped, never read past.
+		assert_eq!(decode_l16(&payload[..5], &mut out), 1);
 	}
 
 	#[test]

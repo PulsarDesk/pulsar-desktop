@@ -186,7 +186,48 @@ pub struct UiState {
 }
 
 /// Overlay settings whose change restarts the stream; see [`UiState::deferred`].
-pub const RESTART_FIELDS: [&str; 7] = ["codec", "encoder", "res", "fps", "quality", "display", "adapt"];
+pub const RESTART_FIELDS: [&str; 8] =
+	["codec", "encoder", "res", "fps", "quality", "display", "adapt", "aquality"];
+
+/// The session's audio-quality PREFERENCE (`auto`/`standard`/`high`/`raw`) for the Ses view:
+/// seeded by the app's `audio … q=<v>` line, mirrored optimistically on a pick. One value for
+/// every backend (the render thread only reads it).
+static AUDIO_QUALITY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+const AUDIO_QUALITIES: [&str; 4] = ["auto", "standard", "high", "raw"];
+
+pub fn set_audio_quality(v: &str) {
+	if let Some(i) = AUDIO_QUALITIES.iter().position(|q| *q == v) {
+		AUDIO_QUALITY.store(i as u8, std::sync::atomic::Ordering::Relaxed);
+	}
+}
+
+/// Relative-mouse sensitivity for the Görüntü view (`msens <x>` from the app; a pick mirrors
+/// it). Same one-value-for-every-backend model as [`AUDIO_QUALITY`].
+static MOUSE_SENS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(3);
+const MOUSE_SENSES: [&str; 7] = ["0.25", "0.5", "0.75", "1", "1.25", "1.5", "2"];
+
+/// Snap a multiplier to the nearest menu step.
+pub fn set_mouse_sens(v: &str) {
+	let Ok(x) = v.trim().parse::<f32>() else { return };
+	let i = MOUSE_SENSES
+		.iter()
+		.enumerate()
+		.min_by(|a, b| {
+			let d = |s: &str| (s.parse::<f32>().unwrap_or(1.0) - x).abs();
+			d(a.1).total_cmp(&d(b.1))
+		})
+		.map(|(i, _)| i)
+		.unwrap_or(3);
+	MOUSE_SENS.store(i as u8, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn mouse_sens() -> &'static str {
+	MOUSE_SENSES[(MOUSE_SENS.load(std::sync::atomic::Ordering::Relaxed) as usize).min(MOUSE_SENSES.len() - 1)]
+}
+
+pub fn audio_quality() -> &'static str {
+	AUDIO_QUALITIES[(AUDIO_QUALITY.load(std::sync::atomic::Ordering::Relaxed) as usize).min(3)]
+}
 
 /// Stage a stream-restarting choice (replacing an earlier one for the same field).
 fn stage(ui: &mut UiState, field: &'static str, val: String) {
@@ -769,7 +810,7 @@ pub fn draw(ctx: &egui::Context, st: &OverlayState, ui_state: &mut UiState) -> V
 						&mut cmds,
 					),
 					View::Audio => {
-						draw_audio(ui, st, &mut ui_state.sub_sel, nav, &mut ui_state.pending, &mut cmds)
+						draw_audio(ui, st, &ui_state.deferred, &mut ui_state.sub_sel, nav, &mut ui_state.pending, &mut cmds)
 					}
 					View::Tools => {
 						draw_tools(ui, &mut ui_state.view, st.mode, &mut ui_state.sub_sel, nav, &mut cmds)
@@ -1105,7 +1146,7 @@ fn draw_display(
 	// Rows: the host monitor picker (only when the host exposes >1 display), the view-fit mode,
 	// then the "screen adaptation" toggle. up/down move the cursor; left/right change the row.
 	let multi = st.displays.len() > 1;
-	let rows = if multi { 3 } else { 2 };
+	let rows = if multi { 4 } else { 3 };
 	if nav.down {
 		*sub_sel = (*sub_sel + 1).min(rows - 1);
 	}
@@ -1162,6 +1203,16 @@ fn draw_display(
 			cmds.push(OverlayCmd::Set("adapt", "off".into()));
 		}
 	}
+	row += 1;
+	// Mouse sensitivity for relative motion (games that grabbed the mouse): a multiplier on the
+	// device's raw deltas, applied by the app. Instant — no stream restart.
+	let senses: Vec<(&str, String)> = MOUSE_SENSES.iter().map(|v| (*v, format!("{v}×"))).collect();
+	let sense_opts: Vec<(&str, &str)> = senses.iter().map(|(v, l)| (*v, l.as_str())).collect();
+	if let Some(v) =
+		choice_row_i(ui, s == row, nav, t("mouse.sens"), mouse_sens(), &sense_opts, row, pending, Some(t("info.msens")))
+	{
+		cmds.push(OverlayCmd::Set("msens", v));
+	}
 	pending_note(ui, deferred);
 	ui.add_space(6.0);
 	ui.label(
@@ -1191,13 +1242,14 @@ fn pending_note(ui: &mut egui::Ui, deferred: &[(&'static str, String)]) {
 fn draw_audio(
 	ui: &mut egui::Ui,
 	st: &OverlayState,
+	deferred: &[(&'static str, String)],
 	sub_sel: &mut usize,
 	nav: Nav,
 	pending: &mut Option<(usize, String)>,
 	cmds: &mut Vec<OverlayCmd>,
 ) {
 	let onoff = [("on", t("on")), ("off", t("off"))];
-	const ROWS: usize = 4;
+	const ROWS: usize = 5;
 	if nav.down {
 		*sub_sel = (*sub_sel + 1).min(ROWS - 1);
 	}
@@ -1224,6 +1276,19 @@ fn draw_audio(
 	let mic = if st.mic_on { "on" } else { "off" };
 	if let Some(v) = choice_row(ui, s == 3, nav, t("audio.mic"), mic, &onoff, 3, pending) {
 		cmds.push(OverlayCmd::Set("mic", v));
+	}
+	// Audio quality — a stream restart, so it waits for the menu to close (RESTART_FIELDS).
+	let qualities = [
+		("auto", t("aq.auto")),
+		("standard", t("aq.standard")),
+		("high", t("aq.high")),
+		("raw", t("aq.raw")),
+	];
+	let q = staged(deferred, "aquality", audio_quality());
+	if let Some(v) =
+		choice_row_i(ui, s == 4, nav, t("audio.quality"), q, &qualities, 4, pending, Some(t("info.aquality")))
+	{
+		cmds.push(OverlayCmd::Set("aquality", v));
 	}
 }
 

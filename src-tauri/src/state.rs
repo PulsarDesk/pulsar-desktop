@@ -265,6 +265,9 @@ pub(crate) enum Restream {
 	/// captured monitor to the display mode best fitting a `w×h` pane and revert on teardown;
 	/// `None` turns it off (revert now). Flipped by the overlay's "Ekran uyarlama" toggle.
 	Adapt(Option<(u32, u32)>),
+	/// New audio-quality preference (`auto`/`standard`/`high`/`raw`); the hold loop resolves
+	/// `auto` (and `raw` on a host that can't send it) to a concrete `AudioQuality`.
+	AudioQuality(String),
 }
 
 /// Stdin-only renderer state re-pushed after a codec-switch renderer respawn: a
@@ -291,6 +294,8 @@ pub(crate) struct RenderSeed {
 	pub(crate) fit: Option<String>,
 	/// Audio truth: (transmit, mute_host, mic_on) → "audio tx=… mute=… mic=…".
 	pub(crate) audio: Option<(bool, bool, bool)>,
+	/// Audio-quality preference for the Ses view ("audio q=<v>").
+	pub(crate) aquality: Option<String>,
 	/// Stream resolution selection key ("auto"/"1080p"/"1440p"/"4K"). Updated from
 	/// `ov set res <val>` so the exact overlay key is preserved, not a width/height
 	/// pair that would need reverse-mapping. Replayed as `res <val>` on respawn.

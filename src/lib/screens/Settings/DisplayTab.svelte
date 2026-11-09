@@ -9,6 +9,7 @@
 		CODECS,
 		encodersForPlatform,
 		type VideoCodec,
+		type AudioQuality,
 		type Encoder
 	} from '#lib/settings.svelte.js';
 	import { caps, decodeAvailable, encoderAvailable } from '#lib/caps.svelte.js';
@@ -172,6 +173,38 @@
 <div class="srow">
 	<div class="st"><b>{t('settings.hdr')}</b><span>{t('settings.hdrDesc')}</span></div>
 	<button class="toggle" aria-label={t('settings.hdr')} class:on={ui.hdr} aria-pressed={ui.hdr} onclick={() => { ui.hdr = !ui.hdr; saveUi(); }}><span class="knob"></span></button>
+</div>
+<div class="srow">
+	<div class="st">
+		<b>{t('settings.audioQuality')}</b>
+		<span>{t('settings.audioQualityDesc')}</span>
+	</div>
+	<select
+		class="select"
+		aria-label={t('settings.audioQuality')}
+		value={ui.audioQuality}
+		onchange={(e) => { ui.audioQuality = e.currentTarget.value as AudioQuality; saveUi(); }}
+	>
+		{#each ['auto', 'standard', 'high', 'raw'] as q (q)}
+			<option value={q}>{t('settings.aq.' + q)}</option>
+		{/each}
+	</select>
+</div>
+<div class="srow">
+	<div class="st">
+		<b>{t('settings.mouseSens')}</b>
+		<span>{t('settings.mouseSensDesc')}</span>
+	</div>
+	<select
+		class="select"
+		aria-label={t('settings.mouseSens')}
+		value={String(ui.mouseSens)}
+		onchange={(e) => { ui.mouseSens = Number(e.currentTarget.value); saveUi(); }}
+	>
+		{#each [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2] as v (v)}
+			<option value={String(v)}>{v}×</option>
+		{/each}
+	</select>
 </div>
 <div class="srow">
 	<div class="st"><b>{t('settings.audioTransmit')}</b><span>{t('settings.audioTransmitDesc')}</span></div>

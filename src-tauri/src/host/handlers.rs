@@ -8,6 +8,10 @@ use super::*;
 /// Wire pacer shared by the video forwarder's video, parity and retransmit datagrams.
 mod pacer;
 
+/// In-process Opus/RTP encoder for the process-loopback audio (no ffmpeg in the audio path).
+#[cfg(windows)]
+mod opus_rtp;
+
 /// Windows: stream the host's system audio via **WASAPI loopback** (no
 /// `virtual-audio-capturer` / Stereo Mix device required). Spawns the encoder ffmpeg
 /// reading raw PCM on stdin (Opus/RTP to `dest`) plus a capture thread that feeds it
@@ -29,6 +33,7 @@ pub(super) fn spawn_loopback_audio(
 	dest: &str,
 	pinned_default: Option<String>,
 	req_layout: pulsar_core::audio::ChannelLayout,
+	quality: pulsar_core::audio::AudioQuality,
 ) -> bool {
 	use pulsar_core::audio::LoopbackFormat;
 	use std::process::Stdio;
@@ -93,7 +98,7 @@ pub(super) fn spawn_loopback_audio(
 		} else {
 			endpoint_layout
 		};
-		args.extend(pulsar_core::audio::opus_rtp_output_layout(&dest_owned, cap_layout));
+		args.extend(pulsar_core::audio::opus_rtp_output_quality(&dest_owned, cap_layout, quality));
 		let mut cmd = std::process::Command::new(&ffmpeg_owned);
 		cmd.args(&args).stdin(Stdio::piped());
 		no_window(&mut cmd);
@@ -212,6 +217,8 @@ pub(super) fn spawn_process_loopback_audio(
 	pid: u32,
 	req_layout: pulsar_core::audio::ChannelLayout,
 	mode: pulsar_core::audio::ProcessLoopbackMode,
+	quality: pulsar_core::audio::AudioQuality,
+	epoch: &crate::process::ProcEpoch,
 ) -> bool {
 	use std::process::Stdio;
 	let fmt = pulsar_core::audio::process_loopback_format();
@@ -227,51 +234,135 @@ pub(super) fn spawn_process_loopback_audio(
 			endpoint_layout
 		}
 	};
-	let mut args: Vec<String> = vec![
-		"-hide_banner".into(),
-		"-loglevel".into(),
-		"error".into(),
-		// Same no-input-buffering / no-probe flags as the default-endpoint loopback so audio
-		// isn't held behind the ultra-low-latency video at startup.
-		"-fflags".into(),
-		"nobuffer".into(),
-		"-probesize".into(),
-		"32".into(),
-		"-analyzeduration".into(),
-		"0".into(),
-		"-f".into(),
-		fmt.ffmpeg_sample_fmt().into(),
-		"-ar".into(),
-		fmt.rate.to_string(),
-		"-ac".into(),
-		fmt.channels.to_string(),
-		"-i".into(),
-		"pipe:0".into(),
-	];
-	args.extend(pulsar_core::audio::opus_rtp_output_layout(dest, cap_layout));
-	let mut cmd = std::process::Command::new(ffmpeg);
-	cmd.args(&args).stdin(Stdio::piped());
-	no_window(&mut cmd);
-	let mut child = match cmd.spawn() {
-		Ok(c) => c,
-		Err(_) => return false,
+	// Encode in-process (see opus_rtp.rs: ffmpeg's PCM reader held audio in 85 ms lumps) —
+	// Opus, or uncompressed L16 for `AudioQuality::Raw`. ffmpeg stays the fallback should the
+	// encoder or its socket fail to come up (Opus only there: Raw gets High).
+	let codec = opus_rtp::Codec::for_quality(quality);
+	let in_process = if cap_layout == pulsar_core::audio::ChannelLayout::Stereo {
+		opus_rtp::rtp_dest(dest).and_then(|addr| {
+			opus_rtp::RtpAudioSink::new(addr, codec, epoch.clone())
+				.map_err(|e| tracing::warn!("audio: in-process encoder unavailable ({e}) — using ffmpeg"))
+				.ok()
+		})
+	} else {
+		None
 	};
-	let stdin = match child.stdin.take() {
-		Some(s) => s,
-		None => {
-			let _ = child.kill();
+	let encoder = if let Some(sink) = in_process {
+		if !start_process_capture(sink, pid, mode) {
 			return false;
 		}
+		match codec {
+			opus_rtp::Codec::Opus { .. } => "in-process Opus",
+			opus_rtp::Codec::L16 => "in-process raw PCM (L16)",
+		}
+	} else {
+		let mut args: Vec<String> = vec![
+			"-hide_banner".into(),
+			"-loglevel".into(),
+			"error".into(),
+			// Same no-input-buffering / no-probe flags as the default-endpoint loopback so
+			// audio isn't held behind the ultra-low-latency video at startup.
+			"-fflags".into(),
+			"nobuffer".into(),
+			"-probesize".into(),
+			"32".into(),
+			"-analyzeduration".into(),
+			"0".into(),
+			"-f".into(),
+			fmt.ffmpeg_sample_fmt().into(),
+			"-ar".into(),
+			fmt.rate.to_string(),
+			"-ac".into(),
+			fmt.channels.to_string(),
+			"-i".into(),
+			"pipe:0".into(),
+		];
+		args.extend(pulsar_core::audio::opus_rtp_output_quality(dest, cap_layout, quality));
+		let mut cmd = std::process::Command::new(ffmpeg);
+		cmd.args(&args).stdin(Stdio::piped());
+		no_window(&mut cmd);
+		let mut child = match cmd.spawn() {
+			Ok(c) => c,
+			Err(_) => return false,
+		};
+		let stdin = match child.stdin.take() {
+			Some(s) => s,
+			None => {
+				let _ = child.kill();
+				return false;
+			}
+		};
+		crate::job::assign(&child); // tie ffmpeg to Pulsar's lifetime (job.rs), like spawn_tracked
+		if !start_process_capture(stdin, pid, mode) {
+			let _ = child.kill();
+			let _ = child.wait();
+			return false;
+		}
+		procs.lock().unwrap().push(child);
+		"ffmpeg"
 	};
-	crate::job::assign(&child); // tie ffmpeg to Pulsar's lifetime (job.rs), like spawn_tracked
+	match mode {
+		pulsar_core::audio::ProcessLoopbackMode::Include => {
+			tracing::info!(pid, encoder, "audio: per-process WASAPI loopback (co-op per-app isolation)")
+		}
+		pulsar_core::audio::ProcessLoopbackMode::Exclude => tracing::info!(
+			encoder,
+			"audio: system mix via process loopback (all but Pulsar; ignores the host's volume and mute)"
+		),
+	}
+	true
+}
+
+/// Windows: tell the client whether the cursor is hidden — a game that grabbed the mouse hides
+/// it and reads RELATIVE motion, which a client positioning the pointer absolutely turns into an
+/// endless spin (`DataMsg::PointerLock`). Polled (100 ms, a change must hold for two polls);
+/// the first state is always sent, so a re-stream re-syncs the client. Lives as long as this
+/// stream generation (`ProcEpoch`), like the in-process audio encoder.
+#[cfg(windows)]
+fn spawn_pointer_lock_watch(out: tokio::sync::mpsc::Sender<DataMsg>, epoch: crate::process::ProcEpoch) {
+	use std::sync::atomic::Ordering;
+	let born = epoch.load(Ordering::SeqCst);
+	let _ = std::thread::Builder::new().name("pointer-lock".into()).spawn(move || {
+		use windows_sys::Win32::UI::WindowsAndMessaging::{GetCursorInfo, CURSORINFO, CURSOR_SHOWING};
+		let hidden_now = || {
+			// SAFETY: a zeroed CURSORINFO with its size set, as GetCursorInfo asks.
+			let mut ci: CURSORINFO = unsafe { std::mem::zeroed() };
+			ci.cbSize = std::mem::size_of::<CURSORINFO>() as u32;
+			let ok = unsafe { GetCursorInfo(&mut ci) } != 0;
+			ok && ci.flags & CURSOR_SHOWING == 0
+		};
+		let mut sent: Option<bool> = None;
+		let mut seen = hidden_now();
+		while epoch.load(Ordering::SeqCst) == born && !out.is_closed() {
+			let now = hidden_now();
+			if now == seen && sent != Some(now) {
+				tracing::info!(hidden = now, "host cursor → client pointer lock");
+				let _ = out.try_send(DataMsg::PointerLock(now));
+				sent = Some(now);
+			}
+			seen = now;
+			std::thread::sleep(std::time::Duration::from_millis(100));
+		}
+	});
+}
+
+/// Run the process-loopback capture into `sink` on its own thread, until the sink stops taking
+/// data (ffmpeg's pipe broke / the in-process encoder's stream was retired) or WASAPI errors.
+/// Waits for the activation (milliseconds) so a failure falls back instead of leaving the
+/// session silent; `false` = it did not start.
+#[cfg(windows)]
+fn start_process_capture<W: std::io::Write + Send + 'static>(
+	sink: W,
+	pid: u32,
+	mode: pulsar_core::audio::ProcessLoopbackMode,
+) -> bool {
 	let (live_tx, live_rx) = std::sync::mpsc::channel::<Result<(), String>>();
 	std::thread::spawn(move || {
-		// Runs until the pipe breaks (ffmpeg killed on teardown) or WASAPI errors — both
-		// expected. A failure here means the per-app capture stopped; the session keeps its
-		// video and (if the user toggles) can re-stream. No re-init loop: process-loopback
-		// has no default-endpoint-change recovery to do.
+		// A failure here means the per-app capture stopped; the session keeps its video and (if
+		// the user toggles) can re-stream. No re-init loop: process-loopback has no
+		// default-endpoint-change recovery to do.
 		let started = live_tx.clone();
-		let r = pulsar_core::audio::run_process_loopback_capture_mode(stdin, pid, mode, move || {
+		let r = pulsar_core::audio::run_process_loopback_capture_mode(sink, pid, mode, move || {
 			let _ = started.send(Ok(()));
 		});
 		if let Err(e) = r {
@@ -279,27 +370,13 @@ pub(super) fn spawn_process_loopback_audio(
 			let _ = live_tx.send(Err(e)); // ignored once the capture was live
 		}
 	});
-	// Activation takes milliseconds; wait for it so a failure falls back instead of
-	// leaving the session silent.
 	match live_rx.recv_timeout(std::time::Duration::from_secs(2)) {
-		Ok(Ok(())) => {}
+		Ok(Ok(())) => true,
 		other => {
 			tracing::warn!(pid, ?mode, ?other, "audio: process-loopback did not start");
-			let _ = child.kill();
-			let _ = child.wait();
-			return false;
+			false
 		}
 	}
-	procs.lock().unwrap().push(child);
-	match mode {
-		pulsar_core::audio::ProcessLoopbackMode::Include => {
-			tracing::info!(pid, "audio: per-process WASAPI loopback (co-op per-app isolation)")
-		}
-		pulsar_core::audio::ProcessLoopbackMode::Exclude => tracing::info!(
-			"audio: system mix via process loopback (all but Pulsar; ignores the host's volume and mute)"
-		),
-	}
-	true
 }
 
 // ---- Host-silent via Sunshine-style default-render-endpoint REDIRECTION ----
@@ -925,6 +1002,9 @@ fn start_audio_and_mute(
 	// unresolved, which take the existing default-endpoint loopback (the whole system mix).
 	// Always `None` off Windows (process-loopback is Windows-only) and on the Linux branches.
 	#[cfg_attr(not(windows), allow(unused_variables))] target_pid: Option<u32>,
+	// The session's stream generation: an in-process audio encoder stops when it moves on
+	// (re-stream / teardown), as an ffmpeg encoder dies with the `procs` drain.
+	#[cfg_attr(not(windows), allow(unused_variables))] epoch: &crate::process::ProcEpoch,
 ) {
 	// Audio: a second ffmpeg streams Opus/RTP to `audio_dest` — the client's audio
 	// port directly (legacy), or the local media-over-session intake (the forwarder
@@ -1001,6 +1081,8 @@ fn start_audio_and_mute(
 						pid,
 						neg_layout,
 						pulsar_core::audio::ProcessLoopbackMode::Include,
+						req.audio_quality,
+						epoch,
 					)
 				}
 				Some(_) => {
@@ -1012,8 +1094,9 @@ fn start_audio_and_mute(
 				}
 				None => false,
 			};
-			// When a host-silent sink redirect is armed (pinned is Some), ALWAYS try to capture
-			// via WASAPI loopback pinned to the virtual sink — even if the user configured a
+			// When a host-silent sink redirect is armed (pinned is Some), ALWAYS capture via a
+			// loopback — the process loopback below, else the WASAPI loopback pinned to the
+			// virtual sink — even if the user configured a
 			// named dshow device (audio_loopback() is false with a named device). The redirect
 			// has already moved program audio to the virtual sink, so a dshow tap on the user's
 			// configured device would capture the wrong endpoint (the one that no longer receives
@@ -1025,11 +1108,15 @@ fn start_audio_and_mute(
 			// muted or at 0 % streamed pure silence (measured: Realtek host muted at 0 %,
 			// endpoint loopback silent, this path −14 dBFS on a test tone). Only Pulsar's own
 			// process tree is left out (its WebView2 renders outside that tree, measured).
+			// Also with a host-silent redirect armed: the apps then render to the virtual sink,
+			// which becomes the default — so the host's volume slider is THAT sink's volume, and
+			// the sink's endpoint loopback (below) streamed the client whatever level the host
+			// set it to. Tapping the app streams keeps the client at full level; the redirect
+			// still keeps the host's speakers silent.
 			// Stereo only (fixed capture format): a surround request keeps the endpoint path,
-			// as do a redirect to the virtual sink and a user-named capture device.
+			// as does a user-named capture device (when not redirecting).
 			let system_started = !process_started
-				&& !pinned_active
-				&& acfg.audio_loopback()
+				&& (pinned_active || acfg.audio_loopback())
 				&& neg_layout.channels() <= 2
 				&& pulsar_core::audio::process_loopback_supported()
 				&& spawn_process_loopback_audio(
@@ -1039,11 +1126,13 @@ fn start_audio_and_mute(
 					std::process::id(),
 					neg_layout,
 					pulsar_core::audio::ProcessLoopbackMode::Exclude,
+					req.audio_quality,
+					epoch,
 				);
 			process_started
 				|| system_started
 				|| ((pinned_active || acfg.audio_loopback())
-					&& spawn_loopback_audio(procs, ffmpeg, &dest, pinned, neg_layout))
+					&& spawn_loopback_audio(procs, ffmpeg, &dest, pinned, neg_layout, req.audio_quality))
 		};
 		#[cfg(not(windows))]
 		let started_audio = false;
@@ -1064,7 +1153,7 @@ fn start_audio_and_mute(
 			#[cfg(not(windows))]
 			let input = effective_audio_input(acfg.audio_input());
 			let (_, aargs) =
-				pulsar_core::audio::audio_command_layout(&input, &dest, neg_layout);
+				pulsar_core::audio::audio_command_quality(&input, &dest, neg_layout, req.audio_quality);
 			let _ = spawn_tracked(procs, ffmpeg, &aargs);
 		}
 	}
@@ -1381,14 +1470,18 @@ fn spawn_media_forwarders(
 				tokio::time::sleep(std::time::Duration::from_millis(5)).await;
 				continue;
 			};
-			// Forward only plausible RTP v2 + payload-type 97 (the ffmpeg opus output,
-			// audio/command.rs). This intake is an UNCONNECTED loopback ephemeral port:
-			// without the check, anything a local process throws at it — an orphaned
-			// encoder from a previous session, RTCP on a port collision — is wrapped as
-			// TAG_AUDIO and fed VERBATIM to the client's opus decoder, where a single
-			// invalid packet is a FATAL codec error (observed live: C2 err 14 → dead
-			// audio + a main-thread exception storm that froze the video).
-			if n < 13 || buf[0] >> 6 != 2 || (buf[1] & 0x7F) != 97 {
+			// Forward only plausible RTP v2 + payload-type 97 (Opus: ffmpeg's or the in-process
+			// encoder's) or 98 (uncompressed L16, `AudioQuality::Raw`). This intake is an
+			// UNCONNECTED loopback ephemeral port: without the check, anything a local process
+			// throws at it — an orphaned encoder from a previous session, RTCP on a port
+			// collision — is wrapped as TAG_AUDIO and fed VERBATIM to the client's opus decoder,
+			// where a single invalid packet is a FATAL codec error (observed live: C2 err 14 →
+			// dead audio + a main-thread exception storm that froze the video).
+			let pt = buf[1] & 0x7F;
+			if n < 13
+				|| buf[0] >> 6 != 2
+				|| (pt != pulsar_core::audio::OPUS_PAYLOAD_TYPE && pt != pulsar_core::audio::L16_PAYLOAD_TYPE)
+			{
 				continue;
 			}
 			if atx
@@ -2106,7 +2199,7 @@ pub(super) fn make_on_stream(
 			// ffmpeg is tracked in `procs` and killed on (re-)stream/teardown.
 			let ffmpeg = ffmpeg_bin(&app_h);
 			// No per-process audio loopback on the Wayland path (process-loopback is Windows-only).
-			start_audio_and_mute(&procs, &ffmpeg, &app_h, adest, &req, sid, None);
+			start_audio_and_mute(&procs, &ffmpeg, &app_h, adest, &req, sid, None, &proc_epoch);
 			return;
 		}
 
@@ -2546,7 +2639,7 @@ pub(super) fn make_on_stream(
 						let _ = stats_out.try_send(DataMsg::Stats(base_label));
 						let _ = stats_out.try_send(DataMsg::DisplayRotation(display_rotation(None)));
 						// No per-process audio loopback on the x11/gst (Linux) path (Windows-only).
-						start_audio_and_mute(&procs, &ffmpeg, &app_h, adest, &req, sid, None);
+						start_audio_and_mute(&procs, &ffmpeg, &app_h, adest, &req, sid, None, &proc_epoch);
 						let _ = app_h.emit(
 							"session",
 							SessionEvent {
@@ -3148,7 +3241,9 @@ pub(super) fn make_on_stream(
 		let audio_pid = target_hwnd.and_then(|h| pulsar_capture::window_pid(h as isize));
 		#[cfg(not(windows))]
 		let audio_pid: Option<u32> = None;
-		start_audio_and_mute(&procs, &ffmpeg, &app_h, adest, &req, sid, audio_pid);
+		start_audio_and_mute(&procs, &ffmpeg, &app_h, adest, &req, sid, audio_pid, &proc_epoch);
+		#[cfg(windows)]
+		spawn_pointer_lock_watch(stats_out.clone(), proc_epoch.clone());
 		let _ = app_h.emit(
 			"session",
 			SessionEvent {

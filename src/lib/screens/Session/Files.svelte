@@ -142,7 +142,7 @@
 				}
 			}),
 			// A download landed (the host streamed our fsGet back): surface the result —
-			// the file was saved under "Pulsar Alınanlar" by the Rust side.
+			// the file was saved in the received-files folder by the Rust side.
 			// Keyed by xferId so a late file-recv for a timed-out same-name download
 			// cannot drain a different in-flight download's concurrency slot (C21 fix).
 			onFileRecv((e) => {

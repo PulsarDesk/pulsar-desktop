@@ -24,3 +24,16 @@ describe('Chrome top bar mode toggle', () => {
 		expect(onToggleMode).not.toHaveBeenCalled();
 	});
 });
+
+describe('Chrome update badge', () => {
+	it('hands the click to the shell (which shows the modal on Home)', async () => {
+		const { update } = await import('#lib/update.svelte.js');
+		update.available = true;
+		update.open = false;
+		const onUpdate = vi.fn();
+		render(Chrome, { props: { ...base, onToggleMode: () => {}, onUpdate } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Güncelleme mevcut' }));
+		expect(onUpdate).toHaveBeenCalledOnce();
+		update.available = false;
+	});
+});

@@ -159,6 +159,11 @@ fn stdin_control() {
 					*FIT.lock().unwrap() = v.to_string();
 				}
 			}
+			Some("msens") => {
+				if let Some(v) = it.next() {
+					crate::overlay::set_mouse_sens(v);
+				}
+			}
 			// The host's active encode summary (rest of the line, verbatim).
 			Some("hostenc") => {
 				*HOST_ENC.lock().unwrap() = line.splitn(2, ' ').nth(1).unwrap_or("").to_string();
@@ -236,6 +241,7 @@ fn stdin_control() {
 						match k {
 							"tx" => AUDIO_TX.store(on, Ordering::SeqCst),
 							"mute" => AUDIO_MUTE.store(on, Ordering::SeqCst),
+							"q" => crate::overlay::set_audio_quality(v),
 							"mic" => MIC_ON.store(on, Ordering::SeqCst),
 							_ => {}
 						}
@@ -592,6 +598,7 @@ impl Overlay {
 						self.state.overlay_btn = val == "on";
 						OVERLAY_BTN.store(val == "on", Ordering::SeqCst);
 					}
+					"msens" => crate::overlay::set_mouse_sens(&val),
 					"fit" => {
 						self.state.fit = val.clone();
 						*FIT.lock().unwrap() = val.clone();
@@ -600,6 +607,7 @@ impl Overlay {
 					// truth after the host acknowledges.
 					"atx" => AUDIO_TX.store(val == "on", Ordering::SeqCst),
 					"amute" => AUDIO_MUTE.store(val == "on", Ordering::SeqCst),
+					"aquality" => crate::overlay::set_audio_quality(&val),
 					"mic" => MIC_ON.store(val == "on", Ordering::SeqCst),
 					// Voice call = mic + host audio together (paired optimistic update).
 					// ON enables BOTH; OFF drops ONLY the mic and leaves host audio as-is

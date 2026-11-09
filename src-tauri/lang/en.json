@@ -1,4 +1,5 @@
 {
+	"files.receivedDir": "Pulsar Received",
 	"err.online": "go online first",
 	"err.denied": "Connection denied.",
 	"err.peer_outdated": "The other device runs an older Pulsar. Update it to connect with a password.",

@@ -179,6 +179,31 @@ fn fwd(tx: &Sender<InputEvent>, ev: InputEvent) {
 	let _ = q.lock().unwrap_or_else(|e| e.into_inner()).send((tx.clone(), ev));
 }
 
+/// Windows switches the keyboard layout on a bare Ctrl+Shift (and the input language on
+/// Alt+Shift): modifiers pressed and released with no other key seen in between. While merely
+/// app-focused the modifiers of a Ctrl+Shift combo DO reach the OS, but the hook swallows the
+/// trigger key — so releasing them flipped the layout, and the layout switcher took the
+/// foreground (seen as "focus lost to ForegroundStaging" right after a Ctrl+Shift+M). A
+/// synthetic tap of an unassigned key in between breaks that sequence (the "menu mask key"
+/// trick). Injected, so our hooks pass it through; nothing maps it, so nobody acts on it.
+fn mask_modifier_hotkey() {
+	use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+		SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+	};
+	const VK_MASK: u16 = 0xE8; // unassigned
+	let key = |flags| INPUT {
+		r#type: INPUT_KEYBOARD,
+		Anonymous: INPUT_0 {
+			ki: KEYBDINPUT { wVk: VK_MASK, wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 },
+		},
+	};
+	let inputs = [key(0), key(KEYEVENTF_KEYUP)];
+	// SAFETY: two well-formed keyboard INPUTs, the count and struct size match.
+	unsafe {
+		SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32);
+	}
+}
+
 /// Send up-strokes for every key still held on the host and clear the set — called
 /// whenever forwarding stops (disengage, disable) so no modifier stays stuck remotely.
 ///
@@ -725,7 +750,12 @@ fn handle_key(evdev: u32, down: bool) -> bool {
 			if let Some(app) = &app_handle {
 				let _ = app.emit("kbd-released", ());
 			}
+		} else {
+			mask_modifier_hotkey();
 		}
+		// Every press, engaged or not (the RELEASED line above only covers the engaged one):
+		// "pressed twice before the menu opened" reports need both presses in the log.
+		tracing::info!(was_engaged, "overlay combo → overlay-toggle");
 		if let Some(app) = &app_handle {
 			let _ = app.emit("overlay-toggle", ());
 		}
@@ -744,6 +774,9 @@ fn handle_key(evdev: u32, down: bool) -> bool {
 		let app_handle = g.app.clone();
 		drop(g);
 		send_flush_events(flush_tx, flush_evs); // un-stick the chord on the (still-alive) host
+		if !ENGAGED.load(Ordering::SeqCst) {
+			mask_modifier_hotkey();
+		}
 		if let Some(app) = &app_handle {
 			let _ = app.emit("kbd-leave", ());
 		}
@@ -761,6 +794,9 @@ fn handle_key(evdev: u32, down: bool) -> bool {
 		// Tauri IPC emit under it could stall the callback past LowLevelHooksTimeout.
 		let app_handle = g.app.clone();
 		drop(g);
+		if !ENGAGED.load(Ordering::SeqCst) {
+			mask_modifier_hotkey();
+		}
 		if let Some(app) = &app_handle {
 			let _ = app.emit("fullscreen-toggle", ());
 		}
@@ -907,10 +943,10 @@ fn handle_mouse(state: u16, flags: u16, rolling: i16, x: i32, y: i32) -> bool {
 	reassert_confine();
 	// Relative movement (skip absolute-coordinate mice — 0x001 = ABSOLUTE flag).
 	if flags & 0x001 == 0 && (x != 0 || y != 0) {
-		let _ = tx.try_send(InputEvent::PointerRelative {
-			dx: x as f64,
-			dy: y as f64,
-		});
+		let (dx, dy) = super::scale_relative(x as f64, y as f64);
+		if dx != 0.0 || dy != 0.0 {
+			let _ = tx.try_send(InputEvent::PointerRelative { dx, dy });
+		}
 	}
 	// Buttons (Interception mouse-state bitflags → 0=left, 1=right, 2=middle).
 	for (bit, button, down) in [
@@ -984,6 +1020,97 @@ pub fn set_host_pinch(on: bool) {
 	HOST_PINCH.store(on, Ordering::SeqCst);
 }
 
+/// The host's cursor is hidden — a game grabbed the mouse and reads RELATIVE motion
+/// (`DataMsg::PointerLock`). The hook path below positions the host pointer ABSOLUTELY, which
+/// such a game turns into an endless spin; while this is on it sends raw-input deltas instead
+/// (`raw_mouse_proc`) and freezes the local cursor. The Interception path is relative anyway.
+static POINTER_LOCK: AtomicBool = AtomicBool::new(false);
+
+pub fn set_pointer_lock(on: bool) {
+	POINTER_LOCK.store(on, Ordering::SeqCst);
+}
+
+/// A message-only window on the hook thread that takes raw mouse input (`RIDEV_INPUTSINK`:
+/// also while the renderer child — another process — holds the focus). Raw input carries the
+/// device's own deltas, unclipped by the screen edge or the cursor confine.
+unsafe fn raw_mouse_window(hmod: windows_sys::Win32::Foundation::HMODULE) {
+	use windows_sys::Win32::UI::Input::{RegisterRawInputDevices, RAWINPUTDEVICE, RIDEV_INPUTSINK};
+	use windows_sys::Win32::UI::WindowsAndMessaging::{
+		CreateWindowExW, RegisterClassW, HWND_MESSAGE, WNDCLASSW,
+	};
+	let name: Vec<u16> = "PulsarRawMouse\0".encode_utf16().collect();
+	let mut wc: WNDCLASSW = std::mem::zeroed();
+	wc.lpfnWndProc = Some(raw_mouse_proc);
+	wc.hInstance = hmod;
+	wc.lpszClassName = name.as_ptr();
+	RegisterClassW(&wc);
+	let hwnd = CreateWindowExW(
+		0,
+		name.as_ptr(),
+		name.as_ptr(),
+		0,
+		0,
+		0,
+		0,
+		0,
+		HWND_MESSAGE,
+		std::ptr::null_mut(),
+		hmod,
+		std::ptr::null(),
+	);
+	if hwnd.is_null() {
+		tracing::warn!("raw mouse window failed — no relative mouse for pointer-locked games");
+		return;
+	}
+	let rid = RAWINPUTDEVICE { usUsagePage: 0x01, usUsage: 0x02, dwFlags: RIDEV_INPUTSINK, hwndTarget: hwnd };
+	if RegisterRawInputDevices(&rid, 1, std::mem::size_of::<RAWINPUTDEVICE>() as u32) == 0 {
+		tracing::warn!("RegisterRawInputDevices(mouse) failed — no relative mouse for pointer-locked games");
+	}
+}
+
+unsafe extern "system" fn raw_mouse_proc(
+	hwnd: windows_sys::Win32::Foundation::HWND,
+	msg: u32,
+	wp: WPARAM,
+	lp: LPARAM,
+) -> LRESULT {
+	use windows_sys::Win32::UI::Input::{
+		GetRawInputData, HRAWINPUT, RAWINPUT, RAWINPUTHEADER, RID_INPUT, RIM_TYPEMOUSE,
+	};
+	use windows_sys::Win32::UI::WindowsAndMessaging::{DefWindowProcW, WM_INPUT};
+	if msg == WM_INPUT
+		&& POINTER_LOCK.load(Ordering::SeqCst)
+		&& ENGAGED.load(Ordering::SeqCst)
+		&& MOUSE_CAPTURE.load(Ordering::SeqCst)
+		&& MECHANISM.load(Ordering::SeqCst) != 1
+	{
+		let mut raw: RAWINPUT = std::mem::zeroed();
+		let mut size = std::mem::size_of::<RAWINPUT>() as u32;
+		let got = GetRawInputData(
+			lp as HRAWINPUT,
+			RID_INPUT,
+			&mut raw as *mut RAWINPUT as *mut core::ffi::c_void,
+			&mut size,
+			std::mem::size_of::<RAWINPUTHEADER>() as u32,
+		);
+		// MOUSE_MOVE_ABSOLUTE (0x01): a tablet / remote-desktop pointer — no deltas to give.
+		if got != u32::MAX && raw.header.dwType == RIM_TYPEMOUSE && raw.data.mouse.usFlags & 0x01 == 0 {
+			let (dx, dy) = (raw.data.mouse.lLastX, raw.data.mouse.lLastY);
+			if dx != 0 || dy != 0 {
+				// try_lock: never stall the hook thread (it also runs the LL hooks).
+				let tx = globals().try_lock().ok().and_then(|g| g.tx.clone());
+				if let Some(tx) = tx {
+					let (dx, dy) = super::scale_relative(dx as f64, dy as f64);
+					if dx != 0.0 || dy != 0.0 {
+						fwd(&tx, InputEvent::PointerRelative { dx, dy });
+					}
+				}
+			}
+		}
+	}
+	DefWindowProcW(hwnd, msg, wp, lp)
+}
+
 fn now_ms() -> u64 {
 	static T0: OnceLock<std::time::Instant> = OnceLock::new();
 	T0.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
@@ -1041,6 +1168,9 @@ fn handle_mouse_wh(msg: u32, x: i32, y: i32, data: u32) -> bool {
 	// (keys never reached the remote, Ctrl+Alt+Z / 3×RightCtrl dead). The confine is
 	// re-asserted from hook_thread's timer instead, outside any hook callback.
 	match msg {
+		// Pointer lock: the raw-input deltas drive the host; keep the local cursor still (a
+		// game's view would otherwise also follow the absolute position).
+		WM_MOUSEMOVE if POINTER_LOCK.load(Ordering::SeqCst) => return true,
 		WM_MOUSEMOVE => {
 			// Normalize against the VIDEO rect (the same one the cursor is clipped to): the
 			// main window's client area also holds the tab bar, which skewed the remote
@@ -1197,6 +1327,8 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, _sta
 	// (its renderer reports the new stream's state itself).
 	if !same_session {
 		STREAM_STALLED.store(false, Ordering::SeqCst);
+		// Same for a host pointer lock: the new host reports its own cursor state.
+		POINTER_LOCK.store(false, Ordering::SeqCst);
 	}
 	tracing::info!(
 		id,
@@ -1439,6 +1571,9 @@ fn hook_thread() {
 		if mouse_hook.is_null() {
 			tracing::warn!("WH_MOUSE_LL hook install failed — mouse capture unavailable (keyboard still active)");
 		}
+		// Relative deltas for pointer-locked games (see POINTER_LOCK); WM_INPUT is dispatched
+		// by this thread's message loop below.
+		raw_mouse_window(hmod);
 		// Foreground watcher: with the renderer child holding the keyboard focus the app gets
 		// no Focused(false) when another app takes the foreground (Start, Win+L, a toast
 		// click...), so watch the foreground directly and drop control the moment it leaves us.

@@ -305,6 +305,14 @@
 	// session running inside the remote shell the other way round. Same rule as the
 	// controller's Guide-button toggle.
 	const modeLocked = $derived(sm.sessions.length > 0 || hostSessions.length > 0);
+
+	// Update badge: a session tab's video is drawn natively OVER the webview, so a modal opened
+	// there sits hidden under it. Show it on the Home tab instead (split mode has no Home: the
+	// panes' native video is occluded while the modal is up, see occludeNative below).
+	function openUpdate() {
+		if (sm.splitMode === 'off') sm.activeTab = 'home';
+		updateStore.open = true;
+	}
 	// Peer map-key → the client's own device id (pushed via DataMsg::PeerId). Lets the
 	// connect-tab list show a client's ID even on a direct/same-LAN connect (where the
 	// session's peer key is the client's ip:port).
@@ -470,9 +478,11 @@
 			splashGone();
 			return;
 		}
-		if (isPopup && isTauri) {
-			// Popups (approve / connections) are created visible-on-demand by Rust; just make
-			// sure they're up and focused.
+		// Only the popups the user is meant to act on now (approve / files) are pulled forward.
+		// The connections window and toasts are placed by Rust: a game session opens the
+		// connections window MINIMIZED, and showing + focusing it here once its page loaded
+		// restored it over the streamed game and took the game's focus. Toasts never focus.
+		if ((approveReq || filesReq) && isTauri) {
 			try {
 				const { getCurrentWindow } = await import('@tauri-apps/api/window');
 				const w = getCurrentWindow();
@@ -875,6 +885,13 @@
 		api.publishGames($state.snapshot(gameStore.games)).catch(() => {});
 	});
 
+	// The capture's relative-mouse sensitivity follows the setting (startup + every change,
+	// from Settings or the session menu).
+	$effect(() => {
+		if (isPopup) return;
+		api.setMouseSensitivity(ui.mouseSens).catch(() => {});
+	});
+
 	// Keep the core's host stream settings in sync (resolution/fps/bitrate/encoder/hdr).
 	$effect(() => {
 		if (isPopup) return;
@@ -931,6 +948,7 @@
 				onSplit={openSplit}
 				fullscreen={sm.fullscreen}
 				onToggleFullscreen={sm.toggleFullscreen}
+				onUpdate={openUpdate}
 			/>
 			{#if sm.sessions.length && sm.splitMode === 'off'}
 				<Tabs
@@ -1019,7 +1037,11 @@
 						fullscreen={sm.fullscreen}
 						onToggleFullscreen={sm.toggleFullscreen}
 						onPaneFocus={paneIdx >= 0 ? () => sm.focusPane(paneIdx) : undefined}
-						occludeNative={showSplitPicker || modalCount.n > 0 || !!pwPrompt || showInputAssign}
+						occludeNative={showSplitPicker ||
+							modalCount.n > 0 ||
+							!!pwPrompt ||
+							showInputAssign ||
+							(updateStore.open && updateStore.available)}
 						onEnd={() => sm.endSession(s.tabId)}
 					/>
 				{/if}
@@ -1084,7 +1106,9 @@
 			/>
 		{/if}
 
-		<UpdateModal />
+		<!-- Installing restarts the app, which ends every open session (ours and the ones this
+		     machine hosts): the modal says so. -->
+		<UpdateModal openSessions={sm.sessions.length + hostSessions.length} />
 		<!-- Relay authentication prompt: shown only when a relay actually demands a
 		     credential. What the user types is used for that one registration; the relay's
 		     access key is what persists, so this is a once-per-device dialog. -->

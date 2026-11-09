@@ -492,7 +492,8 @@ export class SessionManager {
 				ui.touchpadAsMouse,
 				opts.displayIdx,
 				opts.windowHwnd,
-				savedStreamPicks()
+				savedStreamPicks(),
+				ui.audioQuality
 			);
 			let timer: ReturnType<typeof setTimeout> | undefined;
 			let timedOut = false;

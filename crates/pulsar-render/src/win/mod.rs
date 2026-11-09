@@ -358,6 +358,7 @@ fn stdin_control() {
 					match k {
 						"tx" => AUDIO_TX.store(on, Ordering::SeqCst),
 						"mute" => AUDIO_MUTE.store(on, Ordering::SeqCst),
+						"q" => crate::overlay::set_audio_quality(v),
 						"mic" => MIC_ON.store(on, Ordering::SeqCst),
 						_ => {}
 					}
@@ -392,6 +393,8 @@ fn stdin_control() {
 					ROT_DIRTY.store(true, Ordering::SeqCst);
 				}
 			}
+		} else if let Some(rest) = l.strip_prefix("msens ") {
+			crate::overlay::set_mouse_sens(rest);
 		} else if let Some(rest) = l.strip_prefix("fit ") {
 			// View-fit mode pushed by the frontend (persisted value / respawn re-seed).
 			present::set_fit(rest.trim());
@@ -2293,6 +2296,7 @@ fn apply_ov_cmd(ostate: &mut crate::overlay::OverlayState, c: crate::overlay::Ov
 				// `audio …` line re-syncs the truth after the host acknowledges.
 				"atx" => AUDIO_TX.store(val == "on", Ordering::SeqCst),
 				"amute" => AUDIO_MUTE.store(val == "on", Ordering::SeqCst),
+				"aquality" => crate::overlay::set_audio_quality(&val),
 				"mic" => MIC_ON.store(val == "on", Ordering::SeqCst),
 				// Voice call = mic + host audio together (paired optimistic update).
 				// ON enables BOTH; OFF drops ONLY the mic and leaves host audio
@@ -2308,6 +2312,7 @@ fn apply_ov_cmd(ostate: &mut crate::overlay::OverlayState, c: crate::overlay::Ov
 				// View fit is renderer-local (instant Blt rect change) + forwarded
 				// so the frontend mirrors/persists it — Linux-parity (linux.rs).
 				"fit" => present::set_fit(&val),
+				"msens" => crate::overlay::set_mouse_sens(&val),
 				// Optimistic controller swap: the overlay row ▲/▼ was clicked.
 				// Swap the two entries in CONTROLLERS immediately so the list
 				// re-renders at the next frame without waiting for the gilrs

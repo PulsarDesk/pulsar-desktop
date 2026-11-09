@@ -592,6 +592,11 @@ pub fn run() {
 						video::set_fit(v);
 					}
 				}
+				Some("msens") => {
+					if let Some(v) = it.next() {
+						crate::overlay::set_mouse_sens(v);
+					}
+				}
 				// Session audio truth from the app (atx/amute/mic 0|1) so the overlay's
 				// Ses toggles highlight the real state.
 				Some("audio") => {
@@ -601,6 +606,7 @@ pub fn run() {
 							match k {
 								"tx" => AUDIO_TX.store(on, Ordering::SeqCst),
 								"mute" => AUDIO_MUTE.store(on, Ordering::SeqCst),
+								"q" => crate::overlay::set_audio_quality(v),
 								"mic" => MIC_ON.store(on, Ordering::SeqCst),
 								_ => {}
 							}
@@ -1895,10 +1901,12 @@ fn emit_cmd(state: &mut OverlayState, c: OverlayCmd) {
 				// View fit is renderer-local (instant) + forwarded so the frontend
 				// mirrors it (its own canvas path / persistence).
 				"fit" => video::set_fit(&val),
+				"msens" => crate::overlay::set_mouse_sens(&val),
 				// Audio toggles apply optimistically; the app's `audio …` line
 				// re-syncs the truth after the host acknowledges.
 				"atx" => AUDIO_TX.store(val == "on", Ordering::SeqCst),
 				"amute" => AUDIO_MUTE.store(val == "on", Ordering::SeqCst),
+				"aquality" => crate::overlay::set_audio_quality(&val),
 				"mic" => MIC_ON.store(val == "on", Ordering::SeqCst),
 				// Voice call = mic + host audio together (paired optimistic update).
 				// ON enables BOTH; OFF drops ONLY the mic and leaves host audio as-is

@@ -56,9 +56,11 @@ pub(crate) fn open_or_update(app: &AppHandle, surface: Surface) {
 			.inner_size(360.0, 440.0)
 			.min_inner_size(300.0, 240.0)
 			.resizable(true)
-			// Always real (in the taskbar + alt-tab so the host can find it), never
-			// `visible(false)`. Only a Forward surface takes focus on build.
-			.visible(true)
+			// Always real (in the taskbar + alt-tab so the host can find it). Only a Forward
+			// surface takes focus on build. Windows: a Background one is created hidden and then
+			// shown straight into the taskbar (SW_SHOWMINNOACTIVE) — visible-then-minimize put it
+			// on screen over the streamed game for a moment.
+			.visible(!(cfg!(windows) && surface == Surface::Background))
 			.focused(surface == Surface::Forward)
 			.build()
 		{
@@ -70,6 +72,19 @@ pub(crate) fn open_or_update(app: &AppHandle, surface: Surface) {
 				// Accept time (mode unknown) or a game session: send it to the taskbar so it
 				// doesn't cover the streamed game or steal its focus.
 				Surface::Background => {
+					#[cfg(windows)]
+					match win.hwnd() {
+						Ok(hwnd) => {
+							use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_SHOWMINNOACTIVE};
+							// SAFETY: the HWND of the window just built, on its own (main) thread.
+							unsafe { ShowWindow(hwnd.0 as _, SW_SHOWMINNOACTIVE) };
+						}
+						Err(_) => {
+							let _ = win.minimize();
+							let _ = win.show();
+						}
+					}
+					#[cfg(not(windows))]
 					let _ = win.minimize();
 				}
 			},

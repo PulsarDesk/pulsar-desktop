@@ -4,6 +4,8 @@
 
 export type VideoCodec = 'auto' | 'h264' | 'h265' | 'av1';
 export type RumbleStrength = 'off' | 'weak' | 'medium' | 'strong';
+/** Session audio: auto = the highest the link carries (Raw on a LAN with room, else High). */
+export type AudioQuality = 'auto' | 'standard' | 'high' | 'raw';
 export type Encoder =
 	| 'auto'
 	| 'nvenc'
@@ -31,6 +33,10 @@ export interface UiSettings {
 	codec: VideoCodec;
 	/** Host-side hardware encoder. */
 	encoder: Encoder;
+	/** Audio quality asked of the host (Settings + session menu). */
+	audioQuality: AudioQuality;
+	/** Relative-mouse sensitivity (games that grabbed the mouse); 1 = the mouse's own speed. */
+	mouseSens: number;
 	hdr: boolean;
 	unattended: boolean;
 	twofa: boolean;
@@ -144,6 +150,8 @@ const DEFAULTS: UiSettings = {
 	streamFps: 0,
 	codec: 'auto',
 	encoder: 'auto',
+	audioQuality: 'auto',
+	mouseSens: 1,
 	hdr: false,
 	unattended: true,
 	twofa: true,

@@ -391,6 +391,10 @@ async fn respawn_render_for_codec(
 					if let Some(fit) = seed.fit.as_deref() {
 						let _ = writeln!(si, "fit {fit}");
 					}
+					if let Some(q) = seed.aquality.as_deref() {
+						let _ = writeln!(si, "audio q={q}");
+					}
+					let _ = writeln!(si, "msens {}", crate::kbdhook::mouse_sensitivity());
 					if let Some((tx, mute, mic)) = seed.audio {
 						let _ = writeln!(
 							si,
@@ -1264,6 +1268,7 @@ pub(crate) async fn set_overlay(
 	id: u64,
 	open: bool,
 ) -> Result<(), String> {
+	tracing::info!(id, open, "set_overlay");
 	// Release/restore the evdev grab so the local OS + native overlay drive the menu
 	// (no-op on Windows — the overlay floats over the live canvas there). The latch is
 	// derived from the SET of open-overlay tabs, not this one call: with several tabs,
@@ -1411,6 +1416,34 @@ pub(crate) async fn set_play_audio(
 	Ok(())
 }
 
+/// Client: the relative-mouse sensitivity (Settings / session menu; 1.0 = the device's own
+/// deltas). Process-wide: every session's capture scales by it from the next move on.
+#[tauri::command]
+pub(crate) async fn set_mouse_sensitivity(value: f32) -> Result<(), String> {
+	crate::kbdhook::set_mouse_sensitivity(value);
+	Ok(())
+}
+
+/// Client: change the audio quality of a running session (`auto`/`standard`/`high`/`raw` —
+/// the session menu's "Ses kalitesi"). A re-stream: the host restarts its encoders with it.
+#[tauri::command]
+pub(crate) async fn set_play_audio_quality(
+	state: State<'_, AppState>,
+	id: u64,
+	quality: String,
+) -> Result<(), String> {
+	let tx = state.plays.lock().unwrap().get(&id).map(|p| {
+		p.render_seed.lock().unwrap().aquality = Some(quality.clone());
+		p.restream_tx.clone()
+	});
+	if let Some(tx) = tx {
+		tx.send(Restream::AudioQuality(quality))
+			.await
+			.map_err(|e| e.to_string())?;
+	}
+	Ok(())
+}
+
 /// Client: ask the controlled host to **reverse direction** — it connects back to us
 /// (`my_id`) so the roles swap. The host surfaces a `reverse-request`; this device
 /// must be online (serving) for that reverse connect to land.
@@ -1444,7 +1477,7 @@ pub(crate) async fn fs_list(
 
 /// Client: ask the host to send the file at this HOME-relative path (file panel's
 /// "indir"). The host streams it back as FileBegin/Chunk/End → saved under
-/// "Pulsar Alınanlar" and surfaced via the `file-recv` event.
+/// the received-files folder (`files::received_dir`) and surfaced via the `file-recv` event.
 #[tauri::command]
 pub(crate) async fn fs_get(
 	state: State<'_, AppState>,

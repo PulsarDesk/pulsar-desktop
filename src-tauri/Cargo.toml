@@ -88,6 +88,8 @@ windows-sys = { version = "0.61", features = [
 	"Win32_Graphics_Dwm", # io_cmds: kill the 1px border + rounded corners on the frameless fullscreen cover
 	"Win32_UI_WindowsAndMessaging",
 	"Win32_UI_Accessibility", # kbdhook: EVENT_SYSTEM_FOREGROUND watcher (drop control when another app takes over)
+	"Win32_UI_Input", # kbdhook: raw mouse deltas while the host holds a pointer lock
+	"Win32_UI_Input_KeyboardAndMouse",
 	"Win32_Devices_Display", # util: QueryDisplayConfig — the configured refresh under Dynamic refresh rate
 	"Win32_UI_Shell", # main.rs: ShellExecuteW("runas") to relaunch elevated (request_admin / UAC)
 	"Win32_System_Threading", # also load-bearing for JOBOBJECT_EXTENDED_LIMIT_INFORMATION (IO_COUNTERS)

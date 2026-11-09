@@ -5,6 +5,10 @@
 	import { installUpdate } from '#lib/updater.js';
 	import { closeOnEscape } from '#lib/escapeStack.js';
 
+	/** Open sessions (outgoing + the ones this machine hosts). Installing restarts the app and
+	 *  ends them all, so the modal warns before the user clicks Install. */
+	let { openSessions = 0 }: { openSessions?: number } = $props();
+
 	// Close is allowed in every phase except the terminal restart (the app is about
 	// to relaunch anyway); an in-flight download keeps running in the background and
 	// the badge stays lit, so reopening shows live progress.
@@ -46,6 +50,13 @@
 				<!-- This install can't self-update (flatpak / package manager / raw binary /
 				     AppImage without FUSE): the update still SHOWS, but installing is manual. -->
 				<div class="uhint">{t('update.noSelfUpdate')}</div>
+			{/if}
+
+			{#if update.installable && openSessions > 0 && update.phase !== 'restarting'}
+				<div class="uwarn">
+					<Icon name="power" size={15} />
+					<span>{t('update.sessionsClose', { n: openSessions })}</span>
+				</div>
 			{/if}
 
 			{#if update.phase === 'error'}
@@ -183,6 +194,25 @@
 		border-left: 3px solid var(--accent);
 		border-radius: var(--r-sm);
 		color: var(--text-muted);
+	}
+	.uwarn {
+		display: flex;
+		align-items: flex-start;
+		gap: 8px;
+		margin-top: 12px;
+		padding: 10px 12px;
+		font-size: 12.5px;
+		line-height: 1.5;
+		background: var(--warn-soft);
+		border: 1px solid var(--border);
+		border-left: 3px solid var(--warn);
+		border-radius: var(--r-sm);
+		color: var(--text);
+	}
+	.uwarn :global(svg) {
+		flex: none;
+		margin-top: 2px;
+		color: var(--warn);
 	}
 	.uerr {
 		margin-top: 12px;

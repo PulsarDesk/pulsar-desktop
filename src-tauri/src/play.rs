@@ -47,6 +47,42 @@ pub(crate) struct ResidentRender {
 	pub(crate) game_mode: bool,
 }
 
+/// "Otomatik" audio quality: the highest the path carries. Raw (~1.6 Mbit/s, no concealment to
+/// speak of) only on a LAN the probe measured with plenty of room and a host that can send it;
+/// High Opus (320 kb/s) once the probe saw a few Mbit/s — or on a LAN without a probe (older
+/// host); Standard (128 kb/s) otherwise.
+pub(crate) fn auto_audio_quality(
+	probe_kbps: Option<u32>,
+	path: crate::adapt_memory::PathClass,
+	host_raw: bool,
+) -> pulsar_core::audio::AudioQuality {
+	use crate::adapt_memory::PathClass;
+	use pulsar_core::audio::AudioQuality;
+	match probe_kbps {
+		Some(k) if host_raw && path == PathClass::Lan && k >= 15_000 => AudioQuality::Raw,
+		Some(k) if k >= 3_000 => AudioQuality::High,
+		None if path == PathClass::Lan => AudioQuality::High,
+		_ => AudioQuality::Standard,
+	}
+}
+
+/// A Settings / session-menu preference → what to ask the host for. `raw` falls back to High on
+/// a host that can't send it; anything else (incl. `auto`) takes the [`auto_audio_quality`] pick.
+pub(crate) fn audio_quality_for(
+	pref: &str,
+	auto: pulsar_core::audio::AudioQuality,
+	host_raw: bool,
+) -> pulsar_core::audio::AudioQuality {
+	use pulsar_core::audio::AudioQuality;
+	match pref {
+		"standard" => AudioQuality::Standard,
+		"high" => AudioQuality::High,
+		"raw" if host_raw => AudioQuality::Raw,
+		"raw" => AudioQuality::High,
+		_ => auto,
+	}
+}
+
 /// Whether this client advertises the cursor side-channel ([`StreamReq::cursor_external`]):
 /// it tells the host the client can draw the host pointer itself, so the host may use the
 /// cursorless KMS zero-copy capture and stream the pointer out-of-band. Opt-in behind
@@ -164,7 +200,14 @@ pub(crate) async fn start_remote_play(
 	init_height: Option<u32>,
 	init_fps: Option<u32>,
 	init_bitrate_kbps: Option<u32>,
+	// The audio-quality preference (`auto`/`standard`/`high`/`raw`, Settings / session menu);
+	// None = auto. Resolved after the bandwidth probe (`audio_quality_for`).
+	audio_quality: Option<String>,
 ) -> Result<PlayInfo, String> {
+	let aq_pref = match audio_quality.as_deref() {
+		Some(v @ ("standard" | "high" | "raw")) => v.to_string(),
+		_ => "auto".to_string(),
+	};
 	let node = state
 		.node
 		.lock()
@@ -470,9 +513,11 @@ pub(crate) async fn start_remote_play(
 									let _ = writeln!(si, "{line}");
 									let _ = writeln!(
 										si,
-										"audio tx=1 mute={} mic=0",
-										if game_mode { 1 } else { 0 }
+										"audio tx=1 mute={} mic=0 q={}",
+										if game_mode { 1 } else { 0 },
+										aq_pref
 									);
+									let _ = writeln!(si, "msens {}", crate::kbdhook::mouse_sensitivity());
 								}
 								*caps_line.lock().unwrap() = line;
 								render_seed.lock().unwrap().audio = Some((true, game_mode, false));
@@ -713,9 +758,11 @@ pub(crate) async fn start_remote_play(
 										// starting audio policy (game mode mutes the host).
 										let _ = writeln!(
 											si,
-											"audio tx=1 mute={} mic=0",
-											if game_mode { 1 } else { 0 }
+											"audio tx=1 mute={} mic=0 q={}",
+											if game_mode { 1 } else { 0 },
+											aq_pref
 										);
+										let _ = writeln!(si, "msens {}", crate::kbdhook::mouse_sensitivity());
 									}
 									*caps_line.lock().unwrap() = line;
 									render_seed.lock().unwrap().audio =
@@ -857,9 +904,11 @@ pub(crate) async fn start_remote_play(
 										let _ = writeln!(si, "{line}");
 										let _ = writeln!(
 											si,
-											"audio tx=1 mute={} mic=0",
-											if game_mode { 1 } else { 0 }
+											"audio tx=1 mute={} mic=0 q={}",
+											if game_mode { 1 } else { 0 },
+											aq_pref
 										);
+										let _ = writeln!(si, "msens {}", crate::kbdhook::mouse_sensitivity());
 									}
 									*caps_line.lock().unwrap() = line;
 									render_seed.lock().unwrap().audio = Some((true, game_mode, false));
@@ -1151,6 +1200,12 @@ pub(crate) async fn start_remote_play(
 	} else {
 		None
 	};
+	// Audio quality: the user's pick, or for "auto" the highest this path carries.
+	let host_audio_raw =
+		host_caps.features.iter().any(|f| f == pulsar_core::service::media::FEAT_AUDIO_RAW);
+	let auto_audio = auto_audio_quality(probe.as_ref().map(|e| e.kbps), path_class, host_audio_raw);
+	let audio_quality = audio_quality_for(&aq_pref, auto_audio, host_audio_raw);
+	tracing::info!(pref = %aq_pref, auto = ?auto_audio, quality = ?audio_quality, "audio quality");
 	let mut acfg = pulsar_core::adapt::Config::new(pulsar_core::adapt::codec_from_wire(&codec_h), cap_for_ctl);
 	acfg.native = native_dims;
 	// No memory of this path → 0: the controller starts cautiously (min(cap, ~4 Mbit)) and
@@ -1297,6 +1352,7 @@ pub(crate) async fn start_remote_play(
 		fec: mos,
 		fec_rs: mos,
 		rfi: rfi_req,
+		audio_quality,
 	};
 	if let Err(e) = request_stream(&mut sess, &req).await {
 		// Park ANY live pulsar-render child instead of killing it — regardless of whether
@@ -2002,6 +2058,9 @@ pub(crate) async fn start_remote_play(
 		req.cursor_external,
 		req_hdr,
 		req_quality,
+		req.audio_quality,
+		auto_audio,
+		host_audio_raw,
 		req.display_idx,
 		req.window_hwnd,
 		windows_query_rx,
@@ -2380,6 +2439,36 @@ pub(crate) fn auto_cap_kbps(codec: &str, native: (u32, u32, u32), game_mode: boo
 	};
 	let mode = if game_mode { 1.0 } else { 0.6 };
 	((20_000.0 * px * f * eff * mode) as u32).clamp(15_000, 150_000)
+}
+
+#[cfg(test)]
+mod audio_quality_tests {
+	use super::{audio_quality_for, auto_audio_quality};
+	use crate::adapt_memory::PathClass;
+	use pulsar_core::audio::AudioQuality::{High, Raw, Standard};
+
+	#[test]
+	fn auto_takes_the_highest_the_path_carries() {
+		assert_eq!(auto_audio_quality(Some(18_920), PathClass::Lan, true), Raw);
+		// No raw-capable host, or not a LAN, or a thin LAN: Opus.
+		assert_eq!(auto_audio_quality(Some(18_920), PathClass::Lan, false), High);
+		assert_eq!(auto_audio_quality(Some(18_920), PathClass::Wan, true), High);
+		assert_eq!(auto_audio_quality(Some(9_000), PathClass::Lan, true), High);
+		assert_eq!(auto_audio_quality(Some(2_000), PathClass::Relay, true), Standard);
+		// An older host has no probe: a LAN still gets High, anything else Standard.
+		assert_eq!(auto_audio_quality(None, PathClass::Lan, false), High);
+		assert_eq!(auto_audio_quality(None, PathClass::Relay, false), Standard);
+	}
+
+	#[test]
+	fn a_pick_wins_over_auto_and_raw_needs_the_host() {
+		assert_eq!(audio_quality_for("auto", Raw, true), Raw);
+		assert_eq!(audio_quality_for("standard", Raw, true), Standard);
+		assert_eq!(audio_quality_for("high", Standard, true), High);
+		assert_eq!(audio_quality_for("raw", Standard, true), Raw);
+		assert_eq!(audio_quality_for("raw", Standard, false), High);
+		assert_eq!(audio_quality_for("???", High, true), High);
+	}
 }
 
 #[cfg(test)]

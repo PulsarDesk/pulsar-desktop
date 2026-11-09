@@ -29,6 +29,13 @@ Expect rough edges and [report what you find](#-reporting-a-bug).
 One app does both jobs: connect to another computer, or share this one. Connections go peer-to-peer when they can
 and through a relay when they can't, always end-to-end encrypted.
 
+- **Holds up on weak links:** it measures the connection before the picture starts, then keeps adjusting bitrate,
+  error correction and resolution, so a phone hotspot or a busy Wi-Fi stays usable.
+- **Audio:** Opus at up to 320 kb/s, or uncompressed on a local network (Settings -> Display -> Audio quality,
+  *Auto* picks the highest the link carries). On a Windows host its own volume and mute don't affect what you hear.
+- **Games:** when a game grabs the mouse, Pulsar sends raw mouse motion (with a sensitivity setting), passes
+  controllers through, and can keep the host's speakers silent.
+
 ---
 
 ## 📦 Other Pulsar Repositories
@@ -46,6 +53,7 @@ Download the installer for your system from the [latest release](https://github.
 | Windows | `_x64-setup.exe` (or `_arm64-setup.exe`) |
 | macOS | `_aarch64.dmg` (Apple Silicon) or `_x64.dmg` (Intel) |
 | Linux | `.AppImage`, `.deb` or `.rpm` (x64 and arm64) |
+| Orange Pi 5 (RK3588) | `_opi5_arm64.deb`: hardware video decoding; needs Ubuntu 22.04 with the `ppa:jjriek/rockchip-multimedia` packages |
 
 Open Pulsar, share your **ID and one-time password** with the other side, or type theirs to connect.
 
@@ -61,11 +69,12 @@ should always show a picture, only slower.
 
 | System | Graphics | Share this computer | Connect to others |
 |---|---|---|---|
+| Windows 11 | NVIDIA RTX 3080 laptop | ✅ hardware (NVENC) | ✅ hardware |
+| Windows 11 on ARM | Snapdragon (Adreno) | ✅ software | ✅ hardware |
 | Linux (KDE Plasma, Wayland) | AMD Radeon iGPU + NVIDIA RTX laptop | ✅ hardware | ✅ hardware |
-| Linux (Raspberry Pi, Orange Pi 5 / RK3588) | built-in | ✅ | ✅ |
+| Linux (Raspberry Pi, Orange Pi 5 / RK3588) | built-in | ✅ | ✅ hardware on the Orange Pi 5 |
 | Windows 10 | NVIDIA MX230 + Intel UHD | ✅ software (no NVENC on this GPU) | ✅ hardware |
 | Windows with an AMD GPU | — | ❔ not tested yet | ❔ not tested yet |
-| Windows on ARM | — | ❔ builds, not tested | ❔ builds, not tested |
 | macOS | — | ❔ builds, not tested | ❔ builds, not tested |
 | Linux on GNOME, Intel GPUs | — | ❔ not tested yet | ❔ not tested yet |
 

@@ -1,4 +1,5 @@
 {
+	"files.receivedDir": "Pulsar Alınanlar",
 	"err.online": "önce çevrimiçi ol",
 	"err.denied": "Bağlantı reddedildi.",
 	"err.peer_outdated": "Karşı cihazda eski bir Pulsar sürümü var. Şifreyle bağlanmak için onu güncelle.",

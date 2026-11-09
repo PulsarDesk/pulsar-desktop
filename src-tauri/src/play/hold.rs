@@ -514,6 +514,11 @@ pub(super) async fn hold_session(
 	cursor_external: bool,
 	req_hdr: bool,
 	init_quality: QualityPref,
+	// The resolved audio quality the session started with, what "auto" resolved to (a menu
+	// pick of auto goes back to it), and whether the host can send Raw.
+	init_audio_quality: pulsar_core::audio::AudioQuality,
+	auto_audio_quality: pulsar_core::audio::AudioQuality,
+	host_audio_raw: bool,
 	// Initial host monitor (0 = primary). Seeds `cur_display` so a re-request (adaptive
 	// bitrate step / menu change) preserves the monitor the session STARTED on — without
 	// this, a same-host second pane that started on a free monitor would snap back to 0 on
@@ -713,6 +718,7 @@ pub(super) async fn hold_session(
 	// kept as state so it's preserved across every re-request and a future surround
 	// picker can flip it without re-plumbing each StreamReq.
 	let cur_audio_layout = pulsar_core::audio::ChannelLayout::Stereo;
+	let mut cur_audio_quality = init_audio_quality;
 	// Starts at the INITIAL request's bitrate (0 = host default) so a menu-driven
 	// re-request doesn't silently reset an explicit starting target; the adaptive
 	// controller (`pulsar_core::adapt`) moves it within [FLOOR_KBPS, cap].
@@ -731,7 +737,7 @@ pub(super) async fn hold_session(
 	let cur_hdr = req_hdr || std::env::var_os("PULSAR_HDR").is_some();
 	// Inbound file reassembly (file-manager downloads — the host streams an FsGet
 	// back as FileBegin/Chunk/End): Begin → state, Chunk → store BY INDEX,
-	// End → save under "Pulsar Alınanlar". The session transport is unordered UDP,
+	// End → save in the received-files folder. The session transport is unordered UDP,
 	// so chunks can arrive reordered or duplicated; keying by index (not appending
 	// in arrival order) lets reorders/dups self-heal — only a genuinely lost chunk
 	// fails the transfer. Each transfer carries a per-stream `id`, so concurrent
@@ -798,6 +804,7 @@ pub(super) async fn hold_session(
 				window_hwnd: cur_window,
 				adapt: cur_adapt,
 				audio_layout: cur_audio_layout,
+				audio_quality: cur_audio_quality,
 				loss_recovery: cur_recovery,
 				fec: mos,
 				fec_rs: mos,
@@ -1227,6 +1234,12 @@ pub(super) async fn hold_session(
 								if let Some(si) = render_stdin.lock().unwrap().as_mut() {
 									let _ = writeln!(si, "cursorimg {w} {h} {hot_x} {hot_y} {b64}");
 								}
+							}
+							DataMsg::PointerLock(on) => {
+								// The host hid its cursor (a game grabbed the mouse): send relative
+								// motion while it lasts, absolute again once it shows.
+								tracing::info!(on, "host pointer lock");
+								crate::kbdhook::set_pointer_lock(on);
 							}
 							DataMsg::CursorHidden => {
 								// The host pointer is hidden / left the screen — stop drawing it.
@@ -1960,6 +1973,11 @@ pub(super) async fn hold_session(
 							tracing::info!(limit_kbps = b, cap = ctl.cap(), rate = cur_bitrate, point = %ctl.point().label(), "bandwidth limit set");
 						}
 						Restream::Quality(q) => { cur_quality = q; }
+						Restream::AudioQuality(pref) => {
+							cur_audio_quality =
+								crate::play::audio_quality_for(&pref, auto_audio_quality, host_audio_raw);
+							tracing::info!(pref, quality = ?cur_audio_quality, "audio quality change requested");
+						}
 						Restream::Audio(t, m) => {
 							tracing::info!(transmit = t, mute = m, "audio restream requested");
 							cur_transmit = t;

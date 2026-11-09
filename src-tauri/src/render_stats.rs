@@ -295,11 +295,20 @@ pub(crate) fn start_render_reader(
 											.get(&cur_id)
 											.map(|p| p.data_tx.clone());
 										if let Some(tx) = tx {
+											let owner = app.get_webview_window("main");
 											std::thread::spawn(move || {
 												// rfd::FileDialog::pick_file() is synchronous (fine
 												// on a dedicated thread) and opens a real native
 												// dialog — no webview activation required.
-												if let Some(path) = rfd::FileDialog::new().pick_file() {
+												// Owned by the app window: unowned, it opened BEHIND
+												// the session (the click lands in the renderer's child
+												// window — another process — so this thread's new
+												// top-level window never got the foreground).
+												let mut dialog = rfd::FileDialog::new();
+												if let Some(w) = owner.as_ref() {
+													dialog = dialog.set_parent(w);
+												}
+												if let Some(path) = dialog.pick_file() {
 													// The reader thread lives outside the Tauri async
 													// runtime; build a minimal single-thread runtime to
 													// drive the async send_file_abs call.
@@ -339,6 +348,7 @@ pub(crate) fn start_render_reader(
 						let _ = app.emit("overlay-end", cur_id);
 					}
 					(Some("ov"), Some("close")) => {
+						tracing::info!(id = cur_id, "overlay closed by the renderer");
 						let _ = app.emit("overlay-close", cur_id);
 					}
 					// The renderer's own overlay-open button was clicked (platforms where

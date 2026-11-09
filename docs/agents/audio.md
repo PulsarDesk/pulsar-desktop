@@ -16,13 +16,29 @@ A second Opus/RTP stream parallel to video. Implementation lives in
   audio. Measured on the Realtek host muted at 0 %: endpoint loopback = pure
   silence, process loopback = a test tone at −14 dBFS. Stereo only (fixed 48 kHz
   f32 format); Win10 20H1+. A launched game / picked window uses Include mode on
-  its PID instead.
+  its PID instead. Also used while a host-silent redirect to the virtual sink is
+  armed: the host's volume slider is then the sink's, and that sink's endpoint
+  loopback neither ignored it (−12 dB at 0.41 → 0.10) nor ran in real time
+  (46.8k–56.4k samples/s, measured) — game-mode crackle.
+- **Encoded in-process** (`host/handlers/opus_rtp.rs`): libopus, 10 ms frames,
+  128 kb/s, RTP PT 97 to the same destination; stops when the session's
+  `ProcEpoch` moves (re-stream / teardown). ffmpeg reading the PCM from a pipe
+  held it in 85 ms lumps (its raw-PCM demuxer reads 4096-sample packets; no
+  flag changes that) — ~85 ms extra delay and bursty packets. ffmpeg remains
+  the fallback if the encoder can't start.
 - **Fallback: WASAPI loopback** of the default render endpoint (the
   OBS/Sunshine approach — no virtual-audio-capturer/Stereo Mix needed). Used for
-  a surround request, while a host-silent redirect to the virtual sink is armed,
-  or when process loopback fails to start. Rust thread pipes PCM into ffmpeg
-  `pipe:0`; ffmpeg does Opus/RTP. Silence-filled so the timeline tracks
+  a surround request or when process loopback fails to start. Rust thread pipes
+  PCM into ffmpeg `pipe:0`; ffmpeg does Opus/RTP (with the 85 ms lumps above). Silence-filled so the timeline tracks
   wall-clock.
+- **Audio quality** (`StreamReq.audio_quality`, `AudioQuality`): Standard =
+  Opus 128 kb/s, High = Opus 320 kb/s, Raw = uncompressed L16 (RTP PT 98, 5 ms
+  / 960 B packets, ~1.6 Mb/s) from the in-process encoder; hosts that can send
+  Raw advertise `audio_raw`, ffmpeg paths send High instead. The client's
+  "Otomatik" (`play.rs` `auto_audio_quality`) picks Raw on a LAN the probe
+  measured at ≥15 Mbit/s, High at ≥3 Mbit/s, else Standard; the pick is
+  Settings → Görüntü / the session menu's Ses view (a re-stream). The host's
+  audio forwarder passes PT 97 and 98 only.
 - **dshow / Pulse `.monitor` / AVFoundation** on Linux/macOS, or when the user
   names a device (`Config::audio_input` non-empty → `audio_loopback()` false).
 
@@ -35,9 +51,16 @@ Native and in-process, Moonlight's model: `src-tauri/src/native_audio.rs`.
 - The player decodes with **libopus** (`opus` crate → `opusic-sys`, built from
   source with CMake like SDL3). It conceals up to 5 lost packets (PLC) and
   restarts the decoder on a longer gap or a new stream.
-- Output is an **SDL3** audio stream. The queue is held near
-  `PULSAR_AUDIO_TARGETMS` (default 30 ms) by nudging the playback rate ±3 %, and
-  flushed once above 120 ms. The device opens on the first packet.
+- Output is an **SDL3** audio stream (10 ms device buffer requested). The queue
+  is a sawtooth; its LOW point is held at a margin (`PULSAR_AUDIO_TARGETMS`,
+  default 15 ms; +10 ms per dry queue, eases back) by slowly nudging the rate
+  (max ±2 %). Prebuffers before playing; flushes far past the target. The device
+  opens on the first packet. `audio: player stats` every 5 s (in_hz, dry,
+  flushes, gap_max_ms, q_ms, ratio).
+- The old ±3 %-per-packet steering on the post-push level sat at +3 % (1030 Hz
+  for a 1 kHz tone) with 114 dropouts / 478 clicks per 30 s — the crackle.
+  Check audio with the tone test: host plays a 1 kHz WAV, the client's Pulsar
+  output is recorded with process loopback (Include, its PID) and analysed.
 - Stereo only: `opus` has no multistream decoder, and the client always asks for
   stereo.
 - This replaced the webview path (WebCodecs + WebAudio over a loopback

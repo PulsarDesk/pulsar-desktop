@@ -193,7 +193,9 @@ export const api = {
 		 * monitor. Wins over `displayIdx` on the host when set; null = monitor capture. */
 		windowHwnd?: number,
 		/** The user's saved stream picks (`savedStreamPicks()`); 0 = automatic for each. */
-		picks?: { width: number; height: number; fps: number; bitrateKbps: number }
+		picks?: { width: number; height: number; fps: number; bitrateKbps: number },
+		/** 'auto' | 'standard' | 'high' | 'raw' (Settings / session menu). */
+		audioQuality?: string
 	) =>
 		invoke<PlayInfo>('start_remote_play', {
 			target,
@@ -210,7 +212,8 @@ export const api = {
 			initWidth: picks?.width || null,
 			initHeight: picks?.height || null,
 			initFps: picks?.fps || null,
-			initBitrateKbps: picks?.bitrateKbps || null
+			initBitrateKbps: picks?.bitrateKbps || null,
+			audioQuality: audioQuality ?? null
 		}),
 	/** CLI `--connect` auto-connect target (id/ip + password + mode + app), or null. */
 	autoConnectTarget: () =>
@@ -283,6 +286,11 @@ export const api = {
 	/** Toggle host audio transmit + host-mute live (session-menu audio options). */
 	setPlayAudio: (id: number, transmit: boolean, mute: boolean) =>
 		invoke<void>('set_play_audio', { id, transmit, mute }),
+	/** Relative-mouse sensitivity multiplier (process-wide; 1 = unchanged). */
+	setMouseSensitivity: (value: number) => invoke<void>('set_mouse_sensitivity', { value }),
+	/** Change the session's audio quality live (a re-stream): auto/standard/high/raw. */
+	setPlayAudioQuality: (id: number, quality: string) =>
+		invoke<void>('set_play_audio_quality', { id, quality }),
 	/** Open/close the in-session gaming overlay (Linux: ungrabs input + pauses the
 	 * native mpv; Windows/macOS: no-op pause, overlay floats over the live canvas). */
 	setOverlay: (id: number, open: boolean) => invoke<void>('set_overlay', { id, open }),
@@ -360,7 +368,7 @@ export const api = {
 	 * arrives asynchronously as the `fs-entries` event (see onFsEntries). */
 	fsList: (id: number, path: string) => invoke<void>('fs_list', { id, path }),
 	/** Client → host: download the host file at this HOME-relative path — streamed
-	 * back over the session and saved under "Pulsar Alınanlar" (`file-recv` event). */
+	 * back over the session and saved in the received-files folder (`file-recv` event). */
 	fsGet: (id: number, path: string) => invoke<void>('fs_get', { id, path }),
 	/** List a LOCAL directory for the file panel's left pane (same shape + the
 	 * same HOME jail as the remote listing; "" = this user's HOME). */

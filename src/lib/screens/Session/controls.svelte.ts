@@ -8,7 +8,7 @@
 // component. `playId`/`native` are read through getters.
 
 import { api } from '#lib/api.js';
-import { ui, saveUi, type Encoder, type VideoCodec } from '#lib/settings.svelte.js';
+import { ui, saveUi, type AudioQuality, type Encoder, type VideoCodec } from '#lib/settings.svelte.js';
 import { resToWh } from '#lib/streamPicks.js';
 
 type Inputs = {
@@ -179,6 +179,17 @@ export class SessionControls {
 		this.muteHost = !this.muteHost;
 		this.#applyAudio();
 	};
+	// Audio quality (auto / standard / high / raw): saved as the default for later sessions
+	// (Settings shows the same value) and applied to this one — a re-stream on the host.
+	setAudioQuality = (v: AudioQuality) => {
+		ui.audioQuality = v;
+		saveUi();
+		const playId = this.#in.playId();
+		if (playId >= 0) {
+			this.#beginSwitch(2800);
+			api.setPlayAudioQuality(playId, v).catch(() => {});
+		}
+	};
 	// Always-on mini stats HUD (persisted; the renderer draws it while the overlay
 	// is closed).
 	setStatsHud = (on: boolean) => {
@@ -195,9 +206,11 @@ export class SessionControls {
 		if (playId >= 0) api.setOverlayButton(playId, on).catch(() => {});
 	};
 	// Live encoder switch (host re-encodes) — sent to the host, which restarts ffmpeg.
+	// This session only: NOT saved into `ui.encoder`. That setting is this machine's own
+	// host encoder (Settings → Display) and every later session's request — a menu pick
+	// (once a stray click cycling nvenc → amf → software) used to stick there for good, so
+	// every session after it asked the remote host for CPU encoding.
 	setEncoder = (v: Encoder) => {
-		ui.encoder = v;
-		saveUi();
 		const playId = this.#in.playId();
 		if (playId >= 0) {
 			this.#beginSwitch(1600);

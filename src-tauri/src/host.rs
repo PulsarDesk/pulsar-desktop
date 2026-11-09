@@ -82,6 +82,29 @@ use handlers::{make_on_audio, make_on_file, make_on_stream};
 
 /// Transport features this host advertises in its `StreamCaps` reply: it can carry
 /// the RTP media inside the session (single socket) and honors NACK retransmits.
+/// Windows: the whole process runs at HIGH priority while it hosts. The capture thread is
+/// already TIME_CRITICAL (+ MMCSS), but the forwarder, the pacer and the session's ping replies
+/// run on ordinary tokio threads, and a game loading or quitting on this machine starved them
+/// for hundreds of ms — measured entering/leaving a game: a 370 ms hole in the video, then
+/// 17–19 frames at once, RTT 584–934 ms, the bitrate cut to a third. Sunshine runs at HIGH for
+/// the same reason. Back to NORMAL when the last session ends. (Child encoders don't inherit
+/// it; the WebView2 UI is separate processes.)
+fn hosting_priority(on: bool) {
+	#[cfg(windows)]
+	{
+		use windows_sys::Win32::System::Threading::{
+			GetCurrentProcess, SetPriorityClass, HIGH_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS,
+		};
+		// SAFETY: the pseudo-handle of this process; no other state.
+		let ok = unsafe {
+			SetPriorityClass(GetCurrentProcess(), if on { HIGH_PRIORITY_CLASS } else { NORMAL_PRIORITY_CLASS })
+		} != 0;
+		tracing::info!(high = on, ok, "host process priority");
+	}
+	#[cfg(not(windows))]
+	let _ = on;
+}
+
 fn media_features() -> Vec<String> {
 	use pulsar_core::service::media::{FEAT_FEC, FEAT_FEC_RS, FEAT_MOS, FEAT_NACK};
 	#[allow(unused_mut)]
@@ -101,6 +124,10 @@ fn media_features() -> Vec<String> {
 	v.push(pulsar_core::service::media::FEAT_RFI.to_string());
 	// The session-start bandwidth probe (pulsar-core serve loop answers it on every platform).
 	v.push(pulsar_core::service::media::FEAT_PROBE.to_string());
+	// Uncompressed audio (RTP L16) from the in-process encoder — the Windows process-loopback
+	// path. A host that ends up on an ffmpeg path sends High Opus instead.
+	#[cfg(windows)]
+	v.push(pulsar_core::service::media::FEAT_AUDIO_RAW.to_string());
 	v
 }
 
@@ -296,6 +323,7 @@ impl Drop for SessionCleanupGuard {
 		}
 		if conns_emptied {
 			crate::connections::close(&self.app_handle);
+			hosting_priority(false);
 		}
 		// Emit the `disconnected` SessionEvent (carrying this session's sid) so both the
 		// Connections window and +page.svelte's `hostSessions` drop THIS session's row.
@@ -858,6 +886,7 @@ pub(crate) async fn go_online(
 				}
 				let _ = accept(&mut session).await;
 				tracing::info!(%peer, "incoming session connected");
+				hosting_priority(true);
 				let _ = app_h.emit(
 					"session",
 					SessionEvent {
@@ -2305,6 +2334,7 @@ pub(crate) async fn go_online(
 				}
 				if conns_emptied {
 					crate::connections::close(&app_h);
+					hosting_priority(false);
 				}
 				// Stop this session's screen capture — closes the portal session so
 				// KDE/GNOME stops showing "screen is being shared".

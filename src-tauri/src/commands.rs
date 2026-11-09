@@ -58,10 +58,12 @@ pub(crate) async fn set_language(
 	state: State<'_, AppState>,
 	lang: String,
 ) -> Result<(), String> {
-	let language = if lang == "en" {
-		pulsar_core::config::Language::En
-	} else {
+	// The Rust side has Turkish + English catalogs only: a Russian / Kazakh UI gets English
+	// (it used to get Turkish — tray, overlay, the received-files folder name).
+	let language = if lang == "tr" {
 		pulsar_core::config::Language::Tr
+	} else {
+		pulsar_core::config::Language::En
 	};
 	crate::i18n::set_lang(&language);
 	let cfg = {

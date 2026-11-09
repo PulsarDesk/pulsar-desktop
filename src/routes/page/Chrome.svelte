@@ -25,6 +25,8 @@
 		fullscreen?: boolean;
 		/** Toggle window fullscreen (plain — keeps this bar on the home; immersive is F11). */
 		onToggleFullscreen?: () => void;
+		/** Update badge click (the shell moves to Home first, then opens the modal). */
+		onUpdate?: () => void;
 	};
 	let {
 		title,
@@ -36,7 +38,8 @@
 		splitMode = 'off',
 		onSplit,
 		fullscreen = false,
-		onToggleFullscreen
+		onToggleFullscreen,
+		onUpdate
 	}: Props = $props();
 
 	// Collapsed switcher shows just the short code (TR/EN/RU/KK); the dropdown lists
@@ -121,7 +124,7 @@
 				use:navItem={gaming}
 				title={t('update.available')}
 				aria-label={t('update.available')}
-				onclick={() => (update.open = true)}
+				onclick={() => (onUpdate ? onUpdate() : (update.open = true))}
 			>
 				<Icon name="download" size={16} />
 				<span class="upd-dot"></span>

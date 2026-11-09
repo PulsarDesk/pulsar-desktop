@@ -78,7 +78,8 @@ fn escape_reserved(name: String) -> String {
 	name
 }
 
-/// Directory incoming files are written to (`~/Pulsar Alınanlar`, created on
+/// Directory incoming files are written to (`~/Pulsar Alınanlar` in Turkish,
+/// `~/Pulsar Received` otherwise — the app's language at receive time; created on
 /// demand). Resolves the home base the same way as `fs_browse::home_dir` (the
 /// file-manager jail root) so the receive dir and the browse/send root can't
 /// diverge: `HOME` first, then Windows's `USERPROFILE`, falling back to the
@@ -88,7 +89,7 @@ pub fn received_dir() -> PathBuf {
 		.or_else(|| std::env::var_os("USERPROFILE"))
 		.map(PathBuf::from)
 		.unwrap_or_else(std::env::temp_dir);
-	let dir = base.join("Pulsar Alınanlar");
+	let dir = base.join(crate::i18n::t("files.receivedDir"));
 	let _ = std::fs::create_dir_all(&dir);
 	dir
 }

@@ -15,6 +15,38 @@
 use pulsar_core::service::InputEvent;
 use tauri::AppHandle;
 
+/// Relative-mouse sensitivity (Settings / session menu): a multiplier on the device's raw
+/// deltas — the ones a game that grabbed the mouse receives (1.0 = unchanged, as Moonlight
+/// sends them). f32 bits.
+static MOUSE_SENS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000);
+
+pub fn set_mouse_sensitivity(v: f32) {
+	let v = if v.is_finite() { v.clamp(0.1, 4.0) } else { 1.0 };
+	MOUSE_SENS.store(v.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn mouse_sensitivity() -> f32 {
+	f32::from_bits(MOUSE_SENS.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Scale a relative delta by the sensitivity. The host injects whole counts, so the fraction
+/// is carried per capture thread — slow moves at 0.25× still add up instead of vanishing.
+#[allow(dead_code)] // not every platform's capture sends relative motion
+pub(crate) fn scale_relative(dx: f64, dy: f64) -> (f64, f64) {
+	thread_local!(static CARRY: std::cell::Cell<(f64, f64)> = const { std::cell::Cell::new((0.0, 0.0)) });
+	let s = mouse_sensitivity() as f64;
+	if (s - 1.0).abs() < 1e-6 {
+		return (dx, dy);
+	}
+	CARRY.with(|c| {
+		let (cx, cy) = c.get();
+		let (x, y) = (cx + dx * s, cy + dy * s);
+		let (ox, oy) = (x.trunc(), y.trunc());
+		c.set((x - ox, y - oy));
+		(ox, oy)
+	})
+}
+
 // macOS (and any non-Windows, non-Linux target): no client-side capture yet.
 #[cfg(not(any(windows, target_os = "linux")))]
 pub fn enable(
@@ -96,6 +128,13 @@ pub fn set_video_frac(x0: f32, y0: f32, x1: f32, y1: f32) {
 }
 #[cfg(not(windows))]
 pub fn set_video_frac(_x0: f32, _y0: f32, _x1: f32, _y1: f32) {}
+/// The host hid its cursor (a game grabbed the mouse): send relative motion meanwhile.
+#[cfg(windows)]
+pub fn set_pointer_lock(on: bool) {
+	imp::set_pointer_lock(on)
+}
+#[cfg(not(windows))]
+pub fn set_pointer_lock(_on: bool) {}
 /// Whether the connected host injects real pinch gestures (`FEAT_PINCH`).
 #[cfg(windows)]
 pub fn set_host_pinch(on: bool) {
@@ -136,3 +175,22 @@ pub fn engage_render(_app: &AppHandle) {}
 pub fn release(_app: &AppHandle) {}
 #[cfg(not(any(windows, target_os = "linux")))]
 pub fn arm_kiosk_engage() {}
+
+#[cfg(test)]
+mod sensitivity_tests {
+	use super::{scale_relative, set_mouse_sensitivity};
+
+	#[test]
+	fn scaling_carries_the_fraction_so_slow_moves_add_up() {
+		set_mouse_sensitivity(0.25);
+		// Four 1-count moves at 0.25× make exactly one count, not four zeros.
+		let sum: f64 = (0..4).map(|_| scale_relative(1.0, -1.0).0).sum();
+		assert_eq!(sum, 1.0);
+		set_mouse_sensitivity(2.0);
+		assert_eq!(scale_relative(3.0, -5.0), (6.0, -10.0));
+		set_mouse_sensitivity(1.0);
+		assert_eq!(scale_relative(7.0, 1.0), (7.0, 1.0));
+		set_mouse_sensitivity(f32::NAN); // garbage from the UI → unchanged
+		assert_eq!(scale_relative(2.0, 2.0), (2.0, 2.0));
+	}
+}

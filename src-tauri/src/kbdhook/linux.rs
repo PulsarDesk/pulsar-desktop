@@ -965,6 +965,7 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, star
 						_ => {}
 					}
 				}
+				let (adx, ady) = super::scale_relative(adx, ady);
 				if adx != 0.0 || ady != 0.0 {
 					diag_fwd += 1;
 					fwd(&tx, InputEvent::PointerRelative { dx: adx, dy: ady });

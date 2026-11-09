@@ -36,7 +36,7 @@
 	import { SessionControls } from './Session/controls.svelte';
 	import { SessionSideChannels } from './Session/sidechannels.svelte';
 	import { SessionUi } from './Session/ui.svelte';
-	import { ui, saveUi, applyCtrlSwap, type Encoder, type VideoCodec } from '#lib/settings.svelte.js';
+	import { ui, saveUi, applyCtrlSwap, type AudioQuality, type Encoder, type VideoCodec } from '#lib/settings.svelte.js';
 	import { t } from '#lib/i18n.svelte.js';
 
 	type Target = { name: string; id: string };
@@ -702,6 +702,17 @@
 				// toggles (flip only when the desired state differs).
 				case 'atx': if ((val === 'on') !== controls.transmitAudio) controls.toggleTransmit(); break;
 				case 'amute': if ((val === 'on') !== controls.muteHost) controls.toggleMute(); break;
+				case 'msens': {
+					const v = Number(val);
+					if (v > 0) {
+						ui.mouseSens = v;
+						saveUi();
+					}
+					break;
+				}
+				case 'aquality':
+					if (['auto', 'standard', 'high', 'raw'].includes(val)) controls.setAudioQuality(val as AudioQuality);
+					break;
 				case 'mic': if ((val === 'on') !== sidechan.micOn) sidechan.toggleMic(); break;
 				// Voice call: pair mic (us → host) with host audio (host → us) in one switch;
 				// turning it off only drops the mic (host audio stays as the user had it).
