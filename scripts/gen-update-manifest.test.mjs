@@ -32,3 +32,24 @@ test('maps each target to its asset url + signature', () => {
 	assert.equal(m.platforms['darwin-aarch64'].signature, 'SIG_MAC_ARM');
 	assert.equal(m.platforms['darwin-x86_64'].url, base + '/Pulsar_x64.app.tar.gz');
 });
+
+test('the opi5 profile points a .deb install at the Orange Pi 5 build only', () => {
+	const assets = {
+		'Pulsar_0.17.0_arm64.deb': null,
+		'Pulsar_0.17.0_arm64.deb.sig': 'SIG_GENERIC_DEB',
+		'Pulsar_0.17.0_aarch64.AppImage': null,
+		'Pulsar_0.17.0_aarch64.AppImage.sig': 'SIG_APPIMAGE',
+		'Pulsar_0.17.0_opi5_arm64.deb': null,
+		'Pulsar_0.17.0_opi5_arm64.deb.sig': 'SIG_OPI5'
+	};
+	const base = 'https://github.com/PulsarDesk/pulsar-desktop/releases/download/v0.17.0';
+	const m = buildManifest({ version: '0.17.0', notes: 'n', pubDate: 'x', assets, base, profile: 'opi5' });
+	assert.deepEqual(Object.keys(m.platforms).sort(), ['linux-aarch64', 'linux-aarch64-deb']);
+	assert.equal(m.platforms['linux-aarch64-deb'].url, base + '/Pulsar_0.17.0_opi5_arm64.deb');
+	assert.equal(m.platforms['linux-aarch64-deb'].signature, 'SIG_OPI5');
+	assert.equal(m.platforms['linux-aarch64'].url, base + '/Pulsar_0.17.0_opi5_arm64.deb');
+	// The default manifest never offers the rkmpp build to other arm64 installs.
+	const def = buildManifest({ version: '0.17.0', notes: 'n', pubDate: 'x', assets, base });
+	assert.equal(def.platforms['linux-aarch64'].url, base + '/Pulsar_0.17.0_aarch64.AppImage');
+	assert.equal(def.platforms['linux-aarch64-deb'], undefined);
+});

@@ -54,6 +54,16 @@ sudo scripts/opi5-image/build-image.sh target/release/bundle/deb/Pulsar_*_arm64.
 CI: run the **Orange Pi 5B image** workflow (`.github/workflows/opi5-image.yml`) by hand. It
 uploads `pulsar-opi5b.img.xz` as an artifact.
 
+Every desktop release also ships the .deb on its own: the release workflow's `opi5` job builds
+it with this script and attaches `Pulsar_<version>_opi5_arm64.deb` (+ `.sig`). Its in-app
+updater points at a separate channel, `updater-latest/latest-opi5.json`, so an Orange Pi keeps
+updating to the rkmpp build, never to the generic arm64 bundles. On a board that already runs
+Ubuntu 22.04 with the `ppa:jjriek/rockchip-multimedia` packages:
+
+```bash
+sudo apt install ./Pulsar_<version>_opi5_arm64.deb
+```
+
 Flash it with Raspberry Pi Imager / balenaEtcher, or:
 
 ```bash

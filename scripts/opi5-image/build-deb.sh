@@ -9,7 +9,13 @@
 #   INSTALL_DEPS=1 scripts/opi5-image/build-deb.sh   # fresh container/VM: install everything
 #   scripts/opi5-image/build-deb.sh                  # deps already present (e.g. on the Pi)
 #
-# Output: target/release/bundle/deb/Pulsar_<version>_arm64.deb
+# Release builds (the release workflow's opi5 job) also set:
+#   PULSAR_VERSION=<x.y.z>            stamp the version semantic-release computed
+#   PULSAR_UPDATER_ENDPOINT=<url>     the in-app updater's channel (the opi5 manifest, so the
+#                                     board only ever updates to this rkmpp build)
+#   TAURI_SIGNING_PRIVATE_KEY[_PASSWORD]  sign the .deb for the updater (.deb.sig)
+#
+# Output: target/release/bundle/deb/Pulsar_<version>_arm64.deb (+ .sig when signed)
 set -euo pipefail
 
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -57,6 +63,19 @@ fi
 
 cd "$repo"
 bun install --frozen-lockfile
+if [ -n "${PULSAR_VERSION:-}" ]; then
+	bun scripts/bump-version.mjs "$PULSAR_VERSION"
+fi
+if [ -n "${PULSAR_UPDATER_ENDPOINT:-}" ]; then
+	# Build-only edit (never committed), like the release workflow's channel step.
+	bun -e '
+		const fs = require("fs"); const p = "src-tauri/tauri.conf.json";
+		const c = JSON.parse(fs.readFileSync(p));
+		c.plugins.updater.endpoints = [process.env.PULSAR_UPDATER_ENDPOINT];
+		fs.writeFileSync(p, JSON.stringify(c, null, 2));
+		console.log("updater endpoint ->", c.plugins.updater.endpoints[0]);
+	'
+fi
 cargo build --release -p pulsar-render
 # The bundle ships the renderer and an ffmpeg next to the app (tauri.linux.conf.json).
 mkdir -p src-tauri/resources

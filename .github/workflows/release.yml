@@ -302,12 +302,52 @@ jobs:
           path: release-artifacts/*
           if-no-files-found: error
 
+  # 2b. The Orange Pi 5 build: a .deb on Ubuntu 22.04 arm64 linked against the Rockchip
+  #     multimedia PPA's ffmpeg (rkmpp hardware decoding) — the generic linux-arm64 bundles
+  #     link Ubuntu's own ffmpeg and decode in software on the board. Its updater points at
+  #     its own channel (latest-opi5.json), so a board never "updates" to the generic build.
+  #     Best effort: a failure here doesn't hold the release back.
+  opi5:
+    name: Build app · opi5 (Orange Pi 5, rkmpp)
+    needs: prepare
+    if: ${{ needs.prepare.outputs.published == 'true' && vars.ENABLE_DESKTOP_RELEASE == 'true' }}
+    runs-on: ubuntu-22.04-arm
+    container: ubuntu:22.04
+    steps:
+      - name: Install git (checkout needs it inside the container)
+        run: apt-get update && apt-get install -y --no-install-recommends git ca-certificates
+      - uses: actions/checkout@v4
+      - name: Build the OPi5 .deb
+        env:
+          INSTALL_DEPS: '1'
+          PULSAR_VERSION: ${{ needs.prepare.outputs.version }}
+          PULSAR_UPDATER_ENDPOINT: https://github.com/${{ github.repository }}/releases/download/updater-latest/latest-opi5.json
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: bash scripts/opi5-image/build-deb.sh
+      - name: Collect the .deb
+        shell: bash
+        run: |
+          mkdir -p release-artifacts
+          v="${{ needs.prepare.outputs.version }}"
+          deb="$(ls target/release/bundle/deb/*.deb | head -1)"
+          cp "$deb" "release-artifacts/Pulsar_${v}_opi5_arm64.deb"
+          if [ -f "$deb.sig" ]; then cp "$deb.sig" "release-artifacts/Pulsar_${v}_opi5_arm64.deb.sig"; fi
+          ls -l release-artifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-opi5
+          path: release-artifacts/*
+          if-no-files-found: error
+
   # 3. Everything built → NOW create the tag + GitHub release (NO commit) and
   #    attach all installers + publish the rolling auto-update manifest.
   publish:
     name: Publish release
-    needs: [prepare, build]
-    if: ${{ needs.prepare.outputs.published == 'true' && vars.ENABLE_DESKTOP_RELEASE == 'true' }}
+    needs: [prepare, build, opi5]
+    # `always()`: the opi5 build is best effort — publish when the main matrix succeeded,
+    # whatever opi5 did (its assets and channel are simply missing if it failed).
+    if: ${{ always() && needs.prepare.outputs.published == 'true' && vars.ENABLE_DESKTOP_RELEASE == 'true' && needs.build.result == 'success' }}
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -362,3 +402,15 @@ jobs:
             gh release create "$CTAG" --prerelease --title "Auto-update channel: $CTAG" \
               --notes "Holds the rolling auto-update manifest ($CH). Do not delete."
           gh release upload "$CTAG" "$CH" --clobber
+          # The Orange Pi 5 channel (only when its build made it into this release).
+          if ls artifacts/*/*_opi5_arm64.deb >/dev/null 2>&1; then
+            node scripts/gen-update-manifest.mjs \
+              artifacts \
+              "${{ steps.semrel.outputs.new_release_version }}" \
+              "$BASE" \
+              latest-opi5.json \
+              "${NOTES:-Pulsar ${{ steps.semrel.outputs.new_release_version }}}" \
+              opi5
+            cat latest-opi5.json
+            gh release upload "$CTAG" latest-opi5.json --clobber
+          fi
