@@ -38,6 +38,7 @@ mod instance_unix;
 mod io_cmds;
 #[cfg(windows)]
 mod job;
+mod legacy_install;
 mod kbdhook;
 mod native_audio;
 mod native_view;
@@ -340,6 +341,9 @@ pub fn run() {
 		instance_unix::signal_existing_instance();
 		return;
 	}
+	// A per-user pulsar-setup install left behind by the first in-app update (the updater
+	// installs per-machine): point its shortcuts here and remove it.
+	legacy_install::migrate_in_background();
 
 	tauri::Builder::default()
 		.manage(local_relay::LocalRelay::default())
