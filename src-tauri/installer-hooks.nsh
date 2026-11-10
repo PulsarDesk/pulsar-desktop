@@ -120,7 +120,9 @@
   ; In-app updates (the updater passes /UPDATE → Tauri's $UpdateMode) run the installer in
   ; passive mode: a progress window, no clicks. The drivers were set up by the first
   ; install, so skip the reboot note — a modal here would also hold back the /R relaunch.
+  ; /SD IDOK: a scripted `/S` install (no /UPDATE) must not wait on this box either — it is
+  ; invisible there (e.g. over SSH) and the installer would hang forever (2026-11-10).
   ${If} $UpdateMode <> 1
-    MessageBox MB_OK|MB_ICONINFORMATION "Pulsar kuruldu. Klavye/gamepad ve sanal ses sürücülerinin etkinleşmesi için bilgisayarı bir kez yeniden başlatın."
+    MessageBox MB_OK|MB_ICONINFORMATION "Pulsar kuruldu. Klavye/gamepad ve sanal ses sürücülerinin etkinleşmesi için bilgisayarı bir kez yeniden başlatın." /SD IDOK
   ${EndIf}
 !macroend
