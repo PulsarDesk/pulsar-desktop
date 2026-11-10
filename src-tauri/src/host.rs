@@ -75,6 +75,18 @@ mod libav;
 /// Dev aid for UX work: `PULSAR_MOCK_CAPTURE=1` makes this host stream a synthetic test
 /// pattern (`lavfi testsrc2`, software H.264/H.265) instead of the screen, skips the Wayland
 /// portal, and ignores remote mouse/keyboard (nothing reaches the real desktop). Linux only.
+/// True when `hwnd` (a captured window) is the foreground window, or its top-level owner is.
+#[cfg(windows)]
+fn window_in_front(hwnd: i64) -> bool {
+	use windows_sys::Win32::UI::WindowsAndMessaging::{GetAncestor, GetForegroundWindow, GA_ROOT};
+	let target = hwnd as windows_sys::Win32::Foundation::HWND;
+	let fg = unsafe { GetForegroundWindow() };
+	if fg.is_null() || target.is_null() {
+		return false;
+	}
+	fg == target || unsafe { GetAncestor(fg, GA_ROOT) == GetAncestor(target, GA_ROOT) }
+}
+
 pub(crate) fn mock_capture() -> bool {
 	cfg!(target_os = "linux") && std::env::var_os("PULSAR_MOCK_CAPTURE").is_some_and(|v| v == "1")
 }
@@ -1350,6 +1362,11 @@ pub(crate) async fn go_online(
 					// The HWND currently bound to `window_input` (so we only rebuild when it changes).
 					#[cfg(windows)]
 					let mut bound_hwnd: Option<i64> = None;
+					// Keys whose DOWN went through the global `SendInput` path while the captured
+					// window was in front (see `window_in_front`): their UP takes the same path even
+					// if the focus moved meanwhile, or the key would stay latched.
+					#[cfg(windows)]
+					let mut desk_keys: std::collections::HashSet<u32> = std::collections::HashSet::new();
 					// Which monitor's geometry is currently applied to the desktop injector, so we
 					// only re-resolve the virtual-desktop rect when the streamed monitor changes.
 					// `u32::MAX` = "none applied yet" (forces the first resolve).
@@ -1563,6 +1580,7 @@ pub(crate) async fn go_online(
 										if let Some(d) = desktop.as_mut() {
 											d.flush_held();
 										}
+										desk_keys.clear(); // flush_held above released them
 										bound_hwnd = target;
 										window_input = match target {
 											Some(h) => pulsar_core::input::WindowInput::new(h),
@@ -1579,7 +1597,30 @@ pub(crate) async fn go_online(
 									}
 									if let Some(w) = window_input.as_mut() {
 										routed_to_window = true;
+										// The window path exists so two co-op panes don't fight over the one
+										// system focus. When the captured window IS in front (always, for a
+										// single session) the keyboard goes through `SendInput` instead:
+										// posted WM_KEYDOWNs skip Raw Input and the global key state, so
+										// Steam Big Picture scrolled its page on the arrows instead of moving
+										// the selection (Steam Input never saw them), and Raw-Input /
+										// GetAsyncKeyState games ignored them. The mouse stays on the window
+										// path: its coordinates are relative to the captured window.
+										let front = bound_hwnd.is_some_and(window_in_front);
 										match &other {
+											InputEvent::Key { code, down } => {
+												let via_desktop = if *down { front } else { desk_keys.contains(code) };
+												if via_desktop {
+													if *down {
+														desk_keys.insert(*code);
+													} else {
+														desk_keys.remove(code);
+													}
+													routed_to_window = false;
+												} else {
+													w.key(*code, *down)
+												}
+											}
+											InputEvent::Char(_) if front => routed_to_window = false,
 											InputEvent::PointerMotion { x, y } => w.pointer(*x, *y),
 											InputEvent::PointerRelative { dx, dy } => {
 												w.pointer_relative(*dx, *dy)
@@ -1588,7 +1629,6 @@ pub(crate) async fn go_online(
 												w.button(*button, *down)
 											}
 											InputEvent::Scroll { dx, dy } => w.scroll(*dx, *dy),
-											InputEvent::Key { code, down } => w.key(*code, *down),
 											InputEvent::Char(c) => w.type_char(*c),
 											// Controllers never reach the desktop/window injector; a pinch
 											// is screen-level touch input, so the global injector takes it.
