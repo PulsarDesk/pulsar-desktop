@@ -542,6 +542,8 @@
 	"update.downloading": "Downloading…",
 	"update.installing": "Installing…",
 	"update.restarting": "Restarting…",
+	"update.etaSec": "{s} s left",
+	"update.etaMin": "{m} min {s} s left",
 	"update.error": "Update failed",
 	"update.noSelfUpdate": "This install can't update itself (package-manager/Flatpak install, or an AppImage launched without FUSE). Update via your package manager, or download the new version from the GitHub Releases page.",
 	"update.sessionsClose": "Installing restarts Pulsar: {n} open session(s) will be closed.",

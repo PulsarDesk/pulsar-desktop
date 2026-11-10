@@ -34,5 +34,6 @@
 	"splash.start": "Starting…",
 	"splash.ui": "Preparing the interface…",
 	"splash.encoder": "Preparing the hardware encoder…",
-	"splash.ready": "Ready"
+	"splash.ready": "Ready",
+	"update.inProgress": "Pulsar is being updated. It will open by itself once the install finishes — give it a few seconds."
 }

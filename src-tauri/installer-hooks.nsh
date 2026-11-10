@@ -117,5 +117,10 @@
   Pop $1
   Pop $0
 
-  MessageBox MB_OK|MB_ICONINFORMATION "Pulsar kuruldu. Klavye/gamepad ve sanal ses sürücülerinin etkinleşmesi için bilgisayarı bir kez yeniden başlatın."
+  ; In-app updates (the updater passes /UPDATE → Tauri's $UpdateMode) run the installer in
+  ; passive mode: a progress window, no clicks. The drivers were set up by the first
+  ; install, so skip the reboot note — a modal here would also hold back the /R relaunch.
+  ${If} $UpdateMode <> 1
+    MessageBox MB_OK|MB_ICONINFORMATION "Pulsar kuruldu. Klavye/gamepad ve sanal ses sürücülerinin etkinleşmesi için bilgisayarı bir kez yeniden başlatın."
+  ${EndIf}
 !macroend

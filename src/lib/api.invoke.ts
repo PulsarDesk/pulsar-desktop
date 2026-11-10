@@ -136,6 +136,9 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 			// The browser mock isn't an AppImage; pretend self-update is possible so the
 			// preview behaves like a normal in-place-updatable build.
 			return Promise.resolve(true as unknown as T);
+		case 'mark_update_installing':
+		case 'clear_update_installing':
+			return Promise.resolve(undefined as unknown as T);
 		case 'list_connections':
 			return Promise.resolve([] as unknown as T);
 		case 'respond_request':

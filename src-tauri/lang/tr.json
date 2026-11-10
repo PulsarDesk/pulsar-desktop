@@ -34,5 +34,6 @@
 	"splash.start": "Başlatılıyor…",
 	"splash.ui": "Arayüz hazırlanıyor…",
 	"splash.encoder": "Donanımsal kodlayıcı hazırlanıyor…",
-	"splash.ready": "Hazır"
+	"splash.ready": "Hazır",
+	"update.inProgress": "Pulsar güncelleniyor. Kurulum bitince Pulsar kendiliğinden açılacak — birkaç saniye bekle."
 }

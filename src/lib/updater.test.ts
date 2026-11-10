@@ -15,7 +15,11 @@ import { silentUpdateCheck } from './updater';
 // api.selfUpdatePossible is used inside run(); mock it to return true so the
 // download path is exercised.
 vi.mock('./api.commands', () => ({
-	api: { selfUpdatePossible: vi.fn().mockResolvedValue(true) }
+	api: {
+		selfUpdatePossible: vi.fn().mockResolvedValue(true),
+		markUpdateInstalling: vi.fn().mockResolvedValue(undefined),
+		clearUpdateInstalling: vi.fn().mockResolvedValue(undefined)
+	}
 }));
 
 beforeEach(() => {
@@ -273,5 +277,20 @@ describe('release notes', () => {
 		} finally {
 			vi.unstubAllGlobals();
 		}
+	});
+});
+
+describe('update.etaSec', () => {
+	it('is unknown without a size or a speed, else remaining / speed', () => {
+		updateState.total = 0;
+		updateState.speed = 1000;
+		expect(updateState.etaSec).toBe(-1);
+		updateState.total = 10_000;
+		updateState.received = 4_000;
+		updateState.speed = 0;
+		expect(updateState.etaSec).toBe(-1);
+		updateState.speed = 1_000;
+		expect(updateState.etaSec).toBe(6);
+		updateState.speed = 0;
 	});
 });

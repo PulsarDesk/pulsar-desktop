@@ -57,6 +57,7 @@ mod remote_cursor;
 mod splash;
 mod state;
 mod toast;
+mod update_guard;
 mod util;
 mod viewer;
 
@@ -282,6 +283,14 @@ pub fn rumble_selftest() {
 pub fn run() {
 	logging::init();
 	tracing::info!(version = env!("CARGO_PKG_VERSION"), "Pulsar starting");
+	// An update to a newer build is being installed right now (Windows: the NSIS
+	// installer is running, the app is between exit and relaunch). Starting this OLD exe
+	// would lock it against the installer — say so and get out of the way.
+	if update_guard::blocked_by_update() {
+		tracing::info!("an update is being installed — not starting the old build");
+		update_guard::notify_blocked();
+		return;
+	}
 	#[cfg(windows)]
 	unsafe {
 		// Children inherit the error mode: a crashing ffmpeg encoder probe (h264_vulkan
@@ -590,6 +599,8 @@ pub fn run() {
 			node_port,
 			auto_connect_target,
 			self_update_possible,
+			update_guard::mark_update_installing,
+			update_guard::clear_update_installing,
 			steam_path,
 			scan_folder,
 			run_command,

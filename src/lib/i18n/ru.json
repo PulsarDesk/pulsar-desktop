@@ -542,6 +542,8 @@
 	"update.downloading": "Загрузка…",
 	"update.installing": "Установка…",
 	"update.restarting": "Перезапуск…",
+	"update.etaSec": "осталось {s} с",
+	"update.etaMin": "осталось {m} мин {s} с",
 	"update.error": "Ошибка обновления",
 	"update.noSelfUpdate": "Эта установка не может обновиться сама (пакетный менеджер/Flatpak или AppImage без FUSE). Обновите через пакетный менеджер или скачайте новую версию со страницы GitHub Releases.",
 	"update.sessionsClose": "Установка перезапустит Pulsar: открытые сеансы ({n}) будут закрыты.",

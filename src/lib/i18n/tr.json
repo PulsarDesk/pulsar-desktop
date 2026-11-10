@@ -542,6 +542,8 @@
 	"update.downloading": "İndiriliyor…",
 	"update.installing": "Kuruluyor…",
 	"update.restarting": "Yeniden başlatılıyor…",
+	"update.etaSec": "{s} sn kaldı",
+	"update.etaMin": "{m} dk {s} sn kaldı",
 	"update.error": "Güncelleme başarısız",
 	"update.noSelfUpdate": "Bu kurulum kendini güncelleyemiyor (paket yöneticisi/Flatpak kurulumu ya da FUSE olmadan çalıştırılan AppImage). Yeni sürümü paket yöneticinden güncelle veya GitHub Releases sayfasından indirip kur.",
 	"update.sessionsClose": "Kurulum Pulsar'ı yeniden başlatır: açık {n} oturum kapanacak.",

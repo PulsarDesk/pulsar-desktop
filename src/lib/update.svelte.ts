@@ -24,6 +24,8 @@ class UpdateStore {
 	/** Download progress in bytes (total may be 0 when the server omits Content-Length). */
 	received = $state(0);
 	total = $state(0);
+	/** Smoothed download speed (bytes/s); 0 until the first measurement. */
+	speed = $state(0);
 	error = $state('');
 	/** Update modal visibility (badge click opens it). */
 	open = $state(false);
@@ -33,6 +35,12 @@ class UpdateStore {
 
 	get progressPct(): number {
 		return this.total > 0 ? Math.min(100, Math.round((this.received / this.total) * 100)) : 0;
+	}
+
+	/** Seconds left at the current speed; -1 when unknown (no Content-Length / no speed yet). */
+	get etaSec(): number {
+		if (this.total <= 0 || this.speed <= 0) return -1;
+		return Math.max(0, Math.ceil((this.total - this.received) / this.speed));
 	}
 }
 
@@ -57,6 +65,7 @@ if (import.meta.env.DEV && typeof window !== 'undefined') {
 			update.error = state === 'error' ? 'signature verification failed (updater-latest/latest.json)' : '';
 			update.received = state === 'downloading' ? 37 * 1024 * 1024 : 0;
 			update.total = state === 'downloading' ? 86 * 1024 * 1024 : 0;
+			update.speed = state === 'downloading' ? 6.4 * 1024 * 1024 : 0;
 			update.phase =
 				state === 'downloading' || state === 'installing' || state === 'restarting' || state === 'error'
 					? state

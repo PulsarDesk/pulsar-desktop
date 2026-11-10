@@ -225,6 +225,11 @@ export const api = {
 	 * where the updater would silently rewrite a throwaway temp file instead of the deployed
 	 * AppImage. Used to skip the update with a clear warning rather than no-op'ing. */
 	selfUpdatePossible: () => invoke<boolean>('self_update_possible'),
+	/** Right before `install()`: until the new build starts, a launch of the OLD exe
+	 *  (Windows: the gap while the installer runs) shows "updating" and exits. */
+	markUpdateInstalling: (version: string) => invoke<void>('mark_update_installing', { version }),
+	/** The install didn't happen after all (error / deferred) — unblock launches. */
+	clearUpdateInstalling: () => invoke<void>('clear_update_installing'),
 	/** Change an active session's stream resolution live (0×0 = host default). */
 	setPlayResolution: (id: number, width: number, height: number) =>
 		invoke<void>('set_play_resolution', { id, width, height }),

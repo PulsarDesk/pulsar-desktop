@@ -22,6 +22,15 @@
 	function fmtMB(bytes: number): string {
 		return (bytes / (1024 * 1024)).toFixed(1);
 	}
+
+	function fmtSpeed(bps: number): string {
+		return bps >= 1024 * 1024 ? `${fmtMB(bps)} MB/s` : `${Math.round(bps / 1024)} KB/s`;
+	}
+
+	function fmtEta(sec: number): string {
+		if (sec < 60) return t('update.etaSec', { s: sec });
+		return t('update.etaMin', { m: Math.floor(sec / 60), s: sec % 60 });
+	}
 </script>
 
 {#if update.open && update.available}
@@ -78,6 +87,12 @@
 					<div class="ubar" class:indet={update.total === 0}>
 						<div class="ubar-fill" style:width={update.total > 0 ? `${update.progressPct}%` : '100%'}></div>
 					</div>
+					{#if update.speed > 0}
+						<div class="uprog-sub mono">
+							<span>{fmtSpeed(update.speed)}</span>
+							{#if update.etaSec >= 0}<span>{fmtEta(update.etaSec)}</span>{/if}
+						</div>
+					{/if}
 				</div>
 			{:else if update.phase === 'installing'}
 				<div class="uprog">
@@ -229,6 +244,13 @@
 		font-size: 12px;
 		color: var(--text-muted);
 		margin-bottom: 6px;
+	}
+	.uprog-sub {
+		display: flex;
+		justify-content: space-between;
+		font-size: 11.5px;
+		color: var(--text-faint);
+		margin-top: 6px;
 	}
 	.ubar {
 		height: 6px;

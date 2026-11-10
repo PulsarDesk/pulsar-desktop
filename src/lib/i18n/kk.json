@@ -542,6 +542,8 @@
 	"update.downloading": "Жүктелуде…",
 	"update.installing": "Орнатылуда…",
 	"update.restarting": "Қайта іске қосылуда…",
+	"update.etaSec": "{s} сек қалды",
+	"update.etaMin": "{m} мин {s} сек қалды",
 	"update.error": "Жаңарту сәтсіз",
 	"update.noSelfUpdate": "Бұл орнатым өзін жаңарта алмайды (пакет менеджері/Flatpak немесе FUSE-сыз іске қосылған AppImage). Пакет менеджері арқылы жаңартыңыз немесе жаңа нұсқаны GitHub Releases бетінен жүктеп алыңыз.",
 	"update.sessionsClose": "Орнату Pulsar-ды қайта іске қосады: ашық {n} сеанс жабылады.",

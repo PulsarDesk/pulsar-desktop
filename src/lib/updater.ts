@@ -73,12 +73,18 @@ export async function silentUpdateCheck(opts?: {
 			console.warn('[updater] update downloaded but a session is live — deferring relaunch to next boot');
 			return;
 		}
+		await api.markUpdateInstalling(update.version).catch(() => {});
 		// Phase 2: destructive install. On Windows this spawns the (quiet) NSIS
 		// installer and calls process::exit(0), so it never returns here — the
 		// installer's /R flag auto-relaunches the app. On macOS/Linux install()
 		// replaces the binary in place and returns, and relaunch() below does the
 		// actual restart.
-		await update.install();
+		try {
+			await update.install();
+		} catch (e) {
+			await api.clearUpdateInstalling().catch(() => {});
+			throw e;
+		}
 		// macOS/Linux only — on Windows install() already exited the process above.
 		await relaunch();
 	};
@@ -154,10 +160,13 @@ export async function installUpdate(isBusy?: () => boolean): Promise<void> {
 		updateState.phase = 'downloading';
 		updateState.total = 86 * 1024 * 1024;
 		updateState.received = 0;
+		updateState.speed = 0;
 		const step = updateState.total / 24;
+		const meter = speedMeter();
 		while (updateState.received < updateState.total) {
 			await sleep(70);
 			updateState.received = Math.min(updateState.total, updateState.received + step);
+			meter(updateState.received);
 		}
 		updateState.phase = 'installing';
 		await sleep(1100);
@@ -176,10 +185,14 @@ export async function installUpdate(isBusy?: () => boolean): Promise<void> {
 		updateState.phase = 'downloading';
 		updateState.received = 0;
 		updateState.total = 0;
+		updateState.speed = 0;
+		const meter = speedMeter();
 		await u.download((ev) => {
 			if (ev.event === 'Started') updateState.total = ev.data.contentLength ?? 0;
-			else if (ev.event === 'Progress') updateState.received += ev.data.chunkLength;
-			else if (ev.event === 'Finished') updateState.received = updateState.total || updateState.received;
+			else if (ev.event === 'Progress') {
+				updateState.received += ev.data.chunkLength;
+				meter(updateState.received);
+			} else if (ev.event === 'Finished') updateState.received = updateState.total || updateState.received;
 		});
 		// The download can be slow — never tear down a session that started meanwhile.
 		// (On Windows install() spawns the NSIS installer and exits the process, so this
@@ -190,14 +203,35 @@ export async function installUpdate(isBusy?: () => boolean): Promise<void> {
 			return;
 		}
 		updateState.phase = 'installing';
+		await api.markUpdateInstalling(u.version).catch(() => {});
 		await u.install();
 		updateState.phase = 'restarting';
 		await relaunch();
 	} catch (e) {
+		await api.clearUpdateInstalling().catch(() => {});
 		updateState.phase = 'error';
 		updateState.error = String(e);
 		console.warn('[updater] install failed:', e);
 	}
+}
+
+/**
+ * Feeds `update.speed` from the running byte count: one sample per >=500 ms window,
+ * exponentially smoothed so the speed (and the ETA derived from it) does not jitter
+ * with every chunk. Returns the per-progress-event callback.
+ */
+function speedMeter(): (received: number) => void {
+	let lastT = performance.now();
+	let lastB = 0;
+	return (received) => {
+		const now = performance.now();
+		const dt = now - lastT;
+		if (dt < 500) return;
+		const inst = ((received - lastB) * 1000) / dt;
+		updateState.speed = updateState.speed > 0 ? updateState.speed * 0.7 + inst * 0.3 : inst;
+		lastT = now;
+		lastB = received;
+	};
 }
 
 /** How often a long-running launch re-checks for a release (the boot check runs once). */
