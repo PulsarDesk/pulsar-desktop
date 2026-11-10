@@ -70,7 +70,7 @@ should always show a picture, only slower.
 | System | Graphics | Share this computer | Connect to others |
 |---|---|---|---|
 | Windows 11 | NVIDIA RTX 3080 laptop | ✅ hardware (NVENC) | ✅ hardware |
-| Windows 11 on ARM | Snapdragon (Adreno) | ✅ software | ✅ hardware |
+| Windows 11 on ARM | Snapdragon (Adreno) | ✅ hardware (Media Foundation) | ✅ hardware |
 | Linux (KDE Plasma, Wayland) | AMD Radeon iGPU + NVIDIA RTX laptop | ✅ hardware | ✅ hardware |
 | Linux (Raspberry Pi, Orange Pi 5 / RK3588) | built-in | ✅ | ✅ hardware on the Orange Pi 5 |
 | Windows 10 | NVIDIA MX230 + Intel UHD | ✅ software (no NVENC on this GPU) | ✅ hardware |
