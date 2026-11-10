@@ -792,6 +792,8 @@ pub(crate) async fn go_online(
 				// Set to true only when the operator picks "Allow view-only" in the popup —
 				// the session starts with control revoked (see the ConnInfo insert below).
 				let mut approved_view_only = false;
+				// The host USER clicked Allow (vs. a password / unattended let it in).
+				let mut by_operator = false;
 				let approved = if require_auth && !preauthorized {
 					if let Some(rem) = crate::auth::throttle::locked_out(&peer) {
 						tracing::warn!(%peer, secs = rem.as_secs(), "auth throttled: rejecting without prompt");
@@ -864,11 +866,22 @@ pub(crate) async fn go_online(
 								crate::commands::rotate_session_password(&app_h);
 							}
 							approved_view_only = outcome.view_only;
+							by_operator = outcome.by_operator;
 							outcome.approved
 						}
 					}
 				} else {
 					true
+				};
+				// Optional 2FA (Settings → Güvenlik): a connection a password or unattended
+				// access let in must also send the authenticator code. One the host user
+				// approved on the popup doesn't (a human already vouched for it), and a 2nd
+				// pane of an already-authorized device is pre-authorized.
+				let totp_secret = app_h.state::<AppState>().config.lock().unwrap().totp_secret.clone();
+				let approved = if approved && !by_operator && !preauthorized && !totp_secret.is_empty() {
+					crate::auth::host_totp(&mut session, &totp_secret, &peer).await
+				} else {
+					approved
 				};
 				if approved {
 					crate::auth::throttle::clear(&peer);
@@ -1796,6 +1809,11 @@ pub(crate) async fn go_online(
 					let app_h = app_h.clone();
 					let peer = peer.clone();
 					move |text: String| {
+						// Sync on: it goes straight into the host's clipboard. Off: the old flow
+						// (a "{peer} shared the clipboard" notification with a Copy button).
+						if crate::clipboard_sync::apply_remote(&text) {
+							return;
+						}
 						let _ = app_h.emit(
 							"clipboard",
 							DataPayload {

@@ -1167,7 +1167,11 @@ pub(super) async fn hold_session(
 					} else if let Some(dm) = decode_data(&bytes) {
 						match dm {
 							DataMsg::Clipboard(text) => {
-								let _ = app_ev.emit("data-clip", DataPayload { peer: id.to_string(), text });
+								// Sync on: written to our clipboard here, silently (it is the
+								// host's copy, not something to announce). Off: the UI copies it.
+								if !crate::clipboard_sync::apply_remote(&text) {
+									let _ = app_ev.emit("data-clip", DataPayload { peer: id.to_string(), text });
+								}
 							}
 							DataMsg::Chat(text) => {
 								let _ = app_ev.emit("chat-msg", DataPayload { peer: id.to_string(), text });

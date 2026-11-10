@@ -39,9 +39,10 @@ export interface UiSettings {
 	mouseSens: number;
 	hdr: boolean;
 	unattended: boolean;
-	twofa: boolean;
-	record: boolean;
 	tray: boolean;
+	/** Two-way clipboard sync with every open session (viewed and hosted). On by default;
+	 * also switchable from the session overlay. */
+	clipboardSync: boolean;
 	/** Show the verbose host activity log under "connected devices". */
 	debug: boolean;
 	/** Moonlight-style frame pacing on the Linux native renderer: buffer ~1-2 frames and
@@ -154,9 +155,8 @@ const DEFAULTS: UiSettings = {
 	mouseSens: 1,
 	hdr: false,
 	unattended: true,
-	twofa: true,
-	record: false,
 	tray: true,
+	clipboardSync: true,
 	debug: false,
 	// Off by default (2026-11-08): pacing buffers ~1-2 frames — latency the maintainer would
 	// rather not pay by default. On = smoother under network/decode jitter.

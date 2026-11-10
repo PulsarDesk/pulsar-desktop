@@ -56,6 +56,7 @@
 	"aq.raw": "Raw",
 	"info.aquality": "Auto: the highest the link carries — Raw on a local network (uncompressed, ~1.6 Mbit/s), otherwise High. Standard: Opus 128 kbit/s; High: Opus 320 kbit/s; Raw: uncompressed PCM, may click on packet loss.",
 	"tools.clip": "Send clipboard",
+	"tools.clipsync": "Clipboard sync",
 	"tools.file": "Pick + send file",
 	"tools.reverse": "Reverse direction (they connect to me)",
 	"tools.fullscreen": "Toggle fullscreen",

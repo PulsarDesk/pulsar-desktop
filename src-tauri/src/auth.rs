@@ -6,7 +6,8 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use pulsar_core::service::{
-	need_password, recv_client_auth, recv_host_auth, send_auth, ClientAuth, Credential, HostAuth,
+	need_password, need_totp, recv_client_auth, recv_host_auth, recv_totp, send_auth, send_totp,
+	ClientAuth, Credential, HostAuth, TotpReply,
 };
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tokio::sync::oneshot;
@@ -445,6 +446,9 @@ pub(crate) struct RaceOutcome {
 	/// The operator picked "Allow view-only" — the session is accepted but starts
 	/// with control revoked. False for every non-popup path (password, auto-allow).
 	pub view_only: bool,
+	/// The host USER let it in (Allow on the popup), not a password. A host with 2FA on
+	/// asks for the code only when no human approved (see `host_totp`).
+	pub by_operator: bool,
 }
 
 /// Host: open the Allow/Deny popup AND, at the same time, race it against a correct
@@ -471,7 +475,7 @@ pub(crate) async fn race_host_auth(
 			limit = MAX_CONCURRENT_POPUPS,
 			"auth: concurrent popup cap reached — denying without opening a new window"
 		);
-		return RaceOutcome { approved: false, matched_one_time: false, view_only: false };
+		return RaceOutcome { approved: false, matched_one_time: false, view_only: false, by_operator: false };
 	}
 
 	let id = next_req.fetch_add(1, Ordering::SeqCst);
@@ -511,22 +515,22 @@ pub(crate) async fn race_host_auth(
 
 	// (approved, matched_one_time): a passwordless Allow never rotates the OTP, a
 	// password match reports whether it was the single-use OTP vs the reusable one.
-	let result: (bool, bool, bool) = loop {
+	let result: (bool, bool, bool, bool) = loop {
 		tokio::select! {
 			biased;
 			d = &mut rx => break match d {
-				Ok(dec) if dec.allow => (true, false, dec.view_only),
-				_ => (false, false, false),
+				Ok(dec) if dec.allow => (true, false, dec.view_only, true),
+				_ => (false, false, false, false),
 			},
 			// Idle timeout: client sent no useful message recently → deny.
 			_ = &mut idle_deadline => {
 				tracing::debug!(%peer, "auth: idle timeout — auto-denying");
-				break (false, false, false);
+				break (false, false, false, false);
 			}
 			// Absolute budget exhausted: deny regardless of activity.
 			_ = &mut absolute_deadline => {
 				tracing::warn!(%peer, "auth: absolute time budget exhausted — denying");
-				break (false, false, false);
+				break (false, false, false, false);
 			}
 			msg = recv_client_auth(session) => {
 				match msg {
@@ -552,14 +556,14 @@ pub(crate) async fn race_host_auth(
 						let live_otp = crate::commands::current_otp(app);
 						let empty = attempt.is_empty();
 						match attempt.verify(session, &live_otp, &custom).await {
-							Credential::Fixed => break (true, false, false),
+							Credential::Fixed => break (true, false, false, false),
 							// One-time password: consume atomically against the LIVE store
 							// (try_consume_otp matches AND rotates in one critical section),
 							// so two concurrent race tasks can never both consume the same
 							// code. It rotates internally → matched_one_time=false so the
 							// caller does NOT rotate again.
 							Credential::OneTime if crate::commands::try_consume_otp(app, &live_otp) => {
-								break (true, false, false);
+								break (true, false, false, false);
 							}
 							_ => {}
 						}
@@ -584,7 +588,7 @@ pub(crate) async fn race_host_auth(
 							false
 						};
 						if locked {
-							break (false, false, false);
+							break (false, false, false, false);
 						}
 						let _ = need_password(session).await; // wrong → ask client to retry
 					}
@@ -594,7 +598,7 @@ pub(crate) async fn race_host_auth(
 					// absolute deadline above is the only bound for a pure-keepalive
 					// attacker; the idle deadline auto-denies once keepalives stop.
 					ClientAuth::Keepalive => {}
-					ClientAuth::Gone => break (false, false, false),
+					ClientAuth::Gone => break (false, false, false, false),
 				}
 			}
 		}
@@ -608,15 +612,27 @@ pub(crate) async fn race_host_auth(
 		approved: result.0,
 		matched_one_time: result.1,
 		view_only: result.2,
+		by_operator: result.3,
 	}
 }
 
-/// Client: open a password prompt on the UI; returns the receiver for the answer.
+/// Which secret the client prompt asks for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PromptKind {
+	Password,
+	Totp,
+}
+
+/// The open client prompt: its answer channel, request id and what it asks for.
+type OpenPrompt = (oneshot::Receiver<Option<String>>, u64, PromptKind);
+
 fn open_pw_prompt(
 	app: &AppHandle,
 	pw_pending: &Arc<Mutex<HashMap<u64, oneshot::Sender<Option<String>>>>>,
 	next_auth: &Arc<AtomicU64>,
 	peer: &str,
+	kind: PromptKind,
+	retry: bool,
 ) -> (u64, oneshot::Receiver<Option<String>>) {
 	let id = next_auth.fetch_add(1, Ordering::SeqCst);
 	let (tx, rx) = oneshot::channel::<Option<String>>();
@@ -626,6 +642,8 @@ fn open_pw_prompt(
 		AuthPrompt {
 			req: id,
 			peer: peer.into(),
+			kind: if kind == PromptKind::Totp { "totp" } else { "password" },
+			retry,
 		},
 	);
 	(id, rx)
@@ -642,7 +660,9 @@ fn auth_err(e: pulsar_core::ConnError) -> String {
 
 /// Client: authenticate over the session. Sends an empty request first (which makes
 /// the host show its Allow/Deny popup + ask us to prompt), then races the host's
-/// approval against the user typing the password. Returns `Ok(true)` if accepted.
+/// approval against the user typing the password. A host with 2FA on then asks for the
+/// authenticator code (`NeedTotp`) — the same prompt, in its code form. Returns
+/// `Ok(true)` if accepted.
 pub(crate) async fn client_authenticate(
 	sess: &mut pulsar_core::Session,
 	app: &AppHandle,
@@ -651,44 +671,62 @@ pub(crate) async fn client_authenticate(
 	peer: &str,
 ) -> Result<bool, String> {
 	send_auth(sess, "").await.map_err(auth_err)?;
-	let mut pw_rx: Option<oneshot::Receiver<Option<String>>> = None;
-	let mut cur_id: u64 = 0;
+	let mut prompt: Option<OpenPrompt> = None;
 	let cleanup = |id: u64| {
 		pw_pending.lock().unwrap().remove(&id);
+	};
+	// (Re)open the prompt for `kind` unless that same prompt is already up: a repeated ask
+	// that only answers our probe must not flash a new modal. A retry always re-opens it
+	// (the UI shows "wrong").
+	let reprompt = |cur: Option<OpenPrompt>, kind: PromptKind, retry: bool| -> OpenPrompt {
+		match cur {
+			Some(p) if p.2 == kind && !retry => p,
+			cur => {
+				if let Some((_, id, _)) = cur {
+					cleanup(id);
+				}
+				let (id, rx) = open_pw_prompt(app, pw_pending, next_auth, peer, kind, retry);
+				(rx, id, kind)
+			}
+		}
 	};
 	// Every message here is one UDP datagram, and nothing re-sent a lost one: a lost probe or
 	// a lost verdict parked the connect for the whole 40 s AUTH_TIMEOUT (2026-11-09, a
 	// policed 3 Mbit link: the host accepted, its `Ok` never arrived). So the empty probe is
 	// repeated while no answer has come at all; a host that already accepted answers it with
-	// `Ok` again (pulsar-core serve loop), one still deciding with `NeedPassword`.
+	// `Ok` again (pulsar-core serve loop), one still deciding with `NeedPassword`, one waiting
+	// for the 2FA code with `NeedTotp`.
 	let mut answered = false;
 	let mut probes = 0u32;
 	loop {
-		match pw_rx.take() {
-			// Waiting for both the host's reply and the user's password.
-			Some(mut rx) => {
+		match prompt.take() {
+			// Waiting for both the host's reply and the user's answer.
+			Some((mut rx, id, kind)) => {
 				tokio::select! {
 					biased;
-					pw = &mut rx => {
-						cleanup(cur_id);
-						match pw {
-							Ok(Some(p)) => send_auth(sess, &p).await.map_err(auth_err)?,
+					ans = &mut rx => {
+						cleanup(id);
+						match ans {
+							Ok(Some(a)) if kind == PromptKind::Totp => send_totp(sess, &a).await.map_err(auth_err)?,
+							Ok(Some(a)) => send_auth(sess, &a).await.map_err(auth_err)?,
 							_ => return Ok(false), // user cancelled
 						}
 					}
 					out = recv_host_auth(sess) => match out {
-						HostAuth::Ok => { cleanup(cur_id); return Ok(true); }
-						HostAuth::Denied | HostAuth::Gone => { cleanup(cur_id); return Ok(false); }
+						HostAuth::Ok => { cleanup(id); return Ok(true); }
+						HostAuth::Denied | HostAuth::Gone => { cleanup(id); return Ok(false); }
 						// The prompt is already open and the user hasn't submitted (submitting
 						// leaves this branch): this answers a probe below, or repeats the first ask.
-						HostAuth::NeedPassword => pw_rx = Some(rx),
-						HostAuth::Other => pw_rx = Some(rx), // keepalive: keep waiting
+						HostAuth::NeedPassword => prompt = Some(reprompt(Some((rx, id, kind)), PromptKind::Password, false)),
+						HostAuth::NeedTotp(retry) => prompt = Some(reprompt(Some((rx, id, kind)), PromptKind::Totp, retry)),
+						HostAuth::Other => prompt = Some((rx, id, kind)), // keepalive: keep waiting
 					},
-					// While the host user decides on the Allow/Deny popup, keep asking: if their
-					// Allow's `Ok` was lost, the accepted session answers this probe with `Ok`.
+					// While the host user decides on the Allow/Deny popup (or the user reads the
+					// code off their phone), keep asking: if a verdict was lost, the host answers
+					// this probe again.
 					_ = tokio::time::sleep(PROMPT_PROBE_EVERY) => {
 						send_auth(sess, "").await.map_err(auth_err)?;
-						pw_rx = Some(rx);
+						prompt = Some((rx, id, kind));
 					}
 				}
 			}
@@ -710,14 +748,64 @@ pub(crate) async fn client_authenticate(
 				match out {
 					HostAuth::Ok => return Ok(true),
 					HostAuth::Denied | HostAuth::Gone => return Ok(false),
-					HostAuth::NeedPassword => {
-						let (id, rx) = open_pw_prompt(app, pw_pending, next_auth, peer);
-						cur_id = id;
-						pw_rx = Some(rx);
-					}
+					HostAuth::NeedPassword => prompt = Some(reprompt(None, PromptKind::Password, false)),
+					HostAuth::NeedTotp(retry) => prompt = Some(reprompt(None, PromptKind::Totp, retry)),
 					HostAuth::Other => {}
 				}
 			}
+		}
+	}
+}
+
+/// How long the host waits for the client's 2FA code after asking for it.
+const TOTP_WAIT: std::time::Duration = std::time::Duration::from_secs(90);
+/// Wrong 2FA codes in one connection attempt before the host gives up on it.
+const TOTP_MAX_TRIES: u32 = 5;
+
+/// Host: the second factor. Called when a connection passed the password (or unattended
+/// access let it in) and this host has a 2FA secret. Asks the client for the current
+/// authenticator code and checks it; wrong codes count against the same per-peer throttle
+/// as wrong passwords. A client too old to answer is refused (it would otherwise wait on
+/// a message it cannot read). Returns whether the code was right.
+pub(crate) async fn host_totp(session: &mut pulsar_core::Session, secret: &str, peer: &str) -> bool {
+	if !session.peer_supports_totp().await {
+		tracing::info!(%peer, "2FA: client too old to answer the TOTP challenge — rejecting");
+		return false;
+	}
+	let deadline = tokio::time::Instant::now() + TOTP_WAIT;
+	let mut wrong = 0u32;
+	let _ = need_totp(session, false).await;
+	loop {
+		let reply = match tokio::time::timeout_at(deadline, recv_totp(session)).await {
+			Ok(r) => r,
+			Err(_) => {
+				tracing::info!(%peer, "2FA: no code in time — rejecting");
+				return false;
+			}
+		};
+		match reply {
+			TotpReply::Code(code) => {
+				if throttle::locked_out(peer).is_some() {
+					tracing::warn!(%peer, "2FA: peer throttled — rejecting");
+					return false;
+				}
+				if pulsar_core::totp::code_valid_now(secret, &code) {
+					tracing::info!(%peer, "2FA: code accepted");
+					return true;
+				}
+				throttle::record_failure(peer);
+				wrong += 1;
+				tracing::info!(%peer, wrong, "2FA: wrong code");
+				if wrong >= TOTP_MAX_TRIES {
+					return false;
+				}
+				let _ = need_totp(session, true).await;
+			}
+			TotpReply::Probe => {
+				let _ = need_totp(session, wrong > 0).await;
+			}
+			TotpReply::Other => {}
+			TotpReply::Gone => return false,
 		}
 	}
 }

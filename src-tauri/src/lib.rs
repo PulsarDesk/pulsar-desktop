@@ -19,6 +19,7 @@ mod audio_io;
 mod auth;
 mod avatar;
 mod caps;
+mod clipboard_sync;
 mod commands;
 mod connections;
 mod local_relay;
@@ -58,6 +59,7 @@ mod remote_cursor;
 mod splash;
 mod state;
 mod toast;
+mod twofa;
 mod update_guard;
 mod util;
 mod viewer;
@@ -374,6 +376,8 @@ pub fn run() {
 			instance_unix::spawn_show_listener(app.handle().clone());
 			// The renderer's local-cursor hiding follows the real capture state.
 			crate::session_cmds::spawn_engage_sync(app.handle().clone());
+			// Two-way clipboard sync with every open session (on by default).
+			crate::clipboard_sync::spawn_watcher(app.handle().clone());
 			crate::remote_cursor::start(app.handle());
 			crate::host::takeover::start();
 
@@ -681,6 +685,9 @@ pub fn run() {
 			set_kbm_lock,
 			list_input_devices,
 			send_clipboard,
+			clipboard_sync::set_clipboard_sync,
+			twofa::totp_begin,
+			twofa::totp_verify,
 			read_clipboard_text,
 			write_clipboard_text,
 			send_chat,

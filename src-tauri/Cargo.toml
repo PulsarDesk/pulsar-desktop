@@ -97,6 +97,7 @@ windows-sys = { version = "0.61", features = [
 	"Win32_System_LibraryLoader",
 	"Win32_Security", # SECURITY_ATTRIBUTES (CreateMutexW single-instance); also CreateJobObjectW
 	"Win32_System_Diagnostics_Debug", # SetErrorMode: probe ffmpeg crashes must not pop a WER dialog
+	"Win32_System_DataExchange", # clipboard_sync: GetClipboardSequenceNumber (poll only on change)
 	"Win32_System_Registry", # legacy_install: the per-user pulsar-setup install's HKCU uninstall entry
 ] }
 # Self-avatar resolution (avatar.rs): decode the account picture / wallpaper, center-crop

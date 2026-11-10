@@ -31,8 +31,10 @@ export interface Config {
 	node_port: number;
 	/** Identity presented to peers: 'user' (OS photo) | 'wallpaper' | 'anonymous'. */
 	avatar_mode: string;
-	/** Use the native (ffplay) hardware-decoded renderer instead of the webview. */
+	/** Obsolete (video always renders natively); kept so old configs round-trip. */
 	native_player: boolean;
+	/** Two-factor auth for incoming connections: base32 TOTP secret ('' = off). */
+	totp_secret?: string;
 	/** Hardware acceleration for the APP'S OWN UI (the webview that draws menus/settings) —
 	 * NOT the video stream's encode/decode. null = per-device default (off on Orange Pi 5,
 	 * on elsewhere); true/false overrides. Applied at startup → needs an app restart. */

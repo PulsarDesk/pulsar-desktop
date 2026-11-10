@@ -99,6 +99,10 @@
 	<button class="toggle" aria-label={t('settings.tray')} class:on={ui.tray} aria-pressed={ui.tray} onclick={() => { ui.tray = !ui.tray; saveUi(); api.setTray(ui.tray).catch(() => {}); }}><span class="knob"></span></button>
 </div>
 <div class="srow">
+	<div class="st"><b>{t('settings.clipboardSync')}</b><span>{t('settings.clipboardSyncDesc')}</span></div>
+	<button class="toggle" aria-label={t('settings.clipboardSync')} class:on={ui.clipboardSync} aria-pressed={ui.clipboardSync} onclick={() => { ui.clipboardSync = !ui.clipboardSync; saveUi(); api.setClipboardSync(ui.clipboardSync).catch(() => {}); }}><span class="knob"></span></button>
+</div>
+<div class="srow">
 	<div class="st"><b>{t('settings.autoUpdate')}</b><span>{t('settings.autoUpdateDesc')}</span></div>
 	<button class="toggle" aria-label={t('settings.autoUpdate')} class:on={ui.autoUpdate} aria-pressed={ui.autoUpdate} onclick={() => { ui.autoUpdate = !ui.autoUpdate; saveUi(); }}><span class="knob"></span></button>
 </div>

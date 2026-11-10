@@ -607,6 +607,7 @@ pub fn run() {
 								"tx" => AUDIO_TX.store(on, Ordering::SeqCst),
 								"mute" => AUDIO_MUTE.store(on, Ordering::SeqCst),
 								"q" => crate::overlay::set_audio_quality(v),
+								"clip" => crate::overlay::set_clip_sync(on),
 								"mic" => MIC_ON.store(on, Ordering::SeqCst),
 								_ => {}
 							}

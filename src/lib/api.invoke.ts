@@ -18,6 +18,7 @@ const DEFAULT_CONFIG: Config = {
 	language: 'tr',
 	unattended_access: false,
 	connect_password: '',
+	totp_secret: '',
 	transmit_audio: true,
 	mute_host_audio: false,
 	audio_input: '',
@@ -136,6 +137,17 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 			// The browser mock isn't an AppImage; pretend self-update is possible so the
 			// preview behaves like a normal in-place-updatable build.
 			return Promise.resolve(true as unknown as T);
+		case 'totp_begin':
+			return Promise.resolve({
+				secret: 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP',
+				secretGrouped: 'JBSW Y3DP EHPK 3PXP JBSW Y3DP EHPK 3PXP',
+				uri: 'otpauth://totp/Pulsar?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&issuer=Pulsar',
+				qrSvg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10" fill="#fff"/><rect x="2" y="2" width="6" height="6"/></svg>'
+			} as unknown as T);
+		case 'totp_verify':
+			// The browser mock accepts any 6 digits.
+			return Promise.resolve(/^\d{6}$/.test(String((args as { code?: string })?.code ?? '')) as unknown as T);
+		case 'set_clipboard_sync':
 		case 'mark_update_installing':
 		case 'clear_update_installing':
 			return Promise.resolve(undefined as unknown as T);

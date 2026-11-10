@@ -125,6 +125,11 @@ pub(crate) struct FsEntriesPayload {
 pub(crate) struct AuthPrompt {
 	pub(crate) req: u64,
 	pub(crate) peer: String,
+	/// `"password"` (the host's one-time / connect password) or `"totp"` (the host has
+	/// 2FA on: the 6-digit authenticator code, after the password step).
+	pub(crate) kind: &'static str,
+	/// The previous answer was wrong (the UI shows that).
+	pub(crate) retry: bool,
 }
 
 /// Returned to the UI after a successful connect: the play id (for this tab), how

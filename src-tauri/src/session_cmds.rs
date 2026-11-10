@@ -394,6 +394,7 @@ async fn respawn_render_for_codec(
 					if let Some(q) = seed.aquality.as_deref() {
 						let _ = writeln!(si, "audio q={q}");
 					}
+					let _ = writeln!(si, "audio clip={}", if crate::clipboard_sync::enabled() { 1 } else { 0 });
 					let _ = writeln!(si, "msens {}", crate::kbdhook::mouse_sensitivity());
 					if let Some((tx, mute, mic)) = seed.audio {
 						let _ = writeln!(

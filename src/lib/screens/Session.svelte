@@ -723,6 +723,13 @@
 					break;
 				}
 				case 'sendclip': sidechan.sendClipboard(); break;
+				// Overlay Tools toggle: the same switch as Settings → General.
+				case 'clipsync': {
+					ui.clipboardSync = val === 'on';
+					saveUi();
+					api.setClipboardSync(ui.clipboardSync).catch(() => {});
+					break;
+				}
 				// 'pickfile' is handled Rust-side (rfd native dialog) — the renderer
 				// intercepts the cmd before emitting overlay-cmd so this case is never
 				// reached; kept as a no-op guard against stale renderer builds.

@@ -144,6 +144,22 @@ export interface SessionEvent {
 export interface AuthPrompt {
 	req: number;
 	peer: string;
+	/** `password` = the host's one-time / connect password; `totp` = the host has 2FA on and
+	 * wants the 6-digit authenticator code (after the password step). */
+	kind: 'password' | 'totp';
+	/** The previous answer was wrong. */
+	retry: boolean;
+}
+
+/** Settings → Güvenlik 2FA enrollment (`totp_begin`). */
+export interface TotpSetup {
+	/** Base32 secret — saved to `Config.totp_secret` once a code verifies it. */
+	secret: string;
+	/** The same in 4-character groups, for typing into an app by hand. */
+	secretGrouped: string;
+	uri: string;
+	/** Inline SVG QR of `uri`. */
+	qrSvg: string;
 }
 
 /** Startup-probed local capabilities (the `local-caps` event / `local_caps` command). */

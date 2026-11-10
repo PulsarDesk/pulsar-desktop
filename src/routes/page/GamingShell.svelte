@@ -210,7 +210,9 @@
 	.settings-wrap {
 		flex: 1;
 		min-height: 0;
-		overflow-y: auto;
+		/* Settings (padNav) fills this box and scrolls its own content card, so the title
+		   and the tab rail stay put; nothing here scrolls. */
+		overflow: hidden;
 		padding: 24px;
 		background: var(--bg);
 	}

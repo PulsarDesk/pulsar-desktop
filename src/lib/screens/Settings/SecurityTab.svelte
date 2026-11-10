@@ -1,12 +1,11 @@
 <script lang="ts">
-	import { ui, saveUi } from '#lib/settings.svelte.js';
 	import { t } from '#lib/i18n.svelte.js';
 	import type { Config } from '#lib/types.js';
+	import TwoFactor from './TwoFactor.svelte';
 
-	// Unattended access + the custom connect password are backed by the core Config
-	// (the host honors both). The twofa/record toggles below are UI-only scaffolding
-	// (no core backing yet) — and 2FA is mutually exclusive with unattended access
-	// (an unattended host skips auth entirely, so a second factor cannot apply).
+	// Unattended access, the custom connect password and two-factor auth are backed by the
+	// core Config (the host enforces all three). 2FA also covers unattended access: such a
+	// connection skips the password but still has to send the authenticator code.
 	let {
 		config = $bindable(),
 		toggleUnattended,
@@ -26,27 +25,13 @@
 	<div class="st"><b>{t('settings.unattended')}</b><span>{t('settings.unattendedDesc')}</span></div>
 	<button class="toggle" aria-label={t('settings.unattended')} class:on={config?.unattended_access} aria-pressed={config?.unattended_access ?? false} onclick={() => toggleUnattended?.()}><span class="knob"></span></button>
 </div>
-<div class="srow" class:dim={config?.unattended_access}>
-	<div class="st">
-		<b>{t('settings.twofa')}</b><span>{t('settings.twofaDesc')}</span>
-		{#if config?.unattended_access}
-			<span class="blocked">{t('settings.twofaBlocked')}</span>
-		{/if}
-	</div>
-	<button
-		class="toggle"
-		aria-label={t('settings.twofa')}
-		class:on={ui.twofa && !config?.unattended_access}
-		aria-pressed={ui.twofa && !config?.unattended_access}
-		disabled={config?.unattended_access}
-		onclick={() => { ui.twofa = !ui.twofa; saveUi(); }}><span class="knob"></span></button>
-</div>
+<TwoFactor bind:config {saveConfig} />
 <div class="srow">
 	<div class="st">
 		<b>{t('settings.connectPw')}</b><span>{t('settings.connectPwDesc')}</span>
-		<!-- Same rule as two-factor: unattended access skips authentication entirely
-		     (`require_auth = !unattended_access` in host.rs), so the host never consults
-		     this password. Leaving it editable implied a protection that isn't applied. -->
+		<!-- Unattended access skips the password step entirely (`require_auth =
+		     !unattended_access` in host.rs), so the host never consults this password.
+		     Leaving it editable implied a protection that isn't applied. -->
 		{#if config?.unattended_access}
 			<span class="blocked">{t('settings.connectPwBlocked')}</span>
 		{/if}
@@ -63,10 +48,6 @@
 			/>
 		{/if}
 	</div>
-</div>
-<div class="srow">
-	<div class="st"><b>{t('settings.record')}</b><span>{t('settings.recordDesc')}</span></div>
-	<button class="toggle" aria-label={t('settings.record')} class:on={ui.record} aria-pressed={ui.record} onclick={() => { ui.record = !ui.record; saveUi(); }}><span class="knob"></span></button>
 </div>
 <div class="srow">
 	<div class="st"><b>{t('settings.remoteCursor')}</b><span>{t('settings.remoteCursorDesc')}</span></div>
@@ -102,11 +83,6 @@
 		line-height: 1.45;
 		display: block;
 		max-width: 46ch;
-	}
-	/* 2FA row while unattended access blocks it: dimmed + an explanatory note. */
-	.srow.dim .st b,
-	.srow.dim .st span:not(.blocked) {
-		opacity: 0.55;
 	}
 	.blocked {
 		color: var(--warn, #b8860b) !important;

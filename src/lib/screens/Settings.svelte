@@ -114,12 +114,6 @@
 			saveConfig();
 		}
 	}
-	function toggleNative() {
-		if (config) {
-			config.native_player = !config.native_player;
-			saveConfig();
-		}
-	}
 	// Unattended access lives on the core Config (the host skips the one-time-password
 	// auth when it's on).
 	function toggleUnattended() {
@@ -130,6 +124,9 @@
 	}
 </script>
 
+<!-- Gaming mode (`padNav`) fills its box: the title and the tab rail stay put and only the
+     content card scrolls. The remote shell scrolls the whole page as before (rail sticky). -->
+<div class="settings" class:fill={padNav}>
 <div class="head"><h1>{t('settings.title')}</h1><p class="sub">{t('settings.sub')}</p></div>
 
 <div class="layout" use:navContainer={padNav}>
@@ -147,7 +144,6 @@
 				bind:config
 				{detected}
 				{saveConfig}
-				{toggleNative}
 				{toggleTransmit}
 				{toggleMute}
 			/>
@@ -162,6 +158,7 @@
 			<div class="saveerr selectable" role="alert">{t('settings.saveFailed')} · {saveErr}</div>
 		{/if}
 	</div>
+</div>
 </div>
 
 {#if toast}
@@ -193,6 +190,34 @@
 		display: flex;
 		flex-direction: column;
 		gap: 3px;
+		/* Remote shell: the page scrolls, the tab list stays in view. */
+		position: sticky;
+		top: 0;
+	}
+	/* Gaming mode: a full-height column — title, then rail | card — where only the card
+	   scrolls (GamingShell's .settings-wrap no longer scrolls itself). */
+	.settings.fill {
+		display: flex;
+		flex-direction: column;
+		height: 100%;
+		min-height: 0;
+	}
+	.settings.fill .head {
+		flex: none;
+	}
+	.settings.fill .layout {
+		flex: 1;
+		min-height: 0;
+		grid-template-rows: minmax(0, 1fr);
+		align-items: stretch;
+	}
+	.settings.fill .rail {
+		align-self: start;
+		position: static;
+	}
+	.settings.fill .card {
+		min-height: 0;
+		overflow-y: auto;
 	}
 	.tab {
 		display: flex;

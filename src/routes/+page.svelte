@@ -165,7 +165,7 @@
 	// OR the host clicking Allow (whichever first) completes the connect. Multiple tabs
 	// can be connecting at once, so these are a FIFO queue (one modal shown at a time):
 	// a second host's prompt no longer overwrites and drops the first.
-	let pwQueue = $state<{ req: number; peer: string }[]>([]);
+	let pwQueue = $state<{ req: number; peer: string; kind: 'password' | 'totp' }[]>([]);
 	const pwPrompt = $derived(pwQueue[0] ?? null);
 	let pwInput = $state('');
 	let pwError = $state('');
@@ -583,6 +583,7 @@
 		// is unreachable, goOnline blocks for its full timeout; a close during that window
 		// would otherwise hide-to-tray for a user who disabled it, leaving a ghost process.
 		api.setTray(ui.tray).catch(() => {});
+		api.setClipboardSync(ui.clipboardSync).catch(() => {});
 		await goOnline();
 		// Surface incoming connections on the host UI.
 		await onSessionEvent((e) => {
@@ -651,7 +652,8 @@
 			// only for the CLI target itself (same despaced id/ip:port matching as closePwFor)
 			// and only ONCE — clear it so a wrong-password re-fire, a reverse-direction connect,
 			// or a manual connect to a different host falls through to the interactive modal.
-			if (autoPw) {
+			// Never a 2FA code: that is the user's authenticator, not the CLI password.
+			if (autoPw && e.kind !== 'totp') {
 				const want = autoPw.id.replace(/\s/g, '');
 				const p = e.peer.replace(/\s/g, '');
 				if (p === want || p.startsWith(want + ':') || want.startsWith(p + ':')) {
@@ -667,10 +669,14 @@
 			// Match on the SPECIFIC req we submitted (pwCheckingReq), not just the peer: two
 			// concurrent connects to the same peer id would otherwise swap the wrong head.
 			if (pwPrompt && pwChecking && pwPrompt.req === pwCheckingReq && pwPrompt.peer === e.peer) {
-				// Wrong-password re-fire: auth is still interactive — keep the pause alive.
+				// Auth is still interactive — keep the pause alive. Same kind again = the answer
+				// was wrong (a password re-ask, or a 2FA retry); password → code = the password
+				// passed and this host also wants its 2FA code.
 				sm.notifyAuthStart(e.peer);
-				pwQueue = [{ req: e.req, peer: e.peer }, ...pwQueue.slice(1)];
-				pwError = t('pw.error');
+				const sameKind = e.kind === pwPrompt.kind;
+				pwQueue = [{ req: e.req, peer: e.peer, kind: e.kind }, ...pwQueue.slice(1)];
+				pwError = !sameKind ? '' : e.kind === 'totp' ? t('pw.totpError') : t('pw.error');
+				if (!sameKind) pwInput = '';
 				pwChecking = false;
 				pwCheckingReq = null;
 				return;
@@ -681,11 +687,11 @@
 			// password or wait for the host operator to click Allow/Deny.
 			sm.notifyAuthStart(e.peer);
 			const wasEmpty = pwQueue.length === 0;
-			pwQueue = [...pwQueue, { req: e.req, peer: e.peer }];
+			pwQueue = [...pwQueue, { req: e.req, peer: e.peer, kind: e.kind }];
 			if (wasEmpty) {
 				pwInput = '';
 				pwChecking = false;
-				pwError = '';
+				pwError = e.retry && e.kind === 'totp' ? t('pw.totpError') : '';
 			}
 		});
 		// CLI `--connect <id|ip>`: initiate a session on startup (kiosk / automated test).
@@ -1098,6 +1104,7 @@
 
 		{#if pwPrompt}
 			<PasswordModal
+				kind={pwPrompt.kind}
 				bind:pwInput
 				{pwError}
 				{pwChecking}

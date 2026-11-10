@@ -4,6 +4,8 @@
 	import { closeOnEscape } from '#lib/escapeStack.js';
 
 	type Props = {
+		/** `password` = the host's one-time / connect password; `totp` = the host has 2FA on. */
+		kind?: 'password' | 'totp';
 		pwInput: string;
 		pwError: string;
 		pwChecking: boolean;
@@ -11,6 +13,7 @@
 		onCancel: () => void;
 	};
 	let {
+		kind = 'password',
 		pwInput = $bindable(),
 		pwError,
 		pwChecking,
@@ -23,9 +26,13 @@
 
 <div class="pwmodal">
 	<div class="pwcard">
-		<div class="pwhdr"><Icon name="shield" size={18} /><span>{t('pw.title')}</span></div>
-		<!-- eslint-disable-next-line svelte/no-at-html-tags -->
-		<p class="pwlead">{@html t('pw.lead')}</p>
+		<div class="pwhdr"><Icon name="shield" size={18} /><span>{kind === 'totp' ? t('pw.totpTitle') : t('pw.title')}</span></div>
+		{#if kind === 'totp'}
+			<p class="pwlead">{t('pw.totpLead')}</p>
+		{:else}
+			<!-- eslint-disable-next-line svelte/no-at-html-tags -->
+			<p class="pwlead">{@html t('pw.lead')}</p>
+		{/if}
 		{#if pwError}<div class="pwerr selectable">{pwError}</div>{/if}
 		<!-- svelte-ignore a11y_autofocus -->
 		<!-- Raw value: the persistent connect password can be any string (case/symbols/length), so the
@@ -33,15 +40,18 @@
 		     host-side (try_consume_otp), so `uk66-379t` / `UK66379T` / dash-less all still work. -->
 		<input
 			class="pwfield mono"
+			class:code={kind === 'totp'}
 			type="text"
+			inputmode={kind === 'totp' ? 'numeric' : 'text'}
+			maxlength={kind === 'totp' ? 6 : undefined}
 			bind:value={pwInput}
 			disabled={pwChecking}
 			autocapitalize="off"
 			autocomplete="off"
 			spellcheck="false"
 			onkeydown={(e) => e.key === 'Enter' && onSubmit()}
-			placeholder={t('pw.placeholder')}
-			aria-label={t('pw.aria')}
+			placeholder={kind === 'totp' ? '000000' : t('pw.placeholder')}
+			aria-label={kind === 'totp' ? t('pw.totpTitle') : t('pw.aria')}
 			autofocus
 		/>
 		<div class="pwact">
@@ -54,6 +64,11 @@
 </div>
 
 <style>
+	.pwfield.code {
+		letter-spacing: 0.35em;
+		text-align: center;
+		font-size: 20px;
+	}
 	.pwmodal {
 		position: absolute;
 		inset: 0;

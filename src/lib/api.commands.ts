@@ -385,6 +385,12 @@ export const api = {
 	/** Sync the "run in system tray" preference to the backend so the CloseRequested
 	 * handler knows whether to hide-to-tray (enabled=true) or quit (enabled=false). */
 	setTray: (enabled: boolean) => invoke<void>('set_tray', { enabled }),
+	/** Settings → Güvenlik 2FA: a fresh TOTP secret + its QR for the enrollment dialog. */
+	totpBegin: () => invoke<import('./api.types').TotpSetup>('totp_begin'),
+	/** Whether `code` is the current authenticator code for `secret` (enrollment proof). */
+	totpVerify: (secret: string, code: string) => invoke<boolean>('totp_verify', { secret, code }),
+	/** Two-way clipboard sync with every open session (Settings → General / session overlay). */
+	setClipboardSync: (enabled: boolean) => invoke<void>('set_clipboard_sync', { enabled }),
 	/** Enable/disable this device's HOST role. `serving=false` (set when the app enters
 	 * gaming mode) makes the host reject every inbound connection at auth time — nobody
 	 * can connect to this machine. Outbound connects + relay registration are unaffected. */

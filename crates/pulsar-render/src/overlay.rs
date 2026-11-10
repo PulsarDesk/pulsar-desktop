@@ -225,6 +225,18 @@ pub fn mouse_sens() -> &'static str {
 	MOUSE_SENSES[(MOUSE_SENS.load(std::sync::atomic::Ordering::Relaxed) as usize).min(MOUSE_SENSES.len() - 1)]
 }
 
+/// Two-way clipboard sync switch (`audio clip=0|1` from the app; the Tools toggle flips it
+/// optimistically and emits `ov set clipsync on|off` so the app persists + applies it).
+static CLIP_SYNC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_clip_sync(on: bool) {
+	CLIP_SYNC.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn clip_sync() -> bool {
+	CLIP_SYNC.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn audio_quality() -> &'static str {
 	AUDIO_QUALITIES[(AUDIO_QUALITY.load(std::sync::atomic::Ordering::Relaxed) as usize).min(3)]
 }
@@ -1316,6 +1328,12 @@ fn draw_tools(
 	}
 	let w = ui.available_width();
 	// Label-only buttons — the leading emoji icons render as tofu in the bundled egui font.
+	let sync = clip_sync();
+	let label = format!("{}: {}", t("tools.clipsync"), if sync { t("on") } else { t("off") });
+	if ui.add(egui::Button::new(label).min_size(egui::vec2(w, 30.0))).clicked() {
+		set_clip_sync(!sync);
+		cmds.push(OverlayCmd::Set("clipsync", if sync { "off".into() } else { "on".into() }));
+	}
 	if ui
 		.add(egui::Button::new(t("tools.clip")).min_size(egui::vec2(w, 30.0)))
 		.clicked()

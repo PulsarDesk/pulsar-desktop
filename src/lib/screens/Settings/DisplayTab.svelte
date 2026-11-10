@@ -20,14 +20,12 @@
 		config = $bindable(),
 		detected,
 		saveConfig,
-		toggleNative,
 		toggleTransmit,
 		toggleMute
 	}: {
 		config: Config | null;
 		detected: string[];
 		saveConfig: () => void;
-		toggleNative: () => void;
 		toggleTransmit: () => void;
 		toggleMute: () => void;
 	} = $props();
@@ -101,10 +99,6 @@
 			>
 		{/each}
 	</div>
-</div>
-<div class="srow">
-	<div class="st"><b>{t('settings.nativePlayer')}</b><span>{t('settings.nativePlayerDesc')}</span></div>
-	<button class="toggle" aria-label={t('settings.nativePlayer')} class:on={config?.native_player} aria-pressed={config?.native_player ?? false} onclick={toggleNative}><span class="knob"></span></button>
 </div>
 <div class="srow">
 	<div class="st"><b>{t('settings.preOptimize')}</b><span>{t('settings.preOptimizeDesc')}</span></div>

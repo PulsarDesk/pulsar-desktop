@@ -56,6 +56,7 @@
 	"aq.raw": "Ham",
 	"info.aquality": "Otomatik: hat yetiyorsa en yükseği — yerel ağda Ham (sıkıştırmasız, ~1,6 Mbit/s), değilse Yüksek. Standart: Opus 128 kbit/s; Yüksek: Opus 320 kbit/s; Ham: sıkıştırmasız PCM, kayıpta tık olabilir.",
 	"tools.clip": "Panoyu karşıya gönder",
+	"tools.clipsync": "Pano eşitleme",
 	"tools.file": "Dosya seç + gönder",
 	"tools.reverse": "Yön değiştir (bana bağlansın)",
 	"tools.fullscreen": "Tam ekran aç/kapat",
