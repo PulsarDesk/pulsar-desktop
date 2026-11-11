@@ -239,6 +239,9 @@ impl PadCtx {
 		let mut latest: Option<Ds5Report> = None;
 		let mut sent: Option<(Ds5Report, Instant)> = None;
 		let mut last_log = Instant::now();
+		// Media arrival jitter (diagnostics): slots per window and the longest gap.
+		let (mut media_n, mut media_gap_max, mut media_last) =
+			(0u32, Duration::ZERO, None::<Instant>);
 		while !self.stop.load(Ordering::Relaxed) {
 			while let Ok(cmd) = self.rx.try_recv() {
 				match cmd {
@@ -246,6 +249,12 @@ impl PadCtx {
 					Cmd::Media(Ds5Media::Slot {
 						haptics, speaker, ..
 					}) => {
+						let now = Instant::now();
+						if let Some(t) = media_last {
+							media_gap_max = media_gap_max.max(now - t);
+						}
+						media_last = Some(now);
+						media_n += 1;
 						if self.dev.transport == Ds5Transport::Bt {
 							pad.push_slot(haptics, speaker);
 						}
@@ -284,7 +293,15 @@ impl PadCtx {
 			}
 			if last_log.elapsed() > Duration::from_secs(10) {
 				last_log = Instant::now();
-				tracing::info!(slot, stats = ?pad.stats(), "ds5 client");
+				tracing::info!(
+					slot,
+					stats = ?pad.stats(),
+					media_slots = media_n,
+					media_gap_max_ms = media_gap_max.as_millis() as u64,
+					"ds5 client"
+				);
+				media_n = 0;
+				media_gap_max = Duration::ZERO;
 			}
 		}
 		// Leave the pad clean: triggers off, no rumble.
