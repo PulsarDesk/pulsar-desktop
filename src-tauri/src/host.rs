@@ -371,6 +371,10 @@ impl Drop for SessionCleanupGuard {
 
 /// Bind the node and register with the configured relay; returns this device's
 /// grouped ID. Fails (so the UI shows "offline") when the relay is unreachable.
+///
+/// The UI's entry point. Its first call after the host came online WITHOUT the UI (locked
+/// session — see `headless.rs`) adopts that node instead of rebinding, so sessions accepted
+/// meanwhile survive the window showing up.
 #[tauri::command]
 pub(crate) async fn go_online(
 	app: AppHandle,
@@ -381,8 +385,28 @@ pub(crate) async fn go_online(
 	relay_password: Option<String>,
 	relay_totp: Option<String>,
 ) -> Result<String, String> {
+	crate::headless::note_ui_call();
 	// One go_online at a time (see AppState::go_online_lock).
 	let _online_guard = state.go_online_lock.lock().await;
+	let creds_empty = [&relay_password, &relay_totp]
+		.iter()
+		.all(|v| v.as_deref().map_or(true, |s| s.trim().is_empty()));
+	let node_alive = state.node.lock().unwrap().is_some();
+	let key = crate::headless::key_of(&state.config.lock().unwrap());
+	if let Some(id) = crate::headless::take_adoptable(&key, creds_empty, node_alive) {
+		tracing::info!(%id, "go_online: UI adopts the node brought up without it");
+		return Ok(id);
+	}
+	bring_online(app, state.clone(), relay_password, relay_totp).await
+}
+
+/// The body of [`go_online`]. The caller holds `AppState::go_online_lock`.
+pub(crate) async fn bring_online(
+	app: AppHandle,
+	state: State<'_, AppState>,
+	relay_password: Option<String>,
+	relay_totp: Option<String>,
+) -> Result<String, String> {
 	// Pre-warm ALL encoder probes off the hot path: the first QueryStreamCaps must
 	// answer within the client's 2 s window, but a cold probe chain (one-frame ffmpeg
 	// encodes per backend×codec + the gst pipelines) takes several seconds. Results

@@ -106,6 +106,8 @@ windows-sys = { version = "0.61", features = [
 	"Win32_System_DataExchange", # clipboard_sync: GetClipboardSequenceNumber (poll only on change)
 	"Win32_System_Registry", # legacy_install: the per-user pulsar-setup install's HKCU uninstall entry
 	"Win32_System_Power", # link_hint: GetSystemPowerStatus (on battery?)
+	"Win32_System_RemoteDesktop", # ui_start: WTSSessionInfoEx lock state (defer the webview while locked)
+	"Win32_System_StationsAndDesktops", # ui_start: OpenInputDesktop name (Winlogon = locked / secure desktop)
 ] }
 # Self-avatar resolution (avatar.rs): decode the account picture / wallpaper, center-crop
 # + downscale (same pipeline as the Linux block below).

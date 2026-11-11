@@ -47,6 +47,7 @@ mod kbdhook;
 mod native_audio;
 mod native_view;
 mod focus_gate;
+mod headless;
 mod pad_wake;
 mod link_hint;
 mod play;
@@ -68,6 +69,7 @@ mod split_join;
 mod state;
 mod toast;
 mod twofa;
+mod ui_start;
 mod pairing;
 mod update_guard;
 mod util;
@@ -195,6 +197,7 @@ fn spawn_show_watcher(app: AppHandle) {
 			if unsafe { WaitForSingleObject(ev, INFINITE) } != WAIT_OBJECT_0 {
 				break;
 			}
+			crate::ui_start::request_now();
 			if let Some(w) = app.get_webview_window("main") {
 				let _ = w.show();
 				let _ = w.unminimize();
@@ -378,17 +381,19 @@ pub fn run() {
 			use tauri::menu::{Menu, MenuItem};
 			use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
-			// The main window starts hidden (tauri.conf `visible:false`) while its UI loads;
-			// a small separate splash window is on screen meanwhile. The frontend swaps them
-			// via `splash_done` once ready (splash.rs also holds the never-ready fallback).
-			splash::show(app.handle());
+			// Load persisted config (relay endpoint, network mode, etc.) FIRST: the host core
+			// needs it even when no window can be created (locked session, see ui_start.rs).
+			let cfg = pulsar_core::config::Config::load(util::config_path(app.handle()));
+			tracing::info!(relay = %cfg.relay, "config loaded");
+			crate::i18n::set_lang(&cfg.language);
+			*app.state::<AppState>().config.lock().unwrap() = cfg;
 
-			// Display scale for the native renderer's overlay (kept current below).
-			if let Some(w) = app.get_webview_window("main") {
-				if let Ok(scale) = w.scale_factor() {
-					crate::process::set_ui_scale(scale);
-				}
-			}
+			// The main window (tauri.conf `create:false`, `visible:false`) + the splash. Built
+			// right here in a usable session — the frontend swaps them via `splash_done` once
+			// ready (splash.rs also holds the never-ready fallback). In a LOCKED session (or
+			// if the build fails) it's deferred/retried and the host goes online without it.
+			// Also sets the display scale for the native renderer's overlay.
+			crate::ui_start::start(app.handle());
 
 			// Re-launching a tray-hidden Pulsar should surface this instance (a second
 			// process detects the single-instance lock + signals us).
@@ -427,26 +432,34 @@ pub fn run() {
 				}
 			}
 
-			// Load persisted config (relay endpoint, network mode, etc.).
-			let cfg = pulsar_core::config::Config::load(util::config_path(app.handle()));
-			tracing::info!(relay = %cfg.relay, "config loaded");
-			crate::i18n::set_lang(&cfg.language);
-			*app.state::<AppState>().config.lock().unwrap() = cfg;
-
 			// System tray: once launched, Pulsar stays resident in the tray. Closing
 			// the window hides it (see on_window_event); the only full exit is the
 			// tray's quit item. (Tray labels pick the language at startup — a language
 			// change applies to them after a restart.)
-			let show =
-				MenuItem::with_id(app, "show", crate::i18n::t("tray.show"), true, None::<&str>)?;
-			let quit =
-				MenuItem::with_id(app, "quit", crate::i18n::t("tray.quit"), true, None::<&str>)?;
-			let menu = Menu::with_items(app, &[&show, &quit])?;
+			// A tray/menu error must not fail setup (Tauri panics on that, killing the host).
+			let menu = (|| -> tauri::Result<_> {
+				let show =
+					MenuItem::with_id(app, "show", crate::i18n::t("tray.show"), true, None::<&str>)?;
+				let quit =
+					MenuItem::with_id(app, "quit", crate::i18n::t("tray.quit"), true, None::<&str>)?;
+				Menu::with_items(app, &[&show, &quit])
+			})();
+			let menu = match menu {
+				Ok(m) => m,
+				Err(e) => {
+					tracing::warn!("tray menu unavailable — closing the window will quit: {e}");
+					app.state::<AppState>()
+						.tray_missing
+						.store(true, std::sync::atomic::Ordering::Relaxed);
+					return Ok(());
+				}
+			};
 			let mut tray = TrayIconBuilder::with_id("main")
 				.menu(&menu)
 				.show_menu_on_left_click(false)
 				.on_menu_event(|app, event| match event.id.as_ref() {
 					"show" => {
+						crate::ui_start::request_now();
 						if let Some(w) = app.get_webview_window("main") {
 							let _ = w.show();
 							let _ = w.unminimize();
