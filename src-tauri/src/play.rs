@@ -1448,19 +1448,17 @@ pub(crate) async fn start_remote_play(
 		let ov_app = app.clone();
 		// DualSense passthrough: a host advertising FEAT_DS5 gets raw DualSense reports
 		// (ds5/client.rs) instead of GamepadSlot for every forwarded DualSense.
-		// `PULSAR_DS5=0` turns it off (settings toggle comes later).
+		// Settings → Kontroller → DualSense ("DualSense özelliklerini kullan") or
+		// `PULSAR_DS5=0` turns it off.
+		let ds5_prefs = crate::ds5::client::prefs();
 		let ds5_client = (host_caps
 			.features
 			.iter()
 			.any(|f| f == pulsar_core::input::ds5::wire::FEAT_DS5)
-			&& std::env::var("PULSAR_DS5").as_deref() != Ok("0"))
-		.then(|| {
-			crate::ds5::client::Ds5Client::register(
-				id,
-				input_tx.clone(),
-				pulsar_core::input::ds5::Ds5Features::all(),
-			)
-		});
+			&& ds5_prefs.enabled)
+		.then(|| crate::ds5::client::Ds5Client::register(id, input_tx.clone(), ds5_prefs));
+		// One-time hint: Wi-Fi 2.4 GHz / WLAN power saving on battery (Windows).
+		crate::link_hint::check_once(id);
 		tokio::task::spawn_blocking(move || {
 			let Some(mgr) = crate::controllers::manager() else {
 				return;

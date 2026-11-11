@@ -6,6 +6,68 @@ export type VideoCodec = 'auto' | 'h264' | 'h265' | 'av1';
 export type RumbleStrength = 'off' | 'weak' | 'medium' | 'strong';
 /** Session audio: auto = the highest the link carries (Raw on a LAN with room, else High). */
 export type AudioQuality = 'auto' | 'standard' | 'high' | 'raw';
+/** DualSense feature choice: auto = on, but auto-degrade may turn it off on a weak
+ *  Bluetooth link; on = always on; off = off. Same tokens as the Rust `Mode`. */
+export type Ds5Mode = 'auto' | 'on' | 'off';
+
+/** DualSense passthrough settings (Settings → Kumandalar → DualSense), pushed to Rust with
+ *  `set_ds5_settings` (`pulsar_core::input::ds5::degrade::Ds5Prefs`, same JSON names). */
+export interface Ds5Settings {
+	/** Master switch ("DualSense özelliklerini kullan"). Off = plain gamepad forwarding.
+	 *  Applies from the next connection. */
+	enabled: boolean;
+	triggers: Ds5Mode;
+	haptics: Ds5Mode;
+	speaker: Ds5Mode;
+	mic: Ds5Mode;
+	leds: Ds5Mode;
+	rumble: Ds5Mode;
+	/** Shed `auto` features (speaker → mic → HD haptics) while Bluetooth is weak. */
+	autoDegrade: boolean;
+	/** Haptics/speaker jitter buffer in ms (advanced). */
+	jitterMs: number;
+}
+
+export const DS5_DEFAULTS: Ds5Settings = {
+	enabled: true,
+	triggers: 'auto',
+	haptics: 'auto',
+	speaker: 'auto',
+	mic: 'auto',
+	leds: 'auto',
+	rumble: 'auto',
+	autoDegrade: true,
+	jitterMs: 64
+};
+
+/** The DualSense features in UI order, with their i18n label keys. */
+export const DS5_FEATURES = [
+	{ key: 'triggers', label: 'ds5.triggers' },
+	{ key: 'haptics', label: 'ds5.haptics' },
+	{ key: 'speaker', label: 'ds5.speaker' },
+	{ key: 'mic', label: 'ds5.mic' },
+	{ key: 'leds', label: 'ds5.leds' },
+	{ key: 'rumble', label: 'ds5.rumble' }
+] as const satisfies readonly { key: keyof Ds5Settings; label: string }[];
+
+const DS5_MODES: readonly Ds5Mode[] = ['auto', 'on', 'off'];
+
+/** Merge a saved (possibly old or hand-edited) DualSense block over the defaults. */
+export function normalizeDs5(saved: unknown): Ds5Settings {
+	const out: Ds5Settings = { ...DS5_DEFAULTS };
+	if (!saved || typeof saved !== 'object') return out;
+	const s = saved as Record<string, unknown>;
+	if (typeof s.enabled === 'boolean') out.enabled = s.enabled;
+	if (typeof s.autoDegrade === 'boolean') out.autoDegrade = s.autoDegrade;
+	for (const f of DS5_FEATURES) {
+		const v = s[f.key];
+		if (typeof v === 'string' && DS5_MODES.includes(v as Ds5Mode)) out[f.key] = v as Ds5Mode;
+	}
+	const j = Number(s.jitterMs);
+	if (Number.isFinite(j) && j > 0) out.jitterMs = Math.min(500, Math.max(11, Math.round(j)));
+	return out;
+}
+
 export type Encoder =
 	| 'auto'
 	| 'nvenc'
@@ -96,6 +158,8 @@ export interface UiSettings {
 	 * F11 toggle writes this; restored at startup only when appMode==='game'). Scoped
 	 * to game mode so a fullscreen remote session never reopens fullscreen. Default false. */
 	gamingFullscreen: boolean;
+	/** DualSense passthrough settings. */
+	ds5: Ds5Settings;
 }
 
 export const CODECS: { value: VideoCodec; label: string }[] = [
@@ -175,17 +239,18 @@ const DEFAULTS: UiSettings = {
 	touchpadAsMouse: true,
 	appMode: 'remote',
 	autoUpdate: false,
-	gamingFullscreen: false
+	gamingFullscreen: false,
+	ds5: DS5_DEFAULTS
 };
 
 const KEY = 'pulsar.ui.v1';
 const hasLS = typeof localStorage !== 'undefined';
 
 function load(): UiSettings {
-	if (!hasLS) return { ...DEFAULTS };
+	if (!hasLS) return { ...DEFAULTS, ds5: { ...DS5_DEFAULTS } };
 	try {
 		const raw = localStorage.getItem(KEY);
-		if (!raw) return { ...DEFAULTS };
+		if (!raw) return { ...DEFAULTS, ds5: { ...DS5_DEFAULTS } };
 		const saved = JSON.parse(raw) as Partial<UiSettings> & { decoder?: string };
 		delete saved.decoder; // removed: the decoder is auto-selected and shown read-only
 		// 'quicksync' was the old UI value; the wire/host vocabulary is 'qsv'.
@@ -197,9 +262,9 @@ function load(): UiSettings {
 			migrated.framePacing = false;
 			migrated.pacingOffV2 = true;
 		}
-		return { ...DEFAULTS, ...migrated };
+		return { ...DEFAULTS, ...migrated, ds5: normalizeDs5(migrated.ds5) };
 	} catch {
-		return { ...DEFAULTS };
+		return { ...DEFAULTS, ds5: { ...DS5_DEFAULTS } };
 	}
 }
 

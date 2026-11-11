@@ -610,5 +610,22 @@
 	"settings.localRelay": "Bu cihazda relay çalıştır",
 	"settings.localRelayDesc": "Uygulama kendi relay sunucusunu çalıştırır ve ona bağlanır. Adres girmene gerek yok. Aynı ağdaki diğer cihazlar da şu adresi kullanabilir:",
 	"settings.relayLocalNote": "Bu cihazda relay çalışırken kullanılmaz.",
-	"settings.connectPwBlocked": "Gözetimsiz erişim açıkken kullanılmaz: gözetimsiz bağlantılar kimlik doğrulamayı tamamen atlar, bu yüzden hiçbir şifre sorulmaz."
+	"settings.connectPwBlocked": "Gözetimsiz erişim açıkken kullanılmaz: gözetimsiz bağlantılar kimlik doğrulamayı tamamen atlar, bu yüzden hiçbir şifre sorulmaz.",
+	"ds5.enabled": "DualSense özelliklerini kullan",
+	"ds5.enabledDesc": "Adaptif tetik, HD titreşim, kol hoparlörü ve ışık çubuğu karşıdaki oyuna iletilir. Kapalıyken kol sıradan bir oyun kolu gibi iletilir. Bir sonraki bağlantıda geçerli olur.",
+	"ds5.modesHint": "Otomatik: açık, bağlantı zayıflarsa kısılabilir · Açık: hep açık · Kapalı: kapalı.",
+	"ds5.triggers": "Adaptif tetik",
+	"ds5.haptics": "HD titreşim",
+	"ds5.speaker": "Kol hoparlörü",
+	"ds5.mic": "Kol mikrofonu",
+	"ds5.leds": "Işık çubuğu / LED",
+	"ds5.rumble": "Klasik titreşim",
+	"ds5.modeAuto": "Otomatik",
+	"ds5.modeOn": "Açık",
+	"ds5.modeOff": "Kapalı",
+	"ds5.autoDegrade": "Bağlantı zayıflayınca özellikleri otomatik kıs",
+	"ds5.autoDegradeDesc": "Bluetooth bağlantısı yetmezse önce hoparlör, sonra mikrofon, sonra HD titreşim kapanır (titreşim klasik moda geçer). Bağlantı düzelince sırayla geri açılır. Yalnız «Otomatik» olanlar kısılır.",
+	"ds5.advanced": "Gelişmiş",
+	"ds5.jitter": "Titreşim tamponu (ms)",
+	"ds5.jitterDesc": "HD titreşim ve hoparlör için ağ tamponu. Yüksek değer takılmayı azaltır, gecikmeyi artırır. Varsayılan 64."
 }

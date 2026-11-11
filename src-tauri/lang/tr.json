@@ -35,5 +35,13 @@
 	"splash.ui": "Arayüz hazırlanıyor…",
 	"splash.encoder": "Donanımsal kodlayıcı hazırlanıyor…",
 	"splash.ready": "Hazır",
-	"update.inProgress": "Pulsar güncelleniyor. Kurulum bitince Pulsar kendiliğinden açılacak — birkaç saniye bekle."
+	"update.inProgress": "Pulsar güncelleniyor. Kurulum bitince Pulsar kendiliğinden açılacak — birkaç saniye bekle.",
+	"ds5.shed.speaker": "Bluetooth zayıf: kol hoparlörü kapatıldı",
+	"ds5.shed.mic": "Bluetooth zayıf: kol mikrofonu kapatıldı",
+	"ds5.shed.haptics": "Bluetooth zayıf: HD titreşim kapatıldı, klasik titreşim kullanılıyor",
+	"ds5.restore.speaker": "Bluetooth düzeldi: kol hoparlörü geri açıldı",
+	"ds5.restore.mic": "Bluetooth düzeldi: kol mikrofonu geri açıldı",
+	"ds5.restore.haptics": "Bluetooth düzeldi: HD titreşim geri açıldı",
+	"hint.wifi24": "Wi-Fi 2,4 GHz bandında: gecikme artabilir ve Bluetooth kolu etkilenir. Mümkünse 5/6 GHz ağa bağlan",
+	"hint.wlanPowerSave": "Pilde Wi-Fi güç tasarrufu açık: yayında takılmalar olabilir. Şarja tak ya da güç planında kablosuz bağdaştırıcıyı \"En yüksek performans\" yap"
 }

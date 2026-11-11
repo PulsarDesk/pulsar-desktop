@@ -9,6 +9,9 @@
 //!   haptics/speaker reports (a USB pad gets state only in v1: its haptics/speaker play
 //!   through its audio device, which is not wired yet).
 //!
+//! Settings (`Ds5Prefs`, Settings → Kontroller → DualSense) apply live through
+//! [`set_prefs_all`]; each pad thread runs its own auto-degrade policy (`policy.rs`).
+//!
 //! Instances are registered per play id so the session loop (`play/hold.rs`) can route
 //! host messages to the right pads without new plumbing.
 
@@ -19,13 +22,14 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use pulsar_core::input::ds5::degrade::Ds5Prefs;
 use pulsar_core::input::ds5::pad::{Pad, PadInput};
 use pulsar_core::input::ds5::report::{SetState, PID_DUALSENSE, PID_DUALSENSE_EDGE};
 use pulsar_core::input::ds5::wire::{Ds5Media, Ds5Report, Ds5Transport};
-use pulsar_core::input::ds5::Ds5Features;
 use pulsar_core::service::{DataMsg, InputEvent};
 
 use super::hid::{enumerate, Ds5Device, SdlHid};
+use super::policy::{notice_text, PadPolicy};
 
 /// Least gap between two `Ds5Input` sends (250 Hz).
 const INPUT_GAP: Duration = Duration::from_millis(4);
@@ -35,6 +39,34 @@ const INPUT_KEEPALIVE: Duration = Duration::from_secs(1);
 enum Cmd {
 	Output(SetState),
 	Media(Ds5Media),
+	Prefs(Ds5Prefs),
+}
+
+/// The user's DualSense settings (pushed by the UI with `set_ds5_settings`).
+static PREFS: Mutex<Option<Ds5Prefs>> = Mutex::new(None);
+
+/// Current settings (defaults until the UI pushed them). `PULSAR_DS5=0` forces the
+/// passthrough off.
+pub fn prefs() -> Ds5Prefs {
+	let mut p = PREFS.lock().unwrap().unwrap_or_default();
+	if std::env::var("PULSAR_DS5").as_deref() == Ok("0") {
+		p.enabled = false;
+	}
+	p
+}
+
+/// New settings from the UI: stored for the next session and applied to every running
+/// pad (features, jitter buffer, auto-degrade; `Ds5Caps` re-sent). The master switch
+/// takes effect on the next connection.
+pub fn set_prefs_all(p: Ds5Prefs) {
+	*PREFS.lock().unwrap() = Some(p);
+	for c in registry().lock().unwrap().values() {
+		let mut inner = c.0.lock().unwrap();
+		inner.prefs = p;
+		for t in inner.pads.values() {
+			let _ = t.tx.send(Cmd::Prefs(p));
+		}
+	}
 }
 
 struct PadThread {
@@ -54,7 +86,8 @@ struct Inner {
 	pads: HashMap<u8, PadThread>,
 	input_tx: tokio::sync::mpsc::Sender<InputEvent>,
 	data_tx: Option<tokio::sync::mpsc::Sender<DataMsg>>,
-	features: Ds5Features,
+	prefs: Ds5Prefs,
+	play_id: u64,
 }
 
 /// The DualSense passthrough state of one play session. Cheap to clone.
@@ -71,13 +104,14 @@ impl Ds5Client {
 	pub fn register(
 		play_id: u64,
 		input_tx: tokio::sync::mpsc::Sender<InputEvent>,
-		features: Ds5Features,
+		prefs: Ds5Prefs,
 	) -> Self {
 		let c = Self(Arc::new(Mutex::new(Inner {
 			pads: HashMap::new(),
 			input_tx,
 			data_tx: None,
-			features,
+			prefs,
+			play_id,
 		})));
 		registry().lock().unwrap().insert(play_id, c.clone());
 		c
@@ -88,6 +122,7 @@ impl Ds5Client {
 		if let Some(c) = registry().lock().unwrap().remove(&play_id) {
 			c.0.lock().unwrap().pads.clear();
 		}
+		crate::play_notice::take(play_id);
 	}
 
 	/// The session's client→host DataMsg queue (created after the reader starts).
@@ -123,7 +158,8 @@ impl Ds5Client {
 				stop: stop.clone(),
 				input_tx: inner.input_tx.clone(),
 				data_tx: inner.data_tx.clone(),
-				features: inner.features,
+				prefs: inner.prefs,
+				play_id: inner.play_id,
 			};
 			if std::thread::Builder::new()
 				.name(format!("ds5-pad-{slot}"))
@@ -187,6 +223,16 @@ fn find_device(path: Option<&CString>) -> Option<Ds5Device> {
 	(devs.len() == 1).then(|| devs[0].clone())
 }
 
+/// A state that releases both adaptive triggers.
+fn triggers_off() -> SetState {
+	let mut s = SetState::default();
+	s.0[0] = pulsar_core::input::ds5::report::flag::B0_RIGHT_TRIGGER
+		| pulsar_core::input::ds5::report::flag::B0_LEFT_TRIGGER;
+	s.0[10] = 0x05;
+	s.0[21] = 0x05;
+	s
+}
+
 struct PadCtx {
 	slot: u8,
 	dev: Ds5Device,
@@ -194,10 +240,21 @@ struct PadCtx {
 	stop: Arc<AtomicBool>,
 	input_tx: tokio::sync::mpsc::Sender<InputEvent>,
 	data_tx: Option<tokio::sync::mpsc::Sender<DataMsg>>,
-	features: Ds5Features,
+	prefs: Ds5Prefs,
+	play_id: u64,
 }
 
 impl PadCtx {
+	fn send_caps(&self, slot: u8, caps: pulsar_core::input::ds5::Ds5Features) {
+		if let Some(tx) = &self.data_tx {
+			let _ = tx.try_send(DataMsg::Ds5Caps {
+				slot,
+				transport: self.dev.transport,
+				features: caps,
+			});
+		}
+	}
+
 	fn run(self) {
 		let slot = self.slot;
 		let mut hid = match SdlHid::open(&self.dev) {
@@ -207,11 +264,10 @@ impl PadCtx {
 				return;
 			}
 		};
-		// Pad mic stays off in v1 streaming (the host has no mic-open message yet).
-		let feats = Ds5Features {
-			mic: false,
-			..self.features
-		};
+		// Pad mic stays off in v1 streaming (the host has no mic-open message yet; the
+		// policy keeps it off until it is live).
+		let mut feats = self.prefs.features();
+		feats.mic = false;
 		let (mut pad, pad_features) = match Pad::open(&mut hid, self.dev.transport, feats) {
 			Ok(p) => p,
 			Err(e) => {
@@ -219,16 +275,15 @@ impl PadCtx {
 				return;
 			}
 		};
-		// Network jitter: start after ~64 ms of slots, cap at ~256 ms (the first WAN test
-		// overflowed and underran the local-bridge sized 8-slot FIFO).
-		pad.set_jitter_buffer(6, 24);
+		// Network jitter: by default start after ~64 ms of slots, cap at ~256 ms (the first
+		// WAN test overflowed and underran the local-bridge sized 8-slot FIFO).
+		let (pre, max) = self.prefs.jitter_slots();
+		pad.set_jitter_buffer(pre, max);
+		let mut policy = PadPolicy::new(self.prefs, self.dev.transport, &pad, Instant::now());
+		pad.set_features(policy.features());
 		tracing::info!(slot, transport = ?self.dev.transport, "ds5 client: driving pad");
+		self.send_caps(slot, policy.caps());
 		if let Some(tx) = &self.data_tx {
-			let _ = tx.try_send(DataMsg::Ds5Caps {
-				slot,
-				transport: self.dev.transport,
-				features: feats,
-			});
 			for (id, data) in pad_features {
 				if id == 0x05 || id == 0x20 {
 					let _ = tx.try_send(DataMsg::Ds5Feature { slot, id, data });
@@ -260,12 +315,32 @@ impl PadCtx {
 						}
 					}
 					Cmd::Media(_) => {}
+					Cmd::Prefs(p) => {
+						let was = policy.features();
+						policy.set_prefs(p);
+						if was.triggers && !policy.features().triggers {
+							// Masking only stops new effects; release the one in force.
+							pad.set_output(triggers_off());
+						}
+						let (pre, max) = p.jitter_slots();
+						pad.set_jitter_buffer(pre, max);
+						pad.set_features(policy.features());
+						pad.set_rumble_fallback(policy.fallback());
+						self.send_caps(slot, policy.caps());
+					}
 				}
+			}
+			if let Some(change) = policy.tick(Instant::now(), &mut pad) {
+				pad.set_features(policy.features());
+				pad.set_rumble_fallback(policy.fallback());
+				self.send_caps(slot, policy.caps());
+				crate::play_notice::push(self.play_id, notice_text(change));
 			}
 			let wait = pad.poll(Instant::now(), &mut hid);
 			match hid.read_timeout(&mut buf, wait.as_millis().clamp(0, 2) as i32) {
 				Ok(0) => {}
 				Ok(n) => {
+					policy.on_input(Instant::now());
 					if let Some(PadInput::State(s)) = pad.on_input(&buf[..n]) {
 						latest = Ds5Report::from_usb_input(&s);
 					}
@@ -305,12 +380,8 @@ impl PadCtx {
 			}
 		}
 		// Leave the pad clean: triggers off, no rumble.
-		let mut reset = SetState::default();
-		reset.0[0] = pulsar_core::input::ds5::report::flag::B0_RIGHT_TRIGGER
-			| pulsar_core::input::ds5::report::flag::B0_LEFT_TRIGGER;
-		reset.0[10] = 0x05;
-		reset.0[21] = 0x05;
-		pad.set_output(reset);
+		pad.set_features(pulsar_core::input::ds5::Ds5Features::all());
+		pad.set_output(triggers_off());
 		let _ = pad.poll(Instant::now() + Duration::from_millis(10), &mut hid);
 		tracing::info!(slot, "ds5 client: pad released");
 	}

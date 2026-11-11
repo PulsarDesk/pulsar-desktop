@@ -990,6 +990,17 @@ pub(crate) async fn set_disabled_controllers(uuids: Vec<String>) -> Result<(), S
 	Ok(())
 }
 
+/// Set the DualSense passthrough settings from the UI (`ui.ds5`: master switch, per-feature
+/// Otomatik/Açık/Kapalı, auto-degrade, jitter buffer). Applies live to running pads; the
+/// master switch applies from the next connection.
+#[tauri::command]
+pub(crate) async fn set_ds5_settings(
+	settings: pulsar_core::input::ds5::degrade::Ds5Prefs,
+) -> Result<(), String> {
+	crate::ds5::client::set_prefs_all(settings);
+	Ok(())
+}
+
 #[tauri::command]
 pub(crate) async fn set_controller_rumble(
 	map: std::collections::HashMap<String, String>,

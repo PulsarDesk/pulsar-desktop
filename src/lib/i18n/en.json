@@ -610,5 +610,22 @@
 	"settings.localRelay": "Run a relay on this device",
 	"settings.localRelayDesc": "Pulsar runs its own relay server and connects to it. Nothing to type. Other devices on this network can use it too, at:",
 	"settings.relayLocalNote": "Not used while this device runs its own relay.",
-	"settings.connectPwBlocked": "Unavailable while unattended access is on: unattended connections skip authentication entirely, so no password is ever asked for."
+	"settings.connectPwBlocked": "Unavailable while unattended access is on: unattended connections skip authentication entirely, so no password is ever asked for.",
+	"ds5.enabled": "Use DualSense features",
+	"ds5.enabledDesc": "Adaptive triggers, HD haptics, the controller speaker and the light bar reach the remote game. When off, the controller is forwarded as a plain gamepad. Applies from the next connection.",
+	"ds5.modesHint": "Auto: on, may be turned down on a weak link · On: always on · Off: off.",
+	"ds5.triggers": "Adaptive triggers",
+	"ds5.haptics": "HD haptics",
+	"ds5.speaker": "Controller speaker",
+	"ds5.mic": "Controller mic",
+	"ds5.leds": "Light bar / LEDs",
+	"ds5.rumble": "Classic rumble",
+	"ds5.modeAuto": "Auto",
+	"ds5.modeOn": "On",
+	"ds5.modeOff": "Off",
+	"ds5.autoDegrade": "Turn features down automatically on a weak link",
+	"ds5.autoDegradeDesc": "If Bluetooth can't keep up, the speaker goes first, then the mic, then HD haptics (vibration falls back to classic rumble). They come back one by one once the link recovers. Only features set to “Auto” are turned down.",
+	"ds5.advanced": "Advanced",
+	"ds5.jitter": "Haptics buffer (ms)",
+	"ds5.jitterDesc": "Network buffer for HD haptics and the speaker. Higher means fewer stutters but more delay. Default 64."
 }
