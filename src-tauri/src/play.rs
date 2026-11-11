@@ -1408,7 +1408,7 @@ pub(crate) async fn start_remote_play(
 	// The host's Opus/RTP audio plays natively on every platform (libopus + SDL3,
 	// Moonlight's model — see native_audio.rs). Started even when transmit is off, so a live
 	// toggle on just works; the SDL device only opens when the first packet arrives.
-	let audio_native = (audio_port > 0).then(|| crate::native_audio::start(view.audio_packets()));
+	let audio_native = (audio_port > 0).then(|| crate::native_audio::start(view.audio_packets(), id));
 
 	// Register this play session (one per connected-host tab). `id` was allocated above.
 	let running = Arc::new(AtomicBool::new(true));

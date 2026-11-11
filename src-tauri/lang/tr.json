@@ -42,6 +42,10 @@
 	"ds5.restore.speaker": "Bluetooth düzeldi: kol hoparlörü geri açıldı",
 	"ds5.restore.mic": "Bluetooth düzeldi: kol mikrofonu geri açıldı",
 	"ds5.restore.haptics": "Bluetooth düzeldi: HD titreşim geri açıldı",
+	"ds5.shed.headset": "Bluetooth zayıf: kolun kulaklık girişine ses durduruldu",
+	"ds5.restore.headset": "Bluetooth düzeldi: ses yeniden kolun kulaklık girişinde",
+	"ds5.headset.on": "Ses kolun kulaklık girişine aktarıldı",
+	"ds5.headset.off": "Kulaklık çıkarıldı: ses yeniden bu cihazdan çalıyor",
 	"hint.wifi24": "Wi-Fi 2,4 GHz bandında: gecikme artabilir ve Bluetooth kolu etkilenir. Mümkünse 5/6 GHz ağa bağlan",
 	"hint.wlanPowerSave": "Pilde Wi-Fi güç tasarrufu açık: yayında takılmalar olabilir. Şarja tak ya da güç planında kablosuz bağdaştırıcıyı \"En yüksek performans\" yap"
 }

@@ -12,6 +12,9 @@
 //!   `TAG_DS5` mic media to the host; a USB pad's haptics + speaker play on its own audio
 //!   device. Both live in `client_audio.rs`.
 //!
+//! - headphones in the pad's jack → the session's audio plays there instead of the client
+//!   output, mixed with the host's pad slots (`headset.rs`).
+//!
 //! Settings (`Ds5Prefs`, Settings → Kontroller → DualSense) apply live through
 //! [`set_prefs_all`]; each pad thread runs its own auto-degrade policy (`policy.rs`).
 //!
@@ -33,6 +36,7 @@ use pulsar_core::input::ds5::Ds5Features;
 use pulsar_core::service::{DataMsg, InputEvent};
 
 use super::client_audio::{MediaTx, PadAudio};
+use super::headset::{notice_key, PadHeadset};
 use super::hid::{enumerate, Ds5Device, SdlHid};
 use super::policy::{notice_text, PadPolicy};
 
@@ -316,6 +320,7 @@ impl PadCtx {
 			}
 		}
 		let mut audio = PadAudio::new(slot, &self.dev, self.media_tx.clone());
+		let mut headset = PadHeadset::new(self.play_id, slot, self.dev.transport);
 		let mut buf = [0u8; 600];
 		let mut latest: Option<Ds5Report> = None;
 		let mut sent: Option<(Ds5Report, Instant)> = None;
@@ -336,7 +341,9 @@ impl PadCtx {
 						}
 						media_last = Some(now);
 						media_n += 1;
-						if !audio.on_slot(haptics, speaker.clone(), &policy.features())
+						if headset.on_host_slot(haptics, speaker.as_ref(), &policy.features()) {
+							// Mixed into the headset stream (session audio + pad speaker).
+						} else if !audio.on_slot(haptics, speaker.clone(), &policy.features())
 							&& self.dev.transport == Ds5Transport::Bt
 						{
 							pad.push_slot(haptics, speaker);
@@ -368,6 +375,14 @@ impl PadCtx {
 				self.send_caps(slot, policy.caps());
 				crate::play_notice::push(self.play_id, notice_text(change));
 			}
+			// Headphones in the jack: session audio to the pad (or silent while shed).
+			let was_routed = headset.routed();
+			for sw in headset.tick(policy.headset(), &mut pad, &mut audio, &policy.features()) {
+				if let Some(k) = notice_key(sw, was_routed) {
+					crate::play_notice::push(self.play_id, crate::i18n::t(k));
+				}
+			}
+			policy.set_headset_live(headset.routed());
 			let wait = pad.poll(Instant::now(), &mut hid);
 			match hid.read_timeout(&mut buf, wait.as_millis().clamp(0, 2) as i32) {
 				Ok(0) => {}
@@ -376,6 +391,7 @@ impl PadCtx {
 					match pad.on_input(&buf[..n]) {
 						Some(PadInput::State(s)) => {
 							crate::controllers::set_ds5_input(&self.dev.path, &s);
+							headset.on_state(&s);
 							latest = Ds5Report::from_usb_input(&s);
 						}
 						Some(PadInput::Mic(opus)) => audio.on_pad_mic(opus),
@@ -411,6 +427,8 @@ impl PadCtx {
 					media_slots = media_n,
 					media_gap_max_ms = media_gap_max.as_millis() as u64,
 					audio = ?audio.counters(),
+					headset = headset.routed(),
+					headset_slots = headset.slots,
 					"ds5 client"
 				);
 				media_n = 0;
