@@ -74,7 +74,7 @@
   StrCmp $2 "2" usbip_install usbip_present
   usbip_install:
     DetailPrint "Pulsar: usbip-win2 ${USBIP_VERSION} (sanal DualSense sürücüsü) kuruluyor..."
-    ExecWait '"$0" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-' $3
+    ExecWait '"$0" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /NOICONS /COMPONENTS=main,client /TASKS=vcredist' $3
     DetailPrint "Pulsar: usbip-win2 kurulumu bitti (çıkış kodu $3)."
     Goto usbip_done
   usbip_present:

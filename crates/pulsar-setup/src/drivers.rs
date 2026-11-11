@@ -132,7 +132,7 @@ pub fn install_usbip(installer: &Path) -> Result<(), String> {
 		const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 		// Start-Process throws when the UAC prompt is declined → exit 1223 (ERROR_CANCELLED).
 		let script = format!(
-			"try {{ $p = Start-Process -Wait -PassThru -Verb RunAs -FilePath '{}' -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-' }} catch {{ exit 1223 }}; exit $p.ExitCode",
+			"try {{ $p = Start-Process -Wait -PassThru -Verb RunAs -FilePath '{}' -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/NOICONS','/COMPONENTS=main,client','/TASKS=vcredist' }} catch {{ exit 1223 }}; exit $p.ExitCode",
 			installer.display().to_string().replace('\'', "''")
 		);
 		let status = std::process::Command::new("powershell")

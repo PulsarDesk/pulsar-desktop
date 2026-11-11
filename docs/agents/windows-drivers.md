@@ -63,7 +63,10 @@ uninstall key `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{199505b
 (64-bit view). Missing key + no `%ProgramFiles%\USBip\usbip.exe` → install; key older than
 the bundled version → install; otherwise skip. A `usbip.exe` without the key (manual or
 source install) is left alone. Command: `USBip-<arch>.exe /VERYSILENT /SUPPRESSMSGBOXES
-/NORESTART /SP-` (no reboot was needed on the test PC; the generic restart notice covers it).
+/NORESTART /SP- /NOICONS /COMPONENTS=main,client /TASKS=vcredist`. The flags skip the
+GUI (`wusbip.exe`), SDK and PDB components, so the `desktopicon` task (tied to `gui`) never
+runs, and `/NOICONS` (the script sets `AllowNoIcons=yes`) skips the Start-menu group; `main`
+and `client` are `fixed`, `vcredist` is kept because `usbip.exe` needs the VC++ runtime (no reboot was needed on the test PC; the generic restart notice covers it).
 - **NSIS** (`installer-hooks.nsh`, perMachine, already elevated): picks the file by the
   NATIVE arch (`${IsNativeARM64}` / `${IsNativeAMD64}`). A kernel driver must match the
   native arch, so an x64 Pulsar on an ARM64 PC finds no matching file and skips. Runs on
