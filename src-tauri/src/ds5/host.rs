@@ -29,6 +29,11 @@ use super::audio::{SpeakerEncoder, Volume};
 const MAX_SLOTS: u8 = 4;
 /// Re-send the output state this often even if unchanged (session datagrams can drop).
 const STATE_REFRESH: Duration = Duration::from_millis(500);
+/// Wait this long after a slot's first report before plugging its virtual pad in. The
+/// first report comes right at session start, while the host is opening its audio
+/// capture; a new USB audio device appearing then made the process-loopback activation
+/// time out (doubled audio, 2026-11-11). A 3 s late pad costs nothing in a game.
+const PLUG_DELAY: Duration = Duration::from_secs(3);
 
 /// Whether this host can present a virtual DualSense (usbip tool installed).
 pub fn available() -> bool {
@@ -53,6 +58,9 @@ pub struct Ds5Host {
 	slots: Arc<Mutex<HashMap<u8, Slot>>>,
 	/// Slots whose pad failed to start; not retried this session (no attach storm).
 	failed: Arc<Mutex<Vec<u8>>>,
+	/// Slots whose pad is being plugged in on a background thread (inputs are dropped
+	/// until it is up).
+	pending: Arc<Mutex<Vec<u8>>>,
 	out: tokio::sync::mpsc::Sender<DataMsg>,
 	media: tokio::sync::mpsc::Sender<Vec<u8>>,
 	/// Seed for the virtual pads' MACs (stable per client so Linux hosts never see dupes).
@@ -77,25 +85,52 @@ impl Ds5Host {
 		Self {
 			slots: Arc::default(),
 			failed: Arc::default(),
+			pending: Arc::default(),
 			out,
 			media: tx,
 			peer,
 		}
 	}
 
-	/// A raw DualSense input report for `slot`.
+	/// A raw DualSense input report for `slot`. The first one schedules the virtual pad
+	/// (after [`PLUG_DELAY`], off the session loop: `usbip attach` blocks).
 	pub fn on_input(&self, slot: u8, report: &Ds5Report) {
 		if slot >= MAX_SLOTS {
 			return;
 		}
-		let mut slots = self.slots.lock().unwrap();
-		if let Some(s) = slots.get(&slot) {
+		if let Some(s) = self.slots.lock().unwrap().get(&slot) {
 			s.vpad.set_input(&report.to_usb_input());
 			return;
 		}
 		if self.failed.lock().unwrap().contains(&slot) {
 			return;
 		}
+		{
+			let mut pending = self.pending.lock().unwrap();
+			if pending.contains(&slot) {
+				return;
+			}
+			pending.push(slot);
+		}
+		let me = self.clone();
+		let first = *report;
+		std::thread::Builder::new()
+			.name(format!("ds5-plug-{slot}"))
+			.spawn(move || {
+				std::thread::sleep(PLUG_DELAY);
+				// Disconnected meanwhile (slot no longer pending) or the session ended (its
+				// outbound queue closed): don't plug a pad nobody will unplug.
+				let still_wanted =
+					me.pending.lock().unwrap().contains(&slot) && !me.out.is_closed();
+				if still_wanted {
+					me.plug(slot, &first);
+				}
+				me.pending.lock().unwrap().retain(|s| *s != slot);
+			})
+			.ok();
+	}
+
+	fn plug(&self, slot: u8, first: &Ds5Report) {
 		let cfg = VirtualDs5Config {
 			mac: local_mac(format!("{}/{slot}", self.peer).as_bytes()),
 			..Default::default()
@@ -103,7 +138,7 @@ impl Ds5Host {
 		match VirtualDs5::start(cfg) {
 			Ok((vpad, rx)) => {
 				tracing::info!(slot, port = vpad.port(), "ds5 host: virtual DualSense up");
-				vpad.set_input(&report.to_usb_input());
+				vpad.set_input(&first.to_usb_input());
 				let vpad = Arc::new(vpad);
 				let features = Arc::new(Mutex::new(Ds5Features::all()));
 				let stop = Arc::new(AtomicBool::new(false));
@@ -119,7 +154,7 @@ impl Ds5Host {
 					.name(format!("ds5-host-{slot}"))
 					.spawn(move || f.run())
 					.ok();
-				slots.insert(
+				self.slots.lock().unwrap().insert(
 					slot,
 					Slot {
 						vpad,
@@ -158,6 +193,7 @@ impl Ds5Host {
 
 	/// The client's pad at `slot` went away: unplug the virtual pad.
 	pub fn disconnect(&self, slot: u8) {
+		self.pending.lock().unwrap().retain(|s| *s != slot);
 		if self.slots.lock().unwrap().remove(&slot).is_some() {
 			tracing::info!(slot, "ds5 host: virtual DualSense unplugged");
 		}
