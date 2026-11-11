@@ -7,7 +7,14 @@
 //! lets the scheduler run our small capture work first. It needs SeIncreaseBasePriorityPrivilege
 //! (an elevated / SYSTEM process); without it the call fails and we keep the normal class.
 //!
-//! `PULSAR_GPU_SCHED=realtime` (default) | `high` | `off`.
+//! The default is HIGH, not REALTIME. With REALTIME on the NVIDIA host (RTX 3080 Laptop, driver
+//! 32.0.16.2114, two host processes for two seats) the capture + NVENC threads of BOTH processes
+//! froze together for 43 s and 81 s (2026-11-11 21:34 / 21:38 UTC) while audio and data kept
+//! flowing; they resumed only when one process built a new D3D device. Sunshine documents the
+//! same: REALTIME on NVIDIA (worse with HAGS) can freeze encoding for good, so it falls back to
+//! HIGH. REALTIME stays available as an explicit opt-in.
+//!
+//! `PULSAR_GPU_SCHED=high` (default) | `realtime` | `off`.
 
 use std::ffi::c_void;
 use std::sync::Once;
@@ -29,8 +36,8 @@ const CLASS_REALTIME: i32 = 5;
 fn class_for(setting: Option<&str>) -> Option<i32> {
 	match setting.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
 		Some("off") | Some("0") | Some("normal") => None,
-		Some("high") => Some(CLASS_HIGH),
-		_ => Some(CLASS_REALTIME),
+		Some("realtime") => Some(CLASS_REALTIME),
+		_ => Some(CLASS_HIGH),
 	}
 }
 
@@ -69,9 +76,12 @@ mod tests {
 
 	#[test]
 	fn setting_maps_to_a_class() {
-		assert_eq!(class_for(None), Some(CLASS_REALTIME));
+		// HIGH by default: REALTIME froze NVENC on two processes at once (see the module doc).
+		assert_eq!(class_for(None), Some(CLASS_HIGH));
+		assert_eq!(class_for(Some("")), Some(CLASS_HIGH));
 		assert_eq!(class_for(Some("high")), Some(CLASS_HIGH));
 		assert_eq!(class_for(Some(" OFF ")), None);
 		assert_eq!(class_for(Some("realtime")), Some(CLASS_REALTIME));
+		assert_eq!(class_for(Some(" RealTime ")), Some(CLASS_REALTIME));
 	}
 }
