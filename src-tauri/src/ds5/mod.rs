@@ -6,5 +6,6 @@ pub mod audio;
 pub mod bridge;
 pub mod client;
 pub mod hid;
+pub mod policy;
 pub mod host;
 pub mod probe;

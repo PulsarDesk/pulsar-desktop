@@ -1672,6 +1672,20 @@ pub(super) async fn hold_session(
 						let _ = si.flush();
 					}
 				}
+				// Notices from outside this loop (DualSense auto-degrade, link hint).
+				for text in crate::play_notice::take(id) {
+					tracing::info!(%text, "play notice");
+					let mut native = false;
+					if let Some(si) = render_stdin.lock().unwrap().as_mut() {
+						use std::io::Write as _;
+						native = true;
+						let _ = writeln!(si, "toast {text}");
+						let _ = si.flush();
+					}
+					if !native {
+						let _ = app_ev.emit("play-notice", serde_json::json!({ "id": id, "text": text }));
+					}
+				}
 				let live = sess.live_transport().await;
 				// Relay → direct upgrade, or a direct path that died and fell back to the relay:
 				// what the controller learned on the old path (a queue that collapsed it to the
