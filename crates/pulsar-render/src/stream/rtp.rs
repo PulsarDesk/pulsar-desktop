@@ -1144,6 +1144,9 @@ pub fn pump(
 		.filter(|&n: &u64| n >= 2)
 		.unwrap_or(0);
 	let mut rx_count: u64 = 0;
+	// First error of the current run of recv errors, and when one was last logged.
+	let mut recv_err_since: Option<Instant> = None;
+	let mut recv_err_logged: Option<Instant> = None;
 	// One stderr line (→ the app log) per 2 s window in which a hole was given up on, so a
 	// field log tells repairable from unrepairable loss. Quiet on a clean stream.
 	let mut stats_at = Instant::now();
@@ -1166,6 +1169,7 @@ pub fn pump(
 		}
 		match recv(&mut buf) {
 			Ok(n) => {
+				recv_err_since = None;
 				rx_count += 1;
 				if test_drop > 0 && rx_count % test_drop == 0 {
 					continue;
@@ -1191,8 +1195,23 @@ pub fn pump(
 				}
 				std::io::ErrorKind::Interrupted => continue,
 				_ => {
-					eprintln!("pulsar-render: rtp recv error: {e}");
-					break;
+					// Windows UDP sockets surface transient errors here: ERROR_IO_PENDING (997,
+					// "Overlapped I/O operation is in progress"), WSAECONNRESET (10054, an ICMP
+					// port-unreachable), WSAEMSGSIZE (10040). Breaking on the first one ended the
+					// receive loop for good: the picture froze while video kept arriving
+					// (2026-11-12). Retry; give up only if the socket keeps failing for 10 s.
+					let now = Instant::now();
+					let first = *recv_err_since.get_or_insert(now);
+					if now.duration_since(first) > Duration::from_secs(10) {
+						eprintln!("pulsar-render: rtp recv keeps failing ({e}); stopping");
+						break;
+					}
+					if recv_err_logged.is_none_or(|t| now.duration_since(t) > Duration::from_secs(2)) {
+						eprintln!("pulsar-render: rtp recv error (retrying): {e}");
+						recv_err_logged = Some(now);
+					}
+					std::thread::sleep(Duration::from_millis(2));
+					continue;
 				}
 			},
 		}
