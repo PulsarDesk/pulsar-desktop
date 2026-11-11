@@ -179,7 +179,9 @@
 			const autoEngage = mode === 'game' && activeAtConnect && !autoEngaged;
 			autoEngaged = true;
 			api.kbdCaptureStart(playId, true)
-				.then(() => (autoEngage ? api.kbdEngage() : undefined))
+				// auto: only if Pulsar is focused right now — a session started while the user is
+				// in another app engages when they come back to Pulsar, not before.
+				.then(() => (autoEngage ? api.kbdEngage(true) : undefined))
 				.catch(() => {});
 		return () => {
 			if (captureOwner !== playId) return; // another tab re-armed it for itself

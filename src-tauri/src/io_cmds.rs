@@ -447,9 +447,15 @@ pub(crate) async fn kbd_capture_stop() -> Result<(), String> {
 /// Client (native renderer): explicit click-to-engage. The in-app video container is
 /// input pass-through, so a click on the video lands on the webview underneath — the
 /// session screen forwards it here and the armed evdev capture takes the devices.
+/// `auto` = not a click (game mode's connect-time engage): engages only while Pulsar is the
+/// focused app, otherwise when it gets the focus (`kbdhook::engage_auto`).
 #[tauri::command]
-pub(crate) fn kbd_engage(app: AppHandle) -> Result<(), String> {
-	kbdhook::engage(&app);
+pub(crate) fn kbd_engage(app: AppHandle, auto: Option<bool>) -> Result<(), String> {
+	if auto.unwrap_or(false) {
+		kbdhook::engage_auto(&app);
+	} else {
+		kbdhook::engage(&app);
+	}
 	Ok(())
 }
 

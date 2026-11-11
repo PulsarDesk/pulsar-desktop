@@ -107,14 +107,21 @@ fn recently_engaged() -> bool {
 }
 /// CLI kiosk (`--connect`) auto-engages on the next `enable()` (same as Linux).
 static KIOSK_ENGAGE: AtomicBool = AtomicBool::new(false);
-/// True for the lifetime of a kiosk-started session: focus loss must NOT disengage
-/// (the appliance runs nothing else, and the auto-launched window may never get
-/// focus at all under focus-stealing prevention). Cleared on `disable()`.
+/// True for the lifetime of a kiosk-started session (`--connect`). Focus loss releases
+/// it like any session, but focus coming back re-engages by itself (PENDING_ENGAGE); a
+/// start while another app is focused waits for the focus. Cleared on `disable()`.
 static KIOSK_SESSION: AtomicBool = AtomicBool::new(false);
 /// Any app window focused (from the Tauri focus map via `set_focused`) — gates the
 /// disengaged-state combos (Ctrl+Shift+M) so a GLOBAL hook never reacts while the
 /// user is in another application.
 static APP_FOCUSED: AtomicBool = AtomicBool::new(true);
+/// An automatic engage (kiosk `--connect` start, game mode's connect-time engage, a kiosk
+/// session's focus return) that came while another app was focused: the play id it is for,
+/// `u64::MAX` = none. Capture engages when Pulsar gets the focus (Tauri focus event or the
+/// foreground watcher) while that session is armed, never while the user is elsewhere —
+/// starting a session from another app used to grab the keyboard right away. Survives
+/// disable() (tab-activation churn right after connect); another session's enable() drops it.
+static PENDING_ENGAGE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
 
 fn globals() -> &'static Mutex<Globals> {
 	GLOBALS.get_or_init(|| {
@@ -475,6 +482,7 @@ pub(super) fn set_stream_stalled(app: &AppHandle, stalled: bool) {
 }
 
 pub(super) fn engage(app: &AppHandle) {
+	PENDING_ENGAGE.store(u64::MAX, Ordering::SeqCst);
 	if STREAM_STALLED.load(Ordering::SeqCst) {
 		tracing::info!("engage refused: the stream is stopped");
 		return;
@@ -485,6 +493,34 @@ pub(super) fn engage(app: &AppHandle) {
 		// Trap the cursor to the streamed screen so it can't roam to another monitor.
 		confine_to_video(app, true);
 		let _ = app.emit("kbd-engaged", ());
+	}
+}
+
+/// An AUTOMATIC engage (not a click): engages only while Pulsar is the focused app,
+/// otherwise waits for the focus (see PENDING_ENGAGE).
+pub(super) fn engage_auto(app: &AppHandle, why: &str) {
+	if crate::focus_gate::app_focused() {
+		engage(app);
+	} else {
+		let id = LAST_PLAY.load(Ordering::SeqCst);
+		PENDING_ENGAGE.store(id, Ordering::SeqCst);
+		tracing::info!(id, why, "auto-engage deferred: Pulsar is not the focused app — engaging when it gets the focus");
+	}
+}
+
+/// Pulsar got the focus: run a deferred auto-engage for the armed session, if any.
+fn try_pending_engage() {
+	let id = PENDING_ENGAGE.load(Ordering::SeqCst);
+	if id == u64::MAX || !ENABLED.load(Ordering::SeqCst) || LAST_PLAY.load(Ordering::SeqCst) != id {
+		return;
+	}
+	if !crate::focus_gate::app_focused() {
+		return;
+	}
+	let app = globals().lock().unwrap_or_else(|e| e.into_inner()).app.clone();
+	if let Some(app) = app {
+		tracing::info!(id, "Pulsar focused → deferred auto-engage");
+		engage(&app);
 	}
 }
 
@@ -1356,6 +1392,10 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, _sta
 	// A different session starts unlocked: a stopped-stream lock must not outlive the session
 	// (its renderer reports the new stream's state itself).
 	if !same_session {
+		// A deferred auto-engage belongs to the session it was made for.
+		if PENDING_ENGAGE.load(Ordering::SeqCst) != id {
+			PENDING_ENGAGE.store(u64::MAX, Ordering::SeqCst);
+		}
 		STREAM_STALLED.store(false, Ordering::SeqCst);
 		// Same for a host pointer lock: the new host reports its own cursor state.
 		POINTER_LOCK.store(false, Ordering::SeqCst);
@@ -1366,6 +1406,7 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, _sta
 		mouse,
 		memo = ENGAGED_MEMO.load(Ordering::SeqCst),
 		kiosk = KIOSK_ENGAGE.load(Ordering::SeqCst),
+		focused = crate::focus_gate::app_focused(),
 		"kbd capture enable()"
 	);
 	LAST_PLAY.store(id, Ordering::SeqCst);
@@ -1386,8 +1427,12 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, _sta
 	// one-shot left that second enable() disengaged (see kbdhook/linux.rs).
 	let kiosk = KIOSK_ENGAGE.load(Ordering::SeqCst);
 	KIOSK_SESSION.store(kiosk, Ordering::SeqCst);
-	if kiosk {
-		engage(&app);
+	if kiosk && !ENGAGED.load(Ordering::SeqCst) {
+		// Only while Pulsar is focused — a `--connect` launch the user tabbed away from
+		// waits for the focus instead of taking the keyboard from the other app.
+		engage_auto(&app, "kiosk start");
+	} else if kiosk {
+		tracing::info!("kbd capture enable(): kiosk, keeping the live engagement");
 	} else if same_session {
 		// Restore the engagement this id had when last active (disable() cleared the live
 		// ENGAGED but stashed it in ENGAGED_MEMO). engage() emits kbd-engaged on the edge so
@@ -1411,6 +1456,8 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, _sta
 	// read the pointer from the canvas instead, so keep mouse capture off there.
 	MOUSE_CAPTURE.store(mouse, Ordering::SeqCst);
 	ENABLED.store(true, Ordering::SeqCst);
+	// A deferred auto-engage for this session whose focus came while capture was disarmed.
+	try_pending_engage();
 	match MECHANISM.load(Ordering::SeqCst) {
 		0 => {
 			// First arm — decide the capture mechanism once.
@@ -1496,7 +1543,7 @@ pub fn set_focused(focused: bool) {
 	// into the recreate gap: "cursor moves but clicks do nothing"). Focus moving to
 	// a window whose TOP-LEVEL root is still ours is NOT the user leaving the app.
 	if !focused {
-		match foreground_is_ours() {
+		match foreground_owner() {
 			FgOwner::Ours => {
 				tracing::info!("focus moved within our own window tree — keeping engagement");
 				return;
@@ -1508,7 +1555,7 @@ pub fn set_focused(focused: bool) {
 				tracing::info!("focus lost with no foreground window — deferring the decision");
 				std::thread::spawn(|| {
 					std::thread::sleep(std::time::Duration::from_millis(150));
-					match foreground_is_ours() {
+					match foreground_owner() {
 						FgOwner::Ours => tracing::info!("deferred focus check: ours — keeping engagement"),
 						owner => {
 							tracing::info!(?owner, "deferred focus check: foreign — releasing");
@@ -1524,49 +1571,25 @@ pub fn set_focused(focused: bool) {
 		}
 	}
 	APP_FOCUSED.store(focused, Ordering::SeqCst);
-	if !focused {
+	if focused {
+		try_pending_engage();
+	} else {
 		focus_lost();
 	}
 }
 
-/// Who owns the foreground window right now (diagnostic + the focus-loss gate).
-#[derive(Debug)]
-enum FgOwner {
-	Ours,
-	None,
-	Other { pid: u32, class: String },
-}
+// Foreground ownership lives in focus_gate (shared with the controller gates).
+use crate::focus_gate::win::{foreground_owner, FgOwner};
 
-fn foreground_is_ours() -> FgOwner {
-	use windows_sys::Win32::System::Threading::GetCurrentProcessId;
-	use windows_sys::Win32::UI::WindowsAndMessaging::{
-		GetAncestor, GetClassNameW, GetForegroundWindow, GetWindowThreadProcessId, GA_ROOT,
-	};
-	let fg = unsafe { GetForegroundWindow() };
-	if fg.is_null() {
-		return FgOwner::None;
-	}
-	let root = unsafe { GetAncestor(fg, GA_ROOT) };
-	let root = if root.is_null() { fg } else { root };
-	let mut pid = 0u32;
-	unsafe { GetWindowThreadProcessId(root, &mut pid) };
-	if pid == unsafe { GetCurrentProcessId() } {
-		return FgOwner::Ours;
-	}
-	let mut buf = [0u16; 64];
-	let n = unsafe { GetClassNameW(fg, buf.as_mut_ptr(), buf.len() as i32) };
-	let class = String::from_utf16_lossy(&buf[..n.max(0) as usize]);
-	FgOwner::Other { pid, class }
-}
-
-/// The app really lost focus: drop the engagement (unless kiosk).
+/// The app really lost focus: drop the engagement. A kiosk (`--connect`) session releases
+/// too — the global hook must never eat keys typed into another app — but takes control
+/// back by itself when Pulsar is focused again (PENDING_ENGAGE).
 fn focus_lost() {
 	APP_FOCUSED.store(false, Ordering::SeqCst);
-	// Kiosk sessions ignore focus loss entirely (see KIOSK_SESSION).
-	if KIOSK_SESSION.load(Ordering::SeqCst) {
-		return;
-	}
 	if ENGAGED.load(Ordering::SeqCst) {
+		if KIOSK_SESSION.load(Ordering::SeqCst) {
+			PENDING_ENGAGE.store(LAST_PLAY.load(Ordering::SeqCst), Ordering::SeqCst);
+		}
 		let app = globals().lock().unwrap().app.clone();
 		match app {
 			Some(app) => release_engage_why(&app, "focus-loss"),
@@ -1686,12 +1709,22 @@ unsafe extern "system" fn foreground_event(
 	_thread: u32,
 	_time: u32,
 ) {
-	if !ENGAGED.load(Ordering::SeqCst) || KIOSK_SESSION.load(Ordering::SeqCst) {
-		return;
-	}
-	if let FgOwner::Other { pid, class } = foreground_is_ours() {
-		tracing::info!(pid, %class, "foreground moved to another app while engaged");
-		focus_lost();
+	match foreground_owner() {
+		// Back in Pulsar (alt-tab, taskbar, a click on the video): a deferred auto-engage
+		// runs now. No Tauri focus event comes when the renderer child takes the focus.
+		FgOwner::Ours => {
+			APP_FOCUSED.store(true, Ordering::SeqCst);
+			try_pending_engage();
+		}
+		FgOwner::Other { pid, class } => {
+			if ENGAGED.load(Ordering::SeqCst) {
+				tracing::info!(pid, %class, "foreground moved to another app while engaged");
+				focus_lost();
+			} else {
+				APP_FOCUSED.store(false, Ordering::SeqCst);
+			}
+		}
+		FgOwner::None => {}
 	}
 }
 

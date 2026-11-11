@@ -85,6 +85,18 @@ pub use linux::{
 pub fn engage(app: &AppHandle) {
 	imp::engage(app)
 }
+/// An AUTOMATIC engage (game mode's connect-time "control immediately"), not a click:
+/// Windows engages only while Pulsar is the focused app and otherwise waits for the focus
+/// (imp::engage_auto). Linux's evdev grab is already held only while focused, so a plain
+/// engage there takes the devices when the user focuses Pulsar.
+#[cfg(windows)]
+pub fn engage_auto(app: &AppHandle) {
+	imp::engage_auto(app, "connect")
+}
+#[cfg(not(windows))]
+pub fn engage_auto(app: &AppHandle) {
+	engage(app)
+}
 #[cfg(windows)]
 pub fn engage_render(app: &AppHandle) {
 	imp::engage(app)

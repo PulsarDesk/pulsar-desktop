@@ -26,3 +26,24 @@ launch (splash, no home screen; `AppState.auto_connect`). Game mode's target app
 defaults to **"Desktop"** — *always present, NOT deletable* (every host exposes a
 "Desktop" entry). `pulsar --relay --session-rate 10mbit …` runs the app as a
 relay (`relay_mode.rs`, same `pulsar_relay::Limits` flags as the relay repo).
+
+## Input only while Pulsar is focused
+
+While another app is focused, Pulsar acts on NO input (maintainer rule, 2026-11-11):
+
+- **Controllers** (`src-tauri/src/focus_gate.rs`): the host gets a released pad — `GamepadSlot`
+  (`play.rs` pad reader) sends the neutral state, the DualSense passthrough
+  (`ds5/client.rs`) sends `Ds5Input` with every control let go, both repeated by the keepalive
+  until focus returns. The in-app pad UI (gaming menu nav bridge, session overlay nav, the
+  overlay/quit combos, split "press A to join") ignores the pad, and after refocus a button
+  still held from the other app doesn't fire. Host → pad output (rumble, triggers, haptics,
+  speaker) keeps playing. "Focused" = our window tree: on Windows the foreground window's root
+  is ours (the `pulsar-render` video is a cross-process `WS_CHILD`), on Linux the evdev
+  capture's focus (Tauri map or standalone render window), always true for a kiosk
+  `--connect` launch (Orange Pi). Settings → Genel → "Arka planda kol girdisi" (default off)
+  lets the pad keep driving the host (not the in-app UI) in the background.
+- **Keyboard/mouse capture**: automatic engages (CLI `--connect` kiosk start, game mode's
+  connect-time engage — `kbd_engage { auto: true }`) only happen while Pulsar is focused;
+  otherwise they wait and engage when Pulsar gets the focus (Windows `PENDING_ENGAGE` in
+  `kbdhook/imp.rs`; Linux's evdev grab is held only while focused anyway). On Windows a kiosk
+  session now releases on focus loss too and re-engages on its own when focus returns.
