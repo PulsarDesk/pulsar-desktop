@@ -519,6 +519,15 @@ impl PadCtx {
 				media_gap_max = Duration::ZERO;
 			}
 		}
+		// The host's virtual pad keeps its last input: let every control go there first, so
+		// a button held when this session stops driving (tab switch, pad handed to another
+		// session) doesn't stay pressed on that host.
+		if let Some(r) = sent.map(|(r, _)| r) {
+			let _ = self.input_tx.try_send(InputEvent::Ds5Input {
+				slot,
+				report: released(r),
+			});
+		}
 		// Leave the pad clean: triggers off, no rumble.
 		// Every feature on so the reset reaches the pad, except the mic: a BT pad left
 		// streaming its mic sends mic-carrying input reports that SDL's own driver

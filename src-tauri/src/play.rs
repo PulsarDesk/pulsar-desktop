@@ -1446,6 +1446,9 @@ pub(crate) async fn start_remote_play(
 		// `play_id` (or 0 before the first set_active_session), so the gate is transparent there
 		// — see the gate at the per-pad forward below.
 		let focused_session = state.focused_session.clone();
+		// Live play sessions (tabs): with more than one open outside split mode, pads go to the
+		// focused tab only (two hosts must not both get / drive the same pad).
+		let plays_arc = state.plays.clone();
 		// Whether split mode is active (>1 pane). When it isn't, the focused-session forward gate
 		// is bypassed so single-session behavior is byte-for-byte unchanged (the frontend never
 		// calls set_active_session in the non-split flow, so focused_session would be 0).
@@ -1725,7 +1728,17 @@ pub(crate) async fn start_remote_play(
 						// `lock_owner` is reused for the ctrls line's lock field below.
 						let lock_owner = crate::controllers::controller_lock_owner(uuid);
 						let route_here = if split_pane_count.load(Ordering::SeqCst) <= 1 {
-							true
+							// Tabs (split off): one session → it gets every pad. Several open →
+							// only the focused tab (set_active_session); if the focused id is not
+							// a live session (none set yet / it closed) every session forwards,
+							// the old behaviour.
+							let f = focused_session.load(Ordering::SeqCst);
+							// try_lock: never block the pad loop on the session map (a busy map
+							// this tick just forwards as before).
+							match plays_arc.try_lock() {
+								Ok(plays) => plays.len() <= 1 || f == play_id || !plays.contains_key(&f),
+								Err(_) => true,
+							}
 						} else if let Some(owner) = lock_owner {
 							owner == play_id
 						} else if crate::split_join::active() {

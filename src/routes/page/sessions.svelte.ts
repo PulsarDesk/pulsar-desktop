@@ -96,7 +96,20 @@ export class SessionManager {
 	// Multiple concurrent host connections, each a tab. `activeTab` is 'home' or a
 	// session's tabId. Fullscreen hides all chrome/tabs (only the active host).
 	sessions = $state<Session[]>([]);
-	activeTab = $state<'home' | number>('home');
+	#activeTab = $state<'home' | number>('home');
+	get activeTab(): 'home' | number {
+		return this.#activeTab;
+	}
+	/** Switching to a session tab makes it the input target: with several tabs open, pads
+	 * (incl. a DualSense driven directly) go to the focused tab only (play.rs route_here). */
+	set activeTab(v: 'home' | number) {
+		this.#activeTab = v;
+		if (typeof v === 'number' && this.splitMode === 'off') this.#focusTab(v);
+	}
+	#focusTab(tabId: number) {
+		const s = this.sessions.find((x) => x.tabId === tabId);
+		if (s && s.playId >= 0) api.setActiveSession(s.playId).catch(() => {});
+	}
 	fullscreen = $state(false);
 	// Window fullscreen state when the first session of a run opened (null = no session open), and
 	// whether the USER toggled fullscreen while sessions were open. When the last session ends the
@@ -402,6 +415,11 @@ export class SessionManager {
 		this.sessions = this.sessions.map((s) =>
 			s.playId === playId ? { ...s, phase: 'active', ready: true } : s
 		);
+		// Tabs: the active tab's session became live now that its play id exists.
+		if (this.splitMode === 'off' && typeof this.activeTab === 'number') {
+			const s = this.sessions.find((x) => x.playId === playId);
+			if (s && s.tabId === this.activeTab) api.setActiveSession(playId).catch(() => {});
+		}
 		// In split mode, a freshly-active paned session must get its reduced per-cell
 		// resolution (it could only be applied once the play id existed) and, if it's the
 		// focused pane, become the input target.
