@@ -1692,6 +1692,7 @@ pub(crate) async fn go_online(
 											InputEvent::Gamepad(_)
 											| InputEvent::GamepadSlot { .. }
 											| InputEvent::GamepadDisconnect { .. }
+											| InputEvent::Ds5Input { .. }
 											| InputEvent::Pinch { .. } => {
 												routed_to_window = false;
 											}
@@ -1841,7 +1842,9 @@ pub(crate) async fn go_online(
 										// match and never reach the desktop injector.
 										InputEvent::Gamepad(_)
 										| InputEvent::GamepadSlot { .. }
-										| InputEvent::GamepadDisconnect { .. } => {}
+										| InputEvent::GamepadDisconnect { .. }
+										// DualSense passthrough: not advertised (FEAT_DS5) yet, step 5.
+										| InputEvent::Ds5Input { .. } => {}
 									}
 								}
 							}
@@ -2266,6 +2269,9 @@ pub(crate) async fn go_online(
 					// File manager: FsList/FsGet from this client, answered through the
 					// same outbound queue (HOME-jailed; see fs_browse).
 					on_fs: Box::new(crate::fs_browse::make_on_fs(fs_out)),
+					// DualSense passthrough (Ds5Caps / Ds5Feature): not wired to a virtual pad
+					// yet (step 5), so ignored; FEAT_DS5 is not advertised either.
+					on_ds5: Box::new(|_| {}),
 					// The client's adaptive controller's per-window feedback (Phase 0 / 2.4):
 					// logged next to the host's own encode stats, and the one input to the FEC
 					// parity sizing (Phase 2.1) — the forwarder reads `fec_n` live. The parity is

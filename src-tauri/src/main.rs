@@ -74,6 +74,10 @@ fn main() {
 		pulsar_tauri::run_relay(&args);
 		return;
 	}
+	// `pulsar --ds5-probe`: drive a DualSense through the passthrough client path, exit.
+	if args.iter().any(|a| a == "--ds5-probe") {
+		std::process::exit(pulsar_tauri::ds5_probe());
+	}
 	// `pulsar --selftest`: check the bundled media stack headless, print a report, exit.
 	if args.iter().any(|a| a == "--selftest") {
 		std::process::exit(pulsar_tauri::selftest());

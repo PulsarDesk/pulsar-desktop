@@ -111,6 +111,13 @@ use session_cmds::{
 mod relay_mode;
 pub use relay_mode::run_relay;
 
+// DualSense passthrough (client HID path, probe). See pulsar-core docs/dualsense.md.
+mod ds5;
+/// Headless `pulsar --ds5-probe`: drive a connected DualSense through the passthrough path.
+pub fn ds5_probe() -> i32 {
+	ds5::probe::run()
+}
+
 // Headless `pulsar --selftest` (bundled media stack check; CI runs it on the AppImage).
 mod selftest;
 pub fn selftest() -> i32 {
