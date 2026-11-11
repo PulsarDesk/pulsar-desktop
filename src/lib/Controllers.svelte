@@ -5,6 +5,7 @@
 	// state, so the user can see which controllers are available to forward.
 	import { onMount, onDestroy } from 'svelte';
 	import Icon from '#lib/Icon.svelte';
+	import Ds5Settings from '#lib/Ds5Settings.svelte';
 	import { api } from '#lib/api.js';
 	import type { ControllerInfo } from '#lib/types.js';
 	import { t } from '#lib/i18n.svelte.js';
@@ -205,6 +206,7 @@
 				{/each}
 			</ul>
 		{/if}
+		<Ds5Settings {navItem} />
 		<p class="both-modes">{t('controllers.bothModes')}</p>
 	{:else}
 		{#if pads.length === 0}

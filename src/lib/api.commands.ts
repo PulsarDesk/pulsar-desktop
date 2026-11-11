@@ -5,6 +5,7 @@ import type { AutoConnectTarget, Config, ConnInfo, ControllerInfo, PulsarToast }
 import type { FsEntry, LocalCaps } from './api.types';
 import type { GameInfo, LanDevice, PlayInfo, RemoteSources, ScannedApp, WindowInfo } from './api.types';
 import { invoke } from './api.invoke';
+import type { Ds5Settings } from './settings.svelte';
 
 // The keyboard/mouse capture commands must land on the Rust side IN ISSUE ORDER. A tab
 // re-arm is a stop immediately followed by a start (effect cleanup + re-run in one tick);
@@ -53,6 +54,10 @@ export const api = {
 	 * SDL pad manager scales each pad's host rumble by its level live. */
 	setControllerRumble: (map: Record<string, string>) =>
 		invoke<void>('set_controller_rumble', { map }),
+	/** DualSense passthrough settings (`ui.ds5`). Applies live to running pads; the master
+	 * switch applies from the next connection. */
+	setDs5Settings: (settings: Ds5Settings) =>
+		invoke<void>('set_ds5_settings', { settings }),
 	/** Set the disabled-controller set (uuid hex list). Disabled pads aren't forwarded. */
 	setDisabledControllers: (uuids: string[]) =>
 		invoke<void>('set_disabled_controllers', { uuids }),
