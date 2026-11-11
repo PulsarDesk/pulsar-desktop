@@ -221,6 +221,7 @@ impl WgcCaptureDevice {
             let _ = dxgi_dev.SetMaximumFrameLatency(1);
             if std::env::var("PULSAR_GPU_PRIO").map(|v| v != "0").unwrap_or(true) {
                 let _ = dxgi_dev.SetGPUThreadPriority(7);
+                crate::gpu_sched::raise_once();
             }
         }
 

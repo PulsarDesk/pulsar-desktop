@@ -327,6 +327,9 @@ pub(crate) use encode::cap_dbg as encode_log;
 // Which full-monitor source (DXGI / WGC) a build uses, and the measurement that picks it.
 #[cfg(windows)]
 mod path;
+// Process-wide GPU scheduling priority class for the capture/encode work.
+#[cfg(windows)]
+mod gpu_sched;
 // Glass-to-encode measurement hooks for the capbench example (inert unless PULSAR_BENCH_PIXEL=1).
 #[cfg(windows)]
 pub mod bench;

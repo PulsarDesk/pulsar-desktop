@@ -149,6 +149,7 @@ impl CaptureDevice {
 			.unwrap_or(true)
 		{
 			let _ = dxgi_dev.SetGPUThreadPriority(7);
+			crate::gpu_sched::raise_once();
 		}
 
 		let mut me = CaptureDevice {
