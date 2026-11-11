@@ -2,6 +2,7 @@
 	import { t } from '#lib/i18n.svelte.js';
 	import type { Config } from '#lib/types.js';
 	import TwoFactor from './TwoFactor.svelte';
+	import PairedDevices from './PairedDevices.svelte';
 
 	// Unattended access, the custom connect password and two-factor auth are backed by the
 	// core Config (the host enforces all three). 2FA also covers unattended access: such a
@@ -49,6 +50,7 @@
 		{/if}
 	</div>
 </div>
+<PairedDevices />
 <div class="srow">
 	<div class="st"><b>{t('settings.remoteCursor')}</b><span>{t('settings.remoteCursorDesc')}</span></div>
 	<button class="toggle" aria-label={t('settings.remoteCursor')} class:on={config?.show_remote_cursor ?? true} aria-pressed={config?.show_remote_cursor ?? true} onclick={() => { if (config) { config.show_remote_cursor = !(config.show_remote_cursor ?? true); saveConfig?.(); } }}><span class="knob"></span></button>

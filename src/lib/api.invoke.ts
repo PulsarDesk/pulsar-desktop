@@ -33,6 +33,13 @@ const DEFAULT_CONFIG: Config = {
 
 let mockConfig: Config = { ...DEFAULT_CONFIG };
 
+// Browser-mock credential + pairing stores (the real ones live in Rust files).
+const mockCreds = new Map<string, { pw: string; paired: boolean }>();
+let mockPaired: { key: string; fingerprint: string; name: string; id: string; pairedAt: number; lastSeen: number }[] = [
+	{ key: 'ab'.repeat(32), fingerprint: 'abab abab abab abab', name: 'Salon Laptopu', id: '641 724 395', pairedAt: 1_762_000_000_000, lastSeen: 0 }
+];
+const credKey = (t: unknown) => String(t ?? '').replace(/\s/g, '');
+
 export async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 	if (isTauri) {
 		const { invoke: tauriInvoke } = await import('@tauri-apps/api/core');
@@ -168,6 +175,45 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 		case 'totp_verify':
 			// The browser mock accepts any 6 digits.
 			return Promise.resolve(/^\d{6}$/.test(String((args as { code?: string })?.code ?? '')) as unknown as T);
+		case 'device_creds': {
+			const out: Record<string, { hasPassword: boolean; paired: boolean }> = {};
+			for (const t of (args?.targets as string[]) ?? []) {
+				const e = mockCreds.get(credKey(t));
+				out[t] = { hasPassword: !!e?.pw, paired: !!e?.paired };
+			}
+			return Promise.resolve(out as unknown as T);
+		}
+		case 'get_device_password':
+			return Promise.resolve((mockCreds.get(credKey(args?.target))?.pw ?? '') as unknown as T);
+		case 'set_device_password': {
+			const k = credKey(args?.target);
+			const e = mockCreds.get(k) ?? { pw: '', paired: false };
+			e.pw = String(args?.password ?? '');
+			if (e.pw || e.paired) mockCreds.set(k, e);
+			else mockCreds.delete(k);
+			return Promise.resolve(undefined as unknown as T);
+		}
+		case 'forget_device_creds':
+			mockCreds.delete(credKey(args?.target));
+			return Promise.resolve(undefined as unknown as T);
+		case 'pair_device': {
+			const k = credKey(args?.target);
+			mockCreds.set(k, { pw: mockCreds.get(k)?.pw ?? '', paired: true });
+			return Promise.resolve({ paired: true, reason: '' } as unknown as T);
+		}
+		case 'unpair_device': {
+			const k = credKey(args?.target);
+			const e = mockCreds.get(k);
+			if (e) e.paired = false;
+			return Promise.resolve(true as unknown as T);
+		}
+		case 'list_paired_devices':
+			return Promise.resolve(mockPaired.map((d) => ({ ...d })) as unknown as T);
+		case 'revoke_paired_device': {
+			const before = mockPaired.length;
+			mockPaired = mockPaired.filter((d) => d.key !== args?.key);
+			return Promise.resolve((mockPaired.length !== before) as unknown as T);
+		}
 		case 'set_clipboard_sync':
 		case 'mark_update_installing':
 		case 'clear_update_installing':

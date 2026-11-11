@@ -418,6 +418,25 @@ export const api = {
 	setPadBackground: (enabled: boolean) => invoke<void>('set_pad_background', { enabled }),
 	/** Settings → Güvenlik 2FA: a fresh TOTP secret + its QR for the enrollment dialog. */
 	totpBegin: () => invoke<import('./api.types').TotpSetup>('totp_begin'),
+	/** Saved-password / paired badges for these device targets (Devices list). */
+	deviceCreds: (targets: string[]) =>
+		invoke<Record<string, import('./api.types').DeviceCredInfo>>('device_creds', { targets }),
+	/** The custom password saved for a device (edit dialog); "" = none. Lives in the Rust
+	 * store (DPAPI-sealed on Windows), never in localStorage. */
+	getDevicePassword: (target: string) => invoke<string>('get_device_password', { target }),
+	/** Save a device's custom password ("" removes it); sent up front on connect. */
+	setDevicePassword: (target: string, password: string) =>
+		invoke<void>('set_device_password', { target, password }),
+	/** Drop a device's saved password + paired flag (device removed / id changed). */
+	forgetDeviceCreds: (target: string) => invoke<void>('forget_device_creds', { target }),
+	/** Ask the host at `target` to trust this client (Eşleştir). */
+	pairDevice: (target: string) => invoke<import('./api.types').PairOutcome>('pair_device', { target }),
+	/** Unpair: always local; `true` = the host confirmed it forgot us too. */
+	unpairDevice: (target: string) => invoke<boolean>('unpair_device', { target }),
+	/** Host: the clients paired with this device (Settings → Güvenlik). */
+	listPairedDevices: () => invoke<import('./api.types').PairedDevice[]>('list_paired_devices'),
+	/** Host: stop trusting a paired client; it is asked for a password again. */
+	revokePairedDevice: (key: string) => invoke<boolean>('revoke_paired_device', { key }),
 	/** Whether `code` is the current authenticator code for `secret` (enrollment proof). */
 	totpVerify: (secret: string, code: string) => invoke<boolean>('totp_verify', { secret, code }),
 	/** Two-way clipboard sync with every open session (Settings → General / session overlay). */

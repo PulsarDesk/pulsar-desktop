@@ -117,6 +117,8 @@ export const onPeerAvatar = (cb: (e: { peer: string; dataUrl: string }) => void)
  * keying as `onPeerAvatar` (host side: peer id; client side: play id as string). */
 export const onPeerName = (cb: (e: { peer: string; name: string }) => void) =>
 	listenTo<[string, string]>('peer-name', (p) => cb({ peer: p[0], name: p[1] }));
+/** Host: the paired-devices list changed (a pairing, an unpair or a revoke). */
+export const onPairedDevicesChanged = (cb: () => void) => listenTo<null>('paired-devices-changed', () => cb());
 /** A peer pushed its OWN relay device ID (`DataMsg::PeerId`) over the session. Keyed
  * like `onPeerName` by the host-side peer map-key; lets the host show the client's id
  * instead of its `ip:port` on a direct/same-LAN connect. */

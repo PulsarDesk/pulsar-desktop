@@ -18,7 +18,10 @@ export type {
 	FsEntries,
 	SessionEvent,
 	AuthPrompt,
-	RemoteSources
+	RemoteSources,
+	DeviceCredInfo,
+	PairOutcome,
+	PairedDevice
 } from './api.types';
 
 export { isTauri } from './api.invoke';
@@ -41,6 +44,7 @@ export {
 	onPeerAvatar,
 	onPeerName,
 	onPeerId,
+	onPairedDevicesChanged,
 	onKbdLeave,
 	onKbdEngaged,
 	onKbdReleased,

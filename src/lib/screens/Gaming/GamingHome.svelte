@@ -72,7 +72,11 @@
 		else addPeer(name, id);
 	}
 	function confirmRemove() {
-		if (removeDev) unsavePeer(removeDev.id);
+		if (removeDev) {
+			unsavePeer(removeDev.id);
+			// Its saved password goes with it (a pairing stays until unpaired / revoked).
+			api.setDevicePassword(removeDev.id, '').catch(() => {});
+		}
 		closeRemove();
 	}
 

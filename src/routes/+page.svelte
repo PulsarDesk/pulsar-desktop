@@ -61,6 +61,7 @@
 	import Controllers from '#lib/Controllers.svelte';
 	import { SessionManager } from './page/sessions.svelte';
 	import { setLivePeers } from '#lib/presence.svelte.js';
+	import { setAuthDoneHandler } from '#lib/authDone.js';
 
 	// When opened as the Allow/Deny approval popup (a separate window), render only
 	// that prompt and skip all the main-app logic (don't re-register with the relay).
@@ -273,6 +274,9 @@
 			pwCheckingReq = null;
 		}
 	}
+	// The Devices dialog's Pair / Unpair run their own short connect: let them close the
+	// prompt they raised once the host answered.
+	$effect(() => setAuthDoneHandler((target) => closePwFor(target)));
 	// Does a queued password prompt belong to this connect target? Same per-host matching
 	// as closePwFor — used to show "awaiting approval" only on the tab whose connect
 	// actually has a pending prompt (not every concurrent Connecting).

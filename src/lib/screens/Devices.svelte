@@ -145,7 +145,11 @@
 					<button class="rm" aria-label={t('devices.edit')} title={t('devices.edit')} onclick={() => openEdit(d)}>
 						<Icon name="edit" size={14} />
 					</button>
-					<button class="rm" aria-label={t('devices.remove')} onclick={() => removePeer(d.id)}>
+					<button class="rm" aria-label={t('devices.remove')} onclick={() => {
+						removePeer(d.id);
+						// Its saved password goes with it (a pairing stays until unpaired / revoked).
+						api.setDevicePassword(d.id, '').catch(() => {});
+					}}>
 						<Icon name="x" size={15} />
 					</button>
 				</div>

@@ -176,3 +176,28 @@ export interface LocalCaps {
 	encoders: { id: string; backend: 'ffmpeg' | 'gst'; codecs: string[] }[];
 	decoders: { codec: string; ok: boolean; name: string; hw: boolean; tier: string }[];
 }
+
+/** Per-device credential badges (`device_creds`): a saved password / paired with it. */
+export interface DeviceCredInfo {
+	hasPassword: boolean;
+	paired: boolean;
+}
+
+/** `pair_device` result. `reason`: "" on success, "denied" (host user said no / password
+ * refused), "timeout", "unsupported" (old host). */
+export interface PairOutcome {
+	paired: boolean;
+	reason: string;
+}
+
+/** A client this HOST trusts (Settings → Güvenlik → Eşleşmiş cihazlar). */
+export interface PairedDevice {
+	/** Hex public key — what `revoke_paired_device` takes. */
+	key: string;
+	/** Short grouped fingerprint for display. */
+	fingerprint: string;
+	name: string;
+	id: string;
+	pairedAt: number;
+	lastSeen: number;
+}

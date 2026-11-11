@@ -29,6 +29,9 @@
 			? peer.replace(/\s/g, '').replace(/(\d{3})(?=\d)/g, '$1 ').trim()
 			: peer
 	);
+	// `pw = "pair"`: a PAIRING request from an already-connected device (permanent trust),
+	// not a connection request — its own title/lead, no password line, no view-only.
+	const pairing = $derived(pw === 'pair');
 	const pwLabel = $derived(
 		pw === 'ok'
 			? { text: t('approve.pwOk'), cls: 'ok', icon: 'check' }
@@ -50,8 +53,8 @@
 
 <div class="approve" data-tauri-drag-region>
 	<div class="brand"><PulsarMark size={22} /><span>Pulsar</span></div>
-	<div class="title">{t('approve.title')}</div>
-	<p class="lead">{t('approve.lead')}</p>
+	<div class="title">{pairing ? t('approve.pairTitle') : t('approve.title')}</div>
+	<p class="lead">{pairing ? t('approve.pairLead') : t('approve.lead')}</p>
 
 	<div class="who">
 		<div class="avatar"><Icon name="monitor" size={20} /></div>
@@ -61,20 +64,30 @@
 		</div>
 	</div>
 
-	<div class="pw {pwLabel.cls}">
-		<Icon name={pwLabel.icon} size={15} />
-		<span>{pwLabel.text}</span>
-	</div>
+	{#if pairing}
+		<div class="pw none">
+			<Icon name="shield" size={15} />
+			<span>{t('approve.pairNote')}</span>
+		</div>
+	{:else}
+		<div class="pw {pwLabel.cls}">
+			<Icon name={pwLabel.icon} size={15} />
+			<span>{pwLabel.text}</span>
+		</div>
+	{/if}
 
 	<div class="actions">
 		<button class="btn deny" disabled={busy} onclick={() => decide(false)}>{t('approve.deny')} ({secsLeft})</button>
-		<button class="btn allow" disabled={busy} onclick={() => decide(true)}>{t('approve.allow')}</button>
+		<button class="btn allow" disabled={busy} onclick={() => decide(true)}>{pairing ? t('approve.pairAllow') : t('approve.allow')}</button>
 	</div>
 	<!-- Secondary, deliberately de-emphasized: grants the session but as view-only (no
-	     control). Faint + borderless so it never competes with the primary Allow. -->
-	<button class="viewonly" disabled={busy} onclick={() => decide(true, true)}>
-		{t('approve.allowViewOnly')}
-	</button>
+	     control). Faint + borderless so it never competes with the primary Allow. Not for a
+	     pairing request (there is no view-only trust). -->
+	{#if !pairing}
+		<button class="viewonly" disabled={busy} onclick={() => decide(true, true)}>
+			{t('approve.allowViewOnly')}
+		</button>
+	{/if}
 </div>
 
 <style>
