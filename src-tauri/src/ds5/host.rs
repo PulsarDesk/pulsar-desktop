@@ -35,9 +35,10 @@ const STATE_REFRESH: Duration = Duration::from_millis(500);
 /// time out (doubled audio, 2026-11-11). A 3 s late pad costs nothing in a game.
 const PLUG_DELAY: Duration = Duration::from_secs(3);
 
-/// Whether this host can present a virtual DualSense (usbip tool installed).
+/// Whether this host can present a virtual DualSense (Windows: usbip-win2 installed;
+/// Linux: vhci-hcd loaded and its sysfs attach writable).
 pub fn available() -> bool {
-	cfg!(any(windows, target_os = "linux")) && pulsar_core::input::ds5::attach::locate(None).is_ok()
+	cfg!(any(windows, target_os = "linux")) && pulsar_core::input::ds5::attach::available()
 }
 
 struct Slot {
