@@ -12,8 +12,10 @@
 //!   mono, 10 ms) through `DataHandlers::on_ds5_media` → [`Ds5Host::on_media`], is decoded
 //!   here and fed to the virtual pad's mic (stereo, behind a 40 ms jitter buffer).
 //!
-//! Pads are dropped (usbip detach) when the client disconnects the slot or the session
-//! ends. `FEAT_DS5` is advertised only when a backend can work (`host_duo.rs`: usbip-win2 /
+//! Pads are dropped (usbip detach / Duo remove) when the client disconnects the slot or the
+//! session ends: [`Ds5Host::shutdown`] runs from the session's cleanup guard on every exit
+//! path (Bye, peer timeout, host kick, task abort, a panic unwinding the session task), and a
+//! pad whose plug-in finishes after that is unplugged at once ([`PadSlots`]). `FEAT_DS5` is advertised only when a backend can work (`host_duo.rs`: usbip-win2 /
 //! usbip installed, or Duo's driver inside a Duo seat — HID only there, no media).
 
 use std::collections::{HashMap, VecDeque};
@@ -129,6 +131,95 @@ impl Drop for AudioPadToken {
 	}
 }
 
+/// One session's pad slots: live pads, plug-ins in flight, slots that failed. Generic over
+/// the pad so the lifecycle (disconnect / session end → pad dropped) is unit-tested.
+pub(crate) struct PadSlots<T> {
+	live: HashMap<u8, T>,
+	/// `(slot, generation)` of each plug-in in flight (at most one per slot).
+	pending: Vec<(u8, u64)>,
+	/// Slots whose pad failed to start; not retried this session (no attach storm).
+	failed: Vec<u8>,
+	next_gen: u64,
+	/// The session ended: nothing is plugged in any more.
+	closed: bool,
+}
+
+impl<T> Default for PadSlots<T> {
+	fn default() -> Self {
+		Self {
+			live: HashMap::new(),
+			pending: Vec::new(),
+			failed: Vec::new(),
+			next_gen: 0,
+			closed: false,
+		}
+	}
+}
+
+impl<T> PadSlots<T> {
+	pub(crate) fn get(&self, slot: u8) -> Option<&T> {
+		self.live.get(&slot)
+	}
+
+	/// A report for a slot without a pad: `Some(generation)` when the caller should plug
+	/// one in now (nothing live, in flight or failed for it, session open).
+	pub(crate) fn begin(&mut self, slot: u8) -> Option<u64> {
+		if self.closed
+			|| self.live.contains_key(&slot)
+			|| self.failed.contains(&slot)
+			|| self.pending.iter().any(|(s, _)| *s == slot)
+		{
+			return None;
+		}
+		self.next_gen += 1;
+		self.pending.push((slot, self.next_gen));
+		Some(self.next_gen)
+	}
+
+	/// Whether plug-in `generation` for `slot` is still wanted (not disconnected meanwhile,
+	/// session still open).
+	pub(crate) fn wanted(&self, slot: u8, generation: u64) -> bool {
+		!self.closed && self.pending.contains(&(slot, generation))
+	}
+
+	/// Plug-in `generation` ended with `pad` (`None` = it failed). A pad nobody wants any
+	/// more (slot disconnected, session ended) is handed back for the caller to drop
+	/// outside the lock.
+	pub(crate) fn finish(&mut self, slot: u8, generation: u64, pad: Option<T>) -> Option<T> {
+		let wanted = self.wanted(slot, generation);
+		self.pending.retain(|p| *p != (slot, generation));
+		match pad {
+			None => {
+				if wanted {
+					self.failed.push(slot);
+				}
+				None
+			}
+			Some(p) if wanted => self.live.insert(slot, p),
+			Some(p) => Some(p),
+		}
+	}
+
+	/// The client's pad at `slot` went away: its pad (to drop outside the lock).
+	pub(crate) fn disconnect(&mut self, slot: u8) -> Option<T> {
+		self.pending.retain(|(s, _)| *s != slot);
+		self.live.remove(&slot)
+	}
+
+	/// The session ended: every live pad (to drop outside the lock); later plug-ins are
+	/// handed back by [`Self::finish`].
+	pub(crate) fn shutdown(&mut self) -> Vec<T> {
+		self.closed = true;
+		self.pending.clear();
+		self.live.drain().map(|(_, p)| p).collect()
+	}
+
+	#[cfg(test)]
+	fn live_count(&self) -> usize {
+		self.live.len()
+	}
+}
+
 struct Slot {
 	vpad: Arc<HostPad>,
 	/// `Some` for a pad with an audio endpoint (usbip; Duo pads are HID only).
@@ -147,12 +238,8 @@ impl Drop for Slot {
 /// Per-session DualSense host state. Cheap to clone (shared inside).
 #[derive(Clone)]
 pub struct Ds5Host {
-	slots: Arc<Mutex<HashMap<u8, Slot>>>,
-	/// Slots whose pad failed to start; not retried this session (no attach storm).
-	failed: Arc<Mutex<Vec<u8>>>,
-	/// Slots whose pad is being plugged in on a background thread (inputs are dropped
-	/// until it is up).
-	pending: Arc<Mutex<Vec<u8>>>,
+	/// Live pads + plug-ins in flight (inputs for a slot are dropped until its pad is up).
+	slots: Arc<Mutex<PadSlots<Slot>>>,
 	out: tokio::sync::mpsc::Sender<DataMsg>,
 	media: tokio::sync::mpsc::Sender<Vec<u8>>,
 	/// Seed for the virtual pads' MACs (stable per client so Linux hosts never see dupes).
@@ -176,8 +263,6 @@ impl Ds5Host {
 		});
 		Self {
 			slots: Arc::default(),
-			failed: Arc::default(),
-			pending: Arc::default(),
 			out,
 			media: tx,
 			peer,
@@ -190,39 +275,46 @@ impl Ds5Host {
 		if slot >= MAX_SLOTS {
 			return;
 		}
-		if let Some(s) = self.slots.lock().unwrap().get(&slot) {
-			s.vpad.set_input(&report.to_usb_input());
-			return;
-		}
-		if self.failed.lock().unwrap().contains(&slot) {
-			return;
-		}
-		{
-			let mut pending = self.pending.lock().unwrap();
-			if pending.contains(&slot) {
+		let generation = {
+			let mut slots = self.slots.lock().unwrap();
+			if let Some(s) = slots.get(slot) {
+				s.vpad.set_input(&report.to_usb_input());
 				return;
 			}
-			pending.push(slot);
-		}
+			match slots.begin(slot) {
+				Some(g) => g,
+				None => return,
+			}
+		};
 		let me = self.clone();
 		let first = *report;
 		std::thread::Builder::new()
 			.name(format!("ds5-plug-{slot}"))
 			.spawn(move || {
 				std::thread::sleep(PLUG_DELAY);
-				// Disconnected meanwhile (slot no longer pending) or the session ended (its
-				// outbound queue closed): don't plug a pad nobody will unplug.
+				// Disconnected meanwhile or the session ended (shut down, or its outbound
+				// queue closed): don't plug a pad nobody will unplug.
 				let still_wanted =
-					me.pending.lock().unwrap().contains(&slot) && !me.out.is_closed();
-				if still_wanted {
-					me.plug(slot, &first);
+					me.slots.lock().unwrap().wanted(slot, generation) && !me.out.is_closed();
+				let pad = if still_wanted {
+					me.plug(slot, &first)
+				} else {
+					None
+				};
+				// Re-checked after the (seconds-long) plug-in: a pad for a slot or session
+				// that went away meanwhile comes back here and is unplugged at once.
+				let unwanted = me.slots.lock().unwrap().finish(slot, generation, pad);
+				if unwanted.is_some() {
+					drop(unwanted);
+					tracing::info!(slot, "ds5 host: slot gone while plugging in; unplugged");
 				}
-				me.pending.lock().unwrap().retain(|s| *s != slot);
 			})
 			.ok();
 	}
 
-	fn plug(&self, slot: u8, first: &Ds5Report) {
+	/// Plug a pad in (blocks: usbip attach / Duo discovery) and start its forwarder.
+	/// `None` when it failed.
+	fn plug(&self, slot: u8, first: &Ds5Report) -> Option<Slot> {
 		let cfg = VirtualDs5Config {
 			mac: local_mac(format!("{}/{slot}", self.peer).as_bytes()),
 			..Default::default()
@@ -247,20 +339,17 @@ impl Ds5Host {
 					.name(format!("ds5-host-{slot}"))
 					.spawn(move || f.run())
 					.ok();
-				self.slots.lock().unwrap().insert(
-					slot,
-					Slot {
-						_audio: matches!(*vpad, HostPad::Usbip(_)).then(AudioPadToken::new),
-						vpad,
-						features,
-						mic: Mutex::new(MicRx::new()),
-						stop,
-					},
-				);
+				Some(Slot {
+					_audio: matches!(*vpad, HostPad::Usbip(_)).then(AudioPadToken::new),
+					vpad,
+					features,
+					mic: Mutex::new(MicRx::new()),
+					stop,
+				})
 			}
 			Err(e) => {
 				tracing::warn!(slot, "ds5 host: virtual DualSense unavailable: {e}");
-				self.failed.lock().unwrap().push(slot);
+				None
 			}
 		}
 	}
@@ -270,14 +359,14 @@ impl Ds5Host {
 		let slots = self.slots.lock().unwrap();
 		match m {
 			DataMsg::Ds5Caps { slot, features, .. } => {
-				if let Some(s) = slots.get(&slot) {
+				if let Some(s) = slots.get(slot) {
 					*s.features.lock().unwrap() = features;
 				}
 			}
 			DataMsg::Ds5Feature { slot, id, data } => {
 				// The pairing MAC stays the virtual pad's own (see bridge.rs).
 				if id != 0x09 {
-					if let Some(s) = slots.get(&slot) {
+					if let Some(s) = slots.get(slot) {
 						s.vpad.set_feature(id, &data);
 					}
 				}
@@ -292,7 +381,7 @@ impl Ds5Host {
 			return;
 		};
 		let slots = self.slots.lock().unwrap();
-		let Some(s) = slots.get(&slot) else {
+		let Some(s) = slots.get(slot) else {
 			return;
 		};
 		if !s.features.lock().unwrap().mic {
@@ -317,9 +406,48 @@ impl Ds5Host {
 
 	/// The client's pad at `slot` went away: unplug the virtual pad.
 	pub fn disconnect(&self, slot: u8) {
-		self.pending.lock().unwrap().retain(|s| *s != slot);
-		if self.slots.lock().unwrap().remove(&slot).is_some() {
+		// Dropped outside the lock: unplugging blocks (usbip detach, up to ~3 s).
+		let pad = self.slots.lock().unwrap().disconnect(slot);
+		if pad.is_some() {
+			drop(pad);
 			tracing::info!(slot, "ds5 host: virtual DualSense unplugged");
+		}
+	}
+
+	/// The session ended: unplug every pad now, and any still being plugged in as soon as
+	/// it is up. Idempotent. Called from the session's cleanup guard, so it runs on every
+	/// exit path, not only when the last clone of this host happens to drop.
+	pub fn shutdown(&self) {
+		let pads = self
+			.slots
+			.lock()
+			.unwrap_or_else(|e| e.into_inner())
+			.shutdown();
+		if pads.is_empty() {
+			return;
+		}
+		// Off the caller's thread: this runs in the session guard's Drop on an async
+		// executor thread, and a usbip unplug blocks for seconds.
+		// If the thread can't be spawned, unplug right here.
+		let n = pads.len();
+		let held = Arc::new(Mutex::new(Some(pads)));
+		let unplug = move |held: Arc<Mutex<Option<Vec<Slot>>>>| {
+			let pads = held.lock().unwrap_or_else(|e| e.into_inner()).take();
+			if pads.is_some() {
+				drop(pads);
+				tracing::info!(
+					pads = n,
+					"ds5 host: session ended; virtual DualSense(s) unplugged"
+				);
+			}
+		};
+		let h = held.clone();
+		if std::thread::Builder::new()
+			.name("ds5-unplug".into())
+			.spawn(move || unplug(h))
+			.is_err()
+		{
+			unplug(held);
 		}
 	}
 }
@@ -434,5 +562,87 @@ impl Forwarder {
 			}
 		}
 		tracing::debug!(slot = self.slot, "ds5 host: forwarder ended");
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::PadSlots;
+	use std::sync::atomic::{AtomicUsize, Ordering};
+	use std::sync::Arc;
+
+	/// Counts drops (a virtual pad unplugs on drop).
+	struct Pad(Arc<AtomicUsize>);
+	impl Drop for Pad {
+		fn drop(&mut self) {
+			self.0.fetch_add(1, Ordering::SeqCst);
+		}
+	}
+
+	#[test]
+	fn disconnect_drops_the_pad() {
+		let dropped = Arc::new(AtomicUsize::new(0));
+		let mut t = PadSlots::default();
+		let g = t.begin(0).unwrap();
+		assert_eq!(t.begin(0), None, "one plug-in per slot");
+		assert!(t.finish(0, g, Some(Pad(dropped.clone()))).is_none());
+		assert!(t.get(0).is_some());
+		drop(t.disconnect(0));
+		assert_eq!(dropped.load(Ordering::SeqCst), 1);
+		assert_eq!(t.live_count(), 0);
+		// The client's pad comes back: a new plug-in.
+		assert!(t.begin(0).is_some());
+	}
+
+	#[test]
+	fn session_end_drops_every_pad_and_late_plugins() {
+		let dropped = Arc::new(AtomicUsize::new(0));
+		let mut t = PadSlots::default();
+		for slot in 0..2 {
+			let g = t.begin(slot).unwrap();
+			assert!(t.finish(slot, g, Some(Pad(dropped.clone()))).is_none());
+		}
+		let late = t.begin(3).unwrap();
+		drop(t.shutdown());
+		assert_eq!(dropped.load(Ordering::SeqCst), 2);
+		assert!(!t.wanted(3, late));
+		// The in-flight plug-in finishes after the session ended: handed back, not kept.
+		let back = t.finish(3, late, Some(Pad(dropped.clone())));
+		assert!(back.is_some());
+		drop(back);
+		assert_eq!(dropped.load(Ordering::SeqCst), 3);
+		assert_eq!(t.live_count(), 0);
+		assert_eq!(t.begin(1), None, "nothing new after the session ended");
+		assert!(t.shutdown().is_empty(), "idempotent");
+	}
+
+	#[test]
+	fn disconnect_during_plugin_hands_the_pad_back() {
+		let dropped = Arc::new(AtomicUsize::new(0));
+		let mut t = PadSlots::default();
+		let old = t.begin(1).unwrap();
+		assert!(t.disconnect(1).is_none());
+		// The client's pad came back while the first plug-in still ran: only the newer
+		// plug-in keeps its pad.
+		let new = t.begin(1).unwrap();
+		let back = t.finish(1, old, Some(Pad(dropped.clone())));
+		assert!(back.is_some());
+		drop(back);
+		assert!(t.finish(1, new, Some(Pad(dropped.clone()))).is_none());
+		assert_eq!(dropped.load(Ordering::SeqCst), 1);
+		assert_eq!(t.live_count(), 1);
+	}
+
+	#[test]
+	fn failed_slot_is_not_retried() {
+		let mut t: PadSlots<()> = PadSlots::default();
+		let g = t.begin(2).unwrap();
+		assert!(t.finish(2, g, None).is_none());
+		assert_eq!(t.begin(2), None);
+		// A failure after a disconnect doesn't blacklist the slot.
+		let g = t.begin(0).unwrap();
+		t.disconnect(0);
+		t.finish(0, g, None);
+		assert!(t.begin(0).is_some());
 	}
 }
