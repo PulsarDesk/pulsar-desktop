@@ -85,7 +85,7 @@ use commands::{
 	forget_peer, gamepad_nav_start, gamepad_nav_stop, get_config, lan_devices, launch_remote_game,
 	list_audio_sources, list_remote_games, list_remote_sources, coop_status, open_coop_dir, local_ip, log_dir_path, new_password, node_port,
 	open_log_dir, publish_games, run_command, scan_folder, self_update_possible, session_password,
-	set_config, set_controller_emulation, set_controller_order, set_controller_rumble, set_ds5_settings,
+	set_config, set_controller_emulation, set_controller_order, set_controller_rumble, set_ds5_headset_volume, set_ds5_settings,
 	set_disabled_controllers, set_host_serving, set_language, set_pad_wake, set_stream_settings, set_tray,
 	steam_path, test_controller_rumble, webview_sw_painted,
 };
@@ -612,6 +612,7 @@ pub fn run() {
 			set_controller_emulation,
 			set_controller_rumble,
 			set_ds5_settings,
+			set_ds5_headset_volume,
 			set_disabled_controllers,
 			test_controller_rumble,
 			force_ac,

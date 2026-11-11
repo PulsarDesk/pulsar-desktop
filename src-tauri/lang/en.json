@@ -44,8 +44,9 @@
 	"ds5.restore.haptics": "Bluetooth recovered: HD haptics back on",
 	"ds5.shed.headset": "Weak Bluetooth: audio to the controller headset jack stopped",
 	"ds5.restore.headset": "Bluetooth recovered: audio back on the controller headset jack",
-	"ds5.headset.on": "Audio moved to the controller headset jack",
+	"ds5.headset.on": "Switched audio to controller headphones",
 	"ds5.headset.off": "Headphones unplugged: audio plays on this device again",
+	"ds5.headset.player": "Player",
 	"hint.wifi24": "Wi-Fi is on 2.4 GHz: latency may rise and a Bluetooth controller suffers. Use a 5/6 GHz network if you can",
 	"hint.wlanPowerSave": "Wi-Fi power saving is on while on battery: the stream may stall. Plug in, or set the wireless adapter to \"Maximum Performance\" in the power plan"
 }

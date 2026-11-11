@@ -303,6 +303,7 @@
 	"controllers.slot": "Player",
 	"controllers.reorderHint": "Use the arrows to change the player slot order.",
 	"controllers.rumble": "Vibration",
+	"controllers.headsetVolume": "Headphone volume",
 	"controllers.enabled": "On",
 	"controllers.disabled": "Off",
 	"controllers.battery": "Battery",

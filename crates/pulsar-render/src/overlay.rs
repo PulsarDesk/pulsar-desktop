@@ -183,7 +183,68 @@ pub struct UiState {
 	/// applying them on click tore the picture down under the menu — and twice when the user
 	/// changed two of them. The rows show the staged value meanwhile. Last choice per field wins.
 	pub deferred: Vec<(&'static str, String)>,
+	/// Root hub: the pad cursor is on headset volume bar N (above the boxes) instead of the
+	/// box grid. None = on the grid.
+	pub hp_sel: Option<usize>,
 }
+
+/// One DualSense whose headphones carry the session audio (the app's `hpvol` line):
+/// a volume bar on the Root hub. Slot and name come from the `ctrls` list by uuid.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeadsetBar {
+	pub uuid: String,
+	/// 0-100.
+	pub volume: u8,
+	/// The pad's light-bar colour, when the game set one.
+	pub rgb: Option<[u8; 3]>,
+}
+
+static HEADSETS: std::sync::Mutex<Vec<HeadsetBar>> = std::sync::Mutex::new(Vec::new());
+
+/// Parse `uuid:volume:rrggbb,...` (rgb `-` = unknown; empty = no pad routed).
+pub fn parse_headsets(line: &str) -> Vec<HeadsetBar> {
+	line.trim()
+		.split(',')
+		.filter_map(|e| {
+			let mut p = e.splitn(3, ':');
+			let uuid = p.next()?.trim();
+			if uuid.is_empty() {
+				return None;
+			}
+			let volume = p.next()?.parse::<u8>().ok()?.min(100);
+			let rgb = p.next().and_then(|h| {
+				let v = u32::from_str_radix(h, 16).ok().filter(|_| h.len() == 6)?;
+				Some([(v >> 16) as u8, (v >> 8) as u8, v as u8])
+			});
+			Some(HeadsetBar {
+				uuid: uuid.to_string(),
+				volume,
+				rgb,
+			})
+		})
+		.collect()
+}
+
+/// The app's `hpvol <payload>` stdin line (both backends call this).
+pub fn set_headsets(line: &str) {
+	*HEADSETS.lock().unwrap_or_else(|e| e.into_inner()) = parse_headsets(line);
+}
+
+fn headsets() -> Vec<HeadsetBar> {
+	HEADSETS.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Optimistic local update while the user drags (the app echoes the level back).
+fn set_headset_volume_local(uuid: &str, v: u8) {
+	for b in HEADSETS.lock().unwrap_or_else(|e| e.into_inner()).iter_mut() {
+		if b.uuid == uuid {
+			b.volume = v;
+		}
+	}
+}
+
+/// Volume step per d-pad press.
+const HEADSET_STEP: u8 = 5;
 
 /// Overlay settings whose change restarts the stream; see [`UiState::deferred`].
 pub const RESTART_FIELDS: [&str; 8] =
@@ -653,6 +714,7 @@ pub fn draw(ctx: &egui::Context, st: &OverlayState, ui_state: &mut UiState) -> V
 		ui_state.view = View::Root;
 		ui_state.sub_sel = 0;
 		ui_state.pending = None;
+		ui_state.hp_sel = None;
 	}
 	// B / Escape steps back one level: a sub-view returns to the Root menu; from Root it
 	// closes the overlay. (The pad's B button is relayed as Escape — see play.rs.)
@@ -782,6 +844,8 @@ pub fn draw(ctx: &egui::Context, st: &OverlayState, ui_state: &mut UiState) -> V
 				ui_state.nav_active = true;
 				ui_state.sel = 0;
 				ui_state.sub_sel = 0;
+				// Headphone volume bars come first on the hub: the cursor wakes on the first.
+				ui_state.hp_sel = (!headsets().is_empty()).then_some(0);
 				nav = Nav::default();
 			}
 			// Entering any sub-view always starts its row cursor at the top.
@@ -800,7 +864,16 @@ pub fn draw(ctx: &egui::Context, st: &OverlayState, ui_state: &mut UiState) -> V
 				ui.add_space((1.0 - fade) * 8.0);
 				match ui_state.view {
 					View::Root => {
-						draw_root(ui, st, &mut ui_state.view, &mut ui_state.sel, nav, ui_state.nav_active, &mut cmds)
+						draw_root(
+							ui,
+							st,
+							&mut ui_state.view,
+							&mut ui_state.sel,
+							&mut ui_state.hp_sel,
+							nav,
+							ui_state.nav_active,
+							&mut cmds,
+						)
 					}
 					View::Stream => draw_stream(
 						ui,
@@ -899,11 +972,13 @@ fn move_grid_sel(sel: usize, n: usize, nav: Nav) -> usize {
 }
 
 /// Root hub: compact stat tiles + the category boxes + end-session.
+#[allow(clippy::too_many_arguments)]
 fn draw_root(
 	ui: &mut egui::Ui,
 	st: &OverlayState,
 	view: &mut View,
 	sel: &mut usize,
+	hp_sel: &mut Option<usize>,
 	nav: Nav,
 	nav_active: bool,
 	cmds: &mut Vec<OverlayCmd>,
@@ -943,6 +1018,69 @@ fn draw_root(
 		.color(egui::Color32::from_gray(150)),
 	);
 	ui.add_space(6.0);
+
+	// DualSense headphone volume bars (one per pad whose headphones carry the session audio).
+	// The pad cursor visits them before the box grid: up/down move between bars (down from
+	// the last one enters the grid, up from the grid's top row comes back), left/right change
+	// the focused bar's level. The mouse drags or clicks a bar. Applied live.
+	let bars = headsets();
+	if hp_sel.is_some_and(|i| i >= bars.len()) {
+		*hp_sel = bars.len().checked_sub(1);
+	}
+	let mut nav = nav;
+	if let Some(i) = *hp_sel {
+		let moved = Nav::default();
+		if nav.up && i > 0 {
+			*hp_sel = Some(i - 1);
+		} else if nav.down {
+			if i + 1 < bars.len() {
+				*hp_sel = Some(i + 1);
+			} else {
+				*hp_sel = None;
+				*sel = 0;
+			}
+		}
+		let step = |v: u8, up: bool| {
+			if up {
+				v.saturating_add(HEADSET_STEP).min(100)
+			} else {
+				v.saturating_sub(HEADSET_STEP)
+			}
+		};
+		if let Some(b) = bars.get(i) {
+			if nav.left || nav.right {
+				let v = step(b.volume, nav.right);
+				if v != b.volume {
+					set_headset_volume_local(&b.uuid, v);
+					cmds.push(OverlayCmd::Set("hpvol", format!("{},{v}", b.uuid)));
+				}
+			}
+		}
+		nav = moved;
+	} else if !bars.is_empty() && nav.up && *sel < 2 {
+		*hp_sel = Some(bars.len() - 1);
+		nav = Nav::default();
+	}
+	if !bars.is_empty() {
+		ui.label(
+			egui::RichText::new(t("headset.volume"))
+				.size(11.0)
+				.color(egui::Color32::from_gray(150)),
+		);
+		for (i, b) in bars.iter().enumerate() {
+			let label = match st.controllers.iter().find(|c| c.3 == b.uuid) {
+				Some((slot, _, name, ..)) => format!("{} {} · {}", t("controllers.slot"), slot + 1, name),
+				None => "DualSense".to_string(),
+			};
+			if let Some(v) = headset_bar(ui, b, &label, nav_active && *hp_sel == Some(i)) {
+				set_headset_volume_local(&b.uuid, v);
+				cmds.push(OverlayCmd::Set("hpvol", format!("{},{v}", b.uuid)));
+				*hp_sel = Some(i);
+			}
+		}
+		ui.add_space(6.0);
+	}
+	let nav_active_grid = nav_active && hp_sel.is_none();
 
 	// Category boxes, 2 per row (AnyDesk-style hub). Chat + Files are NATIVE views
 	// now — the webview session menu is gone on Linux (it lived under the video).
@@ -991,7 +1129,7 @@ fn draw_root(
 				// Unread host messages also show on the Chat box (not only on the closed-state
 				// open button), until the Chat view is opened.
 				let badge = if *v == View::Chat { st.chat_unread } else { 0 };
-				let resp = cat_box(ui, icon, label, nav_active && i == *sel, badge);
+				let resp = cat_box(ui, icon, label, nav_active_grid && i == *sel, badge);
 				if resp.clicked() || (activate && i == *sel) {
 					// Files opens the app's dedicated per-session window — the in-overlay
 					// two-pane view was too cramped (kept as code for a potential fallback).
@@ -1009,7 +1147,7 @@ fn draw_root(
 	ui.add_space(10.0);
 	// End-session button = the last nav item (index n). Cyan stroke when the pad cursor is on
 	// it; A/Enter (activate) ends the session, same as a click. Highlight only once nav woke.
-	let end_selected = nav_active && *sel == n;
+	let end_selected = nav_active_grid && *sel == n;
 	let mut end_btn = egui::Button::new(
 		egui::RichText::new(t("end")).color(egui::Color32::WHITE),
 	)
@@ -1021,6 +1159,62 @@ fn draw_root(
 	if ui.add(end_btn).clicked() || (activate && end_selected) {
 		cmds.push(OverlayCmd::End);
 	}
+}
+
+/// One headphone volume bar: a light-bar swatch + the pad's label + the level, then a
+/// draggable track. Returns the new level when the mouse set one.
+fn headset_bar(ui: &mut egui::Ui, b: &HeadsetBar, label: &str, selected: bool) -> Option<u8> {
+	let w = ui.available_width();
+	let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 34.0), egui::Sense::click_and_drag());
+	let p = ui.painter();
+	if selected {
+		p.rect_filled(rect.expand(2.0), 7.0, CYAN);
+		p.rect_filled(rect, 6.0, egui::Color32::from_rgb(20, 54, 70));
+	} else {
+		p.rect_filled(rect, 6.0, egui::Color32::from_rgb(26, 28, 38));
+	}
+	let top = rect.top() + 10.0;
+	let swatch = match b.rgb {
+		Some([r, g, bl]) => egui::Color32::from_rgb(r, g, bl),
+		None => egui::Color32::from_gray(90),
+	};
+	p.circle_filled(egui::pos2(rect.left() + 12.0, top), 4.5, swatch);
+	let text_col = if selected { CYAN } else { egui::Color32::from_rgb(228, 230, 240) };
+	p.text(
+		egui::pos2(rect.left() + 22.0, top),
+		egui::Align2::LEFT_CENTER,
+		label,
+		egui::FontId::proportional(12.0),
+		text_col,
+	);
+	p.text(
+		egui::pos2(rect.right() - 10.0, top),
+		egui::Align2::RIGHT_CENTER,
+		format!("{} %", b.volume),
+		egui::FontId::monospace(11.5),
+		text_col,
+	);
+	let track = egui::Rect::from_min_max(
+		egui::pos2(rect.left() + 10.0, rect.bottom() - 11.0),
+		egui::pos2(rect.right() - 10.0, rect.bottom() - 6.0),
+	);
+	p.rect_filled(track, 2.5, egui::Color32::from_gray(60));
+	let frac = b.volume as f32 / 100.0;
+	let fill = egui::Rect::from_min_max(
+		track.min,
+		egui::pos2(track.left() + track.width() * frac, track.bottom()),
+	);
+	p.rect_filled(fill, 2.5, CYAN);
+	p.circle_filled(egui::pos2(fill.right(), track.center().y), 5.0, egui::Color32::WHITE);
+	if resp.hovered() {
+		resp.clone().on_hover_cursor(egui::CursorIcon::PointingHand);
+	}
+	if resp.dragged() || resp.clicked() {
+		let x = resp.interact_pointer_pos()?.x;
+		let v = (((x - track.left()) / track.width()).clamp(0.0, 1.0) * 100.0).round() as u8;
+		return (v != b.volume).then_some(v);
+	}
+	None
 }
 
 /// Stream section: codec/encoder/res/fps/bandwidth-limit + quality/pacing, as pad-navigable
@@ -2661,6 +2855,67 @@ mod deferred_restart_tests {
 		st.open = true;
 		run(&ctx, &st, &mut ui);
 		assert!(ui.view == View::Root, "a fresh open shows the main page");
+	}
+
+	#[test]
+	fn headset_lines_parse() {
+		assert_eq!(
+			parse_headsets("abc:80:00ff10,def:100:-"),
+			vec![
+				HeadsetBar { uuid: "abc".into(), volume: 80, rgb: Some([0, 255, 16]) },
+				HeadsetBar { uuid: "def".into(), volume: 100, rgb: None },
+			]
+		);
+		assert!(parse_headsets("").is_empty());
+		assert!(parse_headsets(" ").is_empty());
+		assert_eq!(parse_headsets("x:250:zz")[0].volume, 100, "clamped, bad rgb ignored");
+		assert_eq!(parse_headsets("x:250:zz")[0].rgb, None);
+	}
+
+	fn key(ctx: &egui::Context, st: &OverlayState, ui: &mut UiState, k: egui::Key) -> Vec<OverlayCmd> {
+		let mut cmds = Vec::new();
+		let input = egui::RawInput {
+			events: vec![egui::Event::Key {
+				key: k,
+				physical_key: None,
+				pressed: true,
+				repeat: false,
+				modifiers: Default::default(),
+			}],
+			..Default::default()
+		};
+		let mut out = ctx.run_pass(input, |ctx| {
+			cmds = draw(ctx, st, ui);
+		});
+		out.textures_delta.clear();
+		cmds
+	}
+
+	/// The pad drives the headphone bars on the hub: the first input wakes the cursor on
+	/// bar 0, left/right change its level, down walks to the next bar and then the grid.
+	#[test]
+	fn headset_bars_follow_the_dpad() {
+		set_headsets("pad-a:80:ff0000,pad-b:50:-");
+		let ctx = egui::Context::default();
+		let mut ui = UiState::default();
+		let st = OverlayState { open: true, ..OverlayState::default() };
+		run(&ctx, &st, &mut ui);
+		key(&ctx, &st, &mut ui, egui::Key::ArrowDown); // wakes the cursor only
+		assert_eq!(ui.hp_sel, Some(0));
+		let out = key(&ctx, &st, &mut ui, egui::Key::ArrowRight);
+		assert_eq!(sets(&out), vec![("hpvol", "pad-a,85".to_string())]);
+		assert_eq!(headsets()[0].volume, 85, "optimistic");
+		key(&ctx, &st, &mut ui, egui::Key::ArrowDown);
+		assert_eq!(ui.hp_sel, Some(1));
+		let out = key(&ctx, &st, &mut ui, egui::Key::ArrowLeft);
+		assert_eq!(sets(&out), vec![("hpvol", "pad-b,45".to_string())]);
+		key(&ctx, &st, &mut ui, egui::Key::ArrowDown);
+		assert_eq!((ui.hp_sel, ui.sel), (None, 0), "into the box grid");
+		key(&ctx, &st, &mut ui, egui::Key::ArrowUp);
+		assert_eq!(ui.hp_sel, Some(1), "back up to the last bar");
+		set_headsets("");
+		run(&ctx, &st, &mut ui);
+		assert_eq!(ui.hp_sel, None, "bars gone: cursor back on the grid");
 	}
 
 	#[test]

@@ -303,6 +303,7 @@
 	"controllers.slot": "Oyuncu",
 	"controllers.reorderHint": "Sıralamayı değiştirmek için okları kullan.",
 	"controllers.rumble": "Titreşim",
+	"controllers.headsetVolume": "Kulaklık sesi",
 	"controllers.enabled": "Etkin",
 	"controllers.disabled": "Pasif",
 	"controllers.battery": "Batarya",

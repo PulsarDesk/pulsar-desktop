@@ -58,6 +58,8 @@ export const api = {
 	 * switch applies from the next connection. */
 	setDs5Settings: (settings: Ds5Settings) =>
 		invoke<void>('set_ds5_settings', { settings }),
+	setDs5HeadsetVolume: (map: Record<string, number>) =>
+		invoke<void>('set_ds5_headset_volume', { map }),
 	/** Set the disabled-controller set (uuid hex list). Disabled pads aren't forwarded. */
 	setDisabledControllers: (uuids: string[]) =>
 		invoke<void>('set_disabled_controllers', { uuids }),

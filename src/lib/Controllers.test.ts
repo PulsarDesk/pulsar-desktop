@@ -120,3 +120,13 @@ describe('Controllers compact mode — no reorder controls', () => {
 		expect(!compact).toBe(true); // reorder controls shown when compact=false
 	});
 });
+
+describe('DualSense headphone volume per pad', () => {
+	it('starts empty (100 % per pad) and keeps a level per uuid', () => {
+		expect(ui.headsetVolume).toEqual({});
+		ui.headsetVolume[PAD_A.uuid] = 40;
+		expect(ui.headsetVolume[PAD_A.uuid]).toBe(40);
+		expect(ui.headsetVolume[PAD_B.uuid] ?? 100).toBe(100);
+		delete ui.headsetVolume[PAD_A.uuid];
+	});
+});

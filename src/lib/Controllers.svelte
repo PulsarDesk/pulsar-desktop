@@ -75,6 +75,7 @@
 		// populated before a session starts (no extra IPC if unchanged — same values).
 		api.setControllerEmulation($state.snapshot(ui.controllerEmulation) as Record<string, string>);
 		api.setControllerRumble($state.snapshot(ui.controllerRumble) as Record<string, string>);
+		api.setDs5HeadsetVolume($state.snapshot(ui.headsetVolume) as Record<string, number>).catch(() => {});
 		// Same for the disabled set, so the play reader knows which pads to ignore.
 		api.setDisabledControllers(Object.keys($state.snapshot(ui.controllerDisabled)));
 	});
@@ -83,6 +84,13 @@
 		ui.controllerRumble[uuid] = value as (typeof RUMBLE_OPTS)[number]['v'];
 		saveUi();
 		api.setControllerRumble($state.snapshot(ui.controllerRumble) as Record<string, string>);
+	}
+
+	function setHeadsetVolume(uuid: string, e: Event) {
+		const v = Math.round(Number((e.currentTarget as HTMLInputElement).value));
+		ui.headsetVolume[uuid] = Number.isFinite(v) ? Math.min(100, Math.max(0, v)) : 100;
+		saveUi();
+		api.setDs5HeadsetVolume($state.snapshot(ui.headsetVolume) as Record<string, number>).catch(() => {});
 	}
 
 	function setDisabled(uuid: string, off: boolean) {
@@ -202,6 +210,24 @@
 								onclick={() => api.testControllerRumble(pad.uuid).catch(() => {})}
 							>{t('controllers.testBtn')}</button>
 						</div>
+						{#if pad.kind === 'Ds5'}
+							<!-- DualSense: level of the session audio on headphones in the pad's jack. -->
+							<div class="seg-row">
+								<label class="seg-lab" for={`hpvol-${pad.uuid}`}>{t('controllers.headsetVolume')}</label>
+								<input
+									id={`hpvol-${pad.uuid}`}
+									class="hp-range"
+									type="range"
+									min="0"
+									max="100"
+									step="5"
+									use:navItem
+									value={ui.headsetVolume[pad.uuid] ?? 100}
+									oninput={(e) => setHeadsetVolume(pad.uuid, e)}
+								/>
+								<span class="hp-val mono">{ui.headsetVolume[pad.uuid] ?? 100}%</span>
+							</div>
+						{/if}
 					</li>
 				{/each}
 			</ul>
@@ -288,6 +314,17 @@
 		display: flex;
 		align-items: center;
 		gap: 10px;
+	}
+	.hp-range {
+		flex: 1;
+		min-width: 0;
+		accent-color: var(--accent);
+	}
+	.hp-val {
+		font-size: 11.5px;
+		color: var(--text-muted);
+		width: 4ch;
+		text-align: right;
 	}
 	.seg-lab {
 		font-size: 11.5px;

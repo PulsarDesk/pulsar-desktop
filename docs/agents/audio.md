@@ -103,6 +103,9 @@ Native and in-process, Moonlight's model: `src-tauri/src/native_audio.rs`.
   route is shed by auto-degrade the packets are dropped (never back to the laptop while
   the headphones are in). The last local packet fades out (5 ms), the first one after
   the route ends fades in and the SDL queue re-buffers. Pulsar has no other UI sounds.
+  Every pad of the session with its headphones in gets the audio (each mixes its own
+  pad-speaker/haptics stream); the laptop stays silent while any is routed. Per-pad level:
+  the in-session menu's bars (`hpvol` stdin/overlay lines, `ui.headsetVolume`).
   Design: pulsar-core `docs/dualsense.md` ("Headset jack").
 
 ## Host policy

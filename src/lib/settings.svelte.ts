@@ -142,6 +142,10 @@ export interface UiSettings {
 	 * full). Pushed to the SDL pad manager via `set_controller_rumble`. Absent uuid =
 	 * 'medium'. */
 	controllerRumble: Record<string, RumbleStrength>;
+	/** DualSense headphone level per pad uuid (0-100, default 100) while the session audio
+	 *  plays through the pad's headset jack ("Kolun kulaklık girişi"). Set from the in-session
+	 *  menu's bars (`ov set hpvol`) or here; pushed with `set_ds5_headset_volume`. */
+	headsetVolume: Record<string, number>;
 	/** Per-controller DISABLED flag keyed by uuid hex (true = off). A disabled pad isn't
 	 * forwarded to the host and doesn't rumble. Absent = enabled. */
 	controllerDisabled: Record<string, boolean>;
@@ -240,6 +244,7 @@ const DEFAULTS: UiSettings = {
 	controllerOrder: [],
 	controllerEmulation: {},
 	controllerRumble: {},
+	headsetVolume: {},
 	controllerDisabled: {},
 	touchpadAsMouse: true,
 	appMode: 'remote',

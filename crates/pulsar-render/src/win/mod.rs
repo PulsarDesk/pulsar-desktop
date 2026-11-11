@@ -571,6 +571,9 @@ fn stdin_control() {
 			if let Ok(idx) = rest.trim().parse::<u32>() {
 				DISPLAY_IDX_SEED.store(idx, Ordering::SeqCst);
 			}
+		} else if l.trim_end() == "hpvol" || l.starts_with("hpvol ") {
+			// DualSense headphone volume bars: `hpvol uuid:volume:rrggbb,...` (overlay.rs).
+			crate::overlay::set_headsets(l.trim_end().strip_prefix("hpvol").unwrap_or(""));
 		} else if let Some(rest) = l.strip_prefix("ctrls ") {
 			// Connected controller list (game mode only):
 			// `ctrls slot:kind:name:uuid:target:rumble,...`. 6-field (per-pad vibration);

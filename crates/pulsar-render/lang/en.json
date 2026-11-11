@@ -81,6 +81,7 @@
 	"active": "Active:",
 	"view.controllers": "Controllers",
 	"controllers.empty": "No controllers connected",
+	"headset.volume": "Headphone volume",
 	"controllers.slot": "Player",
 	"controllers.emulation": "Emulation",
 	"controllers.emuAuto": "Auto",
