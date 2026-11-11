@@ -185,6 +185,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 		case 'set_controller_emulation':
 		case 'set_controller_rumble':
 		case 'set_ds5_settings':
+		case 'set_ds5_headset_volume':
 		case 'set_disabled_controllers':
 		case 'set_tray':
 		case 'set_pad_wake':

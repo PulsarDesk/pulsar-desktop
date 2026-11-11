@@ -855,6 +855,20 @@
 					}
 					break;
 				}
+				// DualSense headphone bar on the overlay hub: `ov set hpvol uuid,level` (0-100).
+				// Rust already applied it live; persist it per pad and resync the map.
+				case 'hpvol': {
+					const comma = val.indexOf(',');
+					if (comma < 0) break;
+					const uuid = val.slice(0, comma);
+					const v = Number(val.slice(comma + 1));
+					if (uuid && Number.isFinite(v)) {
+						ui.headsetVolume[uuid] = Math.min(100, Math.max(0, Math.round(v)));
+						saveUi();
+						api.setDs5HeadsetVolume($state.snapshot(ui.headsetVolume) as Record<string, number>).catch(() => {});
+					}
+					break;
+				}
 				// Overlay enable/disable SET: the egui Controllers view emits
 				// `ov set ctrldisable uuid,state` (state 1 = disabled, 0 = enabled).
 				case 'ctrldisable': {

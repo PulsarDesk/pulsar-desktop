@@ -303,6 +303,7 @@
 	"controllers.slot": "Игрок",
 	"controllers.reorderHint": "Используйте стрелки, чтобы изменить порядок слотов игроков.",
 	"controllers.rumble": "Вибрация",
+	"controllers.headsetVolume": "Громкость наушников",
 	"controllers.enabled": "Вкл",
 	"controllers.disabled": "Выкл",
 	"controllers.battery": "Заряд",
