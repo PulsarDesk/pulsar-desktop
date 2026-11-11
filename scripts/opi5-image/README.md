@@ -35,6 +35,9 @@ the board it would decode in software. Shipping a whole image keeps that stack c
      then starts Pulsar. It restarts Pulsar if it exits.
 
   `xinitrc` asks for 1920×1080 at 120 Hz and falls back to the display's default.
+- **DualSense:** the .deb ships `70-pulsar-ds5.rules` (hidraw `uaccess` for the client),
+  `70-pulsar-vhci.rules` + `modules-load.d/pulsar.conf` (vhci-hcd for the host's virtual
+  pad); `pulsar` is in the `pulsar-vhci` group. Details: pulsar-core `docs/dualsense.md`, "Linux".
 - **Accounts:**
   - `pulsar` has no password and is not a sudoer.
   - Admin is the image's own `ubuntu` account over SSH; cloud-init forces a password change
@@ -81,6 +84,8 @@ xz -dc pulsar-opi5b.img.xz | sudo dd of=/dev/sdX bs=4M conv=fsync status=progres
 5. Audio plays (native libopus + SDL3 → PulseAudio), and a controller works.
 6. It goes online on `relay.pulsardesk.com` and shows up on the LAN.
 7. SSH as `ubuntu` asks for the forced password change.
+8. `lsmod | grep vhci_hcd` is loaded and `/sys/devices/platform/vhci_hcd.0/attach` is
+   `--w--w---- root pulsar-vhci`.
 
 The size must also stay under GitHub's 2 GiB per-asset limit before the image is attached to
 releases. The base server image is ~0.9 GB compressed.

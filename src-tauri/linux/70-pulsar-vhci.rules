@@ -1,0 +1,12 @@
+# Pulsar (GPLv3): DualSense passthrough on Linux, host side.
+#
+# The host plugs a virtual wired DualSense into the in-kernel USB/IP client (vhci-hcd) by
+# writing vhci_hcd.0's sysfs `attach`/`detach` files itself (no usbip CLI). Those files are
+# root-only; this hands them to the `pulsar-vhci` group (created by the package).
+#
+# SECURITY: whoever can write `attach` can plug ANY virtual USB device into this machine,
+# which is as powerful as physical access to a USB port (a malicious device can target
+# kernel drivers). Only add trusted users: sudo usermod -aG pulsar-vhci <user>
+#
+# `bind` fires after vhci-hcd's probe has created the attributes (`add` can come first).
+ACTION=="add|bind", SUBSYSTEM=="platform", KERNEL=="vhci_hcd.0", RUN+="/bin/sh -c '/bin/chgrp pulsar-vhci /sys%p/attach /sys%p/detach && /bin/chmod g+w /sys%p/attach /sys%p/detach'"

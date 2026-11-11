@@ -3,8 +3,26 @@
 	"bundle": {
 		"resources": ["resources/ffmpeg", "resources/pulsar-render"],
 		"linux": {
-			"deb": { "depends": ["libmpv1 | libmpv2"] },
-			"rpm": { "depends": ["mpv-libs"] }
+			"deb": {
+				"depends": ["libmpv1 | libmpv2"],
+				"files": {
+					"/usr/lib/udev/rules.d/70-pulsar-ds5.rules": "linux/70-pulsar-ds5.rules",
+					"/usr/lib/udev/rules.d/70-pulsar-vhci.rules": "linux/70-pulsar-vhci.rules",
+					"/usr/lib/modules-load.d/pulsar.conf": "linux/modules-load-pulsar.conf",
+					"/usr/lib/modprobe.d/pulsar.conf": "linux/modprobe-pulsar.conf"
+				},
+				"postInstallScript": "linux/postinst.sh"
+			},
+			"rpm": {
+				"depends": ["mpv-libs"],
+				"files": {
+					"/usr/lib/udev/rules.d/70-pulsar-ds5.rules": "linux/70-pulsar-ds5.rules",
+					"/usr/lib/udev/rules.d/70-pulsar-vhci.rules": "linux/70-pulsar-vhci.rules",
+					"/usr/lib/modules-load.d/pulsar.conf": "linux/modules-load-pulsar.conf",
+					"/usr/lib/modprobe.d/pulsar.conf": "linux/modprobe-pulsar.conf"
+				},
+				"postInstallScript": "linux/postinst.sh"
+			}
 		}
 	}
 }

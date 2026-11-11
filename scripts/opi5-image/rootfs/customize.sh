@@ -29,7 +29,8 @@ if ! id pulsar >/dev/null 2>&1; then
 	useradd -m -s /bin/bash pulsar
 fi
 passwd -l pulsar
-for g in audio video render input plugdev; do
+# pulsar-vhci (created by the .deb): plug the host's virtual DualSense into vhci-hcd.
+for g in audio video render input plugdev pulsar-vhci; do
 	getent group "$g" >/dev/null && usermod -aG "$g" pulsar
 done
 
