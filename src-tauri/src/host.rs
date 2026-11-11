@@ -241,6 +241,10 @@ struct SessionCleanupGuard {
 	/// same Arc is held by the on_stream handler, which applies/updates it during the session.
 	adapt_state: Arc<Mutex<crate::display_mode::AdaptState>>,
 	app_handle: AppHandle,
+	/// This session's virtual DualSenses: unplugged here on every exit path (the ViGEm /
+	/// Duo pads of `GamepadSlot` live in the `on_input` closure and drop with `serve_with`'s
+	/// future, which every path also drops).
+	ds5_host: crate::ds5::host::Ds5Host,
 }
 
 impl Drop for SessionCleanupGuard {
@@ -267,6 +271,9 @@ impl Drop for SessionCleanupGuard {
 		// to ~1.5 s waiting for its next restream_tx.is_closed() check.
 		// abort() is safe to call after the task has already finished.
 		self.mode_watcher.abort();
+		// Unplug this session's virtual DualSenses (non-blocking: the unplug runs on its own
+		// thread). Idempotent; a pad still being plugged in is unplugged once it is up.
+		self.ds5_host.shutdown();
 		// Screen adaptation (Parsec-style): if this session switched the captured monitor's
 		// display mode for a split pane, restore the ORIGINAL mode now so the host is never
 		// left stuck at a wrong resolution. This is the teardown guarantee — it fires on BOTH
@@ -409,6 +416,18 @@ pub(crate) async fn bring_online(
 ) -> Result<String, String> {
 	// Shared mode: only the machine-wide host lease holder registers (one host per PC).
 	crate::shared_mode::lease::may_host()?;
+	// Remove the virtual pads a killed Pulsar left behind (orphaned Duo HID devices, Duo /
+	// USB/IP pads whose creating process is gone), once per process and off this thread
+	// (SetupAPI + maybe `usbip`): a dead pad is otherwise picked over the session's new one.
+	// Windows only (a no-op elsewhere); needs elevation (logged and skipped otherwise).
+	{
+		static PAD_CLEANUP: std::sync::Once = std::sync::Once::new();
+		PAD_CLEANUP.call_once(|| {
+			let _ = std::thread::Builder::new()
+				.name("pad-cleanup".into())
+				.spawn(pulsar_core::input::pad_cleanup::startup);
+		});
+	}
 	// Pre-warm ALL encoder probes off the hot path: the first QueryStreamCaps must
 	// answer within the client's 2 s window, but a cold probe chain (one-frame ffmpeg
 	// encodes per backend×codec + the gst pipelines) takes several seconds. Results
@@ -2470,6 +2489,7 @@ pub(crate) async fn bring_online(
 					// Same Arc the on_stream handler applies adaptation into — Drop reverts it.
 					adapt_state: adapt_state.clone(),
 					app_handle: app_h.clone(),
+					ds5_host: ds5_host.clone(),
 				};
 				tokio::select! {
 					_ = serve_with(session, provider, on_launch, on_stream, on_input, handlers) => {}
