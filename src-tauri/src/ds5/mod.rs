@@ -5,6 +5,8 @@
 pub mod audio;
 pub mod bridge;
 pub mod client;
+pub mod client_audio;
+pub mod endpoint;
 pub mod hid;
 pub mod host;
 pub mod probe;
