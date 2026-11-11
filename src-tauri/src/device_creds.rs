@@ -6,7 +6,7 @@
 //! app has no OS-keychain dependency, so instead of adding one:
 //! - Windows: the password is sealed with DPAPI (`CryptProtectData`, current-user scope) —
 //!   only this Windows account can unseal it; the file alone (a backup, another account) is
-//!   useless.
+//!   useless. Shared mode: machine scope (`"dpapi-m"`) in the admin-only shared dir.
 //! - macOS / Linux: stored as-is, like the rest of the app's secrets, and the file is made
 //!   owner-only (0600).
 //! The webview never persists it (no localStorage): it asks Rust per device.
@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
 
 use crate::state::AppState;
 
@@ -81,12 +81,41 @@ fn from_hex(s: &str) -> Option<Vec<u8>> {
 }
 
 /// Seal a password for storage → (`enc`, `pw`).
+///
+/// Shared mode (`shared_mode.rs`) seals with machine-scope DPAPI (`"dpapi-m"`) so every
+/// admin's Pulsar on this PC can unseal it; the file itself is SYSTEM/Administrators only.
 pub(crate) fn seal(pw: &str) -> (String, String) {
 	#[cfg(windows)]
-	if let Some(blob) = dpapi::protect(pw.as_bytes()) {
-		return ("dpapi".into(), to_hex(&blob));
+	{
+		let machine = crate::shared_mode::is_shared();
+		if let Some(blob) = dpapi::protect(pw.as_bytes(), machine) {
+			return (if machine { "dpapi-m" } else { "dpapi" }.into(), to_hex(&blob));
+		}
 	}
 	("plain".into(), pw.to_string())
+}
+
+/// Shared-mode migration: copy this user's `device_creds.json` to `dst`, re-sealing every
+/// user-scope password with machine scope (another Windows user could not unseal it).
+#[cfg(windows)]
+pub(crate) fn reseal_for_machine(src: &Path, dst: &Path) {
+	let mut map = load(src);
+	for e in map.values_mut() {
+		if e.enc == "dpapi" {
+			match unseal(e).and_then(|pw| dpapi::protect(pw.as_bytes(), true)) {
+				Some(blob) => {
+					e.enc = "dpapi-m".into();
+					e.pw = to_hex(&blob);
+				}
+				None => {
+					e.enc.clear();
+					e.pw.clear();
+				}
+			}
+		}
+	}
+	map.retain(|_, e| !e.pw.is_empty() || e.paired);
+	save(dst, &map);
 }
 
 /// Unseal a stored entry's password (`None` = none saved, or it can't be unsealed here —
@@ -97,7 +126,7 @@ pub(crate) fn unseal(e: &CredEntry) -> Option<String> {
 	}
 	match e.enc.as_str() {
 		#[cfg(windows)]
-		"dpapi" => from_hex(&e.pw)
+		"dpapi" | "dpapi-m" => from_hex(&e.pw)
 			.and_then(|b| dpapi::unprotect(&b))
 			.and_then(|b| String::from_utf8(b).ok()),
 		"plain" | "" => Some(e.pw.clone()),
@@ -112,13 +141,14 @@ pub(crate) fn unseal(e: &CredEntry) -> Option<String> {
 mod dpapi {
 	use windows_sys::Win32::Foundation::LocalFree;
 	use windows_sys::Win32::Security::Cryptography::{
-		CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
+		CryptProtectData, CryptUnprotectData, CRYPTPROTECT_LOCAL_MACHINE, CRYPTPROTECT_UI_FORBIDDEN,
+		CRYPT_INTEGER_BLOB,
 	};
 
 	/// Extra entropy so another app's DPAPI blob can't be swapped in.
 	const ENTROPY: &[u8] = b"pulsar-device-creds-v1";
 
-	fn run(data: &[u8], protect: bool) -> Option<Vec<u8>> {
+	fn run(data: &[u8], protect: bool, machine: bool) -> Option<Vec<u8>> {
 		let input = CRYPT_INTEGER_BLOB { cbData: data.len() as u32, pbData: data.as_ptr() as *mut u8 };
 		let entropy = CRYPT_INTEGER_BLOB { cbData: ENTROPY.len() as u32, pbData: ENTROPY.as_ptr() as *mut u8 };
 		let mut out = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
@@ -132,7 +162,7 @@ mod dpapi {
 					&entropy,
 					std::ptr::null(),
 					std::ptr::null(),
-					CRYPTPROTECT_UI_FORBIDDEN,
+					CRYPTPROTECT_UI_FORBIDDEN | if machine { CRYPTPROTECT_LOCAL_MACHINE } else { 0 },
 					&mut out,
 				)
 			} else {
@@ -156,12 +186,12 @@ mod dpapi {
 		Some(v)
 	}
 
-	pub(super) fn protect(data: &[u8]) -> Option<Vec<u8>> {
-		run(data, true)
+	pub(super) fn protect(data: &[u8], machine: bool) -> Option<Vec<u8>> {
+		run(data, true, machine)
 	}
 
 	pub(super) fn unprotect(data: &[u8]) -> Option<Vec<u8>> {
-		run(data, false)
+		run(data, false, false)
 	}
 }
 
@@ -172,10 +202,7 @@ mod dpapi {
 static LOCK: Mutex<()> = Mutex::new(());
 
 fn path(app: &AppHandle) -> PathBuf {
-	app.path()
-		.app_config_dir()
-		.unwrap_or_else(|_| PathBuf::from("."))
-		.join("device_creds.json")
+	crate::util::data_dir(app).join("device_creds.json")
 }
 
 fn relay(state: &State<'_, AppState>) -> String {
@@ -373,6 +400,28 @@ mod tests {
 		assert_eq!(unseal(&e).as_deref(), Some("gizli şifre"));
 		assert_eq!(unseal(&CredEntry::default()), None);
 		assert_eq!(unseal(&CredEntry { enc: "rot13".into(), pw: "x".into(), paired: false }), None);
+	}
+
+	#[cfg(windows)]
+	#[test]
+	fn reseal_for_machine_keeps_passwords_and_pairing() {
+		let dir = std::env::temp_dir().join(format!("pulsar-creds-reseal-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&dir);
+		let (src, dst) = (dir.join("user.json"), dir.join("shared.json"));
+		let mut m = CredMap::new();
+		let (enc, pw) = seal("gizli");
+		m.insert("r/111222333".into(), CredEntry { enc, pw, paired: true });
+		m.insert("r/444555666".into(), CredEntry { enc: "dpapi".into(), pw: "00ff".into(), paired: false });
+		save(&src, &m);
+		reseal_for_machine(&src, &dst);
+		let back = load(&dst);
+		let e = &back["r/111222333"];
+		assert_eq!(e.enc, "dpapi-m");
+		assert!(e.paired);
+		assert_eq!(unseal(e).as_deref(), Some("gizli"));
+		assert!(!back.contains_key("r/444555666"), "an unsealable, unpaired entry is dropped");
+		assert_eq!(load(&src)["r/111222333"].enc, "dpapi", "the per-user file is untouched");
+		let _ = std::fs::remove_dir_all(&dir);
 	}
 
 	#[test]

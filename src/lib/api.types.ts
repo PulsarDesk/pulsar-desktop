@@ -178,6 +178,23 @@ export interface LocalCaps {
 }
 
 /** Per-device credential badges (`device_creds`): a saved password / paired with it. */
+/** `shared_mode_status` — Settings → Genel → "Kullanıcılar arası ortak Pulsar". */
+export interface SharedModeStatus {
+	/** The setting exists on this OS (Windows only). */
+	supported: boolean;
+	/** The machine-wide setting (what the toggle shows). */
+	enabled: boolean;
+	/** This process runs in shared mode (differs from `enabled` until a restart). */
+	active: boolean;
+	/** Shared mode is on but this Pulsar is not elevated, so it can't use the shared files. */
+	noAccess: boolean;
+	elevated: boolean;
+	/** This Pulsar holds the machine-wide host lease (it is the PC's host). */
+	held: boolean;
+	/** Windows user whose session hosts right now (another Pulsar holds the lease). */
+	holder: string | null;
+}
+
 export interface DeviceCredInfo {
 	hasPassword: boolean;
 	paired: boolean;

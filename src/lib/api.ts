@@ -79,6 +79,7 @@ export {
 	onControllerConnected,
 	onNodeId,
 	onNodeVersionError,
+	onSharedHost,
 	onSessionPassword,
 	onRelayE2e
 } from './api.events';

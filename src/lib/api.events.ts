@@ -79,6 +79,9 @@ export const onNodeId = (cb: (id: string) => void) => listenTo<string>('node-id'
  * an incompatible protocol version (relay redeployed with a newer build). The node is
  * stranded and has been taken offline — the UI should set online=false and show the
  * "update required" error so the user knows to update. */
+/** Shared mode: this Pulsar took (`held`) or handed over the PC's machine-wide host lease. */
+export const onSharedHost = (cb: (e: { held: boolean; holder: string | null }) => void) =>
+	listenTo<{ held: boolean; holder: string | null }>('shared-host', cb);
 export const onNodeVersionError = (cb: () => void) => listenTo<null>('node-version-error', () => cb());
 /** Host: the one-time connect password was rotated (after a successful auth) — the
  * Home SelfCard updates instantly instead of waiting for the next poll. */
