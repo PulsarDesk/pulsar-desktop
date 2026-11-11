@@ -153,6 +153,11 @@ pub fn run(stop: Arc<AtomicBool>, features: Ds5Features) -> io::Result<()> {
 			tracing::info!(stats = ?pad.stats(), speaker_on, "ds5 bridge");
 		}
 	}
+	// Stop the pad's mic stream: SDL's own driver misreads mic-carrying input reports as
+	// random button presses once we let go.
+	feats.mic = false;
+	pad.set_features(feats);
+	let _ = pad.poll(Instant::now() + Duration::from_millis(10), &mut hid);
 	drop(vpad); // detach before the pad handle closes
 	Ok(())
 }

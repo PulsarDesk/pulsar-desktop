@@ -9,7 +9,9 @@
 
 use std::time::Instant;
 
-use pulsar_core::input::ds5::degrade::{Change, Degrader, Ds5Prefs, LinkMonitor, Shed};
+use pulsar_core::input::ds5::degrade::{
+	Change, Degrader, Ds5Prefs, LinkMonitor, Shed, WARMUP_WINDOWS,
+};
 use pulsar_core::input::ds5::pad::Pad;
 use pulsar_core::input::ds5::wire::Ds5Transport;
 use pulsar_core::input::ds5::Ds5Features;
@@ -22,6 +24,8 @@ pub struct PadPolicy {
 	/// Whether the pad mic is actually streaming (a game on the host has it open and it is
 	/// allowed; `client_audio.rs` decides). Only a live mic counts as in use for shedding.
 	mic_live: bool,
+	/// Windows seen so far (the first [`WARMUP_WINDOWS`] are not judged).
+	windows: u32,
 }
 
 impl PadPolicy {
@@ -32,6 +36,7 @@ impl PadPolicy {
 			mon: LinkMonitor::new(now, pad.stats()),
 			bt: transport == Ds5Transport::Bt,
 			mic_live: false,
+			windows: 0,
 		}
 	}
 
@@ -82,7 +87,8 @@ impl PadPolicy {
 	pub fn tick(&mut self, now: Instant, pad: &mut Pad) -> Option<Change> {
 		let max_write = pad.take_window_max_write_us();
 		let w = self.mon.tick(now, pad.stats(), max_write)?;
-		if !self.bt {
+		self.windows = self.windows.saturating_add(1);
+		if !self.bt || self.windows <= WARMUP_WINDOWS {
 			return None;
 		}
 		let live = Ds5Features {
@@ -155,10 +161,10 @@ mod tests {
 		let mut pad = pad(Ds5Transport::Bt);
 		let t0 = Instant::now();
 		let mut pol = PadPolicy::new(p, Ds5Transport::Bt, &pad, t0);
-		// No input for whole windows = a bad link; speaker is off and the mic is not live,
-		// so haptics go first.
+		// No input for whole windows = a bad link (after the warm-up); speaker is off and
+		// the mic is not live, so haptics go first.
 		let mut change = None;
-		for i in 1..=2 {
+		for i in 1..=2 + WARMUP_WINDOWS {
 			change = pol.tick(t0 + WINDOW * i, &mut pad).or(change);
 		}
 		let c = change.expect("shed after two bad windows");

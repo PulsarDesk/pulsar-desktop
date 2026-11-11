@@ -415,7 +415,13 @@ impl PadCtx {
 			}
 		}
 		// Leave the pad clean: triggers off, no rumble.
-		pad.set_features(pulsar_core::input::ds5::Ds5Features::all());
+		// Every feature on so the reset reaches the pad, except the mic: a BT pad left
+		// streaming its mic sends mic-carrying input reports that SDL's own driver
+		// misreads as random button presses once we let go (2026-11-11).
+		pad.set_features(Ds5Features {
+			mic: false,
+			..Ds5Features::all()
+		});
 		pad.set_output(triggers_off());
 		let _ = pad.poll(Instant::now() + Duration::from_millis(10), &mut hid);
 		tracing::info!(slot, "ds5 client: pad released");
