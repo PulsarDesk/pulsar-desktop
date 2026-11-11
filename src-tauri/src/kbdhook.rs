@@ -144,11 +144,11 @@ pub fn set_video_frac(x0: f32, y0: f32, x1: f32, y1: f32) {
 pub fn set_video_frac(_x0: f32, _y0: f32, _x1: f32, _y1: f32) {}
 /// The host hid its cursor (a game grabbed the mouse): send relative motion meanwhile.
 #[cfg(windows)]
-pub fn set_pointer_lock(on: bool) {
-	imp::set_pointer_lock(on)
+pub fn set_pointer_lock(id: u64, on: bool) {
+	imp::set_pointer_lock(id, on)
 }
 #[cfg(not(windows))]
-pub fn set_pointer_lock(_on: bool) {}
+pub fn set_pointer_lock(_id: u64, _on: bool) {}
 /// Whether the connected host injects real pinch gestures (`FEAT_PINCH`).
 #[cfg(windows)]
 pub fn set_host_pinch(on: bool) {

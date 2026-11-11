@@ -5,7 +5,7 @@
 use super::*;
 use libloading::Library;
 use std::os::raw::c_void;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 use tauri::Emitter;
 use tokio::sync::mpsc::Sender;
@@ -1178,9 +1178,23 @@ pub fn set_host_pinch(on: bool) {
 /// such a game turns into an endless spin; while this is on it sends raw-input deltas instead
 /// (`raw_mouse_proc`) and freezes the local cursor. The Interception path is relative anyway.
 static POINTER_LOCK: AtomicBool = AtomicBool::new(false);
+/// The last host report: which session (play id) and whether its pointer is locked. Kept so
+/// `enable()` for a NEW session can apply that session's state: the host reports the lock
+/// only on change, and it often arrives BEFORE the new session's capture is enabled — a plain
+/// reset there dropped it, so every reconnect into a game sent absolute motion (endless camera
+/// spin, 2026-11-11).
+static POINTER_LOCK_ID: AtomicU64 = AtomicU64::new(u64::MAX);
+static POINTER_LOCK_REPORTED: AtomicBool = AtomicBool::new(false);
 
-pub fn set_pointer_lock(on: bool) {
+pub fn set_pointer_lock(id: u64, on: bool) {
+	POINTER_LOCK_ID.store(id, Ordering::SeqCst);
+	POINTER_LOCK_REPORTED.store(on, Ordering::SeqCst);
 	POINTER_LOCK.store(on, Ordering::SeqCst);
+}
+
+/// The pointer-lock state a session starting capture should use: its own last report.
+fn pointer_lock_for(id: u64) -> bool {
+	POINTER_LOCK_ID.load(Ordering::SeqCst) == id && POINTER_LOCK_REPORTED.load(Ordering::SeqCst)
 }
 
 /// A message-only window on the hook thread that takes raw mouse input (`RIDEV_INPUTSINK`:
@@ -1496,8 +1510,9 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, _sta
 			PENDING_ENGAGE.store(u64::MAX, Ordering::SeqCst);
 		}
 		STREAM_STALLED.store(false, Ordering::SeqCst);
-		// Same for a host pointer lock: the new host reports its own cursor state.
-		POINTER_LOCK.store(false, Ordering::SeqCst);
+		// Same for a host pointer lock: a stopped session's lock must not leak into this one,
+		// but this session's own report may already be here (it is sent only on change).
+		POINTER_LOCK.store(pointer_lock_for(id), Ordering::SeqCst);
 	}
 	tracing::info!(
 		id,

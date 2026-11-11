@@ -1251,7 +1251,7 @@ pub(super) async fn hold_session(
 								// The host hid its cursor (a game grabbed the mouse): send relative
 								// motion while it lasts, absolute again once it shows.
 								tracing::info!(on, "host pointer lock");
-								crate::kbdhook::set_pointer_lock(on);
+								crate::kbdhook::set_pointer_lock(id, on);
 							}
 							DataMsg::CursorHidden => {
 								// The host pointer is hidden / left the screen — stop drawing it.
