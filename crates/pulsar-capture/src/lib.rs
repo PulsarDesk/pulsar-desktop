@@ -108,6 +108,38 @@ pub struct LiveStats {
 	pub(crate) fresh_per_s: std::sync::atomic::AtomicU32,
 	pub(crate) rfi_ok: std::sync::atomic::AtomicU32,
 	pub(crate) rfi_no: std::sync::atomic::AtomicU32,
+	/// Access units handed to the encoder without error, for the capture's life (wraps). The
+	/// thread re-encodes the last surface on a static screen, so this keeps rising on a healthy
+	/// pipeline; a flat count means the thread is stuck (see [`ProgressWatch`]).
+	pub(crate) encoded: std::sync::atomic::AtomicU32,
+}
+
+/// Tells how long a monotonic counter has been flat. The host feeds it the capture thread's
+/// encoded-frame count on each restream request: a pipeline that encodes nothing for seconds
+/// is wedged (2026-11-11: both host processes' capture + NVENC threads froze inside the GPU
+/// for 43 s and 81 s), and a live fast path that only writes atomics into it cannot help.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ProgressWatch {
+	last: Option<(u32, std::time::Instant)>,
+}
+
+impl ProgressWatch {
+	/// Record `count` seen at `now`; returns how long it has been unchanged (zero on a change
+	/// or the first sample).
+	pub fn observe(&mut self, count: u32, now: std::time::Instant) -> std::time::Duration {
+		match self.last {
+			Some((c, since)) if c == count => now.saturating_duration_since(since),
+			_ => {
+				self.last = Some((count, now));
+				std::time::Duration::ZERO
+			}
+		}
+	}
+
+	/// Forget the history (a new pipeline starts its own count).
+	pub fn reset(&mut self) {
+		self.last = None;
+	}
 }
 
 impl LiveStats {
@@ -278,6 +310,33 @@ impl CaptureHandle {
 	/// liveness without holding the `CaptureHandle` / its owning lock.
 	pub fn alive_arc(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
 		self.alive.clone()
+	}
+
+	/// Access units encoded so far (wrapping). Feed it to a [`ProgressWatch`] to spot a stuck
+	/// capture thread.
+	pub fn frames_encoded(&self) -> u32 {
+		self.stats.encoded.load(std::sync::atomic::Ordering::Relaxed)
+	}
+
+	/// Signal the thread and wait at most `wait` for it to exit. Returns `true` when it exited
+	/// and was joined. When it is stuck inside a driver call, it is detached instead (returns
+	/// `false`): it sees the stop flag and releases its NVENC session + capture once the call
+	/// returns, and the caller is not blocked behind it.
+	pub fn stop_within(mut self, wait: std::time::Duration) -> bool {
+		use std::sync::atomic::Ordering::SeqCst;
+		self.stop.store(true, SeqCst);
+		let t0 = std::time::Instant::now();
+		while self.alive.load(SeqCst) && t0.elapsed() < wait {
+			std::thread::sleep(std::time::Duration::from_millis(10));
+		}
+		let exited = !self.alive.load(SeqCst);
+		if let Some(t) = self.thread.take() {
+			if exited {
+				let _ = t.join();
+			}
+			// else: dropping the JoinHandle detaches the thread.
+		}
+		exited
 	}
 
 	/// Signal the thread, join it (releases the NVENC session + DXGI duplication), return.
@@ -867,6 +926,7 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 							}
 						} else {
 							frames_sent += 1;
+							stats_t.encoded.fetch_add(1, Ordering::Relaxed);
 							// G2: smooth per-frame encode wall-time (µs) into the EWMA atom.
 							let us = enc_t0.elapsed().as_micros().min(u32::MAX as u128) as u32;
 							let prev = encode_us_t.load(Ordering::Relaxed);
@@ -1161,5 +1221,40 @@ impl Drop for MmcssGuard {
 				let _ = AvRevertMmThreadCharacteristics(self.handle);
 			}
 		}
+	}
+}
+
+#[cfg(test)]
+mod progress_watch_tests {
+	use super::ProgressWatch;
+	use std::time::{Duration, Instant};
+
+	#[test]
+	fn flat_count_reports_how_long_it_has_been_flat() {
+		let t0 = Instant::now();
+		let mut w = ProgressWatch::default();
+		assert_eq!(w.observe(10, t0), Duration::ZERO);
+		assert_eq!(w.observe(10, t0 + Duration::from_secs(2)), Duration::from_secs(2));
+		assert_eq!(w.observe(10, t0 + Duration::from_secs(6)), Duration::from_secs(6));
+	}
+
+	#[test]
+	fn a_moving_count_restarts_the_clock() {
+		let t0 = Instant::now();
+		let mut w = ProgressWatch::default();
+		w.observe(10, t0);
+		assert_eq!(w.observe(11, t0 + Duration::from_secs(5)), Duration::ZERO);
+		assert_eq!(w.observe(11, t0 + Duration::from_secs(7)), Duration::from_secs(2));
+		// A wrapped counter is still a change.
+		assert_eq!(w.observe(0, t0 + Duration::from_secs(8)), Duration::ZERO);
+	}
+
+	#[test]
+	fn reset_forgets_the_old_pipeline() {
+		let t0 = Instant::now();
+		let mut w = ProgressWatch::default();
+		w.observe(5, t0);
+		w.reset();
+		assert_eq!(w.observe(5, t0 + Duration::from_secs(9)), Duration::ZERO);
 	}
 }

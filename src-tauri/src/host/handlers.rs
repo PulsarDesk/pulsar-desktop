@@ -1568,6 +1568,14 @@ fn spawn_media_forwarders(
 /// and the switch time went erratic 1-8 s). Comparing via the derived `PartialEq` (with both live
 /// fields normalized) means any field added to `StreamReq` later defaults to the safe full path.
 #[cfg(windows)]
+/// A native capture thread whose encoded-frame count stays flat this long is treated as wedged
+/// (an in-thread monitor switch rebuild takes well under this).
+#[cfg(windows)]
+const NATIVE_WEDGED_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
+/// How long a restream waits for the previous native capture thread to exit before detaching it.
+#[cfg(windows)]
+const NATIVE_STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
 fn live_change(prev: &StreamReq, req: &StreamReq) -> Option<(bool, bool)> {
 	let display_changed = prev.display_idx != req.display_idx;
 	let bitrate_changed = prev.bitrate_kbps != req.bitrate_kbps;
@@ -1781,6 +1789,10 @@ pub(super) fn make_on_stream(
 	// (ffmpeg fallback) — then a monitor change falls through to the normal restart.
 	#[cfg(windows)]
 	let mut last_native_req: Option<StreamReq> = None;
+	// How long the native capture thread's encoded-frame count has been flat, sampled on every
+	// request (the client re-sends one every ~2 s, and keeps asking while its video is silent).
+	#[cfg(windows)]
+	let mut native_watch = pulsar_capture::ProgressWatch::default();
 	// The request the running ffmpeg CLI encode (Windows/macOS software/fallback path) was
 	// started with, and when: ffmpeg can't change its bitrate live, so every ABR step used to
 	// restart capture (a visible gap + keyframe each time → stutter, and the gap itself read as
@@ -1880,6 +1892,36 @@ pub(super) fn make_on_stream(
 		// this keeps a bitrate step from forcing a full restart that STACKS a second encoder onto a
 		// concurrent switch (the doubled encode load + erratic switch time). Audio, the media
 		// forwarders, the ffmpeg probe, and the announce state are all left untouched.
+		// WEDGED PIPELINE — the fast path below only writes atomics the capture thread polls, so
+		// it cannot revive a thread that died or that is stuck inside a GPU call. 2026-11-11: the
+		// capture + NVENC threads of both host processes froze for 43 s and 81 s while audio and
+		// data flowed; every client restream was absorbed here as `bitrate=true` and nothing
+		// changed. A thread that has encoded nothing for NATIVE_WEDGED_AFTER (it re-encodes the
+		// last surface on a static screen, so a healthy one never goes flat) is retired without
+		// waiting on it, and this request takes the full restart below.
+		#[cfg(windows)]
+		{
+			let mut slot = native_slot.lock().unwrap();
+			let verdict = slot
+				.as_ref()
+				.map(|h| (h.is_alive(), native_watch.observe(h.frames_encoded(), std::time::Instant::now())));
+			if let Some((alive, flat)) = verdict {
+				if !alive || flat >= NATIVE_WEDGED_AFTER {
+					let h = slot.take().expect("checked above");
+					drop(slot);
+					let joined = h.stop_within(std::time::Duration::from_millis(1500));
+					tracing::warn!(
+						alive,
+						flat_ms = flat.as_millis() as u64,
+						joined,
+						"native capture is not encoding → full restart (thread retired{})",
+						if joined { "" } else { ", detached while stuck" }
+					);
+					native_watch.reset();
+					last_native_req = None;
+				}
+			}
+		}
 		#[cfg(windows)]
 		if let Some((disp, bitrate)) =
 			last_native_req.as_ref().and_then(|prev| live_change(prev, &req))
@@ -2302,7 +2344,14 @@ pub(super) fn make_on_stream(
 		// Same for the native capture thread, if the prior (re)stream used it.
 		#[cfg(windows)]
 		if let Some(h) = native_slot.lock().unwrap().take() {
-			h.stop();
+			// Bounded: a thread stuck inside a GPU call must not hang this restream.
+			if !h.stop_within(NATIVE_STOP_WAIT) {
+				tracing::warn!(
+					wait_ms = NATIVE_STOP_WAIT.as_millis() as u64,
+					"native capture thread did not stop in time — detached, restarting anyway"
+				);
+			}
+			native_watch.reset();
 		}
 		// Stop the prior stream's G2 encode-stats reporter (bound to that now-stopped capture)
 		// so it doesn't linger past this restream re-pushing the old, now-frozen encode-ms label
