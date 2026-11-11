@@ -21,6 +21,18 @@ Rules the code relies on that are easy to break. Each has a regression test.
   `scale` properties, **never `transform`** — that would override a dialog's own
   `translate(-50%, -50%)` centring (`Modal.test.ts`).
 
+## Gaming-mode cards (pad navigation)
+
+- A card with its own buttons is a **nav group**: the row gets `data-navgroup`, the card
+  `data-navcard` (both registered with `use:nav.item`). `GamepadNav` moves card to card and
+  never onto the inner buttons; A/Enter **enters** the card (focus → its first inner button),
+  left/right walks the buttons, B/Esc returns to the card. A modal's back handler still wins
+  over leaving the card (`gamepadNav.test.ts`).
+- The card's own action must be its **first inner button** (gaming Home: Connect), so A, A
+  does what one click does. A card without buttons is clicked on A, as before.
+- Taking a device out of gaming Devices (the × or un-starring a card) always goes through the
+  remove confirm (`GamingHome.test.ts`).
+
 ## Text selection
 
 The app is not drag-selectable: `body` has `user-select: none`; inputs, textareas and

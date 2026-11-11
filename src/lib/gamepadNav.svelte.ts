@@ -14,6 +14,12 @@
 // focus is confined to items inside it, and B/Esc run the modal's back handler (pushed
 // via pushBack) instead of the shell's — so the pop-up is fully pad-navigable and the
 // background can't be reached behind it.
+//
+// Cards: a `[data-navgroup]` element (a device card's row) holds ONE `[data-navcard]` item
+// (the card itself) plus inner items (its buttons — connect, star, …). Roving focus moves
+// card to card and never lands on an inner button; A/Enter on a card ENTERS it (focus goes
+// to its first inner button), left/right then walks the buttons, and B/Esc returns to the
+// card. Mouse clicks are unaffected (the card's own click still runs).
 
 import type { NavInput } from '#lib/api.js';
 
@@ -77,6 +83,8 @@ export class GamepadNav {
 	#editing: HTMLSelectElement | null = null;
 	#pending = -1;
 	#pop: HTMLDivElement | null = null;
+	/** The `[data-navgroup]` card currently entered (focus confined to its inner items). */
+	#entered: HTMLElement | null = null;
 	#now = () => (typeof performance !== 'undefined' ? performance.now() : 0);
 
 	constructor(opts: Opts = {}) {
@@ -125,6 +133,7 @@ export class GamepadNav {
 		this.#timer = 0;
 		if (this.#current) this.#current.removeAttribute('data-navfocus');
 		this.#stopEditing();
+		this.#entered = null;
 		// Re-entering gaming mode should again start ring-less until the user navigates.
 		this.#navActive = false;
 	}
@@ -184,16 +193,64 @@ export class GamepadNav {
 		return true;
 	}
 
-	/** Focusable items in the active scope: confined to the open modal if one exists. */
+	/** The entered card group, or null (a group that left the DOM — its device was removed —
+	 * drops the entered state). */
+	#enteredGroup(): HTMLElement | null {
+		if (this.#entered && !this.#entered.isConnected) this.#entered = null;
+		return this.#entered;
+	}
+
+	/** Whether `el` belongs to the active scope: the open modal if any; else the entered
+	 * card's inner items; else everything except cards' inner items. */
+	#inScope(el: HTMLElement, modal: HTMLElement | null, group: HTMLElement | null): boolean {
+		if (modal) return modal.contains(el);
+		const g = innerGroup(el);
+		if (group) return g === group;
+		return !g;
+	}
+
+	/** Focusable items in the active scope (see #inScope). */
 	#candidates(): HTMLElement[] {
 		const modal = this.#modalEl();
-		const all = [...this.#items].filter((el) => this.#focusable(el));
-		return modal ? all.filter((el) => modal.contains(el)) : all;
+		const group = this.#enteredGroup();
+		return [...this.#items].filter((el) => this.#inScope(el, modal, group) && this.#focusable(el));
+	}
+
+	/** Whether focus is currently inside a card (its buttons), i.e. B/Esc would leave it. */
+	get inCard(): boolean {
+		return !!this.#enteredGroup();
+	}
+
+	/** A/Enter on a card: move focus to its first inner item. False when it has none. */
+	#enter(card: HTMLElement): boolean {
+		const group = card.closest<HTMLElement>('[data-navgroup]');
+		if (!group) return false;
+		const first = [...this.#items].find(
+			(el) => innerGroup(el) === group && this.#focusable(el)
+		);
+		if (!first) return false;
+		this.#setCurrent(first);
+		return true;
+	}
+
+	/** B/Esc inside a card: focus the card itself again. */
+	#exitCard() {
+		const group = this.#entered;
+		this.#entered = null;
+		const card = group?.querySelector<HTMLElement>('[data-navcard]');
+		if (card && this.#items.has(card) && this.#focusable(card)) this.#setCurrent(card);
+		else this.focusFirst();
 	}
 
 	#setCurrent(el: HTMLElement) {
 		if (this.#current && this.#current !== el) this.#current.removeAttribute('data-navfocus');
 		this.#current = el;
+		// Focusing a card's button (by entering it, or nav.focus() restoring it after a modal)
+		// enters that card; focusing anything else outside a modal leaves it. A modal opened
+		// from inside a card keeps the card entered, so closing it returns into the card.
+		const g = innerGroup(el);
+		if (g) this.#entered = g;
+		else if (!this.#modalEl()?.contains(el)) this.#entered = null;
 		// The VISIBLE selection ring only shows once the user is navigating (mouse/touch users
 		// never see it). el.focus() still runs so a woken pad/keyboard user can activate it, and
 		// so a modal's first field is focused for typing — but no ring until #navActive.
@@ -274,10 +331,11 @@ export class GamepadNav {
 			this.#stopEditing();
 		}
 		const modal = this.#modalEl();
+		const group = this.#enteredGroup();
 		const cands: Cand[] = [];
 		for (const el of this.#items) {
 			if (!el.isConnected) continue;
-			if (modal && !modal.contains(el)) continue;
+			if (!this.#inScope(el, modal, group)) continue;
 			if (el.closest('[inert]')) continue;
 			const r = el.getBoundingClientRect();
 			if (r.width <= 0 || r.height <= 0) continue;
@@ -421,6 +479,9 @@ export class GamepadNav {
 			} else this.#startEditing(el as HTMLSelectElement);
 			return;
 		}
+		// A card is entered, not clicked (its first inner button is the card's own action, so
+		// A, A still does what one click does). A card without buttons falls back to a click.
+		if (el.hasAttribute('data-navcard') && !this.#modalEl() && this.#enter(el)) return;
 		el.click();
 	}
 
@@ -518,8 +579,12 @@ export class GamepadNav {
 			this.#stopEditing();
 			return;
 		}
-		const fn = this.#backStack.at(-1) ?? this.#opts.onBack;
-		fn?.();
+		// A modal's back handler wins (e.g. a confirm opened from a card's button); then
+		// leaving an entered card; then the shell's back.
+		const top = this.#backStack.at(-1);
+		if (top) return top();
+		if (this.#enteredGroup()) return this.#exitCard();
+		this.#opts.onBack?.();
 	}
 
 	// ---- keyboard fallback ------------------------------------------------
@@ -736,6 +801,13 @@ type Cand = {
 	left: number;
 	right: number;
 };
+
+/** The `[data-navgroup]` card that `el` is an INNER item of (null for the card itself and for
+ * items outside any card). */
+function innerGroup(el: HTMLElement): HTMLElement | null {
+	if (el.hasAttribute('data-navcard')) return null;
+	return el.closest<HTMLElement>('[data-navgroup]');
+}
 
 /** Nearest ancestor of `el` that scrolls vertically (overflow-y auto/scroll), or null. */
 function scrollBox(el: HTMLElement): HTMLElement | null {
