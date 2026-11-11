@@ -37,6 +37,11 @@ pub(crate) enum Surface {
 /// and on Windows show/focus/close/build on a webview window only take effect on the
 /// main thread (off-thread calls silently no-op).
 pub(crate) fn open_or_update(app: &AppHandle, surface: Surface) {
+	// Locked session: no new window (a webview build there wedges the event loop, see
+	// ui_start.rs); an existing one is still updated.
+	if app.get_webview_window(LABEL).is_none() && !crate::ui_start::windows_allowed() {
+		return;
+	}
 	let handle = app.clone();
 	let _ = app.run_on_main_thread(move || {
 		if let Some(win) = handle.get_webview_window(LABEL) {

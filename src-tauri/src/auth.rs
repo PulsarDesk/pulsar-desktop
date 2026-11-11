@@ -361,6 +361,12 @@ pub(crate) fn open_approval_window(
 	peer: &str,
 	pw_status: &str,
 ) -> Option<PopupSlotGuard> {
+	// Locked session: nobody can answer, and building a webview there wedges the event loop
+	// (ui_start.rs). No popup = the password path alone decides, like a failed window.
+	if !crate::ui_start::windows_allowed() {
+		tracing::info!(%peer, "session locked — no approval popup (password only)");
+		return None;
+	}
 	// A relay id is a grouped 9-digit string ("482 913 056"); normalize it to plain
 	// digits for the popup. A DIRECT (relay-less) connect's `peer` is an address like
 	// "192.168.1.5:9000" — digit-stripping that yields meaningless "192168159000", so

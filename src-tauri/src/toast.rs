@@ -121,6 +121,8 @@ fn sync(app: &AppHandle) {
 				let _ = win.set_always_on_top(true);
 				let _ = handle.emit_to(LABEL, "toasts", &list);
 			}
+			// Locked session: no new toast window (ui_start.rs).
+			None if !crate::ui_start::windows_allowed() => {}
 			None => {
 				let init = serde_json::to_string(&list).unwrap_or_else(|_| "[]".into());
 				let built = WebviewWindowBuilder::new(&handle, LABEL, WebviewUrl::App("index.html".into()))

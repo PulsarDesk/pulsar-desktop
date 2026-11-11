@@ -207,6 +207,10 @@ mod webview {
 	}
 
 	fn build(app: &AppHandle) -> Option<tauri::WebviewWindow> {
+		// Locked session: no webview (ui_start.rs); the caller retries every second.
+		if !crate::ui_start::windows_allowed() {
+			return None;
+		}
 		let built = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("remote-cursor.html".into()))
 			.title("Pulsar")
 			.inner_size(W, H)
