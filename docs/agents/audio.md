@@ -32,14 +32,21 @@ A second Opus/RTP stream parallel to video. Implementation lives in
   glided over 10 ms, clamped to ±1. Process loopback keeps running and stays
   the source when: the endpoint is muted or at 0 (nothing to recover; the pad
   audio leaks then, accepted), the default IS a DualSense endpoint, the endpoint
-  capture fails (retried with 2 s…60 s backoff) or isn't 48 kHz, a host-silent
-  redirect is armed (virtual-sink loopback isn't real-time, above), or an
+  capture fails (retried with 2 s…60 s backoff) or isn't 48 kHz, or an
   Include stream (launched game / picked window) runs next to another
   in-process stream on the host (same-host co-op keeps per-app isolation). A
   lone Include stream does switch: it then carries the whole system mix, not
   just the game. Both captures write one encoder through a mux — only the
   active source passes, switched once the endpoint capture delivers PCM, so a
-  switch neither doubles nor gaps. A default-device change restarts the
+  switch never doubles; the old source fades out over 5 ms and the new one in
+  (`SwitchFader`), so it doesn't click. With a **host-silent redirect armed**
+  (game mode's usual case) the default is the virtual sink, whose slider is the
+  host's volume (compensated the same way) and whose loopback isn't real-time
+  (above): it is paced — no silence fill, `DriftResampler` jitter buffer (30 ms
+  target, +5 ms per underrun up to 60 ms, back down after 30 s calm; ratio =
+  measured source rate ±3 % × a ±0.5 % fill trim; crossfaded drop past target +
+  60 ms; faded silence on underrun) drained by a wall-clock pacer in 5 ms
+  blocks. Stats every 10 s: `audio: virtual-sink jitter buffer`. A default-device change restarts the
   endpoint capture on the new id (process loopback meanwhile). The endpoint is
   never opened while muted (latched silence, below). Only the in-process
   encoder path does this; the ffmpeg fallback and surround keep their paths.
