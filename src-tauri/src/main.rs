@@ -204,6 +204,10 @@ fn appimage_host_libva() {
 /// (the Config default) when the file/field is absent, so a fresh install elevates by default.
 #[cfg(windows)]
 fn request_admin_pref() -> bool {
+	// "Kullanıcılar arası ortak Pulsar": the shared files are admin-only, so always elevate.
+	if pulsar_tauri::shared_mode_requires_admin() {
+		return true;
+	}
 	let Some(appdata) = std::env::var_os("APPDATA") else {
 		return true;
 	};

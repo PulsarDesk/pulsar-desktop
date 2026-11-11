@@ -407,6 +407,8 @@ pub(crate) async fn bring_online(
 	relay_password: Option<String>,
 	relay_totp: Option<String>,
 ) -> Result<String, String> {
+	// Shared mode: only the machine-wide host lease holder registers (one host per PC).
+	crate::shared_mode::lease::may_host()?;
 	// Pre-warm ALL encoder probes off the hot path: the first QueryStreamCaps must
 	// answer within the client's 2 s window, but a cold probe chain (one-frame ffmpeg
 	// encodes per backend×codec + the gst pipelines) takes several seconds. Results
@@ -2603,6 +2605,7 @@ pub(crate) async fn bring_online(
 		}
 	};
 	tracing::info!(%id, "go_online: registered with relay");
+	crate::shared_mode::lease::note_registered(&id.grouped());
 	// The relay hands back a durable ACCESS KEY the first time this device satisfies its
 	// password/2FA prompt. Persist it against the relay address so every later launch
 	// registers silently — the prompt is a once-per-device event, not a stored password.
@@ -2685,27 +2688,7 @@ pub(crate) async fn bring_online(
 			// A bare node.take() only drops ONE Arc while serve_handle and every live
 			// session task each hold their own strong clone; those keep the heartbeat
 			// pinging an incompatible relay and the UDP socket bound indefinitely.
-			let state = watch_app.state::<AppState>();
-			let mut teardown_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
-			if let Some(h) = state.serve_task.lock().unwrap().take() {
-				h.abort();
-				teardown_handles.push(h);
-			}
-			for h in state.session_tasks.lock().unwrap().drain(..) {
-				h.abort();
-				teardown_handles.push(h);
-			}
-			for h in teardown_handles {
-				let _ = h.await;
-			}
-			// Second drain — close the teardown-accept race: after serve_task has been
-			// awaited its last synchronous accept→spawn may have pushed a new handle.
-			let late_handles: Vec<_> = state.session_tasks.lock().unwrap().drain(..).collect();
-			for h in late_handles {
-				h.abort();
-				let _ = h.await;
-			}
-			let _ = state.node.lock().unwrap().take();
+			teardown_node(&watch_app.state::<AppState>()).await;
 			// Emit the version-error event — the UI sets online=false and shows the
 			// "update required" message (same text as the initial-register path).
 			let _ = watch_app.emit("node-version-error", ());
@@ -2713,4 +2696,49 @@ pub(crate) async fn bring_online(
 	}
 
 	Ok(id.grouped())
+}
+
+/// Abort the serve loop + every per-session task (awaited, so their `Arc<Node>` clones are
+/// really gone) and drop the node.
+async fn teardown_node(state: &AppState) {
+	let mut teardown_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+	if let Some(h) = state.serve_task.lock().unwrap().take() {
+		h.abort();
+		teardown_handles.push(h);
+	}
+	for h in state.session_tasks.lock().unwrap().drain(..) {
+		h.abort();
+		teardown_handles.push(h);
+	}
+	for h in teardown_handles {
+		let _ = h.await;
+	}
+	// Second drain — close the teardown-accept race: after serve_task has been
+	// awaited its last synchronous accept→spawn may have pushed a new handle.
+	let late_handles: Vec<_> = state.session_tasks.lock().unwrap().drain(..).collect();
+	for h in late_handles {
+		h.abort();
+		let _ = h.await;
+	}
+	let _ = state.node.lock().unwrap().take();
+}
+
+/// Take this host fully offline (shared mode: the session lost the machine-wide host lease,
+/// another session's Pulsar takes over with the same identity). Caller holds
+/// `AppState::go_online_lock`. Silences + drops the LAN beacon too, so two instances never
+/// announce the same key.
+pub(crate) async fn go_offline(app: &AppHandle) {
+	let state = app.state::<AppState>();
+	let disc = state.discovery.lock().unwrap().take();
+	if let Some(d) = disc {
+		d.set_id(None).await;
+		d.set_paused(true);
+	}
+	teardown_node(&state).await;
+	handlers::reset_redirect_all();
+	crate::auth::preauth::clear_all();
+	state
+		.node_port
+		.store(0, std::sync::atomic::Ordering::SeqCst);
+	let _ = app.emit("node-port", 0u16);
 }

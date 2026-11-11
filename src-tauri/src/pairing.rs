@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use pulsar_core::service::{Credential, DataMsg};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter};
 
 /// One trusted client.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,10 +227,7 @@ pub(crate) fn pair_decision(via: AuthVia) -> PairDecision {
 static STORE_LOCK: Mutex<()> = Mutex::new(());
 
 fn store_path(app: &AppHandle) -> PathBuf {
-	app.path()
-		.app_config_dir()
-		.unwrap_or_else(|_| PathBuf::from("."))
-		.join("paired_devices.json")
+	crate::util::data_dir(app).join("paired_devices.json")
 }
 
 fn now_ms() -> u64 {

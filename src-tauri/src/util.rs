@@ -31,21 +31,23 @@ static PEERS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 pub(crate) static AUTO_CONNECT: std::sync::OnceLock<Option<AutoConnect>> =
 	std::sync::OnceLock::new();
 
-pub(crate) fn config_path(app: &AppHandle) -> PathBuf {
-	app.path()
-		.app_config_dir()
-		.unwrap_or_else(|_| PathBuf::from("."))
-		.join("config.json")
+/// The dir holding Pulsar's data files (config, identity, pairings, pins, saved creds): the
+/// per-user app config dir, or `%ProgramData%\Pulsar\shared` in shared mode
+/// (`shared_mode.rs`, Settings → Genel → "Kullanıcılar arası ortak Pulsar").
+pub(crate) fn data_dir(app: &AppHandle) -> PathBuf {
+	crate::shared_mode::data_dir(app.path().app_config_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
-/// Per-user file holding this device's persistent X25519 identity (32 secret
-/// bytes). Lives in the per-user app config dir, so the relay-assigned device ID is
-/// stable across restarts and distinct per OS user (ASTER seats stay separate).
+pub(crate) fn config_path(app: &AppHandle) -> PathBuf {
+	data_dir(app).join("config.json")
+}
+
+/// File holding this device's persistent X25519 identity (32 secret bytes). Per-user mode:
+/// the per-user app config dir, so the relay-assigned device ID is stable across restarts and
+/// distinct per OS user (ASTER / Duo seats stay separate). Shared mode: one machine identity
+/// in the admin-only shared dir (see `data_dir`).
 pub(crate) fn identity_path(app: &AppHandle) -> PathBuf {
-	app.path()
-		.app_config_dir()
-		.unwrap_or_else(|_| PathBuf::from("."))
-		.join("identity.key")
+	data_dir(app).join("identity.key")
 }
 
 /// Per-user file pinning each connected device id → the X25519 public key we first
@@ -57,10 +59,7 @@ pub(crate) fn identity_path(app: &AppHandle) -> PathBuf {
 /// client would transparently trust it. Pinning the key here lets `connect_pinned`
 /// hard-fail a later connect whose key changed, instead of silently substituting it.
 fn known_peers_path(app: &AppHandle) -> PathBuf {
-	app.path()
-		.app_config_dir()
-		.unwrap_or_else(|_| PathBuf::from("."))
-		.join("known_peers.json")
+	data_dir(app).join("known_peers.json")
 }
 
 /// Compose the `known_peers.json` map key from a relay endpoint and a device id.

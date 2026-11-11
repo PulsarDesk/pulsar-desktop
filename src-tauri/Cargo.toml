@@ -108,6 +108,9 @@ windows-sys = { version = "0.61", features = [
 	"Win32_System_Power", # link_hint: GetSystemPowerStatus (on battery?)
 	"Win32_System_RemoteDesktop", # ui_start: WTSSessionInfoEx lock state (defer the webview while locked)
 	"Win32_System_StationsAndDesktops", # ui_start: OpenInputDesktop name (Winlogon = locked / secure desktop)
+	"Win32_Security_Authorization", # shared_mode: SDDL → protected ACL on %ProgramData%\Pulsar, owner check
+	"Win32_Storage_FileSystem", # shared_mode: CreateDirectoryW with a security descriptor, reparse-point check
+	"Win32_System_Com", # shared_mode: CoTaskMemFree for SHGetKnownFolderPath(FOLDERID_ProgramData)
 ] }
 # Self-avatar resolution (avatar.rs): decode the account picture / wallpaper, center-crop
 # + downscale (same pipeline as the Linux block below).

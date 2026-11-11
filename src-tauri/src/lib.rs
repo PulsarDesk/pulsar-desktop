@@ -48,6 +48,8 @@ mod native_audio;
 mod native_view;
 mod focus_gate;
 mod headless;
+// "Kullanıcılar arası ortak Pulsar": machine-wide identity/config + one host per PC.
+mod shared_mode;
 mod pad_wake;
 mod link_hint;
 mod play;
@@ -131,6 +133,11 @@ pub fn ds5_bridge(secs: Option<u64>) -> i32 {
 
 // Headless `pulsar --selftest` (bundled media stack check; CI runs it on the AppImage).
 mod selftest;
+/// main.rs, before Tauri starts: the machine is in shared mode, so Pulsar must run elevated.
+pub fn shared_mode_requires_admin() -> bool {
+	shared_mode::requires_admin()
+}
+
 pub fn selftest() -> i32 {
 	selftest::run()
 }
@@ -368,6 +375,9 @@ pub fn run() {
 		instance_unix::signal_existing_instance();
 		return;
 	}
+	// Per-user or machine-wide ("Kullanıcılar arası ortak Pulsar") data — decided before any
+	// path is resolved; may set up %ProgramData%\Pulsar on an elevated first launch.
+	let _ = shared_mode::resolved();
 	// A per-user pulsar-setup install left behind by the first in-app update (the updater
 	// installs per-machine): point its shortcuts here and remove it.
 	legacy_install::migrate_in_background();
@@ -394,6 +404,8 @@ pub fn run() {
 			// if the build fails) it's deferred/retried and the host goes online without it.
 			// Also sets the display scale for the native renderer's overlay.
 			crate::ui_start::start(app.handle());
+			// Shared mode: the machine-wide host lease (one host per PC, follows the active session).
+			crate::shared_mode::lease::start(app.handle().clone());
 
 			// Re-launching a tray-hidden Pulsar should surface this instance (a second
 			// process detects the single-instance lock + signals us).
@@ -736,6 +748,10 @@ pub fn run() {
 			twofa::totp_begin,
 			twofa::totp_verify,
 			pairing::list_paired_devices,
+			shared_mode::shared_mode_status,
+			shared_mode::set_shared_mode,
+			shared_mode::shared_peers_get,
+			shared_mode::shared_peers_set,
 			pairing::revoke_paired_device,
 			device_creds::device_creds,
 			device_creds::get_device_password,

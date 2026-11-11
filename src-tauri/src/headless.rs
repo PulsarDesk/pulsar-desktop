@@ -64,6 +64,19 @@ pub(crate) fn needs_user(err: &str) -> bool {
 	err.starts_with("RELAY_AUTH_REQUIRED")
 		|| err == "RELAY_AUTH_FAILED"
 		|| err.contains("incompatible protocol version")
+		// Shared mode standby / no access: the lease thread restarts this loop when this
+		// session takes the machine-wide host lease (`restart`).
+		|| err.starts_with("SHARED_")
+}
+
+/// Shared mode: this session just took the machine-wide host lease. The UI (if up) gets the
+/// `shared-host` event and calls `go_online`; without a UI, run the headless loop again.
+pub(crate) fn restart(app: AppHandle, why: &'static str) {
+	if ui_called() {
+		return;
+	}
+	STARTED.store(false, Ordering::SeqCst);
+	start(app, why);
 }
 
 /// Start the headless registration loop (idempotent). Retries 3 s → 12 s like the UI's
