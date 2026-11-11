@@ -303,7 +303,12 @@ static VIDEO_MAIN: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsi
 static VIDEO_FRAC: Mutex<Option<(f32, f32, f32, f32)>> = Mutex::new(None);
 
 pub fn set_video_frac(x0: f32, y0: f32, x1: f32, y1: f32) {
-	*VIDEO_FRAC.lock().unwrap_or_else(|e| e.into_inner()) = Some((x0, y0, x1, y1));
+	let next = Some((x0, y0, x1, y1));
+	let prev = std::mem::replace(&mut *VIDEO_FRAC.lock().unwrap_or_else(|e| e.into_inner()), next);
+	// The picture area moved (letterbox / stretch / rotation change): re-clip right away.
+	if prev != next && ENGAGED.load(Ordering::SeqCst) {
+		request_reclip(None);
+	}
 }
 
 /// The on-screen rectangle (screen px, LTRB) the video is actually drawn in: the renderer
@@ -371,39 +376,68 @@ fn content_rect() -> Option<(i32, i32, i32, i32)> {
 		}
 		(tl.x, tl.y, br.x, br.y, None)
 	};
-	let (w, h) = ((r - l) as f32, (b - t) as f32);
-	if w < 8.0 || h < 8.0 {
-		return None;
-	}
-	let (fx0, fy0, fx1, fy1) = match frac {
-		Some((a, b2, c, d)) if c > a && d > b2 => (a.clamp(0.0, 1.0), b2.clamp(0.0, 1.0), c.clamp(0.0, 1.0), d.clamp(0.0, 1.0)),
-		_ => (0.0, 0.0, 1.0, 1.0),
+	let rect = super::confine::video_rect((l, t, r, b), frac)?;
+	// Trim to the virtual desktop (all monitors): Windows keeps the clip intersected with
+	// it, so an untrimmed rect would never match GetClipCursor (see reassert_confine).
+	use windows_sys::Win32::UI::WindowsAndMessaging::{
+		GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
 	};
-	let rect = (
-		l + (w * fx0).round() as i32,
-		t + (h * fy0).round() as i32,
-		l + (w * fx1).round() as i32,
-		t + (h * fy1).round() as i32,
-	);
-	if rect.2 - rect.0 < 8 || rect.3 - rect.1 < 8 {
-		return None;
+	let (vx, vy, vw, vh) = unsafe {
+		(
+			GetSystemMetrics(SM_XVIRTUALSCREEN),
+			GetSystemMetrics(SM_YVIRTUALSCREEN),
+			GetSystemMetrics(SM_CXVIRTUALSCREEN),
+			GetSystemMetrics(SM_CYVIRTUALSCREEN),
+		)
+	};
+	if vw <= 0 || vh <= 0 {
+		return Some(rect);
 	}
-	Some(rect)
+	super::confine::intersect(rect, (vx, vy, vx + vw, vy + vh))
+		.filter(|r| r.2 - r.0 >= super::confine::MIN_SIDE && r.3 - r.1 >= super::confine::MIN_SIDE)
 }
 
 /// Re-measure the video rect and re-apply the clip (the OS drops ClipCursor on focus and
-/// display changes; the window can move, resize or go fullscreen). Runs from hook_thread's
-/// timer — never inside a hook callback. No-op when not confined.
+/// display changes; the window can move, resize or go fullscreen). Runs on hook_thread —
+/// from its 100 ms safety-net timer, the window/foreground WinEvents and the LL mouse hook's
+/// overshoot request — and on the Interception thread; never inside an LL hook callback.
+/// Only calls ClipCursor when the clip in force differs from the video rect. No-op when not
+/// confined.
 fn reassert_confine() {
 	use windows_sys::Win32::Foundation::RECT;
-	use windows_sys::Win32::UI::WindowsAndMessaging::ClipCursor;
-	if CONFINE.lock().unwrap().is_none() {
+	use windows_sys::Win32::UI::WindowsAndMessaging::{ClipCursor, GetClipCursor};
+	if CONFINE.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
 		return;
 	}
 	let Some((l, t, r, b)) = content_rect() else {
 		return;
 	};
-	*CONFINE.lock().unwrap() = Some((l, t, r, b));
+	{
+		let mut c = CONFINE.lock().unwrap_or_else(|e| e.into_inner());
+		if c.is_none() {
+			return; // released while we measured
+		}
+		*c = Some((l, t, r, b));
+	}
+	let mut cur: RECT = unsafe { std::mem::zeroed() };
+	let have = unsafe { GetClipCursor(&mut cur) } != 0;
+	if have && (cur.left, cur.top, cur.right, cur.bottom) == (l, t, r, b) {
+		return;
+	}
+	// Rate-limited diagnostic: how often Windows dropped/changed our clip.
+	static REAPPLIED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+	static LAST_LOG_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+	let n = REAPPLIED.fetch_add(1, Ordering::Relaxed) + 1;
+	let now = now_ms();
+	if n == 1 || now.saturating_sub(LAST_LOG_MS.load(Ordering::Relaxed)) >= 2000 {
+		LAST_LOG_MS.store(now, Ordering::Relaxed);
+		tracing::info!(
+			n,
+			was = ?(cur.left, cur.top, cur.right, cur.bottom),
+			rect = ?(l, t, r, b),
+			"cursor clip lost or stale while engaged — re-applied"
+		);
+	}
 	let rc = RECT {
 		left: l,
 		top: t,
@@ -412,6 +446,59 @@ fn reassert_confine() {
 	};
 	unsafe {
 		ClipCursor(&rc);
+	}
+}
+
+/// hook_thread's id (the PostThreadMessage target for `request_reclip`). 0 = not running.
+static HOOK_TID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// Thread message: re-assert the clip now (and move the cursor back inside, see RECLIP_POS).
+const WM_RECLIP: u32 = windows_sys::Win32::UI::WindowsAndMessaging::WM_APP + 0x31;
+/// A WM_RECLIP is already queued — coalesces a burst of overshooting moves into one post.
+static RECLIP_QUEUED: AtomicBool = AtomicBool::new(false);
+/// Where the cursor must be put after the re-clip (the clamped spot of the last overshooting
+/// move), packed by `confine::pack_pos`; valid only while RECLIP_HAS_POS is set (every u64,
+/// incl. u64::MAX = (-1, -1), is a real position).
+static RECLIP_POS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static RECLIP_HAS_POS: AtomicBool = AtomicBool::new(false);
+
+/// Ask hook_thread to re-assert the clip as soon as the current hook callback returns —
+/// safe to call from inside the LL mouse callback (it only posts a message) and from any
+/// other thread (renderer stats reader, Tauri commands).
+fn request_reclip(pos: Option<(i32, i32)>) {
+	if let Some((x, y)) = pos {
+		RECLIP_POS.store(super::confine::pack_pos(x, y), Ordering::SeqCst);
+		RECLIP_HAS_POS.store(true, Ordering::SeqCst);
+	}
+	let tid = HOOK_TID.load(Ordering::SeqCst);
+	if tid != 0
+		&& !RECLIP_QUEUED.swap(true, Ordering::SeqCst)
+		&& unsafe { PostThreadMessageW(tid, WM_RECLIP, 0, 0) } == 0
+	{
+		RECLIP_QUEUED.store(false, Ordering::SeqCst);
+	}
+}
+
+/// hook_thread's WM_RECLIP handler: re-clip, then put the cursor on the clamped spot of the
+/// overshooting move that was suppressed (so a swipe still reaches — and slides along — the
+/// edge instead of stopping one delta short). SetCursorPos is injected input, which our LL
+/// hook passes through untouched.
+fn handle_reclip() {
+	RECLIP_QUEUED.store(false, Ordering::SeqCst);
+	let has_pos = RECLIP_HAS_POS.swap(false, Ordering::SeqCst);
+	let pos = RECLIP_POS.load(Ordering::SeqCst);
+	if !ENGAGED.load(Ordering::SeqCst) {
+		return;
+	}
+	reassert_confine();
+	if has_pos && !POINTER_LOCK.load(Ordering::SeqCst) {
+		let rect = *CONFINE.lock().unwrap_or_else(|e| e.into_inner());
+		if let Some(rect) = rect {
+			let (x, y) = super::confine::unpack_pos(pos);
+			let (x, y) = super::confine::clamp_into(rect, x, y);
+			unsafe {
+				windows_sys::Win32::UI::WindowsAndMessaging::SetCursorPos(x, y);
+			}
+		}
 	}
 }
 
@@ -428,7 +515,7 @@ fn clear_confine() {
 /// Confine the cursor to the VIDEO itself while engaged — the picture area of the renderer
 /// window (letterbox bars excluded), so the pointer can neither leave Pulsar nor wander onto
 /// the app's own tabs/chrome; Ctrl+Alt+Z / 3xRightCtrl release it. `on=false` frees it
-/// (ClipCursor(NULL)). The rect is re-measured by `reassert_confine` every 500 ms.
+/// (ClipCursor(NULL)). The rect is re-measured by `reassert_confine` (events + 100 ms timer).
 fn confine_to_video(app: &AppHandle, on: bool) {
 	use tauri::Manager as _;
 	use windows_sys::Win32::Foundation::{HWND, RECT};
@@ -1218,6 +1305,13 @@ fn handle_mouse_wh(msg: u32, x: i32, y: i32, data: u32) -> bool {
 	if !ENGAGED.load(Ordering::SeqCst) {
 		return false; // disengaged → local mouse untouched (click-to-engage gate)
 	}
+	// Pointer lock: the raw-input deltas drive the host; keep the local cursor still (a
+	// game's view would otherwise also follow the absolute position). Decided BEFORE the
+	// globals try_lock below — a busy lock used to let the move through, so the local cursor
+	// crept (and on a fast swipe escaped) while the host had the pointer locked.
+	if msg == WM_MOUSEMOVE && POINTER_LOCK.load(Ordering::SeqCst) {
+		return true;
+	}
 	// try_lock, never block: this runs inside the WH_MOUSE_LL callback (see ll_keyboard_proc
 	// on why a stalled LL callback is fatal). Busy lock → drop this one event, still
 	// suppressing it locally while engaged (a lost move is invisible, the next one lands).
@@ -1234,19 +1328,24 @@ fn handle_mouse_wh(msg: u32, x: i32, y: i32, data: u32) -> bool {
 	// (keys never reached the remote, Ctrl+Alt+Z / 3×RightCtrl dead). The confine is
 	// re-asserted from hook_thread's timer instead, outside any hook callback.
 	match msg {
-		// Pointer lock: the raw-input deltas drive the host; keep the local cursor still (a
-		// game's view would otherwise also follow the absolute position).
-		WM_MOUSEMOVE if POINTER_LOCK.load(Ordering::SeqCst) => return true,
 		WM_MOUSEMOVE => {
 			// Normalize against the VIDEO rect (the same one the cursor is clipped to): the
 			// main window's client area also holds the tab bar, which skewed the remote
 			// pointer. try_lock: never block in the hook callback.
 			let video = CONFINE.try_lock().ok().and_then(|c| *c);
-			if let Some((l, t, r, b)) = video.filter(|(l, t, r, b)| r - l > 1 && b - t > 1) {
+			if let Some(rect) = video.filter(|(l, t, r, b)| r - l > 1 && b - t > 1) {
 				drop(g);
-				let nx = ((x - l) as f64 / (r - l - 1) as f64).clamp(0.0, 1.0);
-				let ny = ((y - t) as f64 / (b - t - 1) as f64).clamp(0.0, 1.0);
+				let (nx, ny) = super::confine::normalize(rect, x, y);
 				fwd(&tx, InputEvent::PointerMotion { x: nx, y: ny });
+				if !super::confine::contains(rect, x, y) {
+					// The move would leave the video: Windows dropped our clip (focus flap,
+					// another app's ClipCursor, display change) and the safety-net timer has
+					// not caught it yet. Suppress it — the cursor stays inside — and have
+					// hook_thread re-clip and park the cursor on the edge right after this
+					// callback (ClipCursor/SetCursorPos must not run in here, see above).
+					request_reclip(Some(super::confine::clamp_into(rect, x, y)));
+					return true;
+				}
 				return false;
 			}
 			// Normalize the absolute screen position against the video window's client rect.
@@ -1642,13 +1741,45 @@ fn hook_thread() {
 		let my_tid = GetCurrentThreadId();
 		tracing::debug!(tid = my_tid, kbd_tid, mouse_ok = !mouse_hook.is_null(), "kbd: LL hooks installed");
 		globals().lock().unwrap().hook_thread_id = my_tid;
+		HOOK_TID.store(my_tid, Ordering::SeqCst);
+		RECLIP_QUEUED.store(false, Ordering::SeqCst);
+		// Event-driven re-clip: our windows moving/resizing/minimizing/restoring (DPI and
+		// display changes move them too) and a desktop switch (UAC / secure desktop / lock
+		// screen drop every clip). The foreground case is in foreground_event.
+		let my_pid = windows_sys::Win32::System::Threading::GetCurrentProcessId();
+		let win_hooks = [
+			// EVENT_SYSTEM_MOVESIZESTART..EVENT_SYSTEM_MINIMIZEEND (0x000A..0x0017), ours only.
+			(0x000Au32, 0x0017u32, my_pid),
+			// EVENT_OBJECT_LOCATIONCHANGE, ours only (the callback keeps OBJID_WINDOW only).
+			(0x800B, 0x800B, my_pid),
+			// EVENT_SYSTEM_DESKTOPSWITCH, system-wide.
+			(0x0020, 0x0020, 0),
+		]
+		.map(|(lo, hi, pid)| {
+			windows_sys::Win32::UI::Accessibility::SetWinEventHook(
+				lo,
+				hi,
+				std::ptr::null_mut(),
+				Some(reclip_event),
+				pid,
+				0,
+				windows_sys::Win32::UI::WindowsAndMessaging::WINEVENT_OUTOFCONTEXT,
+			)
+		});
 		let mut msg: MSG = std::mem::zeroed();
 		// Re-assert the cursor confine from here (outside any hook callback — see handle_mouse_wh).
-		let timer = SetTimer(std::ptr::null_mut(), 0, 500, None);
+		// 100 ms safety net behind the event-driven re-clips (cheap: no ClipCursor call unless
+		// the clip in force differs). It was 500 ms and the only re-assert on the hook path, so
+		// after Windows dropped the clip a fast swipe had half a second to leave the video.
+		let timer = SetTimer(std::ptr::null_mut(), 0, 100, None);
 		// Fast tick that closes a forwarded touchpad pinch once its steps stop.
 		let pinch_timer = SetTimer(std::ptr::null_mut(), 0, 50, None);
 		// GetMessageW returns 0 on WM_QUIT, -1 on error.
 		while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+			if msg.message == WM_RECLIP && msg.hwnd.is_null() {
+				handle_reclip();
+				continue;
+			}
 			if msg.message == WM_TIMER && pinch_timer != 0 && msg.wParam == pinch_timer {
 				pinch_end(false);
 				continue;
@@ -1681,6 +1812,12 @@ fn hook_thread() {
 		if !fg_hook.is_null() {
 			windows_sys::Win32::UI::Accessibility::UnhookWinEvent(fg_hook);
 		}
+		for h in win_hooks {
+			if !h.is_null() {
+				windows_sys::Win32::UI::Accessibility::UnhookWinEvent(h);
+			}
+		}
+		let _ = HOOK_TID.compare_exchange(my_tid, 0, Ordering::SeqCst, Ordering::SeqCst);
 		if kbd_tid != 0 {
 			PostThreadMessageW(kbd_tid, WM_QUIT, 0, 0);
 		}
@@ -1715,6 +1852,11 @@ unsafe extern "system" fn foreground_event(
 		FgOwner::Ours => {
 			APP_FOCUSED.store(true, Ordering::SeqCst);
 			try_pending_engage();
+			// A foreground change resets the cursor clip — the engage click on the renderer
+			// child (another process) does it too. Put it back at once, not on the next tick.
+			if ENGAGED.load(Ordering::SeqCst) {
+				reassert_confine();
+			}
 		}
 		FgOwner::Other { pid, class } => {
 			if ENGAGED.load(Ordering::SeqCst) {
@@ -1726,6 +1868,27 @@ unsafe extern "system" fn foreground_event(
 		}
 		FgOwner::None => {}
 	}
+}
+
+/// Window move/size/minimize + desktop-switch WinEvents (out-of-context, on hook_thread's
+/// pump): re-clip while engaged. LOCATIONCHANGE also fires for carets and the cursor, so only
+/// whole-window changes (OBJID_WINDOW = 0, CHILDID_SELF = 0) count.
+unsafe extern "system" fn reclip_event(
+	_hook: windows_sys::Win32::UI::Accessibility::HWINEVENTHOOK,
+	event: u32,
+	hwnd: windows_sys::Win32::Foundation::HWND,
+	id_object: i32,
+	id_child: i32,
+	_thread: u32,
+	_time: u32,
+) {
+	if !ENGAGED.load(Ordering::SeqCst) {
+		return;
+	}
+	if event == 0x800B && (hwnd.is_null() || id_object != 0 || id_child != 0) {
+		return;
+	}
+	reassert_confine();
 }
 
 /// The keyboard-only LL hook thread: install, pump, uninstall on WM_QUIT (posted by

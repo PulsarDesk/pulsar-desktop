@@ -65,6 +65,8 @@ pub fn overlay_suspend(_suspend: bool) {}
 #[cfg(not(any(windows, target_os = "linux")))]
 pub fn set_focused(_focused: bool) {}
 
+#[cfg(any(windows, test))]
+mod confine;
 #[cfg(windows)]
 mod imp;
 #[cfg(windows)]
