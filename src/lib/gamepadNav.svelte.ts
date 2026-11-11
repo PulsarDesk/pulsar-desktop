@@ -10,6 +10,12 @@
 // in-session forwarding): it only runs while the app shell — not a live session — is
 // focused, so it never competes with controller input being sent to a host.
 //
+// Focus: a pad never drives the menu while another app is focused. The gilrs bridge is gated
+// in Rust (`focus_gate`: it knows the native video window and the Linux kiosk, and sends
+// "all released" meanwhile); the browser Gamepad API fallback here checks
+// `document.hasFocus()`, and after refocus waits until the pad was let go once, so a button
+// still held from the other app doesn't click anything.
+//
 // Modal scoping: when a `[data-navmodal]` element is in the DOM (the connect pop-up),
 // focus is confined to items inside it, and B/Esc run the modal's back handler (pushed
 // via pushBack) instead of the shell's — so the pop-up is fully pad-navigable and the
@@ -66,6 +72,8 @@ export class GamepadNav {
 	 * has arrived recently. */
 	#bridge: NavInput | null = null;
 	#bridgeAt = 0;
+	/** Browser-pad fallback: the app was unfocused; ignore the pad until it was let go once. */
+	#refocusBlocked = false;
 	/** Resting axis values for the browser-Gamepad-API fallback, snapshotted when a pad
 	 * first appears, so a D-pad reported as an axis is read as DEVIATION from rest (a
 	 * trigger that rests off-center can't masquerade as a held direction). */
@@ -668,12 +676,26 @@ export class GamepadNav {
 		};
 	}
 
+	/** The browser-pad fallback, gated on app focus (see the header). */
+	#focusedBrowserPad(): NavInput | null {
+		if (typeof document !== 'undefined' && !document.hasFocus()) {
+			this.#refocusBlocked = true;
+			return null;
+		}
+		const inp = this.#readBrowserPad();
+		if (this.#refocusBlocked) {
+			if (inp && Object.values(inp).some(Boolean)) return null;
+			this.#refocusBlocked = false;
+		}
+		return inp;
+	}
+
 	#tick() {
 		const now = this.#now();
 		// Prefer the gilrs bridge (works on every platform; the only path on Linux). Fall
 		// back to the browser Gamepad API only if no bridge event has arrived recently.
 		const inp =
-			this.#bridge && now - this.#bridgeAt < 600 ? this.#bridge : this.#readBrowserPad();
+			this.#bridge && now - this.#bridgeAt < 600 ? this.#bridge : this.#focusedBrowserPad();
 		if (!inp) {
 			this.#dirHeld = null;
 			this.#prevInp = null;

@@ -109,6 +109,9 @@ export interface UiSettings {
 	tray: boolean;
 	/** Pad Guide/PS button brings a hidden/background Pulsar forward in gaming mode. */
 	padWake: boolean;
+	/** Controller input reaches the host while another app is focused (Moonlight's
+	 * "process gamepad input in the background"). Off by default. */
+	padBackground: boolean;
 	/** Two-way clipboard sync with every open session (viewed and hosted). On by default;
 	 * also switchable from the session overlay. */
 	clipboardSync: boolean;
@@ -232,6 +235,7 @@ const DEFAULTS: UiSettings = {
 	unattended: true,
 	tray: true,
 	padWake: false,
+	padBackground: false,
 	clipboardSync: true,
 	debug: false,
 	// Off by default (2026-11-08): pacing buffers ~1-2 frames — latency the maintainer would

@@ -104,6 +104,14 @@ pub fn is_engaged() -> bool {
 	RUNNING.load(Ordering::SeqCst) && ENGAGED.load(Ordering::SeqCst)
 }
 
+/// Pulsar is the focused app for the controller gates (`focus_gate`): the same focus the
+/// evdev capture obeys, and a kiosk launch (`--connect`, e.g. the Orange Pi player) always —
+/// it is the only app, and GNOME may never send it a focus event (also before the first
+/// session, for the gaming-home pad nav).
+pub fn app_focused() -> bool {
+	is_focused() || KIOSK_ENGAGE.load(Ordering::SeqCst)
+}
+
 pub fn input_active() -> bool {
 	ENGAGED.load(Ordering::SeqCst) && is_focused() && !SUSPENDED.load(Ordering::SeqCst)
 }

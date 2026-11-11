@@ -370,8 +370,11 @@ export const api = {
 	/** Control: disarm the low-level keyboard hook (release / blur / leave combo). */
 	kbdCaptureStop: () => kbdSerial(() => invoke<void>('kbd_capture_stop')),
 	/** Control (Linux native): explicit click-to-engage — the user clicked the session
-	 * video (the pass-through container let the click reach the webview). */
-	kbdEngage: () => kbdSerial(() => invoke<void>('kbd_engage')),
+	 * video (the pass-through container let the click reach the webview). `auto` = not a
+	 * click (game mode's connect-time engage): engages only while Pulsar is the focused app,
+	 * otherwise once it gets the focus. */
+	kbdEngage: (auto = false) =>
+		kbdSerial(() => (auto ? invoke<void>('kbd_engage', { auto }) : invoke<void>('kbd_engage'))),
 	/** Control (Windows native): relay a key edge the webview saw (evdev code) to the capture's
 	 * key handler — the fallback for machines where the OS keyboard hook isn't called while
 	 * Pulsar's window has focus. Combos (Ctrl+Alt+Z etc.) are decided on the Rust side. */
@@ -410,6 +413,9 @@ export const api = {
 	 * handler knows whether to hide-to-tray (enabled=true) or quit (enabled=false). */
 	setTray: (enabled: boolean) => invoke<void>('set_tray', { enabled }),
 	setPadWake: (enabled: boolean) => invoke<void>('set_pad_wake', { enabled }),
+	/** Background controller input (Settings → General): the pad keeps driving the host
+	 * while another app is focused. Off = the host gets a released pad. */
+	setPadBackground: (enabled: boolean) => invoke<void>('set_pad_background', { enabled }),
 	/** Settings → Güvenlik 2FA: a fresh TOTP secret + its QR for the enrollment dialog. */
 	totpBegin: () => invoke<import('./api.types').TotpSetup>('totp_begin'),
 	/** Whether `code` is the current authenticator code for `secret` (enrollment proof). */

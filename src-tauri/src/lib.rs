@@ -45,6 +45,7 @@ mod legacy_install;
 mod kbdhook;
 mod native_audio;
 mod native_view;
+mod focus_gate;
 mod pad_wake;
 mod link_hint;
 mod play;
@@ -86,7 +87,7 @@ use commands::{
 	list_audio_sources, list_remote_games, list_remote_sources, coop_status, open_coop_dir, local_ip, log_dir_path, new_password, node_port,
 	open_log_dir, publish_games, run_command, scan_folder, self_update_possible, session_password,
 	set_config, set_controller_emulation, set_controller_order, set_controller_rumble, set_ds5_headset_volume, set_ds5_settings,
-	set_disabled_controllers, set_host_serving, set_language, set_pad_wake, set_stream_settings, set_tray,
+	set_disabled_controllers, set_host_serving, set_language, set_pad_background, set_pad_wake, set_stream_settings, set_tray,
 	steam_path, test_controller_rumble, webview_sw_painted,
 };
 use connections::{list_connections, set_view_only, show_connections};
@@ -143,7 +144,9 @@ static WIN_FOCUS: std::sync::Mutex<Option<std::collections::HashMap<String, bool
 
 /// Recompute the OR of all per-window focus states and push it to the capture gate.
 fn refresh_focus_gate(map: &std::collections::HashMap<String, bool>) {
-	kbdhook::set_focused(map.values().any(|f| *f));
+	let any = map.values().any(|f| *f);
+	focus_gate::set_window_focused(any);
+	kbdhook::set_focused(any);
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -645,6 +648,7 @@ pub fn run() {
 			set_stream_settings,
 			set_tray,
 			set_pad_wake,
+			set_pad_background,
 			set_host_serving,
 			gamepad_nav_start,
 			gamepad_nav_stop,

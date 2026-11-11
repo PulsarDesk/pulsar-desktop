@@ -623,6 +623,7 @@
 		// would otherwise hide-to-tray for a user who disabled it, leaving a ghost process.
 		api.setTray(ui.tray).catch(() => {});
 		api.setPadWake(ui.padWake).catch(() => {});
+		api.setPadBackground(ui.padBackground).catch(() => {});
 		api.setDs5Settings($state.snapshot(ui.ds5)).catch(() => {});
 		api.setClipboardSync(ui.clipboardSync).catch(() => {});
 		await goOnline();

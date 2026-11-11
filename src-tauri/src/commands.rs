@@ -786,6 +786,13 @@ pub(crate) fn set_pad_wake(enabled: bool) {
 	crate::pad_wake::set_enabled(enabled);
 }
 
+/// Sync the "background controller input" preference (Settings → General, default off):
+/// the pad keeps driving the host while another app is focused. See `focus_gate`.
+#[tauri::command]
+pub(crate) fn set_pad_background(enabled: bool) {
+	crate::focus_gate::set_background_input(enabled);
+}
+
 /// Enable/disable this device's HOST role from the UI. `serving = false` (set when the
 /// app enters gaming mode — a pure-client personality) makes the host serve loop reject
 /// every inbound connection at auth time, before any Allow/Deny popup, so nobody can
@@ -855,6 +862,7 @@ pub(crate) fn gamepad_nav_start(app: AppHandle, state: State<'_, AppState>) {
 		const T: i16 = 16_000; // ~0.5 stick deflection
 		let mut prev: Option<NavInput> = None;
 		let mut beat: u32 = 0;
+		let mut latch = crate::focus_gate::RefocusLatch::default();
 		while flag.load(Ordering::SeqCst) && gen.load(Ordering::SeqCst) == my_gen {
 			// Mimic the old (kind, state) snapshot shape so the nav mapping below is unchanged.
 			let pads: Vec<(
@@ -879,6 +887,10 @@ pub(crate) fn gamepad_nav_start(app: AppHandle, state: State<'_, AppState>) {
 					rb: st.is_pressed(button::RB),
 				})
 				.unwrap_or_default();
+			// Another app is focused: the menu ignores the pad (all released), and after
+			// refocus only once everything was let go (a held A must not click in Pulsar).
+			let any = nav != NavInput::default();
+			let nav = if latch.pass(crate::focus_gate::app_focused(), any) { nav } else { NavInput::default() };
 			// Emit on change, plus a ~4 Hz heartbeat so a late subscriber still syncs.
 			beat = beat.wrapping_add(1);
 			if prev.as_ref() != Some(&nav) || beat % 16 == 0 {
@@ -912,7 +924,15 @@ pub(crate) fn spawn_guide_watcher(app: AppHandle) {
 		let mut prev_a: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
 		loop {
 			let snap = mgr.snapshot();
-			crate::split_join::tick(&app, &snap, &mut prev_a);
+			// "Press A to join" is in-app pad UI: not while another app is focused (the A
+			// state is still tracked, so a press held across the refocus doesn't join).
+			if crate::focus_gate::app_focused() {
+				crate::split_join::tick(&app, &snap, &mut prev_a);
+			} else {
+				for p in &snap {
+					prev_a.insert(p.uuid.clone(), p.state.is_pressed(button::A));
+				}
+			}
 			// Any connected pad's GUIDE/PS/Home button counts (the user may pick up any pad).
 			let down = snap.iter().any(|p| p.state.is_pressed(button::GUIDE));
 			if down && !prev_down {

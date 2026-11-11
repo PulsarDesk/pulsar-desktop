@@ -1542,6 +1542,11 @@ pub(crate) async fn start_remote_play(
 					// falling back to pads.first() when order is empty (default / single pad).
 					let p1 = order.first().and_then(|u0| pads.iter().find(|p| &p.uuid == u0)).or_else(|| pads.first());
 					let overlay_open = ov_open.lock().unwrap().contains(&play_id);
+					// Focus gate (focus_gate.rs): another app focused → the pad UI below (combos,
+					// overlay nav) ignores the pad, and the host gets a released state unless
+					// background controller input is on. Rumble/haptics to the pad keep playing.
+					let app_focused = crate::focus_gate::app_focused();
+					let forward_ok = app_focused || crate::focus_gate::background_input();
 						// Controller overlay toggle: Moonlight's Select+L1+R1+X combo (all four held)
 						// opens/closes the overlay — the pad equivalent of the keyboard Ctrl+Shift+M
 						// (Moonlight uses this exact combo for its stats overlay). Rising edge of the
@@ -1556,7 +1561,9 @@ pub(crate) async fn start_remote_play(
 									&& s.is_pressed(bt::X)
 							})
 							.unwrap_or(false);
-						if ov_combo && !prev_overlay_combo {
+						// Unfocused: track the combo without firing, so one still held when Pulsar
+						// regains focus doesn't fire either.
+						if ov_combo && !prev_overlay_combo && app_focused {
 							let _ = ov_app.emit("overlay-toggle", ());
 						}
 						prev_overlay_combo = ov_combo;
@@ -1574,7 +1581,7 @@ pub(crate) async fn start_remote_play(
 									&& s.is_pressed(bt::RB)
 							})
 							.unwrap_or(false);
-						if quit_combo && !prev_quit_combo {
+						if quit_combo && !prev_quit_combo && app_focused {
 							let _ = ov_app.emit("kbd-leave", ());
 						}
 						prev_quit_combo = quit_combo;
@@ -1604,7 +1611,7 @@ pub(crate) async fn start_remote_play(
 						if let Some(si) = ctrls_stdin.lock().unwrap().as_mut() {
 							use std::io::Write as _;
 							for i in 0..6 {
-								if nav[i] && !prev_nav[i] {
+								if nav[i] && !prev_nav[i] && app_focused {
 									// `k <key>` = a relayed nav keypress for the overlay (renderer
 									// top-level arm). One egui key event per pad rising edge.
 									let _ = writeln!(si, "k {}", keys[i]);
@@ -1727,7 +1734,9 @@ pub(crate) async fn start_remote_play(
 						// DISABLED pad (user toggled it off): forward a NEUTRAL state instead of the
 						// real input so held buttons/sticks reach the host as released; the
 						// send-on-change gate then suppresses further sends until re-enabled.
-						let eff_state = if crate::controllers::is_controller_disabled(uuid) {
+						// Same for every pad while Pulsar isn't focused (focus gate above): one released
+						// state reaches the host, then the keepalive repeats it until focus returns.
+						let eff_state = if crate::controllers::is_controller_disabled(uuid) || !forward_ok {
 							pulsar_core::input::GamepadState::default()
 						} else {
 							*state

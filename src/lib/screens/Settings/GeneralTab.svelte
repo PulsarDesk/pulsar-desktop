@@ -138,6 +138,10 @@
 	<button class="toggle" aria-label={t('settings.padWake')} class:on={ui.padWake} aria-pressed={ui.padWake} onclick={() => { ui.padWake = !ui.padWake; saveUi(); api.setPadWake(ui.padWake).catch(() => {}); }}><span class="knob"></span></button>
 </div>
 <div class="srow">
+	<div class="st"><b>{t('settings.padBackground')}</b><span>{t('settings.padBackgroundDesc')}</span></div>
+	<button class="toggle" aria-label={t('settings.padBackground')} class:on={ui.padBackground} aria-pressed={ui.padBackground} onclick={() => { ui.padBackground = !ui.padBackground; saveUi(); api.setPadBackground(ui.padBackground).catch(() => {}); }}><span class="knob"></span></button>
+</div>
+<div class="srow">
 	<div class="st"><b>{t('settings.clipboardSync')}</b><span>{t('settings.clipboardSyncDesc')}</span></div>
 	<button class="toggle" aria-label={t('settings.clipboardSync')} class:on={ui.clipboardSync} aria-pressed={ui.clipboardSync} onclick={() => { ui.clipboardSync = !ui.clipboardSync; saveUi(); api.setClipboardSync(ui.clipboardSync).catch(() => {}); }}><span class="knob"></span></button>
 </div>

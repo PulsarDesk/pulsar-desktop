@@ -282,6 +282,8 @@
 	"settings.languageDesc": "Uygulamanın arayüz dili",
 	"settings.padWake": "Kolla uyandır",
 	"settings.padWakeDesc": "Pulsar arka plandayken, simge durumundayken ya da tepside gizliyken kolun PS / Xbox tuşu onu öne getirir ve oyun moduna geçer",
+	"settings.padBackground": "Arka planda kol girdisi",
+	"settings.padBackgroundDesc": "Başka bir uygulama öndeyken de kol uzak bilgisayarı kontrol etmeye devam eder. Kapalıyken Pulsar odakta değilse kol bırakılmış sayılır",
 	"settings.gamingTitle": "Oyun Ayarları",
 	"settings.gamingSub": "Oyun modu yalnızca istemcidir: burada sadece bağlanırken kullanılan ayarlar var. Normal moddaki ayarlar (host, güvenlik) farklı olabilir.",
 	"settings.gamingAllSub": "Tüm ayarlar gösteriliyor; host ve güvenlik ayarları normal modla ortaktır.",

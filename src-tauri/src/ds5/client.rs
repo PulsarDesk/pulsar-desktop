@@ -40,6 +40,22 @@ use super::headset::{notice_key, notice_text as headset_notice, PadHeadset};
 use super::hid::{enumerate, Ds5Device, SdlHid};
 use super::policy::{notice_text, PadPolicy};
 
+/// `r` with every control let go — sticks centred, triggers, buttons (PS / touchpad click /
+/// mute included) and both touch points up. Motion + timestamps stay as read, so the host
+/// sees a pad lying still rather than a jump.
+fn released(r: Ds5Report) -> Ds5Report {
+	let mut s = r.0;
+	s[0..4].fill(0x80); // LX LY RX RY
+	s[4] = 0; // L2
+	s[5] = 0; // R2
+	s[7] = 0x08; // hat neutral, no face buttons
+	s[8] = 0; // L1 R1 L2 R2 create options L3 R3
+	s[9] = 0; // PS, touchpad click, mute (+ Edge paddles / Fn)
+	s[32] |= 0x80; // touch point 0 lifted
+	s[36] |= 0x80; // touch point 1 lifted
+	Ds5Report(s)
+}
+
 /// Least gap between two `Ds5Input` sends (250 Hz).
 const INPUT_GAP: Duration = Duration::from_millis(4);
 /// Send the input at least this often even if unchanged (keepalive, like `GamepadSlot`).
@@ -421,7 +437,10 @@ impl PadCtx {
 					break;
 				}
 			}
-			if let Some(r) = latest {
+			// Focus gate (focus_gate.rs): while another app is focused the host gets this
+			// pad as released (keepalive keeps repeating it); host output still plays.
+			let gated = (!crate::focus_gate::pad_forward_allowed()).then(|| latest.map(released)).flatten();
+			if let Some(r) = gated.or(latest) {
 				let due = match sent {
 					Some((last, at)) => {
 						at.elapsed() >= INPUT_GAP && (last != r || at.elapsed() >= INPUT_KEEPALIVE)
@@ -465,5 +484,36 @@ impl PadCtx {
 		let _ = pad.poll(Instant::now() + Duration::from_millis(10), &mut hid);
 		crate::controllers::clear_ds5_input(&self.dev.path);
 		tracing::info!(slot, "ds5 client: pad released");
+	}
+}
+
+#[cfg(test)]
+mod focus_tests {
+	use super::released;
+	use pulsar_core::input::ds5::report::STATE_LEN;
+	use pulsar_core::input::ds5::wire::Ds5Report;
+
+	#[test]
+	fn released_report_lets_every_control_go() {
+		let mut s = [0u8; STATE_LEN];
+		s[0..4].copy_from_slice(&[0x00, 0xff, 0x10, 0xe0]); // sticks deflected
+		s[4] = 0xff; // L2
+		s[5] = 0x80; // R2
+		s[6] = 0x42; // sequence counter
+		s[7] = 0x20 | 0x02; // cross + hat right
+		s[8] = 0x03; // L1 R1
+		s[9] = 0x01; // PS
+		s[15] = 0x55; // gyro byte
+		s[32] = 0x05; // touch 0 down (bit 7 clear)
+		s[36] = 0x86; // touch 1 already up
+		let r = released(Ds5Report(s)).0;
+		assert_eq!(&r[0..4], &[0x80; 4]);
+		assert_eq!((r[4], r[5]), (0, 0));
+		assert_eq!(r[7], 0x08, "hat neutral, no face buttons");
+		assert_eq!((r[8], r[9]), (0, 0));
+		assert_eq!(r[32] & 0x80, 0x80);
+		assert_eq!(r[36], 0x86);
+		assert_eq!((r[6], r[15]), (0x42, 0x55), "counter + motion untouched");
+		assert_eq!(released(Ds5Report(r)).0, r, "idempotent");
 	}
 }

@@ -74,7 +74,7 @@ pub use imp::{disable, enable, overlay_suspend, set_focused};
 mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::{
-	arm_kiosk_engage, disable, enable, engage, engage_render, input_active, is_engaged,
+	app_focused, arm_kiosk_engage, disable, enable, engage, engage_render, input_active, is_engaged,
 	overlay_suspend, release, set_focused, set_render_focused,
 };
 
