@@ -24,12 +24,12 @@ Rules the code relies on that are easy to break. Each has a regression test.
 ## Gaming-mode cards (pad navigation)
 
 - A card with its own buttons is a **nav group**: the row gets `data-navgroup`, the card
-  `data-navcard` (both registered with `use:nav.item`). `GamepadNav` moves card to card and
-  never onto the inner buttons; A/Enter **enters** the card (focus → its first inner button),
-  left/right walks the buttons, B/Esc returns to the card. A modal's back handler still wins
-  over leaving the card (`gamepadNav.test.ts`).
-- The card's own action must be its **first inner button** (gaming Home: Connect), so A, A
-  does what one click does. A card without buttons is clicked on A, as before.
+  `data-navcard` (both registered with `use:nav.item`). In `GamepadNav`, up/down and left move
+  card to card (the card itself — never another card's buttons, the original "left landed on
+  the other card's star" bug). Right from a card walks into ITS buttons, then on to the next
+  card; left inside the buttons walks back to the card. A on a card clicks it (connects).
+  B/Esc on a button returns to its card, on a card runs the shell's back; a modal's back
+  handler wins over both (`gamepadNav.test.ts`).
 - Taking a device out of gaming Devices (the × or un-starring a card) always goes through the
   remove confirm (`GamingHome.test.ts`).
 

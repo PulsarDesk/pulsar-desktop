@@ -16,10 +16,10 @@
 // background can't be reached behind it.
 //
 // Cards: a `[data-navgroup]` element (a device card's row) holds ONE `[data-navcard]` item
-// (the card itself) plus inner items (its buttons — connect, star, …). Roving focus moves
-// card to card and never lands on an inner button; A/Enter on a card ENTERS it (focus goes
-// to its first inner button), left/right then walks the buttons, and B/Esc returns to the
-// card. Mouse clicks are unaffected (the card's own click still runs).
+// (the card itself) plus inner items (its buttons — star, remove, …). Up/down and left go
+// card to card (the card itself, never another card's buttons). Right from a card walks into
+// ITS buttons, then on to the next card; left inside the buttons walks back to the card.
+// B/Esc on a button returns to its card. A on a card clicks it (connects), as everywhere.
 
 import type { NavInput } from '#lib/api.js';
 
@@ -83,8 +83,6 @@ export class GamepadNav {
 	#editing: HTMLSelectElement | null = null;
 	#pending = -1;
 	#pop: HTMLDivElement | null = null;
-	/** The `[data-navgroup]` card currently entered (focus confined to its inner items). */
-	#entered: HTMLElement | null = null;
 	#now = () => (typeof performance !== 'undefined' ? performance.now() : 0);
 
 	constructor(opts: Opts = {}) {
@@ -133,7 +131,6 @@ export class GamepadNav {
 		this.#timer = 0;
 		if (this.#current) this.#current.removeAttribute('data-navfocus');
 		this.#stopEditing();
-		this.#entered = null;
 		// Re-entering gaming mode should again start ring-less until the user navigates.
 		this.#navActive = false;
 	}
@@ -193,64 +190,45 @@ export class GamepadNav {
 		return true;
 	}
 
-	/** The entered card group, or null (a group that left the DOM — its device was removed —
-	 * drops the entered state). */
-	#enteredGroup(): HTMLElement | null {
-		if (this.#entered && !this.#entered.isConnected) this.#entered = null;
-		return this.#entered;
-	}
-
-	/** Whether `el` belongs to the active scope: the open modal if any; else the entered
-	 * card's inner items; else everything except cards' inner items. */
-	#inScope(el: HTMLElement, modal: HTMLElement | null, group: HTMLElement | null): boolean {
-		if (modal) return modal.contains(el);
-		const g = innerGroup(el);
-		if (group) return g === group;
-		return !g;
+	/** Whether `el` belongs to the active scope: confined to the open modal if one exists. */
+	#inScope(el: HTMLElement, modal: HTMLElement | null): boolean {
+		return modal ? modal.contains(el) : true;
 	}
 
 	/** Focusable items in the active scope (see #inScope). */
 	#candidates(): HTMLElement[] {
 		const modal = this.#modalEl();
-		const group = this.#enteredGroup();
-		return [...this.#items].filter((el) => this.#inScope(el, modal, group) && this.#focusable(el));
+		return [...this.#items].filter((el) => this.#inScope(el, modal) && this.#focusable(el));
 	}
 
-	/** Whether focus is currently inside a card (its buttons), i.e. B/Esc would leave it. */
+	/** Whether focus is on one of a card's buttons (B/Esc would return to the card). */
 	get inCard(): boolean {
-		return !!this.#enteredGroup();
+		return !!this.#current?.isConnected && !!innerGroup(this.#current) && !this.#modalEl();
 	}
 
-	/** A/Enter on a card: move focus to its first inner item. False when it has none. */
-	#enter(card: HTMLElement): boolean {
-		const group = card.closest<HTMLElement>('[data-navgroup]');
-		if (!group) return false;
-		const first = [...this.#items].find(
-			(el) => innerGroup(el) === group && this.#focusable(el)
-		);
-		if (!first) return false;
-		this.#setCurrent(first);
-		return true;
+	/** The card (`[data-navcard]`) of a group, if registered and visible. */
+	#cardOf(group: HTMLElement): HTMLElement | null {
+		const card = group.querySelector<HTMLElement>('[data-navcard]');
+		return card && this.#items.has(card) && this.#focusable(card) ? card : null;
 	}
 
-	/** B/Esc inside a card: focus the card itself again. */
-	#exitCard() {
-		const group = this.#entered;
-		this.#entered = null;
-		const card = group?.querySelector<HTMLElement>('[data-navcard]');
-		if (card && this.#items.has(card) && this.#focusable(card)) this.#setCurrent(card);
+	/** A group's visible inner buttons, in DOM order. */
+	#innerOf(group: HTMLElement): HTMLElement[] {
+		return [...this.#items]
+			.filter((el) => innerGroup(el) === group && this.#focusable(el))
+			.sort((x, y) => (x.compareDocumentPosition(y) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1));
+	}
+
+	/** B/Esc on a card's button: focus the card itself again. */
+	#exitCard(group: HTMLElement) {
+		const card = this.#cardOf(group);
+		if (card) this.#setCurrent(card);
 		else this.focusFirst();
 	}
 
 	#setCurrent(el: HTMLElement) {
 		if (this.#current && this.#current !== el) this.#current.removeAttribute('data-navfocus');
 		this.#current = el;
-		// Focusing a card's button (by entering it, or nav.focus() restoring it after a modal)
-		// enters that card; focusing anything else outside a modal leaves it. A modal opened
-		// from inside a card keeps the card entered, so closing it returns into the card.
-		const g = innerGroup(el);
-		if (g) this.#entered = g;
-		else if (!this.#modalEl()?.contains(el)) this.#entered = null;
 		// The VISIBLE selection ring only shows once the user is navigating (mouse/touch users
 		// never see it). el.focus() still runs so a woken pad/keyboard user can activate it, and
 		// so a modal's first field is focused for typing — but no ring until #navActive.
@@ -331,11 +309,29 @@ export class GamepadNav {
 			this.#stopEditing();
 		}
 		const modal = this.#modalEl();
-		const group = this.#enteredGroup();
+		// Card groups (outside a modal): walk the current card's buttons with left/right.
+		// Everything else (up/down, leaving the buttons, left from a card) moves between
+		// CARDS — inner buttons are never a spatial target, and the geometry is measured
+		// from the card, not the button.
+		let origin = this.#current;
+		if (!modal && this.#current?.isConnected) {
+			const cur = this.#current;
+			const group = innerGroup(cur) ?? (cur.hasAttribute('data-navcard') ? cur.closest<HTMLElement>('[data-navgroup]') : null);
+			if (group) {
+				const btns = this.#innerOf(group);
+				const i = btns.indexOf(cur); // -1 on the card itself
+				if (dir === 'right' && i + 1 < btns.length) return this.#setCurrent(btns[i + 1]);
+				if (dir === 'left' && i > 0) return this.#setCurrent(btns[i - 1]);
+				const card = this.#cardOf(group);
+				if (dir === 'left' && i === 0 && card) return this.#setCurrent(card);
+				if (card) origin = card;
+			}
+		}
 		const cands: Cand[] = [];
 		for (const el of this.#items) {
 			if (!el.isConnected) continue;
-			if (!this.#inScope(el, modal, group)) continue;
+			if (!this.#inScope(el, modal)) continue;
+			if (!modal && el !== origin && innerGroup(el)) continue;
 			if (el.closest('[inert]')) continue;
 			const r = el.getBoundingClientRect();
 			if (r.width <= 0 || r.height <= 0) continue;
@@ -351,7 +347,7 @@ export class GamepadNav {
 		}
 		if (cands.length === 0) return;
 		// No current, or current left the scope (e.g. a modal just opened) → snap to first.
-		const from = this.#current ? cands.find((c) => c.el === this.#current) : undefined;
+		const from = origin ? cands.find((c) => c.el === origin) : undefined;
 		if (!from) {
 			this.#setCurrent(cands[0].el);
 			return;
@@ -479,9 +475,6 @@ export class GamepadNav {
 			} else this.#startEditing(el as HTMLSelectElement);
 			return;
 		}
-		// A card is entered, not clicked (its first inner button is the card's own action, so
-		// A, A still does what one click does). A card without buttons falls back to a click.
-		if (el.hasAttribute('data-navcard') && !this.#modalEl() && this.#enter(el)) return;
 		el.click();
 	}
 
@@ -580,10 +573,11 @@ export class GamepadNav {
 			return;
 		}
 		// A modal's back handler wins (e.g. a confirm opened from a card's button); then
-		// leaving an entered card; then the shell's back.
+		// a card's button returns to its card; then the shell's back.
 		const top = this.#backStack.at(-1);
 		if (top) return top();
-		if (this.#enteredGroup()) return this.#exitCard();
+		const group = this.#current?.isConnected ? innerGroup(this.#current) : null;
+		if (group) return this.#exitCard(group);
 		this.#opts.onBack?.();
 	}
 

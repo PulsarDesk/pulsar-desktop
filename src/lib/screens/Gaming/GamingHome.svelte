@@ -148,7 +148,7 @@
 								<span class="rid mono">{fmtPeerId(d.id)}</span>
 							</span>
 						</button>
-						<div class="ractions">{@render go(d.id, d.name)}{@render star(d.id, d.name)}</div>
+						<div class="ractions">{@render star(d.id, d.name)}</div>
 					</div>
 				{/each}
 			</div>
@@ -180,7 +180,6 @@
 							</span>
 						</button>
 						<div class="ractions">
-							{@render go(r.id, r.name)}
 							{@render star(r.id, r.name)}
 							<button
 								class="ract"
@@ -230,7 +229,6 @@
 						</span>
 					</button>
 					<div class="ractions">
-						{@render go(p.id, p.name)}
 						<button
 							class="ract"
 							use:navItem
@@ -268,17 +266,6 @@
 	>
 {/snippet}
 
-{#snippet go(id: string, name: string)}
-	<!-- The card's own action as its first inner button: A on a card enters it and lands here,
-	     so A, A connects. Only shown while the card holds focus (mouse users click the card). -->
-	<button
-		class="ract rgo"
-		use:navItem
-		title={t('gaming.connect')}
-		aria-label={t('gaming.connect')}
-		onclick={() => onPickHost(id, name)}><Icon name="connect" size={14} /></button
-	>
-{/snippet}
 
 {#if idPick}
 	<ConnectModal
@@ -587,17 +574,8 @@
 	.rstar.on {
 		color: var(--accent);
 	}
-	/* Connect button: only while the card (or one of its buttons) holds focus — the pad needs
-	   it inside an entered card; on hover the card itself is the click target. */
-	.rgo {
-		display: none;
-	}
-	.rrow:focus-within .rgo,
-	.rrow:has(:global([data-navfocus])) .rgo {
-		display: grid;
-	}
-	/* An entered card (focus on one of its buttons) keeps an accent edge, so it is clear which
-	   card the buttons belong to. */
+	/* While the pad focus is on one of a card's buttons the card keeps an accent edge, so it
+	   is clear which card the buttons belong to. */
 	.rrow:has(.ract:global([data-navfocus])) .rcard {
 		border-color: var(--accent);
 	}

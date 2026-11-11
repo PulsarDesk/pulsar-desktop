@@ -21,17 +21,17 @@ const focused = () => document.querySelector('[data-navfocus]')?.textContent;
 function layout(nav: GamepadNav) {
 	const root = document.createElement('div');
 	document.body.appendChild(root);
-	const cards: { card: HTMLButtonElement; go: HTMLButtonElement; star: HTMLButtonElement }[] = [];
+	const cards: { card: HTMLButtonElement; star: HTMLButtonElement; rm: HTMLButtonElement }[] = [];
 	for (const [i, x] of [0, 230].entries()) {
 		const row = document.createElement('div');
 		row.setAttribute('data-navgroup', '');
 		root.appendChild(row);
 		const card = box(btn(`card${i + 1}`, row), x, 0, 220, 60);
 		card.setAttribute('data-navcard', '');
-		const go = box(btn(`go${i + 1}`, row), x + 150, 16, 28, 28);
-		const star = box(btn(`star${i + 1}`, row), x + 184, 16, 28, 28);
-		for (const el of [card, go, star]) nav.item(el);
-		cards.push({ card, go, star });
+		const star = box(btn(`star${i + 1}`, row), x + 150, 16, 28, 28);
+		const rm = box(btn(`rm${i + 1}`, row), x + 184, 16, 28, 28);
+		for (const el of [card, star, rm]) nav.item(el);
+		cards.push({ card, star, rm });
 	}
 	const row3 = document.createElement('div');
 	row3.setAttribute('data-navgroup', '');
@@ -54,87 +54,100 @@ describe('GamepadNav card groups', () => {
 		document.body.innerHTML = '';
 	});
 
-	it('moves card to card, never onto a card’s inner buttons', () => {
+	it('right walks into the card’s own buttons, then on to the next card itself', () => {
 		layout(nav);
 		key(nav, 'ArrowRight'); // first input only reveals the ring at the default
 		expect(focused()).toBe('card1');
-		key(nav, 'ArrowRight'); // go1/star1 sit closer, but the next CARD wins
+		key(nav, 'ArrowRight');
+		expect(focused()).toBe('star1');
+		key(nav, 'ArrowRight');
+		expect(focused()).toBe('rm1');
+		key(nav, 'ArrowRight'); // past the last button: the next CARD, not its buttons
 		expect(focused()).toBe('card2');
 		key(nav, 'ArrowRight');
+		expect(focused()).toBe('star2');
+		key(nav, 'ArrowRight');
+		key(nav, 'ArrowRight'); // nothing further right: stays
+		expect(focused()).toBe('rm2');
+	});
+
+	it('left walks back through the buttons to the card, and never into another card’s buttons', () => {
+		const { cards } = layout(nav);
+		key(nav, 'ArrowRight'); // wake on card1
+		nav.focus(cards[1].rm);
+		key(nav, 'ArrowLeft');
+		expect(focused()).toBe('star2');
+		key(nav, 'ArrowLeft');
 		expect(focused()).toBe('card2');
+		key(nav, 'ArrowLeft'); // rm1/star1 sit closer, but the previous CARD wins
+		expect(focused()).toBe('card1');
 		key(nav, 'ArrowLeft');
 		expect(focused()).toBe('card1');
+	});
+
+	it('up/down go card to card, from a card or from its buttons', () => {
+		const { cards } = layout(nav);
+		key(nav, 'ArrowRight'); // wake on card1
+		key(nav, 'ArrowRight'); // star1
 		key(nav, 'ArrowDown');
+		expect(focused()).toBe('card3');
+		key(nav, 'ArrowUp');
+		expect(focused()).toBe('card1');
+		nav.focus(cards[1].rm);
+		key(nav, 'ArrowDown'); // measured from card2: the card below-left, not a button
 		expect(focused()).toBe('card3');
 	});
 
-	it('Enter enters a card, arrows walk its buttons, Escape returns to the card', () => {
-		const { cards } = layout(nav);
+	it('A on a card clicks it (connects); A on a button clicks the button', () => {
+		const { cards, bare } = layout(nav);
 		const cardClick = vi.fn();
+		const starClick = vi.fn();
+		const bareClick = vi.fn();
 		cards[0].card.addEventListener('click', cardClick);
-		key(nav, 'ArrowRight'); // wake on card1
-		key(nav, 'Enter');
-		expect(cardClick).not.toHaveBeenCalled(); // entered, not activated
-		expect(focused()).toBe('go1');
-		expect(nav.inCard).toBe(true);
+		cards[0].star.addEventListener('click', starClick);
+		bare.addEventListener('click', bareClick);
+		key(nav, 'Enter'); // a cold A wakes on the default and clicks it
+		expect(cardClick).toHaveBeenCalledOnce();
 		key(nav, 'ArrowRight');
-		expect(focused()).toBe('star1');
-		key(nav, 'ArrowRight'); // confined to the card: card2 is not reachable from inside
-		expect(focused()).toBe('star1');
+		key(nav, 'Enter');
+		expect(starClick).toHaveBeenCalledOnce();
+		expect(cardClick).toHaveBeenCalledOnce();
 		key(nav, 'ArrowDown');
-		expect(focused()).toBe('star1');
-		key(nav, 'ArrowLeft');
-		expect(focused()).toBe('go1');
-		const goClick = vi.fn();
-		cards[0].go.addEventListener('click', goClick);
-		key(nav, 'Enter'); // A on an inner button clicks it
-		expect(goClick).toHaveBeenCalledOnce();
+		key(nav, 'Enter');
+		expect(bareClick).toHaveBeenCalledOnce();
+	});
+
+	it('B/Esc on a button returns to its card; on a card it runs the shell’s back; a modal wins', () => {
+		const onBack = vi.fn();
+		nav.setOpts({ onBack });
+		layout(nav);
+		key(nav, 'ArrowRight'); // card1
+		key(nav, 'ArrowRight'); // star1
+		key(nav, 'ArrowRight'); // rm1
+		expect(nav.inCard).toBe(true);
+		const close = vi.fn();
+		nav.pushBack(close); // e.g. the remove confirm opened from rm1
+		key(nav, 'Escape');
+		expect(close).toHaveBeenCalledOnce();
+		expect(focused()).toBe('rm1');
+		nav.popBack(close);
 		key(nav, 'Escape');
 		expect(focused()).toBe('card1');
 		expect(nav.inCard).toBe(false);
-		key(nav, 'ArrowRight');
-		expect(focused()).toBe('card2');
+		expect(onBack).not.toHaveBeenCalled();
+		key(nav, 'Escape');
+		expect(onBack).toHaveBeenCalledOnce();
 	});
 
-	it('a card without buttons is clicked on Enter', () => {
-		const { bare } = layout(nav);
-		const click = vi.fn();
-		bare.addEventListener('click', click);
-		key(nav, 'ArrowDown'); // wake on card1
-		key(nav, 'ArrowDown');
-		expect(focused()).toBe('card3');
-		key(nav, 'Enter');
-		expect(click).toHaveBeenCalledOnce();
-	});
-
-	it('a modal’s back handler wins over leaving the card; the card stays entered', () => {
+	it('a removed card no longer counts as focus inside a card', () => {
 		const onBack = vi.fn();
 		nav.setOpts({ onBack });
 		const { cards } = layout(nav);
 		key(nav, 'ArrowRight');
-		key(nav, 'Enter');
 		key(nav, 'ArrowRight'); // star1
-		const close = vi.fn();
-		nav.pushBack(close);
-		key(nav, 'Escape');
-		expect(close).toHaveBeenCalledOnce();
-		expect(focused()).toBe('star1');
-		nav.popBack(close);
-		nav.focus(cards[0].star); // what the confirm does on cancel
-		expect(nav.inCard).toBe(true);
-		key(nav, 'Escape');
-		expect(focused()).toBe('card1');
-		key(nav, 'Escape'); // outside a card: the shell's back
-		expect(onBack).toHaveBeenCalledOnce();
-	});
-
-	it('leaves the entered state when the card is removed', () => {
-		const { cards } = layout(nav);
-		key(nav, 'ArrowRight');
-		key(nav, 'Enter');
 		cards[0].card.parentElement!.remove();
 		expect(nav.inCard).toBe(false);
-		nav.focusFirst();
-		expect(focused()).toBe('card2');
+		key(nav, 'Escape');
+		expect(onBack).toHaveBeenCalledOnce();
 	});
 });

@@ -56,8 +56,8 @@ describe('Gaming home — devices star', () => {
 		expect(rows.length).toBe(2); // the recent + the Devices entry
 		for (const r of rows) {
 			expect(r.querySelectorAll('[data-navcard]').length).toBe(1);
-			// The card's own action is its first inner button (A, A = connect).
-			expect(r.querySelector('.ractions button')).toHaveAccessibleName('Bağlan');
+			// No extra Connect button: A on the card itself connects.
+			expect(within(r as HTMLElement).queryByRole('button', { name: 'Bağlan' })).toBeNull();
 		}
 	});
 });
