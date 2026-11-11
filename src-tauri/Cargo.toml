@@ -94,6 +94,8 @@ windows-sys = { version = "0.61", features = [
 	"Win32_UI_Input", # kbdhook: raw mouse deltas while the host holds a pointer lock
 	"Win32_UI_Input_KeyboardAndMouse",
 	"Win32_Devices_Display", # util: QueryDisplayConfig — the configured refresh under Dynamic refresh rate
+	"Win32_Devices_DeviceAndDriverInstallation", # ds5/endpoint.rs: CfgMgr32 container-id match of a USB DualSense to its audio endpoints
+	"Win32_Devices_Properties", # ds5/endpoint.rs: DEVPKEY_Device_ContainerId / InstanceId / FriendlyName
 	"Win32_UI_Shell", # main.rs: ShellExecuteW("runas") to relaunch elevated (request_admin / UAC)
 	"Win32_System_Threading", # also load-bearing for JOBOBJECT_EXTENDED_LIMIT_INFORMATION (IO_COUNTERS)
 	"Win32_System_JobObjects", # job.rs: kill orphaned ffmpeg/ffplay when Pulsar dies (needs Threading + Security)

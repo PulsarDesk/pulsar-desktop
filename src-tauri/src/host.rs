@@ -2283,6 +2283,11 @@ pub(crate) async fn go_online(
 						let ds5_host = ds5_host.clone();
 						move |m| ds5_host.on_data(m)
 					}),
+					// DualSense pad mic (TAG_DS5 media from the client) → the slot's virtual pad.
+					on_ds5_media: Box::new({
+						let ds5_host = ds5_host.clone();
+						move |p| ds5_host.on_media(p)
+					}),
 					// The client's adaptive controller's per-window feedback (Phase 0 / 2.4):
 					// logged next to the host's own encode stats, and the one input to the FEC
 					// parity sizing (Phase 2.1) — the forwarder reads `fec_n` live. The parity is

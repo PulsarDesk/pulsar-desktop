@@ -119,6 +119,24 @@ impl HostPad {
 			Self::Duo(_) => {}
 		}
 	}
+
+	/// Mic jitter buffer of the virtual pad. Duo's pad has no audio device: no-op.
+	pub fn set_mic_prebuffer(&self, ms: u32) {
+		match self {
+			Self::Usbip(p) => p.set_mic_prebuffer(ms),
+			#[cfg(windows)]
+			Self::Duo(_) => {}
+		}
+	}
+
+	/// Pad-mic audio (48 kHz stereo s16) for the game. Duo's pad has no audio device: dropped.
+	pub fn push_mic(&self, pcm: &[i16]) {
+		match self {
+			Self::Usbip(p) => p.push_mic(pcm),
+			#[cfg(windows)]
+			Self::Duo(_) => {}
+		}
+	}
 }
 
 #[cfg(test)]

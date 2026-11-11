@@ -6,6 +6,11 @@
 //! - Host → client: the game's output state as `DataMsg::Ds5Output` (on change + 500 ms
 //!   refresh, with OS volume merged in), and haptics + pad-speaker Opus as `TAG_DS5`
 //!   media slots (`Ds5Media::Slot`), one per 10.667 ms.
+//! - Pad mic: when a game opens the virtual pad's mic (`Ds5HostEvent::MicOpen`) and the
+//!   client allows it (`Ds5Caps`), the client is told with `DataMsg::Ds5Mic` (refreshed
+//!   every second while on). Its mic arrives as `TAG_DS5` `Ds5Media::Mic` Opus (48 kHz
+//!   mono, 10 ms) through `DataHandlers::on_ds5_media` → [`Ds5Host::on_media`], is decoded
+//!   here and fed to the virtual pad's mic (stereo, behind a 40 ms jitter buffer).
 //!
 //! Pads are dropped (usbip detach) when the client disconnects the slot or the session
 //! ends. `FEAT_DS5` is advertised only when a backend can work (`host_duo.rs`: usbip-win2 /
@@ -18,6 +23,7 @@ use std::time::{Duration, Instant};
 
 use pulsar_core::input::ds5::bt_audio::SpeakerOut;
 use pulsar_core::input::ds5::haptics::Frame;
+use pulsar_core::input::ds5::mic::{mono_to_stereo, MicAnnouncer, MicSeq, MIC_FRAME};
 use pulsar_core::input::ds5::report::SetState;
 use pulsar_core::input::ds5::virtual_pad::{local_mac, Ds5HostEvent, VirtualDs5Config};
 use pulsar_core::input::ds5::wire::{Ds5Media, Ds5Report};
@@ -37,6 +43,60 @@ const STATE_REFRESH: Duration = Duration::from_millis(500);
 /// time out (doubled audio, 2026-11-11). A 3 s late pad costs nothing in a game.
 const PLUG_DELAY: Duration = Duration::from_secs(3);
 
+/// Mic jitter buffer on the virtual pad (network arrival is bursty).
+const MIC_PREBUFFER_MS: u32 = 40;
+/// Lost mic packets in a row that Opus conceals; a longer gap is left silent.
+const MIC_MAX_CONCEAL: u64 = 3;
+
+/// Decoder side of one slot's pad mic.
+struct MicRx {
+	dec: Option<opus::Decoder>,
+	seq: MicSeq,
+	pcm: Vec<i16>,
+	packets: u64,
+}
+
+impl MicRx {
+	fn new() -> Self {
+		Self {
+			dec: None,
+			seq: MicSeq::default(),
+			pcm: vec![0; MIC_FRAME * 6],
+			packets: 0,
+		}
+	}
+
+	/// One Opus packet → 48 kHz stereo s16 for `push_mic` (with concealment of a short gap
+	/// before it).
+	fn decode(&mut self, seq: u16, opus: &[u8], out: &mut Vec<i16>) {
+		let lost_before = self.seq.lost;
+		if !self.seq.accept(seq) {
+			return;
+		}
+		if self.dec.is_none() {
+			self.dec = opus::Decoder::new(48_000, opus::Channels::Mono)
+				.map_err(|e| tracing::warn!("ds5 host: no mic decoder ({e})"))
+				.ok();
+		}
+		let Some(dec) = self.dec.as_mut() else {
+			return;
+		};
+		self.packets += 1;
+		let gap = self.seq.lost - lost_before;
+		if self.packets > 1 && gap > 0 && gap <= MIC_MAX_CONCEAL {
+			for _ in 0..gap {
+				if let Ok(n) = dec.decode(&[], &mut self.pcm[..MIC_FRAME], false) {
+					out.extend(mono_to_stereo(&self.pcm[..n]));
+				}
+			}
+		}
+		match dec.decode(opus, &mut self.pcm, false) {
+			Ok(n) => out.extend(mono_to_stereo(&self.pcm[..n])),
+			Err(e) => tracing::debug!("ds5 host: mic decode failed: {e}"),
+		}
+	}
+}
+
 /// Whether this host can present a virtual DualSense (see `host_duo.rs`: Duo inside a Duo
 /// seat; otherwise usbip-win2 on Windows, vhci-hcd with a writable sysfs attach on Linux).
 pub fn available() -> bool {
@@ -46,6 +106,7 @@ pub fn available() -> bool {
 struct Slot {
 	vpad: Arc<HostPad>,
 	features: Arc<Mutex<Ds5Features>>,
+	mic: Mutex<MicRx>,
 	stop: Arc<AtomicBool>,
 }
 
@@ -142,6 +203,7 @@ impl Ds5Host {
 			Ok((vpad, rx)) => {
 				tracing::info!(slot, pad = %vpad.describe(), "ds5 host: virtual DualSense up");
 				vpad.set_input(&first.to_usb_input());
+				vpad.set_mic_prebuffer(MIC_PREBUFFER_MS);
 				let vpad = Arc::new(vpad);
 				let features = Arc::new(Mutex::new(Ds5Features::all()));
 				let stop = Arc::new(AtomicBool::new(false));
@@ -162,6 +224,7 @@ impl Ds5Host {
 					Slot {
 						vpad,
 						features,
+						mic: Mutex::new(MicRx::new()),
 						stop,
 					},
 				);
@@ -191,6 +254,35 @@ impl Ds5Host {
 				}
 			}
 			_ => {}
+		}
+	}
+
+	/// A `TAG_DS5` payload from the client (`DataHandlers::on_ds5_media`): the pad mic.
+	pub fn on_media(&self, payload: &[u8]) {
+		let Some(Ds5Media::Mic { slot, seq, opus }) = Ds5Media::decode(payload) else {
+			return;
+		};
+		let slots = self.slots.lock().unwrap();
+		let Some(s) = slots.get(&slot) else {
+			return;
+		};
+		if !s.features.lock().unwrap().mic {
+			return;
+		}
+		let mut pcm = Vec::with_capacity(MIC_FRAME * 2);
+		let mut rx = s.mic.lock().unwrap();
+		rx.decode(seq, &opus, &mut pcm);
+		if rx.packets % 1000 == 1 {
+			tracing::info!(
+				slot,
+				packets = rx.packets,
+				lost = rx.seq.lost,
+				"ds5 host: pad mic"
+			);
+		}
+		drop(rx);
+		if !pcm.is_empty() {
+			s.vpad.push_mic(&pcm);
 		}
 	}
 
@@ -230,6 +322,7 @@ impl Forwarder {
 		let mut speaker_on = false;
 		let mut seq: u16 = 0;
 		let mut have_state = false;
+		let mut mic = MicAnnouncer::new(self.features.lock().unwrap().mic);
 		while !self.stop.load(Ordering::Relaxed) {
 			match self.rx.recv_timeout(Duration::from_millis(20)) {
 				Ok(Ds5HostEvent::Output(s)) => {
@@ -263,9 +356,21 @@ impl Forwarder {
 						opus_q.clear();
 					}
 				}
-				Ok(Ds5HostEvent::MicOpen(_)) | Ok(Ds5HostEvent::SetFeature { .. }) => {}
+				Ok(Ds5HostEvent::MicOpen(on)) => {
+					tracing::info!(slot = self.slot, on, "ds5 host: game mic");
+					mic.set_open(on);
+				}
+				Ok(Ds5HostEvent::SetFeature { .. }) => {}
 				Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
 				Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+			}
+			// Tell the client when to stream its pad mic (changes + 1 s refresh while on).
+			mic.set_allowed(self.features.lock().unwrap().mic);
+			if let Some(on) = mic.poll(Instant::now()) {
+				let _ = self.out.try_send(DataMsg::Ds5Mic {
+					slot: self.slot,
+					on,
+				});
 			}
 			// One media datagram per 10.667 ms slot: haptics (or silence) + speaker Opus.
 			while let Some(h) = haptics.pop_front() {

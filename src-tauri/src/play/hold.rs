@@ -549,6 +549,8 @@ pub(super) async fn hold_session(
 	// A relayed session keeps punching in the background (core `punch_in_background`) and may
 	// upgrade to a direct path mid-stream; the adaptive rate then starts over on it.
 	let mut on_relay = matches!(sess.transport(), pulsar_core::Transport::Relay);
+	// DualSense pad mic → host: raw TAG_DS5 payloads straight onto the session.
+	crate::ds5::client::Ds5Client::set_media_sender(id, sess.sender());
 	let mut keep = tokio::time::interval(std::time::Duration::from_secs(2));
 	keep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 	// The keepalive Ping fires at uneven gaps (`ping_gap_ms`, mean PING_MS); the first at once.
@@ -1260,6 +1262,9 @@ pub(super) async fn hold_session(
 							}
 							DataMsg::Ds5Output { slot, report } => {
 								crate::ds5::client::on_output(id, slot, &report);
+							}
+							DataMsg::Ds5Mic { slot, on } => {
+								crate::ds5::client::on_mic(id, slot, on);
 							}
 							DataMsg::Rumble { slot, large, small } => {
 								// The host forwarded the game's force-feedback — hand it to the

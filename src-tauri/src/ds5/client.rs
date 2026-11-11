@@ -6,8 +6,11 @@
 //! `pulsar_core::input::ds5::pad::Pad`:
 //! - pad input → `InputEvent::Ds5Input` (≤ 250 Hz, latest wins);
 //! - host `DataMsg::Ds5Output` → state report; host `TAG_DS5` media slots → BT
-//!   haptics/speaker reports (a USB pad gets state only in v1: its haptics/speaker play
-//!   through its audio device, which is not wired yet).
+//!   haptics/speaker reports (a USB pad plays them on its own audio device instead);
+//!
+//! - host `DataMsg::Ds5Mic` → the pad mic (BT pad mic stream / USB mic capture) →
+//!   `TAG_DS5` mic media to the host; a USB pad's haptics + speaker play on its own audio
+//!   device. Both live in `client_audio.rs`.
 //!
 //! Settings (`Ds5Prefs`, Settings → Kontroller → DualSense) apply live through
 //! [`set_prefs_all`]; each pad thread runs its own auto-degrade policy (`policy.rs`).
@@ -26,8 +29,10 @@ use pulsar_core::input::ds5::degrade::Ds5Prefs;
 use pulsar_core::input::ds5::pad::{Pad, PadInput};
 use pulsar_core::input::ds5::report::{SetState, PID_DUALSENSE, PID_DUALSENSE_EDGE};
 use pulsar_core::input::ds5::wire::{Ds5Media, Ds5Report, Ds5Transport};
+use pulsar_core::input::ds5::Ds5Features;
 use pulsar_core::service::{DataMsg, InputEvent};
 
+use super::client_audio::{MediaTx, PadAudio};
 use super::hid::{enumerate, Ds5Device, SdlHid};
 use super::policy::{notice_text, PadPolicy};
 
@@ -40,6 +45,7 @@ enum Cmd {
 	Output(SetState),
 	Media(Ds5Media),
 	Prefs(Ds5Prefs),
+	Mic(bool),
 }
 
 /// The user's DualSense settings (pushed by the UI with `set_ds5_settings`).
@@ -88,6 +94,7 @@ struct Inner {
 	data_tx: Option<tokio::sync::mpsc::Sender<DataMsg>>,
 	prefs: Ds5Prefs,
 	play_id: u64,
+	media_tx: MediaTx,
 }
 
 /// The DualSense passthrough state of one play session. Cheap to clone.
@@ -112,6 +119,7 @@ impl Ds5Client {
 			data_tx: None,
 			prefs,
 			play_id,
+			media_tx: MediaTx::default(),
 		})));
 		registry().lock().unwrap().insert(play_id, c.clone());
 		c
@@ -129,6 +137,14 @@ impl Ds5Client {
 	pub fn set_data_tx(play_id: u64, tx: tokio::sync::mpsc::Sender<DataMsg>) {
 		if let Some(c) = registry().lock().unwrap().get(&play_id) {
 			c.0.lock().unwrap().data_tx = Some(tx);
+		}
+	}
+
+	/// The session's client→host raw payload path (pad mic media). Call from the session
+	/// loop (inside the tokio runtime).
+	pub fn set_media_sender(play_id: u64, sender: pulsar_core::SessionSender) {
+		if let Some(c) = registry().lock().unwrap().get(&play_id) {
+			super::client_audio::connect_media(&c.0.lock().unwrap().media_tx, sender);
 		}
 	}
 
@@ -160,6 +176,7 @@ impl Ds5Client {
 				data_tx: inner.data_tx.clone(),
 				prefs: inner.prefs,
 				play_id: inner.play_id,
+				media_tx: inner.media_tx.clone(),
 			};
 			if std::thread::Builder::new()
 				.name(format!("ds5-pad-{slot}"))
@@ -194,6 +211,11 @@ pub fn on_media(play_id: u64, payload: &[u8]) {
 	if let Some(m @ Ds5Media::Slot { slot, .. }) = Ds5Media::decode(payload) {
 		send(play_id, slot, Cmd::Media(m));
 	}
+}
+
+/// Route a host `Ds5Mic` to the pad at `slot`.
+pub fn on_mic(play_id: u64, slot: u8, on: bool) {
+	send(play_id, slot, Cmd::Mic(on));
 }
 
 fn send(play_id: u64, slot: u8, cmd: Cmd) {
@@ -242,6 +264,7 @@ struct PadCtx {
 	data_tx: Option<tokio::sync::mpsc::Sender<DataMsg>>,
 	prefs: Ds5Prefs,
 	play_id: u64,
+	media_tx: MediaTx,
 }
 
 impl PadCtx {
@@ -264,10 +287,12 @@ impl PadCtx {
 				return;
 			}
 		};
-		// Pad mic stays off in v1 streaming (the host has no mic-open message yet; the
-		// policy keeps it off until it is live).
-		let mut feats = self.prefs.features();
-		feats.mic = false;
+		// The pad mic starts off: it streams only while the host says a game has the mic
+		// open (`Ds5Mic`, see client_audio.rs) and the policy allows it.
+		let feats = Ds5Features {
+			mic: false,
+			..self.prefs.features()
+		};
 		let (mut pad, pad_features) = match Pad::open(&mut hid, self.dev.transport, feats) {
 			Ok(p) => p,
 			Err(e) => {
@@ -290,6 +315,7 @@ impl PadCtx {
 				}
 			}
 		}
+		let mut audio = PadAudio::new(slot, &self.dev, self.media_tx.clone());
 		let mut buf = [0u8; 600];
 		let mut latest: Option<Ds5Report> = None;
 		let mut sent: Option<(Ds5Report, Instant)> = None;
@@ -310,7 +336,9 @@ impl PadCtx {
 						}
 						media_last = Some(now);
 						media_n += 1;
-						if self.dev.transport == Ds5Transport::Bt {
+						if !audio.on_slot(haptics, speaker.clone(), &policy.features())
+							&& self.dev.transport == Ds5Transport::Bt
+						{
 							pad.push_slot(haptics, speaker);
 						}
 					}
@@ -328,8 +356,12 @@ impl PadCtx {
 						pad.set_rumble_fallback(policy.fallback());
 						self.send_caps(slot, policy.caps());
 					}
+					Cmd::Mic(on) => audio.mic.on_host(on),
 				}
 			}
+			// Mic on/off follows the host + what the policy allows (mic shed = not allowed).
+			audio.tick(&mut pad, &policy.allowed());
+			policy.set_mic_live(audio.pad_mic());
 			if let Some(change) = policy.tick(Instant::now(), &mut pad) {
 				pad.set_features(policy.features());
 				pad.set_rumble_fallback(policy.fallback());
@@ -341,8 +373,10 @@ impl PadCtx {
 				Ok(0) => {}
 				Ok(n) => {
 					policy.on_input(Instant::now());
-					if let Some(PadInput::State(s)) = pad.on_input(&buf[..n]) {
-						latest = Ds5Report::from_usb_input(&s);
+					match pad.on_input(&buf[..n]) {
+						Some(PadInput::State(s)) => latest = Ds5Report::from_usb_input(&s),
+						Some(PadInput::Mic(opus)) => audio.on_pad_mic(opus),
+						None => {}
 					}
 				}
 				Err(e) => {
@@ -373,6 +407,7 @@ impl PadCtx {
 					stats = ?pad.stats(),
 					media_slots = media_n,
 					media_gap_max_ms = media_gap_max.as_millis() as u64,
+					audio = ?audio.counters(),
 					"ds5 client"
 				);
 				media_n = 0;

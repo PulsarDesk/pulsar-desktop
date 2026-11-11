@@ -19,8 +19,8 @@ pub struct PadPolicy {
 	deg: Degrader,
 	mon: LinkMonitor,
 	bt: bool,
-	/// Whether the pad mic is actually streaming. v1 streaming never opens it (the host
-	/// has no mic-open message yet), so it stays off and is never shed.
+	/// Whether the pad mic is actually streaming (a game on the host has it open and it is
+	/// allowed; `client_audio.rs` decides). Only a live mic counts as in use for shedding.
 	mic_live: bool,
 }
 
@@ -35,17 +35,29 @@ impl PadPolicy {
 		}
 	}
 
-	/// The features the pad applies now.
+	/// What the user's settings allow now, minus shed features (`mic` = the mic may stream
+	/// when the host asks for it).
+	pub fn allowed(&self) -> Ds5Features {
+		self.deg.features(&self.prefs)
+	}
+
+	/// The features the pad applies now (`mic` only while it is live).
 	pub fn features(&self) -> Ds5Features {
-		let mut f = self.deg.features(&self.prefs);
+		let mut f = self.allowed();
 		f.mic &= self.mic_live;
 		f
 	}
 
-	/// What to tell the host (`Ds5Caps`). While haptics are shed but rumble is on, the
-	/// host keeps sending haptics: the client turns their energy into rumble.
+	/// The pad mic started or stopped streaming.
+	pub fn set_mic_live(&mut self, live: bool) {
+		self.mic_live = live;
+	}
+
+	/// What to tell the host (`Ds5Caps`): the allowed set, so the host asks for the mic
+	/// only if it may stream. While haptics are shed but rumble is on, the host keeps
+	/// sending haptics: the client turns their energy into rumble.
 	pub fn caps(&self) -> Ds5Features {
-		let mut f = self.features();
+		let mut f = self.allowed();
 		f.haptics |= self.fallback();
 		f
 	}
