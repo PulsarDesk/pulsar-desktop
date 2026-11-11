@@ -175,6 +175,73 @@ impl SdlPads {
 
 static PADS: OnceLock<Option<SdlPads>> = OnceLock::new();
 
+/// Input state for pads that the DualSense passthrough (`ds5::client`) drives over raw HID,
+/// keyed by the lowercased HID path. While a path is here, the published [`PadView`] state
+/// comes from the passthrough's own parse instead of SDL: a BT DualSense streaming its mic
+/// interleaves mic reports into the same report id, and SDL's driver reads those as random
+/// button presses (which fired the overlay / leave-session combos, 2026-11-11).
+fn ds5_override_map() -> &'static Mutex<HashMap<Vec<u8>, GamepadState>> {
+    static M: OnceLock<Mutex<HashMap<Vec<u8>, GamepadState>>> = OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+fn path_key(path: &CStr) -> Vec<u8> {
+    path.to_bytes().to_ascii_lowercase()
+}
+
+/// The passthrough's latest input for the pad at `path` (USB input report 0x01, 64 B).
+pub fn set_ds5_input(path: &CStr, usb_input: &[u8; 64]) {
+    ds5_override_map()
+        .lock()
+        .unwrap()
+        .insert(path_key(path), ds5_usb_to_state(usb_input));
+}
+
+/// The passthrough let go of the pad: SDL's own reading applies again.
+pub fn clear_ds5_input(path: &CStr) {
+    ds5_override_map().lock().unwrap().remove(&path_key(path));
+}
+
+fn ds5_override(path: Option<&std::ffi::CString>) -> Option<GamepadState> {
+    let p = path?;
+    let m = ds5_override_map().lock().unwrap();
+    if m.is_empty() {
+        return None;
+    }
+    m.get(&path_key(p)).copied()
+}
+
+/// A DualSense USB input report (0x01) as [`GamepadState`], with SDL's mapping (cross = A,
+/// circle = B, square = X, triangle = Y, create = BACK, options = START, PS = GUIDE).
+pub fn ds5_usb_to_state(r: &[u8; 64]) -> GamepadState {
+    let mut st = GamepadState::default();
+    let axis = |v: u8| ((v as i32 - 128) * 256).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+    st.left_x = axis(r[1]);
+    st.left_y = axis(r[2]).saturating_neg();
+    st.right_x = axis(r[3]);
+    st.right_y = axis(r[4]).saturating_neg();
+    st.left_trigger = r[5];
+    st.right_trigger = r[6];
+    let (b0, b1, b2) = (r[8], r[9], r[10]);
+    let hat = b0 & 0x0F;
+    st.set(button::DPAD_UP, matches!(hat, 7 | 0 | 1));
+    st.set(button::DPAD_RIGHT, matches!(hat, 1..=3));
+    st.set(button::DPAD_DOWN, matches!(hat, 3..=5));
+    st.set(button::DPAD_LEFT, matches!(hat, 5..=7));
+    st.set(button::X, b0 & 0x10 != 0);
+    st.set(button::A, b0 & 0x20 != 0);
+    st.set(button::B, b0 & 0x40 != 0);
+    st.set(button::Y, b0 & 0x80 != 0);
+    st.set(button::LB, b1 & 0x01 != 0);
+    st.set(button::RB, b1 & 0x02 != 0);
+    st.set(button::BACK, b1 & 0x10 != 0);
+    st.set(button::START, b1 & 0x20 != 0);
+    st.set(button::L3, b1 & 0x40 != 0);
+    st.set(button::R3, b1 & 0x80 != 0);
+    st.set(button::GUIDE, b2 & 0x01 != 0);
+    st
+}
+
 /// PER-CONTROLLER vibration strength, keyed by pad uuid (SDL GUID hex): 0 = off, 1 = weak,
 /// 2 = medium (default), 3 = strong (full). [`apply_rumble`] (SDL thread) scales the host's
 /// 8-bit motor magnitudes by `level/3` per pad, so "off" stops that pad's motors (×0) and
@@ -381,7 +448,7 @@ fn run(shared: Arc<Shared>, rumble_rx: Receiver<RumbleCmd>, ready: std::sync::mp
 
         // Read each open pad and diff against the last published state.
         for (inst, p) in &open {
-            let st = unsafe { read_state(p.ptr) };
+            let st = ds5_override(p.path.as_ref()).unwrap_or_else(|| unsafe { read_state(p.ptr) });
             if last.get(inst) != Some(&st) {
                 last.insert(*inst, st);
                 changed = true;
@@ -551,4 +618,31 @@ fn apply_rumble(open: &HashMap<u32, OpenPad>, cmd: &RumbleCmd) {
 /// Lowercase-hex of an SDL GUID's 16 bytes — the stable device key (matches gilrs `uuid()`).
 fn guid_hex(g: &SDL_GUID) -> String {
     g.data.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod ds5_tests {
+    use super::*;
+
+    #[test]
+    fn ds5_report_maps_like_sdl() {
+        let mut r = [0u8; 64];
+        r[0] = 0x01;
+        r[1..5].copy_from_slice(&[128, 0, 255, 128]);
+        r[5] = 10;
+        r[6] = 200;
+        r[8] = 0x20 | 0x02; // cross + d-pad right
+        r[9] = 0x20; // options
+        r[10] = 0x01; // PS
+        let st = ds5_usb_to_state(&r);
+        assert_eq!(st.left_x, 0);
+        assert!(st.left_y > 30_000, "stick pushed up = up-positive");
+        assert!(st.right_x > 30_000);
+        assert_eq!((st.left_trigger, st.right_trigger), (10, 200));
+        assert!(st.is_pressed(button::A) && st.is_pressed(button::DPAD_RIGHT));
+        assert!(st.is_pressed(button::START) && st.is_pressed(button::GUIDE));
+        assert!(!st.is_pressed(button::DPAD_UP) && !st.is_pressed(button::B));
+        r[8] = 0x08; // hat released
+        assert_eq!(ds5_usb_to_state(&r).buttons & (button::DPAD_UP | button::DPAD_DOWN), 0);
+    }
 }

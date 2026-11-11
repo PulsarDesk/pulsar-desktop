@@ -374,7 +374,10 @@ impl PadCtx {
 				Ok(n) => {
 					policy.on_input(Instant::now());
 					match pad.on_input(&buf[..n]) {
-						Some(PadInput::State(s)) => latest = Ds5Report::from_usb_input(&s),
+						Some(PadInput::State(s)) => {
+							crate::controllers::set_ds5_input(&self.dev.path, &s);
+							latest = Ds5Report::from_usb_input(&s);
+						}
 						Some(PadInput::Mic(opus)) => audio.on_pad_mic(opus),
 						None => {}
 					}
@@ -424,6 +427,7 @@ impl PadCtx {
 		});
 		pad.set_output(triggers_off());
 		let _ = pad.poll(Instant::now() + Duration::from_millis(10), &mut hid);
+		crate::controllers::clear_ds5_input(&self.dev.path);
 		tracing::info!(slot, "ds5 client: pad released");
 	}
 }
