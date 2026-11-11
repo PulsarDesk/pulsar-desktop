@@ -571,6 +571,31 @@ fn stdin_control() {
 			if let Ok(idx) = rest.trim().parse::<u32>() {
 				DISPLAY_IDX_SEED.store(idx, Ordering::SeqCst);
 			}
+		} else if let Some(tok) = l.strip_prefix("k ") {
+			// Controller overlay-nav (`k up|down|left|right|go|escape`, emitted by play.rs
+			// while the overlay is open; same protocol as linux.rs). Windows never handled
+			// it, so a pad could not drive the menu here at all (2026-11-11).
+			let key = match tok.trim() {
+				"left" => Some(egui::Key::ArrowLeft),
+				"right" => Some(egui::Key::ArrowRight),
+				"up" | "shifttab" => Some(egui::Key::ArrowUp),
+				"down" | "tab" => Some(egui::Key::ArrowDown),
+				"go" => Some(egui::Key::Enter),
+				"escape" => Some(egui::Key::Escape),
+				_ => None,
+			};
+			if let Some(key) = key {
+				let mut q = EGUI_EVENTS.lock().unwrap();
+				for pressed in [true, false] {
+					q.push(egui::Event::Key {
+						key,
+						physical_key: None,
+						pressed,
+						repeat: false,
+						modifiers: egui::Modifiers::default(),
+					});
+				}
+			}
 		} else if l.trim_end() == "hpvol" || l.starts_with("hpvol ") {
 			// DualSense headphone volume bars: `hpvol uuid:volume:rrggbb,...` (overlay.rs).
 			crate::overlay::set_headsets(l.trim_end().strip_prefix("hpvol").unwrap_or(""));
