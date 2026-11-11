@@ -219,6 +219,9 @@ impl PadCtx {
 				return;
 			}
 		};
+		// Network jitter: start after ~64 ms of slots, cap at ~256 ms (the first WAN test
+		// overflowed and underran the local-bridge sized 8-slot FIFO).
+		pad.set_jitter_buffer(6, 24);
 		tracing::info!(slot, transport = ?self.dev.transport, "ds5 client: driving pad");
 		if let Some(tx) = &self.data_tx {
 			let _ = tx.try_send(DataMsg::Ds5Caps {
