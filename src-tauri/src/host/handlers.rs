@@ -357,6 +357,12 @@ fn start_process_capture<W: std::io::Write + Send + 'static>(
 	mode: pulsar_core::audio::ProcessLoopbackMode,
 ) -> bool {
 	let (live_tx, live_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+	// Set when we stop waiting: the caller then starts a fallback capture, so a late
+	// activation must not ALSO feed the stream (two senders = doubled samples and a
+	// constantly restarting player on the client, seen 2026-11-11 when the activation
+	// raced a USB audio device appearing).
+	let abandoned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+	let sink = AbandonableSink { inner: sink, abandoned: abandoned.clone() };
 	std::thread::spawn(move || {
 		// A failure here means the per-app capture stopped; the session keeps its video and (if
 		// the user toggles) can re-stream. No re-init loop: process-loopback has no
@@ -373,9 +379,34 @@ fn start_process_capture<W: std::io::Write + Send + 'static>(
 	match live_rx.recv_timeout(std::time::Duration::from_secs(2)) {
 		Ok(Ok(())) => true,
 		other => {
+			abandoned.store(true, std::sync::atomic::Ordering::SeqCst);
 			tracing::warn!(pid, ?mode, ?other, "audio: process-loopback did not start");
 			false
 		}
+	}
+}
+
+/// A capture sink that refuses writes once its capture was abandoned (see
+/// [`start_process_capture`]), so a late-starting capture ends instead of doubling the stream.
+#[cfg(windows)]
+struct AbandonableSink<W> {
+	inner: W,
+	abandoned: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(windows)]
+impl<W: std::io::Write> std::io::Write for AbandonableSink<W> {
+	fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+		if self.abandoned.load(std::sync::atomic::Ordering::Relaxed) {
+			return Err(std::io::Error::new(
+				std::io::ErrorKind::BrokenPipe,
+				"process loopback started after its timeout; a fallback capture owns the stream",
+			));
+		}
+		self.inner.write(buf)
+	}
+	fn flush(&mut self) -> std::io::Result<()> {
+		self.inner.flush()
 	}
 }
 
