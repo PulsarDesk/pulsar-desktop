@@ -20,6 +20,29 @@ A second Opus/RTP stream parallel to video. Implementation lives in
   armed: the host's volume slider is then the sink's, and that sink's endpoint
   loopback neither ignored it (−12 dB at 0.41 → 0.10) nor ran in real time
   (46.8k–56.4k samples/s, measured) — game-mode crackle.
+- **Virtual DualSense plugged → default-endpoint loopback**
+  (`host/handlers/ds5_route.rs`, logic in pulsar-core `audio/endpoint_route.rs`).
+  Process loopback is endpoint-agnostic: what a game renders to the pad's own
+  endpoint ("Speakers (N- DualSense Wireless Controller)", ch 1/2 speaker, 3/4
+  haptics) was played in the client's audio (verified 2026-11-11). While a usbip
+  pad is up on this host (`ds5::host::audio_pad_plugged`), the stream comes from
+  the default render endpoint's loopback instead, divided by its master
+  attenuation (`GetMasterVolumeLevel` dB — not the slider scalar, which is an
+  audio taper; 1.0 for an endpoint with hardware volume), polled every 20 ms,
+  glided over 10 ms, clamped to ±1. Process loopback keeps running and stays
+  the source when: the endpoint is muted or at 0 (nothing to recover; the pad
+  audio leaks then, accepted), the default IS a DualSense endpoint, the endpoint
+  capture fails (retried with 2 s…60 s backoff) or isn't 48 kHz, a host-silent
+  redirect is armed (virtual-sink loopback isn't real-time, above), or an
+  Include stream (launched game / picked window) runs next to another
+  in-process stream on the host (same-host co-op keeps per-app isolation). A
+  lone Include stream does switch: it then carries the whole system mix, not
+  just the game. Both captures write one encoder through a mux — only the
+  active source passes, switched once the endpoint capture delivers PCM, so a
+  switch neither doubles nor gaps. A default-device change restarts the
+  endpoint capture on the new id (process loopback meanwhile). The endpoint is
+  never opened while muted (latched silence, below). Only the in-process
+  encoder path does this; the ffmpeg fallback and surround keep their paths.
 - **Encoded in-process** (`host/handlers/opus_rtp.rs`): libopus, 10 ms frames,
   128 kb/s, RTP PT 97 to the same destination; stops when the session's
   `ProcEpoch` moves (re-stream / teardown). ffmpeg reading the PCM from a pipe

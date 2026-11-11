@@ -149,6 +149,12 @@ impl RtpAudioSink {
 		})
 	}
 
+	/// The stream generation moved on (re-stream / teardown): every capture feeding this sink
+	/// must stop.
+	pub(super) fn retired(&self) -> bool {
+		self.epoch.load(Ordering::SeqCst) != self.born
+	}
+
 	fn send_packet(&mut self) -> io::Result<()> {
 		let n = match self.enc.as_mut() {
 			Some(enc) => enc
@@ -181,7 +187,7 @@ impl RtpAudioSink {
 
 impl Write for RtpAudioSink {
 	fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-		if self.epoch.load(Ordering::SeqCst) != self.born {
+		if self.retired() {
 			// The session re-streamed or ended: stop the capture (its next write fails).
 			return Err(io::Error::new(io::ErrorKind::BrokenPipe, "audio stream retired"));
 		}

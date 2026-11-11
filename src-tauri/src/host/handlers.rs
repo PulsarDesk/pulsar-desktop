@@ -12,6 +12,11 @@ mod pacer;
 #[cfg(windows)]
 mod opus_rtp;
 
+/// DualSense-aware capture: the default endpoint's loopback while a virtual pad is plugged, so
+/// the pad's own speaker/haptics audio stays out of the stream (process loopback otherwise).
+#[cfg(windows)]
+mod ds5_route;
+
 /// Windows: stream the host's system audio via **WASAPI loopback** (no
 /// `virtual-audio-capturer` / Stereo Mix device required). Spawns the encoder ffmpeg
 /// reading raw PCM on stdin (Opus/RTP to `dest`) plus a capture thread that feeds it
@@ -248,7 +253,7 @@ pub(super) fn spawn_process_loopback_audio(
 		None
 	};
 	let encoder = if let Some(sink) = in_process {
-		if !start_process_capture(sink, pid, mode) {
+		if !ds5_route::start(sink, pid, mode) {
 			return false;
 		}
 		match codec {

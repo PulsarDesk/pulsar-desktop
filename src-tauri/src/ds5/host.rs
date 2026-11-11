@@ -17,7 +17,7 @@
 //! usbip installed, or Duo's driver inside a Duo seat — HID only there, no media).
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -103,8 +103,36 @@ pub fn available() -> bool {
 	super::host_duo::current().is_some()
 }
 
+/// Virtual pads with an audio endpoint (usbip) plugged in on this host, all sessions.
+static AUDIO_PADS: AtomicUsize = AtomicUsize::new(0);
+
+/// Whether a virtual DualSense with its own audio endpoint is plugged in on this host. The
+/// host's audio capture then taps the default endpoint so the pad's speaker/haptics audio
+/// stays out of the client's sound (`host/handlers/ds5_route.rs`).
+pub fn audio_pad_plugged() -> bool {
+	AUDIO_PADS.load(Ordering::Relaxed) > 0
+}
+
+/// Counts one pad in [`AUDIO_PADS`] while alive.
+struct AudioPadToken;
+
+impl AudioPadToken {
+	fn new() -> Self {
+		AUDIO_PADS.fetch_add(1, Ordering::Relaxed);
+		Self
+	}
+}
+
+impl Drop for AudioPadToken {
+	fn drop(&mut self) {
+		AUDIO_PADS.fetch_sub(1, Ordering::Relaxed);
+	}
+}
+
 struct Slot {
 	vpad: Arc<HostPad>,
+	/// `Some` for a pad with an audio endpoint (usbip; Duo pads are HID only).
+	_audio: Option<AudioPadToken>,
 	features: Arc<Mutex<Ds5Features>>,
 	mic: Mutex<MicRx>,
 	stop: Arc<AtomicBool>,
@@ -222,6 +250,7 @@ impl Ds5Host {
 				self.slots.lock().unwrap().insert(
 					slot,
 					Slot {
+						_audio: matches!(*vpad, HostPad::Usbip(_)).then(AudioPadToken::new),
 						vpad,
 						features,
 						mic: Mutex::new(MicRx::new()),
