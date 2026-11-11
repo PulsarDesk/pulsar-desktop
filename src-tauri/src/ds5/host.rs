@@ -37,7 +37,8 @@ const STATE_REFRESH: Duration = Duration::from_millis(500);
 /// time out (doubled audio, 2026-11-11). A 3 s late pad costs nothing in a game.
 const PLUG_DELAY: Duration = Duration::from_secs(3);
 
-/// Whether this host can present a virtual DualSense (see `host_duo.rs`).
+/// Whether this host can present a virtual DualSense (see `host_duo.rs`: Duo inside a Duo
+/// seat; otherwise usbip-win2 on Windows, vhci-hcd with a writable sysfs attach on Linux).
 pub fn available() -> bool {
 	super::host_duo::current().is_some()
 }

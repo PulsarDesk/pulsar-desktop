@@ -54,7 +54,7 @@ fn duo_ok() -> bool {
 }
 
 fn usbip_ok() -> bool {
-	cfg!(any(windows, target_os = "linux")) && pulsar_core::input::ds5::attach::locate(None).is_ok()
+	cfg!(any(windows, target_os = "linux")) && pulsar_core::input::ds5::attach::available()
 }
 
 /// The backend this host would use now. Only checks what the current session needs
