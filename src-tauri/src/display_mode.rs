@@ -25,6 +25,8 @@
 // ---------------------------------------------------------------------------
 #[cfg(windows)]
 pub use win::{revert, set_best_mode, PrevMode};
+#[cfg(windows)]
+pub use win_fit::{fit_window, restore_window, WindowPrev};
 
 /// Per-session screen-adaptation state, shared (via `Arc<Mutex<_>>`) between the StreamReq
 /// handler (`make_on_stream`) and the session's [`SessionCleanupGuard`](crate::host) so the
@@ -41,6 +43,12 @@ pub use win::{revert, set_best_mode, PrevMode};
 pub struct AdaptState {
 	pub prev: Option<PrevMode>,
 	pub last: Option<(u32, u32, u32)>,
+	/// Per-WINDOW adaptation (a split pane streaming one host app): the window's original
+	/// placement while we hold it resized to the pane's shape — restored on teardown, when the
+	/// client turns adaptation off, or when the capture target changes.
+	pub win_prev: Option<WindowPrev>,
+	/// The last `(hwnd, w, h)` window-fit target acted on (same no-repeat rule as `last`).
+	pub win_last: Option<(i64, u32, u32)>,
 }
 
 #[cfg(windows)]
@@ -247,6 +255,144 @@ mod win {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Per-window fit (Windows): resize ONE host app window to a split pane's shape
+// ---------------------------------------------------------------------------
+/// A split pane streaming a single host window (WGC capture) gets a capture with the window's
+/// own aspect. Instead of changing the monitor mode (impossible for a 3.5:1 pane, and wrong when
+/// two panes share the monitor), resize that window's CLIENT area to the pane's aspect, scaled
+/// to fit the monitor's work area, and restore its exact placement (incl. the maximized state)
+/// afterwards. Borderless-fullscreen games may ignore the resize — the capture then simply stays
+/// at the window's own size.
+#[cfg(windows)]
+mod win_fit {
+	use windows_sys::Win32::Foundation::{HWND, RECT};
+	use windows_sys::Win32::Graphics::Gdi::{
+		GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+	};
+	use windows_sys::Win32::UI::WindowsAndMessaging::{
+		GetClientRect, GetWindowPlacement, GetWindowRect, IsWindow, SetWindowPlacement,
+		SetWindowPos, ShowWindow, SWP_NOACTIVATE, SWP_NOZORDER, SW_RESTORE, SW_SHOWMAXIMIZED,
+		SW_SHOWMINIMIZED, WINDOWPLACEMENT,
+	};
+
+	/// The window's placement before we resized it (`SetWindowPlacement` restores it exactly).
+	pub struct WindowPrev {
+		hwnd: isize,
+		placement: WINDOWPLACEMENT,
+	}
+
+	/// Resize `hwnd`'s client area to the `pane_w × pane_h` aspect, as large as fits the window's
+	/// monitor work area (never larger than the pane itself). Returns the original placement when
+	/// a change was applied, `None` when there was nothing to do or it failed.
+	pub fn fit_window(hwnd: i64, pane_w: u32, pane_h: u32) -> Option<WindowPrev> {
+		if pane_w == 0 || pane_h == 0 {
+			return None;
+		}
+		let h = hwnd as isize as HWND;
+		unsafe {
+			if IsWindow(h) == 0 {
+				return None;
+			}
+			let mut placement: WINDOWPLACEMENT = std::mem::zeroed();
+			placement.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
+			if GetWindowPlacement(h, &mut placement) == 0 {
+				return None;
+			}
+			// A maximized / minimized window can't take a size: restore it first.
+			let sc = placement.showCmd as i32;
+			if sc == SW_SHOWMAXIMIZED || sc == SW_SHOWMINIMIZED {
+				ShowWindow(h, SW_RESTORE);
+			}
+			let mut mi: MONITORINFO = std::mem::zeroed();
+			mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+			if GetMonitorInfoW(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST), &mut mi) == 0 {
+				return None;
+			}
+			let work = mi.rcWork;
+			let mut wr: RECT = std::mem::zeroed();
+			let mut cr: RECT = std::mem::zeroed();
+			if GetWindowRect(h, &mut wr) == 0 || GetClientRect(h, &mut cr) == 0 {
+				return None;
+			}
+			// Frame = outer size minus client size (title bar + borders), in physical pixels.
+			let frame_w = (wr.right - wr.left) - (cr.right - cr.left);
+			let frame_h = (wr.bottom - wr.top) - (cr.bottom - cr.top);
+			let (cw, ch) = fit_client(
+				pane_w,
+				pane_h,
+				((work.right - work.left) - frame_w).max(1) as u32,
+				((work.bottom - work.top) - frame_h).max(1) as u32,
+			);
+			let (out_w, out_h) = (cw as i32 + frame_w, ch as i32 + frame_h);
+			// Keep the window on its monitor: clamp the top-left so the whole window fits.
+			let x = wr.left.clamp(work.left, (work.right - out_w).max(work.left));
+			let y = wr.top.clamp(work.top, (work.bottom - out_h).max(work.top));
+			if SetWindowPos(h, std::ptr::null_mut(), x, y, out_w, out_h, SWP_NOZORDER | SWP_NOACTIVATE) == 0 {
+				tracing::warn!(hwnd, "window-fit: SetWindowPos failed");
+				return None;
+			}
+			tracing::info!(
+				hwnd,
+				pane = %format!("{pane_w}x{pane_h}"),
+				client = %format!("{cw}x{ch}"),
+				"window-fit: resized the host window to the split pane's shape"
+			);
+			Some(WindowPrev { hwnd: hwnd as isize, placement })
+		}
+	}
+
+	/// Put the window back exactly where it was (position, size, maximized state).
+	pub fn restore_window(prev: WindowPrev) {
+		unsafe {
+			let h = prev.hwnd as HWND;
+			if IsWindow(h) == 0 {
+				return; // closed meanwhile — nothing to restore
+			}
+			if SetWindowPlacement(h, &prev.placement) == 0 {
+				tracing::warn!(hwnd = prev.hwnd, "window-fit: restoring the window placement failed");
+			} else {
+				tracing::info!(hwnd = prev.hwnd, "window-fit: restored the host window");
+			}
+		}
+	}
+
+	/// Largest `w × h` with the pane's aspect that fits `max_w × max_h` and is no larger than the
+	/// pane (even sizes — encoders want them).
+	pub(super) fn fit_client(pane_w: u32, pane_h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
+		let scale = (max_w as f64 / pane_w as f64).min(max_h as f64 / pane_h as f64).min(1.0);
+		let w = ((pane_w as f64 * scale) as u32).max(64) & !1;
+		let h = ((pane_h as f64 * scale) as u32).max(64) & !1;
+		(w, h)
+	}
+
+	#[cfg(test)]
+	mod tests {
+		use super::fit_client;
+		#[test]
+		fn fits_a_wide_pane_into_the_work_area() {
+			// 2560x700 top/bottom pane on a 1920x1040 work area: width-bound, aspect kept.
+			let (w, h) = fit_client(2560, 700, 1904, 1009);
+			assert_eq!(w, 1904);
+			assert!((h as i32 - 520).abs() <= 2, "{h}");
+		}
+		#[test]
+		fn never_upscales_past_the_pane() {
+			assert_eq!(fit_client(800, 600, 1904, 1009), (800, 600));
+		}
+	}
+}
+
+/// Placeholder off Windows (no window fit there).
+#[cfg(not(windows))]
+pub struct WindowPrev;
+#[cfg(not(windows))]
+pub fn fit_window(_hwnd: i64, _w: u32, _h: u32) -> Option<WindowPrev> {
+	None
+}
+#[cfg(not(windows))]
+pub fn restore_window(_prev: WindowPrev) {}
 
 // ---------------------------------------------------------------------------
 // Non-Windows stubs — keep handlers.rs / host.rs compiling everywhere.

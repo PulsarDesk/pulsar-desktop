@@ -3,7 +3,7 @@
 
 import type { AutoConnectTarget, Config, ConnInfo, ControllerInfo, PulsarToast } from './types';
 import type { FsEntry, LocalCaps } from './api.types';
-import type { GameInfo, LanDevice, PlayInfo, ScannedApp, WindowInfo } from './api.types';
+import type { GameInfo, LanDevice, PlayInfo, RemoteSources, ScannedApp, WindowInfo } from './api.types';
 import { invoke } from './api.invoke';
 
 // The keyboard/mouse capture commands must land on the Rust side IN ISSUE ORDER. A tab
@@ -85,8 +85,10 @@ export const api = {
 	 * setting) as a `data:image/png;base64,…` URL, or null when none resolves —
 	 * the UI keeps its textual chip then. */
 	selfAvatar: () => invoke<string | null>('self_avatar'),
+	avatarPreview: (mode: string) => invoke<string | null>('avatar_preview', { mode }),
 	/** The OS user's display name (e.g. "Jane Doe") for the identity chip. */
 	deviceUserName: () => invoke<string>('device_user_name'),
+	deviceHostName: () => invoke<string>('device_host_name'),
 	/** Path to an installed Steam launcher, or empty if Steam isn't found. */
 	steamPath: () => invoke<string>('steam_path'),
 	/** Scan a folder for launchable apps (host side). */
@@ -141,6 +143,14 @@ export const api = {
 	chatLog: () => invoke<[string, string, boolean][]>('chat_log'),
 	/** List the games published by the host at `target`. */
 	listRemoteGames: (target: string) => invoke<GameInfo[]>('list_remote_games', { target }),
+	/** Games + open windows + monitors of `target` in one authenticated round trip (the
+	 * split-pane source picker; needs no live session to that host). */
+	listRemoteSources: (target: string) => invoke<RemoteSources>('list_remote_sources', { target }),
+	/** Same-host co-op component (ProtoInput) status: installed + its folder + missing files. */
+	coopStatus: () =>
+		invoke<{ supported: boolean; installed: boolean; dir: string; missing: string[] }>('coop_status'),
+	/** Open (creating it) the folder the co-op component's files go into. */
+	openCoopDir: () => invoke<void>('open_coop_dir'),
 	/** Ask the host at `target` to launch one of its games. */
 	launchRemoteGame: (target: string, gameId: string) =>
 		invoke<void>('launch_remote_game', { target, gameId }),
@@ -230,6 +240,8 @@ export const api = {
 	markUpdateInstalling: (version: string) => invoke<void>('mark_update_installing', { version }),
 	/** The install didn't happen after all (error / deferred) — unblock launches. */
 	clearUpdateInstalling: () => invoke<void>('clear_update_installing'),
+	/** Windows: open the branded "updating" window right before the quiet install. */
+	launchUpdateWindow: () => invoke<void>('launch_update_window'),
 	/** Change an active session's stream resolution live (0×0 = host default). */
 	setPlayResolution: (id: number, width: number, height: number) =>
 		invoke<void>('set_play_resolution', { id, width, height }),
@@ -320,6 +332,11 @@ export const api = {
 	/** Split: the keyboards/mice the local capture is holding (stable keys), for per-pane
 	 * assignment. Linux-only content; empty elsewhere. */
 	listInputDevices: () => invoke<string[]>('list_input_devices'),
+	/** Gaming split "press to join": the panes' play ids in pane order (-1 = empty pane);
+	 * [] turns it off. Unassigned pads then drive nothing until A locks them to a pane. */
+	setSplitJoin: (playIds: number[]) => invoke<void>('set_split_join', { playIds }),
+	/** Current controller → pane locks (uuid → play id). */
+	controllerLocks: () => invoke<Record<string, number>>('controller_locks'),
 	/** Ask the controlled host to reverse direction (it connects back to `myId`). */
 	reversePlay: (id: number, myId: string) => invoke<void>('reverse_play', { id, myId }),
 	/** Control: absolute pointer motion, normalized 0..1 over the remote screen. */
@@ -385,6 +402,7 @@ export const api = {
 	/** Sync the "run in system tray" preference to the backend so the CloseRequested
 	 * handler knows whether to hide-to-tray (enabled=true) or quit (enabled=false). */
 	setTray: (enabled: boolean) => invoke<void>('set_tray', { enabled }),
+	setPadWake: (enabled: boolean) => invoke<void>('set_pad_wake', { enabled }),
 	/** Settings → Güvenlik 2FA: a fresh TOTP secret + its QR for the enrollment dialog. */
 	totpBegin: () => invoke<import('./api.types').TotpSetup>('totp_begin'),
 	/** Whether `code` is the current authenticator code for `secret` (enrollment proof). */

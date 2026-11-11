@@ -32,7 +32,7 @@
 	open = (g?: Game) => {
 		if (g) {
 			editingId = g.id;
-			form = { title: g.title, type: g.type, path: g.path, args: g.args, command: g.command, image: g.image, cmdStart: g.cmdStart, cmdStop: g.cmdStop };
+			form = { title: g.title, type: g.type, path: g.path, args: g.args, command: g.command, image: g.image, cmdStart: g.cmdStart, cmdStop: g.cmdStop, coopMutexes: g.coopMutexes ?? '', coopProfile: g.coopProfile ?? false };
 		} else {
 			editingId = null;
 			form = blank();
@@ -85,6 +85,15 @@
 			<div class="field"><input bind:value={form.cmdStart} placeholder={t('games.fCmdStartPlaceholder')} aria-label={t('games.fCmdStartAria')} style="font-family:var(--font-mono)" /></div>
 			<span class="fl">{t('games.fCmdStop')}</span>
 			<div class="field"><input bind:value={form.cmdStop} placeholder={t('games.fCmdStopPlaceholder')} aria-label={t('games.fCmdStopAria')} style="font-family:var(--font-mono)" /></div>
+			{#if form.type === 'program'}
+				<!-- Same-host co-op: how a SECOND copy of this game may start next to the first. -->
+				<span class="fl">{t('games.fCoopMutexes')}</span>
+				<div class="field"><input bind:value={form.coopMutexes} placeholder={t('games.fCoopMutexesPlaceholder')} aria-label={t('games.fCoopMutexes')} style="font-family:var(--font-mono)" /></div>
+				<label class="fcheck">
+					<input type="checkbox" bind:checked={form.coopProfile} />
+					<span>{t('games.fCoopProfile')}</span>
+				</label>
+			{/if}
 
 			<div class="factions">
 				<button class="btn btn-ghost" onclick={() => (showForm = false)}>{t('games.cancel')}</button>
@@ -95,6 +104,13 @@
 {/if}
 
 <style>
+	.fcheck {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		font-size: 12.5px;
+		color: var(--text-muted);
+	}
 	.f {
 		display: flex;
 		flex-direction: column;

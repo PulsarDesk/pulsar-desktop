@@ -1,0 +1,46 @@
+# Pulsar SYSTEM input agent (Windows only; builds as a no-op elsewhere).
+#
+# A LocalSystem service (`pulsar-sysagent service`) spawns one helper per interactive
+# session (`pulsar-sysagent helper`) with a SYSTEM token. The helper follows the INPUT
+# desktop (Default / Winlogon) and injects with SendInput, so a remote user can operate
+# UAC consent prompts, the lock screen and the secure desktop — which UIPI blocks for the
+# user-level (High IL) Pulsar host. The host talks to its session's helper over a named
+# pipe through the `SysInput` client in this crate's lib target.
+#
+# Design + integration points: docs/agents/system-agent.md.
+[package]
+name = "pulsar-sysagent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "pulsar_sysagent"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pulsar-sysagent"
+path = "src/main.rs"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+	"Win32_Foundation",
+	"Win32_Security",
+	"Win32_Security_Authorization",
+	"Win32_Storage_FileSystem",
+	"Win32_System_Diagnostics_ToolHelp",
+	"Win32_System_Environment",
+	"Win32_System_IO",
+	"Win32_System_JobObjects",
+	"Win32_System_Pipes",
+	"Win32_System_RemoteDesktop",
+	"Win32_System_Services",
+	"Win32_System_StationsAndDesktops",
+	"Win32_System_SystemServices",
+	"Win32_System_Threading",
+	"Win32_UI_Input_KeyboardAndMouse",
+	"Win32_UI_Input_Pointer",
+	"Win32_UI_WindowsAndMessaging",
+] }

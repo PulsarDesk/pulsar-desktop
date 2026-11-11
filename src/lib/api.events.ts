@@ -62,6 +62,11 @@ export const onNodePort = (cb: (port: number) => void) => listenTo<number>('node
  * The shell toggles gaming mode on/off when idle — entering gaming mode from remote, or
  * leaving it — but only when NOT in a session. Payload-less. */
 export const onGuideToggle = (cb: () => void) => listenTo<null>('guide-toggle', () => cb());
+/** The Guide/PS button woke a hidden/background Pulsar (Settings → wake with controller). */
+/** Gaming split: a controller pressed A and joined a pane (`pane` = its index). */
+export const onPadJoined = (cb: (e: { uuid: string; name: string; play_id: number; pane: number }) => void) =>
+	listenTo<{ uuid: string; name: string; play_id: number; pane: number }>('pad-joined', cb);
+export const onPadWake = (cb: () => void) => listenTo<null>('pad-wake', () => cb());
 /** A controller was just connected (always-on watcher). Carries its name + battery (0..100
  * or null). The shell shows a toast when idle (not in a session). */
 export const onControllerConnected = (cb: (e: { name: string; battery: number | null }) => void) =>

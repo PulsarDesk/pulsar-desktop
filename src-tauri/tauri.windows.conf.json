@@ -5,6 +5,7 @@
 		"resources": [
 			"resources/ffmpeg.exe",
 			"resources/pulsar-render.exe",
+			"resources/pulsar-update.exe",
 			"resources/ffplay.exe",
 			"resources/interception/interception.dll",
 			"resources/virtual-audio-driver/VirtualAudioDriver.inf",

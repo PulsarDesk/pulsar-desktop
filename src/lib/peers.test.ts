@@ -13,6 +13,9 @@ import {
 	normalizeId,
 	fmtPeerId,
 	setPeerIdentity,
+	isSaved,
+	unsavePeer,
+	toggleSaved,
 	_reset
 } from './peers.svelte';
 
@@ -159,5 +162,22 @@ describe('peers store', () => {
 		// Oldest evicted first, newest kept.
 		expect(ghosts.some((p) => p.id === '300000000')).toBe(false);
 		expect(ghosts.some((p) => p.id === '300000029')).toBe(true);
+	});
+
+	it('star toggle saves a device and unsaving keeps its history', () => {
+		recordConnection('641 724 395', 'Salon', 'pc', 'game');
+		expect(isSaved('641724395')).toBe(false);
+		toggleSaved('641 724 395', 'Salon');
+		expect(isSaved('641724395')).toBe(true);
+		expect(savedPeers()).toHaveLength(1);
+		unsavePeer('641724395');
+		expect(isSaved('641724395')).toBe(false);
+		expect(gameHistoryPeers()).toHaveLength(1); // history survives
+	});
+
+	it('unsaving a device with no history drops it', () => {
+		addPeer('Ofis', '111222333');
+		unsavePeer('111 222 333');
+		expect(allPeers()).toHaveLength(0);
 	});
 });

@@ -40,6 +40,12 @@ pub(crate) fn blocked_by_update() -> bool {
 	let Some(path) = marker_path() else {
 		return false;
 	};
+	// Reopened from the update window after a failed / declined install: the marker is
+	// stale by definition.
+	if std::env::args().any(|a| a == "--update-failed") {
+		let _ = std::fs::remove_file(&path);
+		return false;
+	}
 	let Ok(text) = std::fs::read_to_string(&path) else {
 		return false;
 	};
@@ -85,6 +91,55 @@ pub(crate) fn mark_update_installing(version: String) -> Result<(), String> {
 		std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
 	}
 	std::fs::write(&path, format!("{}\n{}\n", norm(&version), now_secs())).map_err(|e| e.to_string())
+}
+
+/// The version a running in-app update is installing (from the marker), if any.
+pub(crate) fn pending_version() -> Option<String> {
+	let text = std::fs::read_to_string(marker_path()?).ok()?;
+	let v = norm(text.lines().next()?).to_string();
+	(!v.is_empty()).then_some(v)
+}
+
+/// Windows: the updater runs the NSIS installer QUIETLY (no wizard window) and exits this
+/// process. Right before that, open the branded "Pulsar is updating" window
+/// (`resources/pulsar-update.exe` = `pulsar-setup --updating`): it shows progress while the
+/// installer works, closes when the new build starts (the installer's /R relaunch), and
+/// offers to reopen Pulsar if the install never ran (UAC declined) or failed. It is copied
+/// to %TEMP% first because the installer overwrites the install dir. Best-effort: without
+/// the helper the update still installs, just without the window. Called by the frontend
+/// right before `install()` (the updater plugin owns its own on-before-exit hook).
+#[tauri::command]
+pub(crate) fn launch_update_window() {
+	#[cfg(windows)]
+	{
+		use std::os::windows::process::CommandExt;
+		const DETACHED_PROCESS: u32 = 0x0000_0008;
+		let Some(src) = std::env::current_exe()
+			.ok()
+			.and_then(|e| e.parent().map(|d| d.join("resources").join("pulsar-update.exe")))
+			.filter(|p| p.is_file())
+		else {
+			tracing::warn!("update window: resources/pulsar-update.exe missing — installing without it");
+			return;
+		};
+		let dst = std::env::temp_dir().join("pulsar-update.exe");
+		if let Err(e) = std::fs::copy(&src, &dst) {
+			tracing::warn!("update window: copy to temp failed: {e}");
+			return;
+		}
+		let mut cmd = std::process::Command::new(&dst);
+		cmd.arg("--updating")
+			.arg(pending_version().unwrap_or_default())
+			.arg("--old-pid")
+			.arg(std::process::id().to_string());
+		if let Ok(exe) = std::env::current_exe() {
+			cmd.arg("--app").arg(exe);
+		}
+		match cmd.creation_flags(DETACHED_PROCESS).spawn() {
+			Ok(_) => tracing::info!("update window started"),
+			Err(e) => tracing::warn!("update window: spawn failed: {e}"),
+		}
+	}
 }
 
 /// Frontend: the install did not happen (error / deferred) — unblock launches.

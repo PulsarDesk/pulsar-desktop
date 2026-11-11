@@ -1284,6 +1284,9 @@ fn spawn_media_forwarders(
 		const RS_IDLE_FLUSH: std::time::Duration = std::time::Duration::from_millis(25);
 		let mut last_video_at = std::time::Instant::now();
 		let mut rs_held = false;
+		const SEND_FAIL_GIVE_UP: std::time::Duration = std::time::Duration::from_secs(3);
+		let mut send_fail_since: Option<std::time::Instant> = None;
+		let mut send_fail_n: u64 = 0;
 		'fwd: loop {
 			if rs_held && last_video_at.elapsed() >= RS_IDLE_FLUSH {
 				rs_held = false;
@@ -1292,14 +1295,28 @@ fn spawn_media_forwarders(
 					pacer.push(Class::Parity, parity, None, now);
 				}
 			}
-			// Put on the wire everything the pacer allows now. A failed VIDEO send means the
-			// session is gone; a failed parity/retransmit send is just skipped (as before).
+			// Put on the wire everything the pacer allows now. A failed send is skipped: one
+			// transient socket error (e.g. WSAENOBUFS while two sessions burst 25 Mbit/s each)
+			// used to end this loop for good — the session stayed up, audio kept playing and
+			// the client sat on "stream stopped". Only a send path that keeps failing for
+			// SEND_FAIL_GIVE_UP (the session really is gone) ends it; teardown aborts us anyway.
 			while let Some((class, dg)) = pacer.pop(std::time::Instant::now()) {
-				if vtx.send(&dg).await.is_err() {
-					if class == Class::Video {
-						break 'fwd; // session gone
+				if let Err(e) = vtx.send(&dg).await {
+					let now = std::time::Instant::now();
+					let since = *send_fail_since.get_or_insert(now);
+					send_fail_n += 1;
+					if send_fail_n == 1 {
+						tracing::warn!(error = ?e, ?class, "mos video forwarder: send failed (skipping)");
+					}
+					if now.duration_since(since) >= SEND_FAIL_GIVE_UP {
+						tracing::warn!(error = ?e, failures = send_fail_n, "mos video forwarder: sends keep failing, stopping");
+						break 'fwd;
 					}
 					continue;
+				}
+				if send_fail_since.take().is_some() {
+					tracing::info!(failures = send_fail_n, "mos video forwarder: sends recovered");
+					send_fail_n = 0;
 				}
 				match class {
 					Class::Video => sent.add_video(dg.len()),
@@ -1410,7 +1427,10 @@ fn spawn_media_forwarders(
 					}
 				}
 				q = nack_rx.recv() => {
-					let Some(seqs) = q else { break };
+					let Some(seqs) = q else {
+						tracing::info!("mos video forwarder: nack channel closed, stopping");
+						break;
+					};
 					// The peer controls `seqs` length and content (a relayed session
 					// datagram can carry thousands of u16s), so DON'T do a linear ring
 					// scan per requested seq (O(seqs*ring) CPU amplification). De-dup the
@@ -1489,7 +1509,9 @@ fn spawn_media_forwarders(
 				.await
 				.is_err()
 			{
-				break;
+				// A transient socket error must not end the audio for good (same as video);
+				// teardown aborts this task when the session really ends.
+				continue;
 			}
 		}
 	});
@@ -1564,14 +1586,40 @@ fn apply_screen_adaptation(
 	adapt_state: &Arc<Mutex<crate::display_mode::AdaptState>>,
 ) {
 	let mut st = adapt_state.lock().unwrap();
-	// Per-window capture overrides the monitor — drop any monitor-mode change we applied.
-	if req.window_hwnd.is_some() {
+	// Per-window capture overrides the monitor — drop any monitor-mode change we applied. With an
+	// adapt target the WINDOW itself is fitted to the pane's shape instead (restored later).
+	if let Some(hwnd) = req.window_hwnd {
 		if let Some(prev) = st.prev.take() {
 			crate::display_mode::revert(prev);
 		}
 		st.last = None;
+		match req.adapt {
+			Some((w, h)) => {
+				let target = (hwnd, w, h);
+				if st.win_last == Some(target) {
+					return;
+				}
+				// Another window / pane size: restore the old placement first, then fit anew.
+				if let Some(prev) = st.win_prev.take() {
+					crate::display_mode::restore_window(prev);
+				}
+				st.win_prev = crate::display_mode::fit_window(hwnd, w, h);
+				st.win_last = Some(target);
+			}
+			None => {
+				if let Some(prev) = st.win_prev.take() {
+					crate::display_mode::restore_window(prev);
+				}
+				st.win_last = None;
+			}
+		}
 		return;
 	}
+	// Back to a whole-monitor capture: give a fitted window back its own placement.
+	if let Some(prev) = st.win_prev.take() {
+		crate::display_mode::restore_window(prev);
+	}
+	st.win_last = None;
 	match req.adapt {
 		Some((w, h)) => {
 			let target = (req.display_idx, w, h);
@@ -2862,6 +2910,9 @@ pub(super) fn make_on_stream(
 		#[cfg(windows)]
 		{
 			*win_capture_hwnd.lock().unwrap() = if native_started { target_hwnd } else { None };
+			// Same-host co-op: which window this session captures (another pane may play a
+			// second instance of the same game — see coop.rs).
+			crate::coop::set_capture(sid, if native_started { target_hwnd } else { None });
 		}
 
 		// Remember this request for the in-place monitor-switch fast path — but ONLY when the

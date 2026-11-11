@@ -17,7 +17,8 @@ export type {
 	FsEntry,
 	FsEntries,
 	SessionEvent,
-	AuthPrompt
+	AuthPrompt,
+	RemoteSources
 } from './api.types';
 
 export { isTauri } from './api.invoke';
@@ -69,6 +70,8 @@ export {
 	onAuthPrompt,
 	onNodePort,
 	onGuideToggle,
+	onPadWake,
+	onPadJoined,
 	onControllerConnected,
 	onNodeId,
 	onNodeVersionError,

@@ -355,6 +355,7 @@ pub(crate) async fn set_controller_lock(
 	locked: bool,
 ) -> Result<(), String> {
 	if locked {
+		crate::split_join::paint(&uuid, play_id);
 		crate::controllers::set_controller_lock(uuid, play_id);
 	} else if crate::controllers::controller_lock_owner(&uuid) == Some(play_id) {
 		crate::controllers::clear_controller_lock(&uuid);
@@ -521,8 +522,13 @@ pub(crate) fn set_window_fullscreen(
 	window: tauri::WebviewWindow,
 	state: State<'_, AppState>,
 	on: bool,
+	// Leaving fullscreen because the user grabbed the title bar and started dragging:
+	// `[x ratio across the window, y offset in CSS px]` of the grab point. The restored window
+	// is moved under the cursor at the same spot and a native drag starts, like Windows does
+	// for a maximized window — instead of dragging a monitor-sized fullscreen window around.
+	drag_from: Option<[f64; 2]>,
 ) -> Result<(), String> {
-	tracing::info!(on, "set_window_fullscreen");
+	tracing::info!(on, ?drag_from, "set_window_fullscreen");
 	let _ = &state; // no longer needed (native fullscreen tracks the pre-fullscreen geometry)
 	// Use the platform's NATIVE borderless fullscreen (tao/winit). The window is non-transparent
 	// + frameless now, so on Windows the shell treats it as a real fullscreen app: the taskbar
@@ -533,15 +539,53 @@ pub(crate) fn set_window_fullscreen(
 	// Window ops must run on the UI/event thread (a Tauri command runs off it; calling these
 	// off-thread can silently no-op, esp. on the GTK backend).
 	let _ = window.run_on_main_thread(move || {
+		use std::sync::atomic::{AtomicBool, Ordering};
+		// Fullscreen from a MAXIMIZED window (title-bar maximize / Win+Up / snap) breaks on
+		// Windows: tao keeps the maximized state underneath, so the window doesn't cover the
+		// monitor cleanly and leaving fullscreen lands in a half-maximized state. Un-maximize
+		// first and maximize again after leaving, so the user gets back what they had.
+		static WAS_MAXIMIZED: AtomicBool = AtomicBool::new(false);
+		let fs = w.is_fullscreen().unwrap_or(false);
+		// Maximized WHILE fullscreen (Win+Up, a maximize call): restore that on leaving too.
+		if !on && fs && w.is_maximized().unwrap_or(false) {
+			WAS_MAXIMIZED.store(true, Ordering::Relaxed);
+		}
+		if on && !fs {
+			let max = w.is_maximized().unwrap_or(false);
+			WAS_MAXIMIZED.store(max, Ordering::Relaxed);
+			if max {
+				let _ = w.unmaximize();
+			}
+		}
 		// Self-heal any stray always-on-top the old fullscreen path could have left set.
 		if !on {
 			let _ = w.set_always_on_top(false);
 		}
 		let _ = w.set_fullscreen(on);
+		let mut maximized = false;
+		if !on && fs && WAS_MAXIMIZED.swap(false, Ordering::Relaxed) {
+			let _ = w.maximize();
+			maximized = true;
+		}
+		if let (false, Some([rx, oy])) = (on, drag_from) {
+			// Maximized: the native caption drag restores it under the cursor by itself.
+			if !maximized {
+				if let (Ok(c), Ok(sz), Ok(scale)) = (w.cursor_position(), w.outer_size(), w.scale_factor()) {
+					let x = c.x - rx.clamp(0.0, 1.0) * sz.width as f64;
+					let y = c.y - (oy * scale).clamp(0.0, sz.height as f64);
+					let _ = w.set_position(tauri::PhysicalPosition::new(x.round() as i32, y.round() as i32));
+				}
+			}
+			let _ = w.start_dragging();
+		}
+		tracing::info!(on, was_fullscreen = fs, "set_window_fullscreen applied");
 		// Keep input focus on the toplevel after the toggle — otherwise (Linux) X moves focus to
 		// the embedded native-renderer child window, which flips kbdhook's FOCUSED to false and
 		// silently kills the evdev combos (F12/M/Q) until the user clicks back in.
-		let _ = w.set_focus();
+		// (Not during a drag-out: the modal move loop already owns the window.)
+		if on || drag_from.is_none() {
+			let _ = w.set_focus();
+		}
 	});
 	Ok(())
 }
@@ -679,6 +723,14 @@ pub(crate) unsafe fn fill_children_to_client(hwnd: windows_sys::Win32::Foundatio
 		// Direct children only — grandchildren (the webview's internal chain) follow
 		// their own parent's resize.
 		if GetAncestor(child, GA_PARENT) == ctx.parent {
+			// Skip a PARKED child: an inactive session tab's renderer hides itself as 1×1
+			// offscreen and caches that geometry, so it never re-parks. Filling it here left the
+			// background tab's video covering the whole window (chrome + tabs grey) after leaving
+			// fullscreen.
+			let mut r: RECT = std::mem::zeroed();
+			if GetClientRect(child, &mut r) != 0 && r.right <= 1 && r.bottom <= 1 {
+				return 1;
+			}
 			MoveWindow(child, 0, 0, ctx.w, ctx.h, 1);
 		}
 		1

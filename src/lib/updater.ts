@@ -75,11 +75,13 @@ export async function silentUpdateCheck(opts?: {
 		}
 		await api.markUpdateInstalling(update.version).catch(() => {});
 		// Phase 2: destructive install. On Windows this spawns the (quiet) NSIS
-		// installer and calls process::exit(0), so it never returns here — the
+		// installer QUIETLY (the branded pulsar-update window shows progress instead of the NSIS
+		// wizard) and calls process::exit(0), so it never returns here — the
 		// installer's /R flag auto-relaunches the app. On macOS/Linux install()
 		// replaces the binary in place and returns, and relaunch() below does the
 		// actual restart.
 		try {
+			await api.launchUpdateWindow().catch(() => {});
 			await update.install();
 		} catch (e) {
 			await api.clearUpdateInstalling().catch(() => {});
@@ -204,6 +206,7 @@ export async function installUpdate(isBusy?: () => boolean): Promise<void> {
 		}
 		updateState.phase = 'installing';
 		await api.markUpdateInstalling(u.version).catch(() => {});
+		await api.launchUpdateWindow().catch(() => {});
 		await u.install();
 		updateState.phase = 'restarting';
 		await relaunch();

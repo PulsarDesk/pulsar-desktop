@@ -164,6 +164,118 @@ pub fn uninstall() {
 	}
 }
 
+/// Launch an app exe (detached), from its own directory.
+pub fn launch_exe(exe: &Path, args: &[&str]) {
+	let dir = exe.parent().map(Path::to_path_buf).unwrap_or_default();
+	#[cfg(windows)]
+	{
+		use std::os::windows::process::CommandExt;
+		const DETACHED_PROCESS: u32 = 0x0000_0008;
+		let _ = std::process::Command::new(exe).args(args).current_dir(&dir).creation_flags(DETACHED_PROCESS).spawn();
+	}
+	#[cfg(not(windows))]
+	{
+		let _ = std::process::Command::new(exe).args(args).current_dir(&dir).spawn();
+	}
+}
+
+/// Outcome of an in-app update, as seen by the `--updating` window.
+pub enum UpdMsg {
+	/// The new build is running.
+	Done,
+	/// The installer never ran (UAC declined) or the app did not come back.
+	Failed(String),
+}
+
+/// Watch the quiet NSIS update the app just started (`Pulsar-<ver>-installer.exe` in %TEMP%)
+/// until the new Pulsar runs in THIS session. Blocking — run it on a worker thread.
+pub fn watch_update(old_pid: u32, tx: &Sender<UpdMsg>) {
+	use std::time::{Duration, Instant};
+	let start = Instant::now();
+	let mut saw_installer = false;
+	let mut gone_at: Option<Instant> = None;
+	loop {
+		std::thread::sleep(Duration::from_millis(400));
+		let procs = processes();
+		let me = std::process::id();
+		let my_session = procs.iter().find(|p| p.pid == me).map(|p| p.session);
+		let old_alive = procs.iter().any(|p| p.pid == old_pid);
+		let installer = procs.iter().any(|p| {
+			let n = p.name.to_ascii_lowercase();
+			n.starts_with("pulsar") && (n.ends_with("-installer.exe") || n.contains("setup"))
+				&& p.pid != me
+		});
+		let new_app = procs.iter().any(|p| {
+			p.name.eq_ignore_ascii_case("pulsar.exe") && p.pid != old_pid && Some(p.session) == my_session
+		});
+		if installer {
+			saw_installer = true;
+			gone_at = None;
+		}
+		if new_app && !old_alive {
+			let _ = tx.send(UpdMsg::Done);
+			return;
+		}
+		// install() failed before the installer started: the app is still running and
+		// handles it itself — nothing to show.
+		if !saw_installer && old_alive && start.elapsed() > Duration::from_secs(15) {
+			let _ = tx.send(UpdMsg::Done);
+			return;
+		}
+		if !saw_installer && !old_alive && start.elapsed() > Duration::from_secs(40) {
+			let _ = tx.send(UpdMsg::Failed(
+				"Kurulum başlamadı. Yönetici izni verilmemiş olabilir; Pulsar'ı açıp güncellemeyi tekrar dene.".into(),
+			));
+			return;
+		}
+		if saw_installer && !installer {
+			let at = *gone_at.get_or_insert_with(Instant::now);
+			if at.elapsed() > Duration::from_secs(20) {
+				let _ = tx.send(UpdMsg::Failed("Kurulum bitti ama Pulsar açılmadı.".into()));
+				return;
+			}
+		}
+		if start.elapsed() > Duration::from_secs(300) {
+			let _ = tx.send(UpdMsg::Failed("Güncelleme çok uzun sürdü.".into()));
+			return;
+		}
+	}
+}
+
+struct Proc {
+	name: String,
+	pid: u32,
+	session: u32,
+}
+
+/// Running processes (image name, pid, session number) via `tasklist /FO CSV`.
+fn processes() -> Vec<Proc> {
+	#[cfg(windows)]
+	{
+		use std::os::windows::process::CommandExt;
+		const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+		let Ok(out) = std::process::Command::new("tasklist")
+			.args(["/FO", "CSV", "/NH"])
+			.creation_flags(CREATE_NO_WINDOW)
+			.output()
+		else {
+			return Vec::new();
+		};
+		String::from_utf8_lossy(&out.stdout)
+			.lines()
+			.filter_map(|l| {
+				// "name","pid","session name","session#","mem"
+				let f: Vec<&str> = l.split("\",\"").map(|s| s.trim_matches('"')).collect();
+				Some(Proc { name: f.first()?.to_string(), pid: f.get(1)?.parse().ok()?, session: f.get(3)?.parse().ok()? })
+			})
+			.collect()
+	}
+	#[cfg(not(windows))]
+	{
+		Vec::new()
+	}
+}
+
 /// Launch the installed app (detached).
 pub fn launch_app(dir: &Path) {
 	#[cfg(windows)]

@@ -165,6 +165,28 @@ describe('SessionManager — same-host split: per-pane host-display selection (P
 		expect(displayArg(2)).toBe(2);
 	});
 
+	it('a pane with NO free monitor left still opens its own session (same screen twice)', async () => {
+		const mgr = makeManager('game');
+		mgr.enterSplit('grid4', 'game');
+		for (let i = 0; i < 4; i++) await mgr.connectIntoPane(i, target, 'game', '');
+		// The host advertises 3 monitors: the 4th pane mirrors the default one instead of
+		// collapsing onto pane 1's session (which left its cell gray).
+		expect(mgr.sessions).toHaveLength(4);
+		expect(displayArg(3)).toBeUndefined();
+		expect(new Set(mgr.panes).size).toBe(4);
+	});
+
+	it('paneUsageFor tags the window / screen each pane streams (1-based)', async () => {
+		const mgr = makeManager('game');
+		mgr.enterSplit('grid4', 'game');
+		await mgr.connectIntoPane(0, target, 'game', '');
+		await mgr.connectIntoPane(1, target, 'game', '', undefined, 4242);
+		await mgr.connectIntoPane(2, target, 'game', 'steam');
+		const u = mgr.paneUsageFor(target.id);
+		expect(u.displays).toEqual({ 0: 1 });
+		expect(u.windows).toEqual({ 4242: 2 });
+	});
+
 	it('an explicit picker choice (displayIdx) is passed through and bypasses de-dup', async () => {
 		const mgr = makeManager('remote');
 		mgr.enterSplit('h2');
@@ -213,5 +235,33 @@ describe('SessionManager — same-host split: per-pane host-display selection (P
 		expect([...mgr.usedDisplaysFor(target.id)].sort()).toEqual([0, 1]);
 		// Next free is 2.
 		expect(mgr.freeDisplayFor(target.id)).toBe(2);
+	});
+});
+
+describe('SessionManager — window fullscreen after the last session ends', () => {
+	beforeEach(() => vi.clearAllMocks());
+
+	it('fullscreen before the session → stays fullscreen after it ends', async () => {
+		const mgr = makeManager('game');
+		mgr.toggleFullscreen();
+		await mgr.startConnect(target, 'game');
+		mgr.endSession(mgr.sessions[0].tabId);
+		expect(mgr.fullscreen).toBe(true);
+	});
+
+	it('windowed before, auto-fullscreen during → back to windowed', async () => {
+		const mgr = makeManager('remote');
+		await mgr.startConnect(target, 'remote');
+		mgr.enterFullscreenAuto();
+		mgr.endSession(mgr.sessions[0].tabId);
+		expect(mgr.fullscreen).toBe(false);
+	});
+
+	it('user toggled during the session → their choice stays', async () => {
+		const mgr = makeManager('remote');
+		await mgr.startConnect(target, 'remote');
+		mgr.toggleFullscreen();
+		mgr.endSession(mgr.sessions[0].tabId);
+		expect(mgr.fullscreen).toBe(true);
 	});
 });

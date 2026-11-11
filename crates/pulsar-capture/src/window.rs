@@ -53,6 +53,26 @@ pub fn list_windows() -> Vec<WindowDesc> {
 		if ex_style & WS_EX_TOOLWINDOW.0 != 0 {
 			return BOOL(1);
 		}
+		// Skip CLOAKED windows: "visible" to Win32 but never drawn — suspended UWP apps
+		// (Settings, Windows Input Experience…) and windows on another virtual desktop. They
+		// capture as black, so the picker must not offer them.
+		let mut cloaked: u32 = 0;
+		if windows::Win32::Graphics::Dwm::DwmGetWindowAttribute(
+			hwnd,
+			windows::Win32::Graphics::Dwm::DWMWA_CLOAKED,
+			&mut cloaked as *mut u32 as *mut core::ffi::c_void,
+			std::mem::size_of::<u32>() as u32,
+		)
+		.is_ok() && cloaked != 0
+		{
+			return BOOL(1);
+		}
+		// Skip Pulsar's own windows (streaming the host app into itself is never wanted).
+		let mut pid = 0u32;
+		windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(hwnd, Some(&mut pid));
+		if pid == std::process::id() {
+			return BOOL(1);
+		}
 		// Non-empty title.
 		let len = GetWindowTextLengthW(hwnd);
 		if len <= 0 {

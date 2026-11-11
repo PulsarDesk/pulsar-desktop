@@ -72,6 +72,8 @@ struct RumbleCmd {
     /// the host's continuous refresh keeps alive / stops with 0,0). A one-shot **test** pulse
     /// sets a short value so the motors stop on their own (no stop command follows).
     dur_ms: Option<u32>,
+    /// Light-bar colour instead of a rumble (split-join player colours); motors untouched.
+    led: Option<[u8; 3]>,
 }
 
 struct Shared {
@@ -145,7 +147,7 @@ impl SdlPads {
     /// Replay a host rumble command on the physical pad. `guid` = the slot's device key from
     /// the live controller order (preferred match); 0/0 stops the motors. Best-effort.
     pub fn rumble(&self, guid: Option<String>, slot: u8, large: u8, small: u8) {
-        let _ = self.rumble_tx.try_send(RumbleCmd { guid, slot, large, small, dur_ms: None });
+        let _ = self.rumble_tx.try_send(RumbleCmd { guid, slot, large, small, dur_ms: None, led: None });
     }
 
     /// Fire a one-shot rumble PULSE on a pad (by uuid) so the user can FEEL its vibration
@@ -158,7 +160,13 @@ impl SdlPads {
             large: 255,
             small: 255,
             dur_ms: Some(TEST_RUMBLE_MS),
+            led: None,
         });
+    }
+
+    /// Set a pad's light bar (DualSense / DS4; a no-op on pads without one).
+    pub fn led(&self, uuid: String, rgb: [u8; 3]) {
+        let _ = self.rumble_tx.try_send(RumbleCmd { guid: Some(uuid), slot: 0, large: 0, small: 0, dur_ms: None, led: Some(rgb) });
     }
 }
 
@@ -225,6 +233,11 @@ pub fn clear_controller_lock(uuid: &str) {
 pub fn clear_session_locks(play_id: u64) {
     lock_map().lock().unwrap().retain(|_, owner| *owner != play_id);
     kbm_lock_map().lock().unwrap().retain(|_, owner| *owner != play_id);
+}
+
+/// Every controller lock (uuid → owning play id).
+pub fn lock_snapshot() -> HashMap<String, u64> {
+    lock_map().lock().unwrap().clone()
 }
 
 /// The session/play id that currently owns (has locked) this pad, or `None` if it's unlocked.
@@ -509,6 +522,11 @@ fn apply_rumble(open: &HashMap<u32, OpenPad>, cmd: &RumbleCmd) {
         tracing::debug!(slot = cmd.slot, guid = ?cmd.guid, pads = open.len(), "rumble: no SDL pad for slot");
         return;
     };
+    if let Some([r, g, b]) = cmd.led {
+        let ok = unsafe { SDL_SetGamepadLED(pad.ptr, r, g, b) };
+        tracing::debug!(name = %pad.name, r, g, b, ok, "SDL_SetGamepadLED");
+        return;
+    }
     // A disabled pad neither forwards input nor rumbles.
     if is_controller_disabled(&pad.uuid) {
         return;

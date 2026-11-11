@@ -26,6 +26,11 @@ export interface Game {
 	cmdStart: string;
 	/** run on session end */
 	cmdStop: string;
+	/** Same-host co-op: named mutexes/events that stop a 2nd copy from starting (comma-separated,
+	 * substring match) — renamed per copy when a second pane launches this game. */
+	coopMutexes?: string;
+	/** Same-host co-op: give every extra copy its own user-profile / AppData folder (saves). */
+	coopProfile?: boolean;
 }
 
 export interface HostSettings {

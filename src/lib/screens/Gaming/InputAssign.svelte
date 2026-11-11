@@ -23,6 +23,11 @@
 
 	onMount(async () => {
 		pads = await api.controllers().catch(() => []);
+		const locks = await api.controllerLocks().catch(() => ({}) as Record<string, number>);
+		for (const p of pads) {
+			const owner = locks[p.uuid];
+			if (owner !== undefined && panes.some((x) => x.playId === owner)) padPick[p.uuid] = owner;
+		}
 		kbms = await api.listInputDevices().catch(() => []);
 	});
 
@@ -61,7 +66,7 @@
 					value={padPick[pad.uuid] ?? -1}
 					onchange={(e) => pickPad(pad.uuid, +(e.currentTarget as HTMLSelectElement).value)}
 				>
-					<option value={-1}>{t('input.followFocus')}</option>
+					<option value={-1}>{t('input.unassignedJoin')}</option>
 					{#each panes as p (p.playId)}
 						<option value={p.playId}>{paneLabel(p)}</option>
 					{/each}

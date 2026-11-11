@@ -238,21 +238,21 @@
 			}
 		</style>
 	</head>
-	<body data-tauri-drag-region>
-		<div class="splash" role="status" aria-live="polite" data-tauri-drag-region>
-			<span class="ver" id="ver" data-tauri-drag-region></span>
-			<div class="mark" aria-hidden="true" data-tauri-drag-region>
+	<body>
+		<div class="splash" role="status" aria-live="polite">
+			<span class="ver" id="ver"></span>
+			<div class="mark" aria-hidden="true">
 				<span class="ring"></span><span class="ring"></span><span class="ring"></span>
-				<svg class="core" width="72" height="72" viewBox="0 0 52 52" fill="none" data-tauri-drag-region>
+				<svg class="core" width="72" height="72" viewBox="0 0 52 52" fill="none">
 					<circle cx="26" cy="26" r="24" stroke="var(--mark)" stroke-width="1.5" style="opacity: var(--ring-outer)" />
 					<circle cx="26" cy="26" r="16" stroke="var(--mark)" stroke-width="1.75" style="opacity: var(--ring-mid)" />
 					<circle cx="26" cy="26" r="8.5" stroke="var(--mark)" stroke-width="2" />
 					<circle cx="26" cy="26" r="3.5" fill="var(--mark)" />
 				</svg>
 			</div>
-			<div class="word" data-tauri-drag-region>Pulsar</div>
-			<div class="load" data-tauri-drag-region>
-				<div class="row" data-tauri-drag-region>
+			<div class="word">Pulsar</div>
+			<div class="load">
+				<div class="row">
 					<span class="status" id="status"><span class="dot"></span><span id="label"></span></span>
 					<span class="pct" id="pct"></span>
 				</div>
@@ -266,6 +266,16 @@
 					return document.getElementById(id);
 				};
 				$('ver').textContent = q.get('v') ? 'v' + q.get('v') : '';
+				// Drag from ANYWHERE on the card. Tauri's `data-tauri-drag-region` only starts a
+				// drag when the exact clicked element carries the attribute — the logo rings, SVG
+				// paths and text spans don't, so most of the card wouldn't move.
+				document.addEventListener('mousedown', function (e) {
+					if (e.button !== 0) return;
+					var ipc = window.__TAURI_INTERNALS__;
+					if (!ipc) return;
+					e.preventDefault();
+					ipc.invoke('plugin:window|start_dragging', { label: 'splash' }).catch(function () {});
+				});
 				// The bar creeps through each step's share (toward, never onto, the next step's
 				// start — 90 % of the way, easing off) and glides on when Rust reports the next
 				// step. Mirrors `Step::creep` in splash.rs.

@@ -378,6 +378,89 @@ pub(crate) async fn list_remote_games(
 	request_games(&mut sess).await.map_err(|e| e.to_string())
 }
 
+/// Same-host co-op component status for Settings.
+#[derive(serde::Serialize)]
+pub(crate) struct CoopStatus {
+	supported: bool,
+	installed: bool,
+	dir: String,
+	missing: Vec<&'static str>,
+}
+
+#[tauri::command]
+pub(crate) fn coop_status() -> CoopStatus {
+	CoopStatus {
+		supported: cfg!(windows),
+		installed: crate::coop::component_installed(),
+		dir: crate::coop::component_dir().map(|d| d.display().to_string()).unwrap_or_default(),
+		missing: crate::coop::missing_files(),
+	}
+}
+
+/// Open (creating it) the folder the co-op component's files go into.
+#[tauri::command]
+pub(crate) fn open_coop_dir() -> Result<(), String> {
+	let dir = crate::coop::component_dir().ok_or("no LOCALAPPDATA")?;
+	std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+	#[cfg(windows)]
+	{
+		let mut c = std::process::Command::new("explorer");
+		c.arg(&dir);
+		c.spawn().map_err(|e| e.to_string())?;
+	}
+	Ok(())
+}
+
+/// Everything a split pane can stream from one host, fetched over ONE authenticated session:
+/// its games, its open app windows (per-window capture) and its monitors.
+#[derive(serde::Serialize)]
+pub(crate) struct RemoteSources {
+	games: Vec<GameInfo>,
+	windows: Vec<pulsar_core::service::WindowInfo>,
+	displays: Vec<pulsar_core::service::DisplayInfo>,
+}
+
+/// Client: list the host's games + open windows + monitors (the split-pane source picker).
+/// Unlike `host_window_list` this needs no live stream session to that host, so the FIRST
+/// pane can pick a window too. An old host simply answers no windows / no displays.
+#[tauri::command]
+pub(crate) async fn list_remote_sources(
+	app: AppHandle,
+	state: State<'_, AppState>,
+	target: String,
+) -> Result<RemoteSources, String> {
+	let node = state
+		.node
+		.lock()
+		.unwrap()
+		.clone()
+		.ok_or(crate::i18n::t("err.online"))?;
+	let (pw_pending, next_auth) = (state.pw_pending.clone(), state.next_auth.clone());
+	let disc = state.discovery.lock().unwrap().clone();
+	let (net_mode, relay) = {
+		let cfg = state.config.lock().unwrap();
+		(cfg.network_mode, cfg.relay.clone())
+	};
+	let (mut sess, peer_label) =
+		connect_target(&app, &node, disc, &target, net_mode, &relay).await?;
+	let auth_result = tokio::time::timeout(
+		AUTH_TIMEOUT,
+		crate::auth::client_authenticate(&mut sess, &app, &pw_pending, &next_auth, &peer_label),
+	)
+	.await
+	.map_err(|_| "connect-timed-out".to_string())?;
+	if !auth_result? {
+		return Err(crate::i18n::t("err.denied").into());
+	}
+	let games = request_games(&mut sess).await.map_err(|e| e.to_string())?;
+	let windows = pulsar_core::service::query_windows(&mut sess).await.unwrap_or_default();
+	let displays = pulsar_core::service::query_stream_caps(&mut sess)
+		.await
+		.map(|c| c.displays)
+		.unwrap_or_default();
+	Ok(RemoteSources { games, windows, displays })
+}
+
 /// Client: ask the host at `target` to launch one of its games.
 #[tauri::command]
 pub(crate) async fn launch_remote_game(
@@ -483,7 +566,15 @@ pub(crate) async fn lan_devices(state: State<'_, AppState>) -> Result<Vec<LanDev
 			platform: p.platform,
 		})
 		.collect();
-	list.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+	// Total order: name alone ties for two hosts on one machine (two Windows accounts share the
+	// computer name), and HashMap iteration order then flipped them on every 2 s poll.
+	list.sort_by(|a, b| {
+		a.name
+			.to_lowercase()
+			.cmp(&b.name.to_lowercase())
+			.then_with(|| a.id.cmp(&b.id))
+			.then_with(|| a.addr.cmp(&b.addr))
+	});
 	Ok(list)
 }
 
@@ -688,6 +779,13 @@ pub(crate) fn set_tray(state: State<'_, AppState>, enabled: bool) {
 		.store(!enabled, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Sync the "wake on controller" preference (Settings → General): the Guide/PS button
+/// brings a hidden / background Pulsar forward in gaming mode. See `pad_wake`.
+#[tauri::command]
+pub(crate) fn set_pad_wake(enabled: bool) {
+	crate::pad_wake::set_enabled(enabled);
+}
+
 /// Enable/disable this device's HOST role from the UI. `serving = false` (set when the
 /// app enters gaming mode — a pure-client personality) makes the host serve loop reject
 /// every inbound connection at auth time, before any Allow/Deny popup, so nobody can
@@ -795,7 +893,8 @@ pub(crate) fn gamepad_nav_start(app: AppHandle, state: State<'_, AppState>) {
 /// Start the always-on PS / Home / Guide-button watcher. INDEPENDENT of the gaming-mode nav
 /// bridge above (which only runs in gaming mode and doesn't carry GUIDE): this runs for the
 /// whole process so a controller's PS button can TOGGLE gaming mode even from remote mode.
-/// Emits a `guide-toggle` event on each rising edge (a press, debounced — never while held);
+/// On each rising edge (a press, debounced — never while held) it calls
+/// `pad_wake::on_guide_press`, which emits `guide-toggle` while Pulsar is focused;
 /// the shell decides whether to act (only when idle, never mid-session). Polls the shared SDL
 /// snapshot at ~40 ms — cheap, and a no-op when no pad is connected. Started once at setup.
 pub(crate) fn spawn_guide_watcher(app: AppHandle) {
@@ -809,12 +908,16 @@ pub(crate) fn spawn_guide_watcher(app: AppHandle) {
 		// for each NEW pad (name + battery), for the idle (out-of-session) UI.
 		let mut prev_uuids: std::collections::HashSet<String> = std::collections::HashSet::new();
 		let mut first_pass = true;
+		// Split "press to join": per-pad A state (see split_join::tick).
+		let mut prev_a: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
 		loop {
 			let snap = mgr.snapshot();
+			crate::split_join::tick(&app, &snap, &mut prev_a);
 			// Any connected pad's GUIDE/PS/Home button counts (the user may pick up any pad).
 			let down = snap.iter().any(|p| p.state.is_pressed(button::GUIDE));
 			if down && !prev_down {
-				let _ = app.emit("guide-toggle", ());
+				// Focused: `guide-toggle` (mode toggle when idle); background: optional wake.
+				crate::pad_wake::on_guide_press(&app);
 			}
 			prev_down = down;
 			// New-pad detection → connect toast. Skip the very first pass so already-connected

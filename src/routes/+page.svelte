@@ -15,6 +15,8 @@
 		onPeerName,
 		onPeerId,
 		onGuideToggle,
+		onPadWake,
+		onPadJoined,
 		onControllerConnected,
 		onNodeId,
 		onNodeVersionError,
@@ -54,6 +56,9 @@
 	import PasswordModal from './page/PasswordModal.svelte';
 	import UpdateModal from './page/UpdateModal.svelte';
 	import RelayAuthModal from './page/RelayAuthModal.svelte';
+	import Modal from '#lib/Modal.svelte';
+	import Settings from '#lib/screens/Settings.svelte';
+	import Controllers from '#lib/Controllers.svelte';
 	import { SessionManager } from './page/sessions.svelte';
 	import { setLivePeers } from '#lib/presence.svelte.js';
 
@@ -122,6 +127,10 @@
 	// chrome split button. The actual split state (layout / panes / focus) lives on the
 	// SessionManager (sm.splitMode / sm.panes / sm.focusedPane).
 	let showSplitPicker = $state(false);
+	// Split mode hides the home (and with it Settings / the controllers popup) — the title
+	// bar opens them as dialogs instead.
+	let splitSettingsOpen = $state(false);
+	let splitPadsOpen = $state(false);
 	// Couch-coop input assignment modal (split + gaming) — `assignPanes` is derived after `sm` below.
 	let showInputAssign = $state(false);
 	// The personality every pane runs in split mode, captured the moment the picker opens.
@@ -160,6 +169,36 @@
 			}))
 			.filter((p) => p.playId >= 0)
 	);
+	// Gaming split "press to join": pane order → backend, which pads are locked where (polled,
+	// so an unplugged pad brings its pane's prompt back), and a toast when one joins.
+	const joinOn = $derived(sm.splitMode !== 'off' && sm.splitSessionMode === 'game');
+	let padLocks = $state<Record<string, number>>({});
+	let padUuids = $state<string[]>([]);
+	$effect(() => {
+		const ids = joinOn
+			? sm.panes.map((tabId) =>
+					tabId != null ? (sm.sessions.find((s) => s.tabId === tabId)?.playId ?? -1) : -1
+				)
+			: [];
+		api.setSplitJoin(ids).catch(() => {});
+	});
+	$effect(() => {
+		if (!joinOn) return;
+		const poll = () => {
+			api.controllerLocks().then((l) => (padLocks = l)).catch(() => {});
+			api.controllers()
+				.then((c) => (padUuids = c.map((p) => p.uuid)))
+				.catch(() => {});
+		};
+		poll();
+		const timer = setInterval(poll, 1500);
+		return () => clearInterval(timer);
+	});
+	function joinPromptFor(playId: number, paneIdx: number): string {
+		if (!joinOn || playId < 0 || paneIdx < 0) return '';
+		const has = padUuids.some((u) => padLocks[u] === playId);
+		return has ? '' : t('split.joinPrompt', { n: paneIdx + 1 });
+	}
 	// Client-side password prompts — driven by the host's `auth-prompt` event, so they
 	// appear at the same time as the host's Allow/Deny popup. Replying with the password
 	// OR the host clicking Allow (whichever first) completes the connect. Multiple tabs
@@ -583,6 +622,7 @@
 		// is unreachable, goOnline blocks for its full timeout; a close during that window
 		// would otherwise hide-to-tray for a user who disabled it, leaving a ghost process.
 		api.setTray(ui.tray).catch(() => {});
+		api.setPadWake(ui.padWake).catch(() => {});
 		api.setClipboardSync(ui.clipboardSync).catch(() => {});
 		await goOnline();
 		// Surface incoming connections on the host UI.
@@ -628,6 +668,17 @@
 		await onGuideToggle(() => {
 			if (isPopup) return;
 			toggleMode(); // a no-op while a connection is open (modeLocked)
+		});
+		// Settings → "wake on controller": the Guide/PS button brought the hidden/background
+		// window forward (Rust did the show/focus) — land in gaming mode (never toggle out).
+		await onPadJoined((e) => {
+			padLocks = { ...padLocks, [e.uuid]: e.play_id };
+			if (!padUuids.includes(e.uuid)) padUuids = [...padUuids, e.uuid];
+			api.renderToast(e.play_id, t('split.joined', { n: e.pane + 1, name: e.name })).catch(() => {});
+		});
+		await onPadWake(() => {
+			if (isPopup) return;
+			if (mode !== 'game') toggleMode();
 		});
 		// Controller connected → toast (only when idle; in a session it's surfaced in-overlay).
 		await onControllerConnected((e) => {
@@ -732,7 +783,7 @@
 			// Kiosk / headless start (CLI --connect): begin fullscreen so the host fills
 			// the screen with no app chrome. Toggle off with Ctrl+Shift+F12. `--nofullscreen`
 			// (ac.nofullscreen) opts out — the session starts windowed (dev test loops / embedded).
-			if (!ac.nofullscreen && !sm.fullscreen) sm.toggleFullscreen();
+			if (!ac.nofullscreen) sm.enterFullscreenAuto();
 		}
 		// Auto-update: only when this launch is IDLE (no CLI --connect into a live
 		// session) — the updater must never interrupt a remote session. Deferred a few
@@ -776,13 +827,23 @@
 	// This ONLY suspends visual repaint: the process, all event handling, tab switching,
 	// and the active-session input rAF pump keep running. Cleared the instant the active
 	// tab leaves the native session (home/another tab) or the session ends.
+	// A webview modal is up over a session (split picker, password prompt, update…): the
+	// native video is hidden for it (occludeNative) and the webview must paint again.
+	const webModalUp = $derived(
+		showSplitPicker ||
+			modalCount.n > 0 ||
+			!!pwPrompt ||
+			showInputAssign ||
+			(updateStore.open && updateStore.available)
+	);
 	$effect(() => {
 		// In split mode the panes only tile PART of the window (chrome/tabs + any empty
 		// PaneConnect cells stay visible), so the webview is never fully occluded — keep
 		// repaint live. Single-tab mode is unchanged.
 		const s = sm.sessions.find((x) => x.tabId === sm.activeTab);
 		const occluded =
-			sm.splitMode === 'off' && !!s && !!s.native && s.phase === 'active' && !!s.ready;
+			sm.splitMode === 'off' && !!s && !!s.native && s.phase === 'active' && !!s.ready && !webModalUp;
+		// (A modal's entry animation starts at opacity 0 — paused, it would stay invisible.)
 		document.documentElement.toggleAttribute('data-occluded', occluded);
 	});
 
@@ -863,6 +924,29 @@
 				if (e.repeat) return;
 				sm.toggleFullscreen();
 			}
+		};
+		window.addEventListener('keydown', onKey);
+		return () => window.removeEventListener('keydown', onKey);
+	});
+
+	// Tab shortcuts (browser-style), only while no session is engaged — an engaged session's
+	// keys go to the host and never reach this listener (Session.svelte stops them in the
+	// capture phase). Ctrl+Tab / Ctrl+Shift+Tab cycle; Ctrl+1…8 pick the tab at that
+	// position in the bar (1 = Home), Ctrl+9 the last one.
+	$effect(() => {
+		const onKey = (e: KeyboardEvent) => {
+			if (!e.ctrlKey || e.altKey || e.metaKey) return;
+			const order: ('home' | number)[] = ['home', ...sm.sessions.map((s) => s.tabId)];
+			let next: 'home' | number | undefined;
+			if (e.key === 'Tab') {
+				const i = Math.max(0, order.indexOf(sm.activeTab));
+				next = order[(i + (e.shiftKey ? order.length - 1 : 1)) % order.length];
+			} else if (!e.shiftKey && /^Digit[1-9]$/.test(e.code)) {
+				const n = Number(e.code.slice(5));
+				next = n === 9 ? order[order.length - 1] : order[n - 1];
+			} else return;
+			e.preventDefault();
+			if (next !== undefined && next !== sm.activeTab) sm.activeTab = next;
 		};
 		window.addEventListener('keydown', onKey);
 		return () => window.removeEventListener('keydown', onKey);
@@ -955,6 +1039,11 @@
 				fullscreen={sm.fullscreen}
 				onToggleFullscreen={sm.toggleFullscreen}
 				onUpdate={openUpdate}
+				onOpenSettings={() => (splitSettingsOpen = true)}
+				onOpenControllers={() =>
+					sm.splitSessionMode === 'game' && assignPanes.length
+						? (showInputAssign = true)
+						: (splitPadsOpen = true)}
 			/>
 			{#if sm.sessions.length && sm.splitMode === 'off'}
 				<Tabs
@@ -1040,14 +1129,12 @@
 							? sm.activeTab === s.tabId
 							: paneIdx === sm.focusedPane}
 						split={sm.splitMode !== 'off'}
+						windowCapture={s.windowHwnd !== undefined}
 						fullscreen={sm.fullscreen}
 						onToggleFullscreen={sm.toggleFullscreen}
 						onPaneFocus={paneIdx >= 0 ? () => sm.focusPane(paneIdx) : undefined}
-						occludeNative={showSplitPicker ||
-							modalCount.n > 0 ||
-							!!pwPrompt ||
-							showInputAssign ||
-							(updateStore.open && updateStore.available)}
+						occludeNative={webModalUp}
+						joinPrompt={joinPromptFor(s.playId, paneIdx)}
 						onEnd={() => sm.endSession(s.tabId)}
 					/>
 				{/if}
@@ -1077,6 +1164,7 @@
 									index={i}
 									focused={i === sm.focusedPane}
 									onConnect={sm.connectIntoPane}
+									usageFor={(id) => sm.paneUsageFor(id)}
 									onFetched={closePwFor}
 								/>
 							{:else}
@@ -1121,6 +1209,16 @@
 		     access key is what persists, so this is a once-per-device dialog. -->
 		<RelayAuthModal onSubmit={(password, totp) => goOnline({ password, totp })} />
 
+		{#if splitSettingsOpen}
+			<Modal title={t('nav.settings')} wide onClose={() => (splitSettingsOpen = false)}>
+				<Settings onReconnect={goOnline} />
+			</Modal>
+		{/if}
+		{#if splitPadsOpen}
+			<Modal title={t('controllers.title')} onClose={() => (splitPadsOpen = false)}>
+				<Controllers />
+			</Modal>
+		{/if}
 		{#if showSplitPicker}
 			<SplitPicker
 				splitMode={sm.splitMode}

@@ -5,7 +5,7 @@
 	import { isLive } from '#lib/presence.svelte.js';
 	import { api, onNodePort } from '#lib/api.js';
 	import { t } from '#lib/i18n.svelte.js';
-	import { canConnectTarget, fmtTarget } from '#lib/connectTarget.js';
+	import { canConnectTarget, fmtTarget, guardIdSpaces, reformatInput } from '#lib/connectTarget.js';
 	import SelfCard from './Home/SelfCard.svelte';
 	import LanDevices from './Home/LanDevices.svelte';
 
@@ -155,8 +155,8 @@
 			<Icon name="connect" size={17} />
 			<input
 				value={target}
-				oninput={(e) => setTarget(e.currentTarget.value)}
-				onkeydown={(e) => e.key === 'Enter' && go()}
+				oninput={(e) => (target = reformatInput(e.currentTarget))}
+				onkeydown={(e) => (e.key === 'Enter' ? go() : guardIdSpaces(e))}
 				placeholder="000 000 000"
 				aria-label={t('home.targetAria')}
 				style="font-family:var(--font-mono);font-size:19px;letter-spacing:0.06em"

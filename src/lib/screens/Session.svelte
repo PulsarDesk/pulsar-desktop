@@ -4,6 +4,12 @@
 	// sibling Session components isn't guaranteed, so a deactivating tab must not
 	// disarm a capture another tab just re-armed — only the recorded owner may stop.
 	let captureOwner = -1;
+	// One kbd-leave event ends ONE session. Every Session listens to the same global event;
+	// ending the active tab activates the next one synchronously, so a later listener in the
+	// same dispatch saw `active` turn true and ended its session too (one Ctrl+Shift+Q closed
+	// every tab). The first handler claims the event; the rest within the window ignore it.
+	let lastLeaveAt = -Infinity;
+	const LEAVE_DEDUPE_MS = 400;
 </script>
 
 <script lang="ts">
@@ -67,9 +73,14 @@
 		split?: boolean;
 		/** Split mode: clicking this pane's video focuses the pane (routes input to it). */
 		onPaneFocus?: () => void;
+		/** This session streams ONE host window (the pane's "app" pick), not a monitor. In
+		 * split mode the host then fits that window to this pane's shape (and restores it). */
+		windowCapture?: boolean;
 		/** A shell modal (e.g. the SplitPicker) is open ON TOP — hide this pane's native render
 		 * window (which on Linux composites OVER the webview, hiding the modal) while true. */
 		occludeNative?: boolean;
+		/** Gaming split: "press A to join this pane" (shown on the renderer banner). */
+		joinPrompt?: string;
 		onToggleFullscreen: () => void;
 		onEnd?: () => void;
 	};
@@ -89,7 +100,9 @@
 		active = true,
 		split = false,
 		onPaneFocus,
+		windowCapture = false,
 		occludeNative = false,
+		joinPrompt = '',
 		onToggleFullscreen,
 		onEnd = () => {}
 	}: Props = $props();
@@ -145,14 +158,28 @@
 	// automatically at session start, so a broken/erroring session can't trap the keyboard.
 	// Gated on `active`: kbdhook::enable is GLOBAL (last call wins), so only the visible
 	// tab may own it — capture re-arms on tab activation and stops on deactivation.
+	// Game mode's connect-time auto-engage already happened (plain let: not reactive).
+	let autoEngaged = false;
+	// Whether this tab was the visible one when its stream came up (null = not up yet). A
+	// session that connected in the background (another tab was in front) must NOT grab
+	// input the first time the user switches to its tab — switching tabs never engages.
+	let activeAtConnect: boolean | null = null;
 	$effect(() => {
-		if (!native || playId < 0 || !active) return;
+		if (!native || playId < 0) return;
+		const isActive = active;
+		if (activeAtConnect === null) activeAtConnect = isActive;
+		if (!isActive) return;
 		captureOwner = playId;
 		// true = also capture mouse. Game mode = Moonlight/Parsec-style "control immediately
 			// on connect": engage right after the watcher is armed (remote stays click-to-engage
 			// so a manual remote connect never grabs the local desktop unasked).
+			// Only at CONNECT, in the tab that was in front: coming back from the Home tab or
+			// switching to another tab re-arms the watcher but stays disengaged until the user
+			// clicks the video again.
+			const autoEngage = mode === 'game' && activeAtConnect && !autoEngaged;
+			autoEngaged = true;
 			api.kbdCaptureStart(playId, true)
-				.then(() => (mode === 'game' ? api.kbdEngage() : undefined))
+				.then(() => (autoEngage ? api.kbdEngage() : undefined))
 				.catch(() => {});
 		return () => {
 			if (captureOwner !== playId) return; // another tab re-armed it for itself
@@ -202,7 +229,7 @@
 				? media.mbps > 0
 					? t('session.noDecode')
 					: t('session.streamStopped')
-				: '';
+				: joinPrompt;
 		api.renderBanner(playId, text).catch(() => {});
 	});
 
@@ -289,6 +316,37 @@
 			clearTimeout(t2);
 			ro.disconnect();
 			window.removeEventListener('resize', report);
+		};
+	});
+	// Split pane streaming ONE host window: ask the host to fit that window to this pane's shape
+	// (screen adaptation's per-window form — the host restores the window when the session ends).
+	// Sent once the pane's size settles, and again only when it changes noticeably (a layout
+	// reshape), since every send is a capture restart on the host.
+	let fitSent: [number, number] | null = null;
+	$effect(() => {
+		const el = screenEl;
+		if (!split || !windowCapture || playId < 0 || !el) return;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const send = () => {
+			const r = el.getBoundingClientRect();
+			const dpr = window.devicePixelRatio || 1;
+			const w = Math.round(r.width * dpr);
+			const h = Math.round(r.height * dpr);
+			if (w < 64 || h < 64) return;
+			if (fitSent && Math.abs(w - fitSent[0]) / fitSent[0] < 0.04 && Math.abs(h - fitSent[1]) / fitSent[1] < 0.04) return;
+			fitSent = [w, h];
+			controls.setAdapt(true, w, h);
+		};
+		const schedule = () => {
+			clearTimeout(timer);
+			timer = setTimeout(send, 700);
+		};
+		const ro = new ResizeObserver(schedule);
+		ro.observe(el);
+		schedule();
+		return () => {
+			clearTimeout(timer);
+			ro.disconnect();
 		};
 	});
 	// The 0×0 "unmap" report lives in its OWN effect (no `fullscreen` dependency):
@@ -617,6 +675,9 @@
 		scope.add(
 			onKbdLeave(() => {
 				if (!active) return;
+				const now = performance.now();
+				if (now - lastLeaveAt < LEAVE_DEDUPE_MS) return;
+				lastLeaveAt = now;
 				if (native) onEnd();
 				else stopControl();
 			})

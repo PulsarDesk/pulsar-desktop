@@ -1205,6 +1205,7 @@ pub(super) async fn hold_session(
 								let _ = deg;
 							}
 							DataMsg::Avatar(png) => {
+								tracing::info!(bytes = png.len(), "host identity image received");
 								// The host's identity image for this session, addressed by play
 								// id like the other client-side payloads.
 								let _ = app_ev.emit("peer-avatar", AvatarPayload {

@@ -332,6 +332,23 @@ export function avatarFor(id: string): string | undefined {
 	return peers.find((p) => p.id === nid)?.avatar;
 }
 
+/** Take a device OUT of the address book but keep its connection history (the gaming
+ * home's star / remove). An entry left with no history at all is dropped. */
+export function unsavePeer(id: string) {
+	const i = peers.findIndex((p) => p.id === normalizeId(id));
+	if (i < 0) return;
+	peers[i].saved = false;
+	peers[i].fav = false;
+	if (peers[i].lastConnected == null && peers[i].gameConnected == null) peers.splice(i, 1);
+	persist();
+}
+
+/** Star toggle (gaming home): save `id` to Devices, or take it out again. */
+export function toggleSaved(id: string, name: string) {
+	if (isSaved(id)) unsavePeer(id);
+	else addPeer(name, id);
+}
+
 export function removePeer(id: string) {
 	const i = peers.findIndex((p) => p.id === id);
 	if (i >= 0) {

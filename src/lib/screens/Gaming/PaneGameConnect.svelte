@@ -13,6 +13,7 @@
 	import GamesScreen from './GamesScreen.svelte';
 	import { GamepadNav } from '#lib/gamepadNav.svelte.js';
 	import { api, onGamepadNav, type GameInfo } from '#lib/api.js';
+	import type { HostDisplay, WindowInfo } from '#lib/api.types.js';
 	import { t } from '#lib/i18n.svelte.js';
 
 	type Target = { name: string; id: string };
@@ -24,13 +25,23 @@
 		focused?: boolean;
 		/** Connect into THIS pane (runs startConnect + assigns the tabId). The mode arg is
 		 * advisory — connectIntoPane FORCES the split's fixed personality (game). */
-		onConnect: (i: number, target: Target, mode: 'remote' | 'game', gameId?: string) => void;
+		onConnect: (
+			i: number,
+			target: Target,
+			mode: 'remote' | 'game',
+			gameId?: string,
+			displayIdx?: number,
+			windowHwnd?: number
+		) => void;
+		/** What the OTHER panes already stream from host `id` (hwnd / monitor idx → 1-based
+		 * pane number), so the picker can tag those sources. */
+		usageFor?: (id: string) => { windows: Record<number, number>; displays: Record<number, number> };
 		/** The games-fetch authenticates against the host (the host may prompt) but is NOT a
 		 * session, so the password modal otherwise stays up after the host accepts. Signal the
 		 * parent when the fetch SUCCEEDS so it can dismiss the (now-stale) prompt for this host. */
 		onFetched?: (id: string) => void;
 	};
-	let { index, focused = false, onConnect, onFetched }: Props = $props();
+	let { index, focused = false, onConnect, onFetched, usageFor }: Props = $props();
 
 	// This pane's own roving-focus controller (one per pane — never the shell singleton).
 	const nav = new GamepadNav();
@@ -39,20 +50,36 @@
 	// Two-step flow (identical to GamingShell.openGames/playPick/backHome): home → games.
 	let step = $state<'home' | 'games'>('home');
 	let gamesTarget = $state('');
+	// Display name of the picked host (LAN / recents card), for the games-screen header.
+	let gamesTargetName = $state('');
 	let hostGames = $state<GameInfo[] | null>(null);
 	let gamesLoading = $state(false);
 	let gamesErr = $state('');
 	let desktopImg = $state('');
+	let hostWindows = $state<WindowInfo[]>([]);
+	let hostDisplays = $state<HostDisplay[]>([]);
+	const usage = $derived(
+		gamesTarget && usageFor ? usageFor(gamesTarget) : { windows: {}, displays: {} }
+	);
 
-	async function openGames(id: string) {
+	async function openGames(id: string, name = '') {
 		gamesTarget = id;
+		gamesTargetName = name;
 		hostGames = null;
 		desktopImg = '';
 		gamesErr = '';
 		gamesLoading = true;
 		step = 'games';
+		hostWindows = [];
+		hostDisplays = [];
 		try {
-			const fetched = await api.listRemoteGames(id);
+			// Games + open windows + monitors in ONE authenticated round trip (no live session
+			// to this host needed, so the first pane can pick a window too).
+			const src = await api.listRemoteSources(id);
+			if (gamesTarget !== id) return; // the user went back / picked another host meanwhile
+			const fetched = src.games;
+			hostWindows = src.windows;
+			hostDisplays = src.displays;
 			// Auth succeeded (host accepted / OTP matched) — dismiss any still-open password
 			// prompt for this host (the fetch isn't a session, so onAuthDone never fired).
 			onFetched?.(id);
@@ -70,6 +97,16 @@
 		hostGames = null;
 		gamesErr = '';
 		gamesTarget = '';
+		hostWindows = [];
+		hostDisplays = [];
+	}
+	function playDisplay(idx: number) {
+		onConnect(index, { name: t('gaming.screenN', { n: idx + 1 }), id: gamesTarget }, 'game', '', idx);
+		backHome();
+	}
+	function playWindow(w: WindowInfo) {
+		onConnect(index, { name: w.title, id: gamesTarget }, 'game', '', undefined, w.hwnd);
+		backHome();
 	}
 	function playPick(gameId: string) {
 		const name = gameId
@@ -117,12 +154,19 @@
 		<GamesScreen
 			{nav}
 			target={gamesTarget}
+				targetName={gamesTargetName}
 			games={hostGames}
 			{desktopImg}
 			loading={gamesLoading}
 			err={gamesErr}
 			onPlay={playPick}
 			onBack={backHome}
+			windows={hostWindows}
+			onPlayWindow={playWindow}
+			displays={hostDisplays}
+			onPlayDisplay={playDisplay}
+			usedWindows={usage.windows}
+			usedDisplays={usage.displays}
 		/>
 	{:else}
 		<GamingHome {nav} onPickHost={openGames} />

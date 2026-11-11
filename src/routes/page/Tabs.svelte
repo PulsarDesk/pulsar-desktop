@@ -1,12 +1,14 @@
 <script lang="ts">
 	import Icon from '#lib/Icon.svelte';
 	import { t } from '#lib/i18n.svelte.js';
+	import { allPeers, fmtPeerId, normalizeId } from '#lib/peers.svelte.js';
 
 	type Tab = {
 		tabId: number;
 		phase: 'connecting' | 'active';
 		target: { name: string; id: string };
 		label?: string;
+		mode?: 'remote' | 'game';
 	};
 	type Props = {
 		sessions: Tab[];
@@ -23,7 +25,23 @@
 	let draft = $state('');
 	function startEdit(s: Tab) {
 		editing = s.tabId;
-		draft = s.label ?? s.target.name;
+		draft = tabName(s);
+	}
+
+	// Default tab title. A game-mode tab's `target.name` is WHAT it streams (a game title,
+	// "Desktop", "Screen 2", a window title) — on its own it doesn't say which host, so it
+	// reads "<host name> (<what>)". The host name comes from the peer store, which the host's
+	// pushed identity keeps up to date; an unknown host falls back to its id.
+	function hostName(id: string): string {
+		const nid = normalizeId(id);
+		const n = allPeers().find((p) => p.id === nid)?.name?.trim() ?? '';
+		return n && normalizeId(n) !== nid ? n : fmtPeerId(id);
+	}
+	function tabName(s: Tab): string {
+		if (s.label) return s.label;
+		if (s.mode !== 'game') return s.target.name;
+		const host = hostName(s.target.id);
+		return s.target.name && s.target.name !== host ? `${host} (${s.target.name})` : host;
 	}
 	function commitEdit() {
 		if (editing !== null) onRename(editing, draft);
@@ -69,7 +87,7 @@
 					aria-label={t('tab.rename')}
 				/>
 			{:else}
-				<span class="tname">{s.label ?? s.target.name}</span>
+				<span class="tname">{tabName(s)}</span>
 				<button
 					class="tx tpen"
 					aria-label={t('tab.rename')}

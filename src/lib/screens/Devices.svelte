@@ -1,8 +1,8 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import Icon from '#lib/Icon.svelte';
-	import Modal from '#lib/Modal.svelte';
-	import { savedPeers, addPeer, updatePeer, removePeer, toggleFav, fmtPeerId, normalizeId } from '#lib/peers.svelte.js';
+	import DeviceFormModal from '#lib/DeviceFormModal.svelte';
+	import { savedPeers, removePeer, toggleFav, fmtPeerId, normalizeId } from '#lib/peers.svelte.js';
 	import { isLive } from '#lib/presence.svelte.js';
 	import { api, type LanDevice } from '#lib/api.js';
 	import { t } from '#lib/i18n.svelte.js';
@@ -13,32 +13,18 @@
 
 	let q = $state('');
 
-	// add/edit-device form: name + id-or-IP + an image (a built-in icon or an
-	// upload). `editing` holds the ORIGINAL id of the device being edited
-	// (null = adding a new one); the same modal serves both.
+	// add/edit-device dialog (shared with the gaming home): `editDev` is the device being
+	// edited, null when adding a new one.
 	let adding = $state(false);
-	let editing = $state<string | null>(null);
-	let newName = $state('');
-	let newId = $state('');
-	let newImage = $state('icon:monitor');
-	let fileInput = $state<HTMLInputElement | null>(null);
-
+	let editDev = $state<{ id: string; name: string; image?: string } | null>(null);
 	function openEdit(d: { id: string; name: string; image?: string }) {
-		editing = d.id;
-		newName = d.name;
-		newId = fmtPeerId(d.id);
-		newImage = d.image ?? 'icon:monitor';
+		editDev = { id: d.id, name: d.name, image: d.image };
 		adding = true;
 	}
 	function closeForm() {
 		adding = false;
-		editing = null;
-		newName = '';
-		newId = '';
-		newImage = 'icon:monitor';
+		editDev = null;
 	}
-
-	const ICONS = ['monitor', 'devices', 'gaming', 'keyboard'] as const;
 
 	const peers = $derived(savedPeers());
 	// Ids are stored canonical (despaced) — despace the query too so typing the
@@ -76,56 +62,6 @@
 		isLive(id) ||
 		lan.some((d) => (d.id && normalizeId(d.id) === id) || d.addr === id || addrHost(d.addr) === addrHost(id));
 
-	// Display id input as-is (IPs welcome); an all-digit relay id is capped at its 9 digits
-	// and grouped (a 10th digit used to drop it out of the id form, ungrouped and unlimited).
-	const tidyId = (v: string) => {
-		const despaced = v.replace(/\s/g, '');
-		return /^\d+$/.test(despaced)
-			? despaced
-					.slice(0, 9)
-					.replace(/(\d{3})(?=\d)/g, '$1 ')
-					.trim()
-			: v.trim();
-	};
-
-	// Uploaded picture → small cover-cropped data URL (96px) so the persisted
-	// store never carries multi-MB originals.
-	function onPickImage(e: Event) {
-		const file = (e.currentTarget as HTMLInputElement).files?.[0];
-		(e.currentTarget as HTMLInputElement).value = '';
-		if (!file) return;
-		const url = URL.createObjectURL(file);
-		const img = new Image();
-		img.onload = () => {
-			const S = 96;
-			const c = document.createElement('canvas');
-			c.width = S;
-			c.height = S;
-			const g = c.getContext('2d');
-			if (g) {
-				const scale = Math.max(S / img.width, S / img.height);
-				const w = img.width * scale;
-				const h = img.height * scale;
-				g.drawImage(img, (S - w) / 2, (S - h) / 2, w, h);
-				newImage = c.toDataURL('image/jpeg', 0.82);
-			}
-			URL.revokeObjectURL(url);
-		};
-		img.onerror = () => URL.revokeObjectURL(url);
-		img.src = url;
-	}
-
-	function submitAdd() {
-		const id = normalizeId(newId);
-		if (!id) return;
-		if (editing) {
-			updatePeer(editing, { name: newName, newId: id, image: newImage });
-		} else {
-			addPeer(newName.trim() || t('devices.defaultName'), id, 'pc', newImage);
-		}
-		closeForm();
-	}
-
 	function relTime(ms: number | null): string {
 		if (ms == null) return t('devices.never');
 		const m = Math.floor((Date.now() - ms) / 60000);
@@ -154,70 +90,7 @@
 </div>
 
 {#if adding}
-	<Modal title={editing ? t('devices.editTitle') : t('devices.add')} onClose={closeForm}>
-		<div class="addform">
-			<div class="addgrid">
-				<!-- Left: the device's picture. The big tile previews the pick and opens the file
-				     picker; the chips below swap between the built-in icons. -->
-				<div class="imgcol">
-					<button
-						class="preview"
-						class:photo={!newImage.startsWith('icon:')}
-						onclick={() => fileInput?.click()}
-						title={t('devices.imageHint')}
-						aria-label={t('devices.imageHint')}
-					>
-						{#if newImage.startsWith('icon:')}
-							<Icon name={newImage.slice(5)} size={44} />
-						{:else}
-							<img class="uimg" src={newImage} alt="" />
-						{/if}
-						<span class="pv-up"><Icon name="edit" size={14} /></span>
-					</button>
-					<div class="imgrow" role="group" aria-label={t('devices.image')}>
-						{#each ICONS as ic (ic)}
-							<button
-								class="imgopt"
-								class:active={newImage === 'icon:' + ic}
-								aria-label={ic}
-								aria-pressed={newImage === 'icon:' + ic}
-								onclick={() => (newImage = 'icon:' + ic)}><Icon name={ic} size={17} /></button
-							>
-						{/each}
-					</div>
-					<input type="file" accept="image/*" bind:this={fileInput} onchange={onPickImage} style="display:none" />
-				</div>
-
-				<!-- Right: what the device is called and how to reach it. -->
-				<div class="fieldcol">
-					<label class="fl" for="dev-name">{t('devices.name')}</label>
-					<div class="field">
-						<input id="dev-name" bind:value={newName} placeholder={t('devices.name')} aria-label={t('devices.name')} />
-					</div>
-					<label class="fl" for="dev-id">{t('devices.idOrIp')}</label>
-					<div class="field">
-						<Icon name="connect" size={15} />
-						<input
-							id="dev-id"
-							value={newId}
-							oninput={(e) => {
-								// Write back too: at the 9-digit cap `newId` doesn't change, so Svelte wouldn't
-								// touch the field and the extra digit would stay on screen.
-								newId = e.currentTarget.value = tidyId(e.currentTarget.value);
-							}}
-							placeholder="000 000 000 · 192.168.1.42"
-							aria-label={t('devices.idOrIp')}
-							style="font-family:var(--font-mono)"
-						/>
-					</div>
-				</div>
-			</div>
-			<div class="factions">
-				<button class="btn btn-ghost" onclick={closeForm}>{t('devices.cancel')}</button>
-				<button class="btn btn-primary" onclick={submitAdd}>{editing ? t('devices.saveBtn') : t('devices.addBtn')}</button>
-			</div>
-		</div>
-	</Modal>
+	<DeviceFormModal device={editDev} onClose={closeForm} />
 {/if}
 
 <div class="toolbar">
@@ -296,111 +169,6 @@
 		color: var(--text-muted);
 		font-size: 14.5px;
 		margin: 7px 0 0;
-	}
-	.addform {
-		display: flex;
-		flex-direction: column;
-	}
-	.addgrid {
-		display: grid;
-		grid-template-columns: auto 1fr;
-		gap: 22px;
-		align-items: start;
-	}
-	.imgcol {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		gap: 10px;
-	}
-	.preview {
-		position: relative;
-		width: 124px;
-		height: 124px;
-		border-radius: var(--r-lg);
-		border: 1px solid var(--border);
-		background: var(--accent-soft);
-		color: var(--accent-fg);
-		display: grid;
-		place-items: center;
-		overflow: hidden;
-		padding: 0;
-		cursor: pointer;
-		transition: border-color var(--dur);
-	}
-	.preview:hover {
-		border-color: var(--accent);
-	}
-	.preview.photo {
-		background: var(--surface-2);
-	}
-	/* "Change picture" badge, pinned bottom-right; always visible so the tile reads as clickable. */
-	.pv-up {
-		position: absolute;
-		right: 7px;
-		bottom: 7px;
-		width: 28px;
-		height: 28px;
-		border-radius: 50%;
-		display: grid;
-		place-items: center;
-		background: var(--surface);
-		color: var(--text-muted);
-		border: 1px solid var(--border);
-		box-shadow: var(--shadow-sm);
-	}
-	.preview:hover .pv-up {
-		color: var(--accent-fg);
-		border-color: var(--accent);
-	}
-	.imgrow {
-		display: grid;
-		grid-template-columns: repeat(4, 1fr);
-		gap: 6px;
-		width: 124px;
-	}
-	.imgopt {
-		aspect-ratio: 1;
-		border: 1px solid var(--border);
-		border-radius: 8px;
-		background: var(--surface);
-		color: var(--text-muted);
-		cursor: pointer;
-		display: grid;
-		place-items: center;
-		padding: 0;
-	}
-	.imgopt.active {
-		border-color: var(--accent);
-		color: var(--accent-fg);
-		background: var(--accent-soft);
-	}
-	.uimg {
-		width: 100%;
-		height: 100%;
-		object-fit: cover;
-	}
-	.fieldcol {
-		display: flex;
-		flex-direction: column;
-		gap: 6px;
-		min-width: 0;
-	}
-	.fieldcol .fl {
-		font-size: 12px;
-		font-weight: 600;
-		color: var(--text-muted);
-	}
-	.fieldcol .fl + .field {
-		margin-bottom: 8px;
-	}
-	.addform .factions {
-		display: flex;
-		justify-content: flex-end;
-		gap: 10px;
-		margin-top: 22px;
-		padding-top: 16px;
-		border-top: 1px solid var(--border);
 	}
 	.toolbar {
 		display: flex;

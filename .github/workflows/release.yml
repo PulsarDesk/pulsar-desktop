@@ -155,6 +155,23 @@ jobs:
           mkdir -p src-tauri/resources
           cp "$BIN" "src-tauri/resources/pulsar-render${EXT}"
 
+      # The branded "Pulsar is updating" window (pulsar-setup --updating, NO payload): the
+      # in-app updater runs the NSIS installer quietly and shows this instead of the wizard.
+      # Bundled as resources/pulsar-update.exe (tauri.windows.conf.json).
+      - name: Build update window (pulsar-update)
+        if: startsWith(matrix.os, 'windows')
+        shell: bash
+        run: |
+          if [ -n "${{ matrix.rust_targets }}" ]; then
+            cargo build --release -p pulsar-setup --target "${{ matrix.rust_targets }}"
+            BIN="target/${{ matrix.rust_targets }}/release/pulsar-setup.exe"
+          else
+            cargo build --release -p pulsar-setup
+            BIN="target/release/pulsar-setup.exe"
+          fi
+          mkdir -p src-tauri/resources
+          cp "$BIN" src-tauri/resources/pulsar-update.exe
+
       # Point the updater at this branch's channel (build-only edit, not committed).
       - name: Point updater at this branch's channel
         shell: bash

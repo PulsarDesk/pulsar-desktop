@@ -2,7 +2,7 @@
 	import Icon from '#lib/Icon.svelte';
 	import type { Config } from '#lib/types.js';
 	import { ui, saveUi } from '#lib/settings.svelte.js';
-	import { t } from '#lib/i18n.svelte.js';
+	import { t, i18n, setLang, LANGS } from '#lib/i18n.svelte.js';
 	import { api, isTauri } from '#lib/api.js';
 	import pkg from '../../../../package.json';
 
@@ -45,12 +45,32 @@
 	// wire (host.rs/play.rs already do this), so the input mirrors that — the OS
 	// name is the PLACEHOLDER, and a value equal to it (or the legacy "Pulsar
 	// Cihazı" default) renders as empty instead of looking like a custom choice.
+	// A name equal to the machine HOSTNAME is replaced by the OS name on the wire too
+	// (util::announce_name), so it must not show as a custom value either — it did, and the
+	// field said "desktop-ab12cd" while peers saw the user's real name.
 	let userName = $state('');
+	let hostName = $state('');
 	api.deviceUserName().then((n) => (userName = n)).catch(() => {});
+	api.deviceHostName().then((n) => (hostName = n)).catch(() => {});
 	const shownName = $derived.by(() => {
-		const v = config?.device_name ?? '';
-		return v === userName || v === 'Pulsar Cihazı' ? '' : v;
+		const v = (config?.device_name ?? '').trim();
+		const isHost = !!hostName && v.toLowerCase() === hostName.toLowerCase();
+		return v === userName || v === 'Pulsar Cihazı' || isHost ? '' : v;
 	});
+	// Identity image preview: what peers will actually receive for the chosen mode.
+	let avatarPrev = $state<string | null>(null);
+	let avatarLoading = $state(false);
+	$effect(() => {
+		const mode = config?.avatar_mode ?? 'user';
+		let live = true;
+		avatarLoading = true;
+		api.avatarPreview(mode)
+			.then((u) => live && (avatarPrev = u))
+			.catch(() => live && (avatarPrev = null))
+			.finally(() => live && (avatarLoading = false));
+		return () => (live = false);
+	});
+
 	function onNameChange(e: Event) {
 		if (!config) return;
 		config.device_name = (e.currentTarget as HTMLInputElement).value.trim();
@@ -73,6 +93,14 @@
 </script>
 
 <div class="srow">
+	<div class="st"><b>{t('settings.language')}</b><span>{t('settings.languageDesc')}</span></div>
+	<div class="seg">
+		{#each LANGS as l (l.value)}
+			<button class:active={i18n.lang === l.value} onclick={() => setLang(l.value)}>{l.label}</button>
+		{/each}
+	</div>
+</div>
+<div class="srow">
 	<div class="st"><b>{t('settings.displayName')}</b><span>{t('settings.displayNameDesc')}</span></div>
 	<div class="field" style="width:220px">
 		<Icon name="devices" size={15} />
@@ -88,6 +116,13 @@
 </div>
 <div class="srow">
 	<div class="st"><b>{t('settings.avatar')}</b><span>{t('settings.avatarDesc')}</span></div>
+	<div
+		class="avprev"
+		class:loading={avatarLoading}
+		title={avatarPrev ? t('settings.avatarPreview') : t('settings.avatarNone')}
+	>
+		{#if avatarPrev}<img src={avatarPrev} alt={t('settings.avatarPreview')} />{:else}<Icon name="x" size={14} />{/if}
+	</div>
 	<div class="seg">
 		{#each [['user', t('settings.avatarUser')], ['wallpaper', t('settings.avatarWall')], ['anonymous', t('settings.avatarAnon')]] as [v, l] (v)}
 			<button class:active={config?.avatar_mode === v} onclick={() => setAvatar(v)}>{l}</button>
@@ -97,6 +132,10 @@
 <div class="srow">
 	<div class="st"><b>{t('settings.tray')}</b><span>{t('settings.trayDesc')}</span></div>
 	<button class="toggle" aria-label={t('settings.tray')} class:on={ui.tray} aria-pressed={ui.tray} onclick={() => { ui.tray = !ui.tray; saveUi(); api.setTray(ui.tray).catch(() => {}); }}><span class="knob"></span></button>
+</div>
+<div class="srow">
+	<div class="st"><b>{t('settings.padWake')}</b><span>{t('settings.padWakeDesc')}</span></div>
+	<button class="toggle" aria-label={t('settings.padWake')} class:on={ui.padWake} aria-pressed={ui.padWake} onclick={() => { ui.padWake = !ui.padWake; saveUi(); api.setPadWake(ui.padWake).catch(() => {}); }}><span class="knob"></span></button>
 </div>
 <div class="srow">
 	<div class="st"><b>{t('settings.clipboardSync')}</b><span>{t('settings.clipboardSyncDesc')}</span></div>
@@ -130,6 +169,29 @@
 </div>
 
 <style>
+	.avprev {
+		flex: none;
+		width: 40px;
+		height: 40px;
+		margin-left: auto;
+		margin-right: 10px;
+		border-radius: 10px;
+		overflow: hidden;
+		display: grid;
+		place-items: center;
+		background: var(--surface-2);
+		border: 1px solid var(--border);
+		color: var(--text-faint);
+		transition: opacity var(--dur) var(--ease);
+	}
+	.avprev.loading {
+		opacity: 0.5;
+	}
+	.avprev img {
+		width: 100%;
+		height: 100%;
+		object-fit: cover;
+	}
 	.act {
 		flex-shrink: 0;
 		padding: 8px 14px;

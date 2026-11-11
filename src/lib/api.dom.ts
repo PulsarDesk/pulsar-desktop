@@ -43,11 +43,11 @@ export async function copyText(text: string): Promise<boolean> {
 }
 
 /** Toggle true, taskbar-covering fullscreen (no-op outside Tauri). */
-export async function setFullscreen(on: boolean): Promise<void> {
+export async function setFullscreen(on: boolean, dragFrom?: [number, number]): Promise<void> {
 	if (!isTauri) return;
-	// Done Rust-side: manual monitor-cover + always-on-top, which reliably hides the
-	// taskbar for our transparent window (plain setFullscreen leaves it visible).
-	await invoke<void>('set_window_fullscreen', { on });
+	// Done Rust-side (native borderless fullscreen + maximized bookkeeping). `dragFrom` =
+	// [x ratio, y css px] of a title-bar grab: leave fullscreen and keep dragging the window.
+	await invoke<void>('set_window_fullscreen', { on, dragFrom: dragFrom ?? null });
 }
 
 /** Read the local clipboard text (for "paste to remote"). */

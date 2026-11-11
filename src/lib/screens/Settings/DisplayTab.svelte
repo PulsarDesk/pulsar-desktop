@@ -15,19 +15,27 @@
 	import { caps, decodeAvailable, encoderAvailable } from '#lib/caps.svelte.js';
 	import { gameStore, saveGames } from '#lib/games.svelte.js';
 	import { t } from '#lib/i18n.svelte.js';
+	// Same-host co-op component (ProtoInput) status, refreshed when the tab opens.
+	let coop = $state<{ supported: boolean; installed: boolean; dir: string; missing: string[] } | null>(null);
+	onMount(() => {
+		api.coopStatus().then((s) => (coop = s)).catch(() => {});
+	});
 
 	let {
 		config = $bindable(),
 		detected,
 		saveConfig,
 		toggleTransmit,
-		toggleMute
+		toggleMute,
+		clientOnly = false
 	}: {
 		config: Config | null;
 		detected: string[];
 		saveConfig: () => void;
 		toggleTransmit: () => void;
 		toggleMute: () => void;
+		/** Gaming-mode settings: hide the HOST section (what this device sends when shared). */
+		clientOnly?: boolean;
 	} = $props();
 
 	// CODECS/ENCODERS labels are mostly brand names (kept verbatim); only the
@@ -117,6 +125,43 @@
 	<button class="toggle" aria-label={t('settings.overlayButton')} class:on={ui.overlayButton} aria-pressed={ui.overlayButton} onclick={() => { ui.overlayButton = !ui.overlayButton; saveUi(); }}><span class="knob"></span></button>
 </div>
 
+<div class="srow">
+	<div class="st"><b>{t('settings.hdr')}</b><span>{t('settings.hdrDesc')}</span></div>
+	<button class="toggle" aria-label={t('settings.hdr')} class:on={ui.hdr} aria-pressed={ui.hdr} onclick={() => { ui.hdr = !ui.hdr; saveUi(); }}><span class="knob"></span></button>
+</div>
+<div class="srow">
+	<div class="st">
+		<b>{t('settings.audioQuality')}</b>
+		<span>{t('settings.audioQualityDesc')}</span>
+	</div>
+	<select
+		class="select"
+		aria-label={t('settings.audioQuality')}
+		value={ui.audioQuality}
+		onchange={(e) => { ui.audioQuality = e.currentTarget.value as AudioQuality; saveUi(); }}
+	>
+		{#each ['auto', 'standard', 'high', 'raw'] as q (q)}
+			<option value={q}>{t('settings.aq.' + q)}</option>
+		{/each}
+	</select>
+</div>
+<div class="srow">
+	<div class="st">
+		<b>{t('settings.mouseSens')}</b>
+		<span>{t('settings.mouseSensDesc')}</span>
+	</div>
+	<select
+		class="select"
+		aria-label={t('settings.mouseSens')}
+		value={String(ui.mouseSens)}
+		onchange={(e) => { ui.mouseSens = Number(e.currentTarget.value); saveUi(); }}
+	>
+		{#each [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2] as v (v)}
+			<option value={String(v)}>{v}×</option>
+		{/each}
+	</select>
+</div>
+{#if !clientOnly}
 <!-- HOST: what this device sends when it shares its screen. Resolution/fps/bitrate
      edit gameStore.host, which the +page effect pushes to the core via
      api.setStreamSettings (same wiring the Games card used); the rest are core
@@ -164,42 +209,25 @@
 		})}
 	</div>
 {/if}
-<div class="srow">
-	<div class="st"><b>{t('settings.hdr')}</b><span>{t('settings.hdrDesc')}</span></div>
-	<button class="toggle" aria-label={t('settings.hdr')} class:on={ui.hdr} aria-pressed={ui.hdr} onclick={() => { ui.hdr = !ui.hdr; saveUi(); }}><span class="knob"></span></button>
-</div>
-<div class="srow">
-	<div class="st">
-		<b>{t('settings.audioQuality')}</b>
-		<span>{t('settings.audioQualityDesc')}</span>
+{#if coop?.supported}
+	<div class="srow">
+		<div class="st">
+			<b>{t('settings.coop')}</b>
+			<span>{t('settings.coopDesc')}</span>
+			<span class="mono coopst" class:ok={coop.installed}>
+				{coop.installed ? t('settings.coopInstalled') : t('settings.coopMissing')}
+				<button class="linkbtn" onclick={() => api.openCoopDir().catch(() => {})}>{t('settings.coopOpenDir')}</button>
+			</span>
+		</div>
+		<button
+			class="toggle"
+			aria-label={t('settings.coop')}
+			class:on={config?.coop_isolation ?? false}
+			aria-pressed={config?.coop_isolation ?? false}
+			onclick={() => { if (config) { config.coop_isolation = !(config.coop_isolation ?? false); saveConfig?.(); } }}
+		><span class="knob"></span></button>
 	</div>
-	<select
-		class="select"
-		aria-label={t('settings.audioQuality')}
-		value={ui.audioQuality}
-		onchange={(e) => { ui.audioQuality = e.currentTarget.value as AudioQuality; saveUi(); }}
-	>
-		{#each ['auto', 'standard', 'high', 'raw'] as q (q)}
-			<option value={q}>{t('settings.aq.' + q)}</option>
-		{/each}
-	</select>
-</div>
-<div class="srow">
-	<div class="st">
-		<b>{t('settings.mouseSens')}</b>
-		<span>{t('settings.mouseSensDesc')}</span>
-	</div>
-	<select
-		class="select"
-		aria-label={t('settings.mouseSens')}
-		value={String(ui.mouseSens)}
-		onchange={(e) => { ui.mouseSens = Number(e.currentTarget.value); saveUi(); }}
-	>
-		{#each [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2] as v (v)}
-			<option value={String(v)}>{v}×</option>
-		{/each}
-	</select>
-</div>
+{/if}
 <div class="srow">
 	<div class="st"><b>{t('settings.audioTransmit')}</b><span>{t('settings.audioTransmitDesc')}</span></div>
 	<button class="toggle" aria-label={t('settings.audioTransmit')} class:on={config?.transmit_audio} aria-pressed={config?.transmit_audio ?? false} onclick={toggleTransmit}><span class="knob"></span></button>
@@ -232,6 +260,7 @@
 		</div>
 	{/if}
 </div>
+{/if}
 
 <style>
 	.srow {
@@ -305,6 +334,27 @@
 		text-transform: uppercase;
 		color: var(--text-faint);
 		margin-top: 22px;
+	}
+	.coopst {
+		margin-top: 4px;
+		font-size: 11px;
+		color: var(--warn, var(--text-muted));
+		display: flex;
+		gap: 10px;
+		align-items: center;
+		flex-wrap: wrap;
+	}
+	.coopst.ok {
+		color: var(--ok, var(--accent));
+	}
+	.linkbtn {
+		border: none;
+		background: none;
+		padding: 0;
+		color: var(--accent);
+		cursor: pointer;
+		font: inherit;
+		text-decoration: underline;
 	}
 	/* the first section header opens the tab — no big top gap */
 	.group:first-child {

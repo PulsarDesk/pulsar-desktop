@@ -98,6 +98,17 @@ export class SessionManager {
 	sessions = $state<Session[]>([]);
 	activeTab = $state<'home' | number>('home');
 	fullscreen = $state(false);
+	// Window fullscreen state when the first session of a run opened (null = no session open), and
+	// whether the USER toggled fullscreen while sessions were open. When the last session ends the
+	// window goes back to how it was before (`#fsBefore`) — unless the user changed it meanwhile,
+	// then their choice stays.
+	#fsBefore: boolean | null = null;
+	#fsTouched = false;
+	#noteSessionStart() {
+		if (this.sessions.length > 0) return;
+		this.#fsBefore = this.fullscreen;
+		this.#fsTouched = false;
+	}
 	connectErr = $state('');
 
 	// ── Split mode ──────────────────────────────────────────────────────────────
@@ -266,6 +277,20 @@ export class SessionManager {
 		return undefined;
 	}
 
+	/** What each pane streams from host `id` — for the pane source picker's "in pane N" tags.
+	 * A window session maps its hwnd; a plain screen session (no game, no window) its monitor. */
+	paneUsageFor(id: string): { windows: Record<number, number>; displays: Record<number, number> } {
+		const windows: Record<number, number> = {};
+		const displays: Record<number, number> = {};
+		for (const s of this.#liveSessionsForHost(id)) {
+			const pane = this.panes.indexOf(s.tabId);
+			if (pane < 0) continue;
+			if (s.windowHwnd !== undefined) windows[s.windowHwnd] = pane + 1;
+			else if (!s.gameId) displays[s.displayIdx ?? 0] = pane + 1;
+		}
+		return { windows, displays };
+	}
+
 	/** Host monitor indices already CLAIMED by a live session to host `id` (its connect-time
 	 * `displayIdx`, default 0). Used to keep two same-host panes off the same monitor. */
 	usedDisplaysFor(id: string, exceptTab?: number): Set<number> {
@@ -322,7 +347,7 @@ export class SessionManager {
 		// picker already chose one.
 		const wantDisplay =
 			windowHwnd !== undefined ? undefined : (displayIdx ?? this.freeDisplayFor(target.id));
-		await this.startConnect(target, m, gameId, { displayIdx: wantDisplay, windowHwnd });
+		await this.startConnect(target, m, gameId, { displayIdx: wantDisplay, windowHwnd, newSession: true });
 		// The new session is the tab that wasn't there before; if startConnect de-duped to
 		// an existing session it focused it (activeTab), so fall back to that.
 		const added = this.sessions.find((s) => !before.has(s.tabId));
@@ -425,6 +450,11 @@ export class SessionManager {
 			 * opts the connect out of the same-(host,mode,game) de-dup (a deliberate second pane
 			 * capturing a specific window is its own session). Wins over the monitor on the host. */
 			windowHwnd?: number;
+			/** A split-pane connect: always a NEW session, never de-duped onto an open one
+			 * (a single-monitor host has no free display to pass, and two panes of the same
+			 * screen are a deliberate choice — de-duping put one session in both cells and
+			 * left the second one gray). */
+			newSession?: boolean;
 		} = {}
 	) => {
 		const useMode = m ?? this.#deps.getMode();
@@ -443,7 +473,7 @@ export class SessionManager {
 		// explicit `windowHwnd` (the "Pencere" picker) opts out of de-dup the same way — a
 		// pane capturing a specific host window is its own session even on a shared monitor.
 		const want = target.id.replace(/\s/g, '');
-		if (want && opts.displayIdx === undefined && opts.windowHwnd === undefined) {
+		if (want && !opts.newSession && opts.displayIdx === undefined && opts.windowHwnd === undefined) {
 			const existing = this.sessions.find(
 				(s) =>
 					s.target.id.replace(/\s/g, '') === want &&
@@ -455,6 +485,7 @@ export class SessionManager {
 				return;
 			}
 		}
+		this.#noteSessionStart();
 		const tabId = this.#nextTab++;
 		this.sessions = [
 			...this.sessions,
@@ -635,21 +666,28 @@ export class SessionManager {
 			if (s.stopCmd) api.runCommand(s.stopCmd).catch(() => {});
 		}
 		this.removeTab(tabId);
-		// Force-exit fullscreen ONLY when the LAST session closes WITHOUT persisting — this is a
-		// programmatic exit, not the user's intent, so it must not clobber the saved
-		// game-mode fullscreen preference (restored next launch). Closing one pane/tab while
-		// other sessions are still live (e.g. split couch co-op) must NOT drop the whole window
-		// out of fullscreen for the players still streaming.
-		if (this.sessions.length === 0 && this.fullscreen) {
-			this.fullscreen = false;
-			setFullscreen(false).catch(() => {});
+		// LAST session closed: put the window back the way it was when the sessions started
+		// (windowed or fullscreen), unless the user toggled fullscreen during them — then their
+		// choice stays. Programmatic, so it never touches the saved game-mode preference. Closing
+		// one pane/tab while other sessions are live (split couch co-op) changes nothing.
+		if (this.sessions.length === 0 && this.#fsBefore !== null) {
+			const want = this.#fsTouched ? this.fullscreen : this.#fsBefore;
+			this.#fsBefore = null;
+			if (want !== this.fullscreen) {
+				this.fullscreen = want;
+				setFullscreen(want).catch(() => {});
+			}
 		}
 	};
 
 	// ONE fullscreen toggle for the button, F11, and Ctrl+Shift+F12 — they must behave identically.
-	toggleFullscreen = () => {
+	// `dragFrom`: only from Chrome's title-bar drag-out. Guarded with Array.isArray because this
+	// is also bound straight to `onclick` handlers, which pass a MouseEvent.
+	toggleFullscreen = (dragFrom?: unknown) => {
 		this.fullscreen = !this.fullscreen;
-		setFullscreen(this.fullscreen).catch(() => {});
+		if (this.sessions.length > 0) this.#fsTouched = true;
+		const drag = !this.fullscreen && Array.isArray(dragFrom) ? (dragFrom as [number, number]) : undefined;
+		setFullscreen(this.fullscreen, drag).catch(() => {});
 		// Remember the choice for game mode so the app reopens fullscreen the way the user
 		// left it (scoped to game mode — a fullscreen remote session never persists).
 		if (this.#deps.getMode() === 'game') {
@@ -658,8 +696,17 @@ export class SessionManager {
 		}
 	};
 
+	// Programmatic fullscreen (kiosk / CLI --connect start): NOT a user choice — not persisted and
+	// not counted as "changed during the session", so the window still goes back afterwards.
+	enterFullscreenAuto = () => {
+		if (this.fullscreen) return;
+		this.fullscreen = true;
+		setFullscreen(true).catch(() => {});
+	};
+
 	// Host launches one of its own games — a local tab (no remote peer / video).
 	startHostSession = (game: Game) => {
+		this.#noteSessionStart();
 		const tabId = this.#nextTab++;
 		this.sessions = [
 			...this.sessions,

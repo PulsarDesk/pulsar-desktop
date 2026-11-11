@@ -413,11 +413,18 @@ impl WgcCaptureDevice {
         let nw = self.width.max(2);
         let nh = self.height.max(2);
         let (w, h) = if want_w > 0 && want_h > 0 {
-            (want_w.min(nw), want_h.min(nh))
+            if self.hwnd.is_some() {
+                // A WINDOW has its own shape (a portrait app, a split-pane-fitted window): the
+                // client's request is a size BUDGET (its ladder point, e.g. 1280×720), not an
+                // aspect — clamping each axis separately squashed an 856×1056 window into 16:9.
+                fit_aspect(nw, nh, want_w, want_h)
+            } else {
+                (want_w.min(nw), want_h.min(nh))
+            }
         } else {
             (nw, nh)
         };
-        (w & !1, h & !1)
+        (w.max(2) & !1, h.max(2) & !1)
     }
 
     /// Native (full) capture size = the window content extent. The encoder sizes its bridge +
@@ -683,3 +690,28 @@ unsafe impl Send for WgcCaptureDevice {}
 // type is kept imported so a future FrameArrived/SystemRelativeTime pacing variant compiles.
 #[allow(dead_code)]
 const _: Option<TimeSpan> = None;
+
+/// Largest `w × h` with the `nw × nh` source's aspect that fits the `bw × bh` budget box and
+/// never exceeds the source itself (no upscale).
+fn fit_aspect(nw: u32, nh: u32, bw: u32, bh: u32) -> (u32, u32) {
+    let scale = (bw as f64 / nw as f64).min(bh as f64 / nh as f64).min(1.0);
+    (((nw as f64 * scale).round() as u32).max(2), ((nh as f64 * scale).round() as u32).max(2))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fit_aspect;
+
+    #[test]
+    fn a_portrait_window_keeps_its_shape_in_a_16_9_budget() {
+        // 856×1056 window, client ladder point 1280×720 → height-bound, aspect kept.
+        let (w, h) = fit_aspect(856, 1056, 1280, 720);
+        assert_eq!(h, 720);
+        assert!((w as i32 - 584).abs() <= 1, "{w}");
+    }
+
+    #[test]
+    fn never_upscales() {
+        assert_eq!(fit_aspect(800, 600, 1920, 1080), (800, 600));
+    }
+}

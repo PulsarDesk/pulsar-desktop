@@ -1699,6 +1699,10 @@ pub(crate) async fn start_remote_play(
 							true
 						} else if let Some(owner) = lock_owner {
 							owner == play_id
+						} else if crate::split_join::active() {
+							// Gaming split "press to join": an unassigned pad drives no pane until
+							// its A press locks it to one (split_join::tick).
+							false
 						} else {
 							focused_session.load(Ordering::SeqCst) == play_id
 						};
@@ -1991,12 +1995,7 @@ pub(crate) async fn start_remote_play(
 		let app_av = app.clone();
 		let (mode, name) = {
 			let cfg = state.config.lock().unwrap();
-			let n = cfg.device_name.trim();
-			let name = if n.is_empty() || n == "Pulsar Cihazı" {
-				pulsar_core::discovery::os_display_name()
-			} else {
-				n.to_string()
-			};
+			let name = crate::util::announce_name(&cfg.device_name);
 			(cfg.avatar_mode.clone(), name)
 		};
 		// Name first (tiny, instant); the avatar may take a blocking decode.

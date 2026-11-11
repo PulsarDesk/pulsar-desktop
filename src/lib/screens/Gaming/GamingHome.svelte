@@ -1,18 +1,21 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, tick } from 'svelte';
 	import Icon from '#lib/Icon.svelte';
 	import Modal from '#lib/Modal.svelte';
+	import DeviceFormModal from '#lib/DeviceFormModal.svelte';
 	import ConnectModal from './ConnectModal.svelte';
 	import { t } from '#lib/i18n.svelte.js';
 	import { api, type LanDevice } from '#lib/api.js';
 	import {
 		gameHistoryPeers,
 		removeFromGameHistory,
-		renameGamePeer,
-		setGamePeerImage,
 		fmtPeerId,
 		normalizeId,
-		avatarFor
+		avatarFor,
+		savedPeers,
+		isSaved,
+		toggleSaved,
+		unsavePeer
 	} from '#lib/peers.svelte.js';
 	import { isLive } from '#lib/presence.svelte.js';
 	import type { GamepadNav } from '#lib/gamepadNav.svelte.js';
@@ -21,13 +24,42 @@
 		/** The shared GamepadNav (our items + the connect modal register against it). */
 		nav: GamepadNav;
 		/** Pick a host by id → the shell opens the connecting/games screen (no popup for games). */
-		onPickHost: (id: string) => void;
+		onPickHost: (id: string, name?: string) => void;
 	};
 	let { nav, onPickHost }: Props = $props();
 	const navItem = nav.item;
 
 	// Game-only recents (separate timeline from remote recents / Devices).
 	const recents = $derived(gameHistoryPeers(12));
+	// The Devices address book (shared with remote mode). The star on a LAN host / recent
+	// saves it here (or takes it out); "+" adds one by ID.
+	const devices = $derived(savedPeers());
+	// "+" opens the same device form as edit (empty); its ID field opens the keypad.
+	let addOpen = $state(false);
+	let idPick = $state<{ current: string; set: (id: string) => void } | null>(null);
+	// The keypad calls onClose BEFORE onPick, so keep the setter outside `idPick`.
+	let pickSet: ((id: string) => void) | null = null;
+	function openAdd() {
+		addOpen = true;
+		nav.pushBack(closeEditDev);
+		tick().then(() => nav.focusFirst());
+	}
+	// Removing a saved device asks first (one stray pad press must not delete it).
+	let removeDev = $state<{ id: string; name: string } | null>(null);
+	function askRemove(p: { id: string; name: string }) {
+		removeDev = { id: p.id, name: p.name };
+		nav.pushBack(closeRemove); // B / Escape cancels
+		tick().then(() => nav.focusFirst());
+	}
+	function closeRemove() {
+		removeDev = null;
+		nav.popBack(closeRemove);
+		tick().then(() => nav.focusFirst());
+	}
+	function confirmRemove() {
+		if (removeDev) unsavePeer(removeDev.id);
+		closeRemove();
+	}
 
 	// LAN auto-discovery: Pulsar hosts announcing on this network (multicast beacon).
 	let lan = $state<LanDevice[]>([]);
@@ -54,58 +86,18 @@
 		return name.split(' ').map((w) => w[0]).slice(0, 2).join('').toUpperCase();
 	}
 
-	// Recents edit modal: change a recent host's NAME + IMAGE (icon set or an
-	// uploaded picture), persisted via renameGamePeer / setGamePeerImage. `editId`
-	// holds the recent being edited (null = closed). Mirrors the Devices add/edit
-	// form's image handling.
-	const ICONS = ['monitor', 'devices', 'gaming', 'keyboard'] as const;
-	let editId = $state<string | null>(null);
-	let editName = $state('');
-	let editImage = $state('icon:monitor');
-	let fileInput = $state<HTMLInputElement | null>(null);
-
-	function openEdit(r: { id: string; name: string; image?: string; avatar?: string }) {
-		editId = r.id;
-		editName = r.name;
-		editImage = r.image ?? (r.avatar ? r.avatar : 'icon:monitor');
+	// Device edit: the SAME dialog as the remote Devices screen (name, ID, picture).
+	let editDev = $state<{ id: string; name: string; image?: string } | null>(null);
+	function openEdit(p: { id: string; name: string; image?: string }) {
+		editDev = { id: p.id, name: p.name, image: p.image };
+		nav.pushBack(closeEditDev); // B / Escape closes the dialog
+		tick().then(() => nav.focusFirst());
 	}
-	function closeEdit() {
-		editId = null;
-		editName = '';
-		editImage = 'icon:monitor';
-	}
-	function saveEdit() {
-		if (!editId) return;
-		renameGamePeer(editId, editName);
-		setGamePeerImage(editId, editImage);
-		closeEdit();
-	}
-
-	// Uploaded picture → small cover-cropped data URL (96px) so the persisted store
-	// never carries multi-MB originals (same as the Devices add/edit modal).
-	function onPickImage(e: Event) {
-		const file = (e.currentTarget as HTMLInputElement).files?.[0];
-		(e.currentTarget as HTMLInputElement).value = '';
-		if (!file) return;
-		const url = URL.createObjectURL(file);
-		const img = new Image();
-		img.onload = () => {
-			const S = 96;
-			const c = document.createElement('canvas');
-			c.width = S;
-			c.height = S;
-			const g = c.getContext('2d');
-			if (g) {
-				const scale = Math.max(S / img.width, S / img.height);
-				const w = img.width * scale;
-				const h = img.height * scale;
-				g.drawImage(img, (S - w) / 2, (S - h) / 2, w, h);
-				editImage = c.toDataURL('image/jpeg', 0.82);
-			}
-			URL.revokeObjectURL(url);
-		};
-		img.onerror = () => URL.revokeObjectURL(url);
-		img.src = url;
+	function closeEditDev() {
+		editDev = null;
+		addOpen = false;
+		nav.popBack(closeEditDev);
+		tick().then(() => nav.focusFirst());
 	}
 
 	// Display image for a recent: the user-chosen `image` (icon: or data URL) wins,
@@ -131,15 +123,18 @@
 			<div class="rlab"><span class="lpulse"></span>{t('gaming.lan')}</div>
 			<div class="rgrid">
 				{#each lanHosts as d (d.addr + '|' + d.id)}
-					<button class="rcard" use:navItem onclick={() => onPickHost(d.id)}>
-						<span class="ravatar">
-							{#if avatarFor(d.id)}<img class="rimg" src={avatarFor(d.id)} alt="" />{:else}{initials(d.name)}{/if}
-						</span>
-						<span class="rmeta">
-							<span class="rname">{d.name}</span>
-							<span class="rid mono">{fmtPeerId(d.id)}</span>
-						</span>
-					</button>
+					<div class="rrow">
+						<button class="rcard" use:navItem onclick={() => onPickHost(d.id, d.name)}>
+							<span class="ravatar">
+								{#if avatarFor(d.id)}<img class="rimg" src={avatarFor(d.id)} alt="" />{:else}{initials(d.name)}{/if}
+							</span>
+							<span class="rmeta">
+								<span class="rname">{d.name}{@render savedMark(d.id)}</span>
+								<span class="rid mono">{fmtPeerId(d.id)}</span>
+							</span>
+						</button>
+						<div class="ractions">{@render star(d.id, d.name)}</div>
+					</div>
 				{/each}
 			</div>
 		</div>
@@ -153,7 +148,7 @@
 			<div class="rgrid">
 				{#each recents as r (r.id)}
 					<div class="rrow">
-						<button class="rcard" use:navItem onclick={() => onPickHost(r.id)}>
+						<button class="rcard" use:navItem onclick={() => onPickHost(r.id, r.name)}>
 							<span class="ravatar">
 								{#if recentImg(r)}
 									<img class="rimg" src={recentImg(r)} alt="" />
@@ -164,31 +159,107 @@
 							<span class="rmeta">
 								<span class="rname">
 									<span class="rdot" class:on={isOnline(r.id)} title={isOnline(r.id) ? t('home.online') : t('home.unknown')}></span>
-									{r.name}
+									{r.name}{@render savedMark(r.id)}
 								</span>
 								<span class="rid mono">{fmtPeerId(r.id)}</span>
 							</span>
 						</button>
-						<button
-							class="redit"
-							use:navItem
-							title={t('recent.edit')}
-							aria-label={t('recent.edit')}
-							onclick={() => openEdit(r)}><Icon name="edit" size={14} /></button
-						>
-						<button
-							class="rdel"
-							use:navItem
-							title={t('home.removeRecent')}
-							aria-label={t('home.removeRecent')}
-							onclick={() => removeFromGameHistory(r.id)}>×</button
-						>
+						<div class="ractions">
+							{@render star(r.id, r.name)}
+							<button
+								class="ract"
+								use:navItem
+								title={t('home.removeRecent')}
+								aria-label={t('home.removeRecent')}
+								onclick={() => removeFromGameHistory(r.id)}><Icon name="x" size={13} /></button
+							>
+						</div>
 					</div>
 				{/each}
 			</div>
 		{/if}
 	</div>
+
+	<div class="recents">
+		<div class="rlab">
+			{t('gaming.devices')}
+			<button
+				class="radd"
+				use:navItem
+				title={t('gaming.addDevice')}
+				aria-label={t('gaming.addDevice')}
+				onclick={openAdd}><Icon name="plus" size={14} /></button
+			>
+		</div>
+		{#if devices.length === 0}
+			<div class="empty">{t('gaming.noDevices')}</div>
+		{/if}
+		<div class="rgrid">
+			{#each devices as p (p.id)}
+				<div class="rrow">
+					<button class="rcard" use:navItem onclick={() => onPickHost(p.id, p.name)}>
+						<span class="ravatar">
+							{#if recentImg(p)}
+								<img class="rimg" src={recentImg(p)} alt="" />
+							{:else if recentIcon(p)}
+								<Icon name={recentIcon(p)} size={20} />
+							{:else}{initials(p.name)}{/if}
+						</span>
+						<span class="rmeta">
+							<span class="rname">
+								<span class="rdot" class:on={isOnline(p.id)}></span>
+								{p.name}
+							</span>
+							<span class="rid mono">{fmtPeerId(p.id)}</span>
+						</span>
+					</button>
+					<div class="ractions">
+						<button
+							class="ract"
+							use:navItem
+							title={t('recent.edit')}
+							aria-label={t('recent.edit')}
+							onclick={() => openEdit(p)}><Icon name="edit" size={13} /></button
+						>
+						<button
+							class="ract"
+							use:navItem
+							title={t('gaming.removeDevice')}
+							aria-label={t('gaming.removeDevice')}
+							onclick={() => askRemove(p)}><Icon name="x" size={13} /></button
+						>
+					</div>
+				</div>
+			{/each}
+		</div>
+	</div>
 </div>
+
+{#snippet savedMark(id: string)}
+	{#if isSaved(id)}<span class="rsaved" title={t('gaming.saved')}><Icon name="star" size={12} /></span>{/if}
+{/snippet}
+
+{#snippet star(id: string, name: string)}
+	<button
+		class="ract rstar"
+		class:on={isSaved(id)}
+		use:navItem
+		title={t(isSaved(id) ? 'gaming.unstar' : 'gaming.star')}
+		aria-label={t(isSaved(id) ? 'gaming.unstar' : 'gaming.star')}
+		aria-pressed={isSaved(id)}
+		onclick={() => toggleSaved(id, name)}><Icon name="star" size={15} /></button
+	>
+{/snippet}
+
+{#if idPick}
+	<ConnectModal
+		{nav}
+		mode="id"
+		initial={idPick.current}
+		onPick={(id) => pickSet?.(id)}
+		onClose={() => (idPick = null)}
+	/>
+{/if}
 
 {#if modalOpen}
 	<ConnectModal
@@ -198,44 +269,29 @@
 	/>
 {/if}
 
-{#if editId}
-	<Modal title={t('recent.editTitle')} onClose={closeEdit} navModal>
+{#if removeDev}
+	<Modal title={t('gaming.removeDevice')} onClose={closeRemove} navModal>
 		<div class="editform">
-			<span class="fl">{t('recent.name')}</span>
-			<div class="field">
-				<input bind:value={editName} placeholder={t('recent.namePlaceholder')} aria-label={t('recent.name')} />
-			</div>
-			<span class="fl">{t('recent.image')}</span>
-			<div class="imgrow">
-				{#each ICONS as ic (ic)}
-					<button
-						class="imgopt"
-						class:active={editImage === 'icon:' + ic}
-						aria-label={ic}
-						onclick={() => (editImage = 'icon:' + ic)}><Icon name={ic} size={20} /></button
-					>
-				{/each}
-				<button
-					class="imgopt upload"
-					class:active={!editImage.startsWith('icon:')}
-					aria-label={t('recent.image')}
-					onclick={() => fileInput?.click()}
-				>
-					{#if !editImage.startsWith('icon:')}
-						<img class="uimg" src={editImage} alt="" />
-					{:else}
-						<Icon name="upload" size={18} />
-					{/if}
-				</button>
-				<input type="file" accept="image/*" bind:this={fileInput} onchange={onPickImage} style="display:none" />
-				<span class="imghint">{t('recent.imageHint')}</span>
-			</div>
+			<p class="confirm">{t('gaming.removeConfirm', { name: removeDev.name })}</p>
 			<div class="factions">
-				<button class="btn btn-ghost" onclick={closeEdit}>{t('recent.cancel')}</button>
-				<button class="btn btn-primary" onclick={saveEdit}>{t('recent.save')}</button>
+				<button class="btn btn-ghost" use:navItem onclick={closeRemove}>{t('recent.cancel')}</button>
+				<button class="btn btn-primary danger" use:navItem onclick={confirmRemove}>{t('gaming.removeYes')}</button>
 			</div>
 		</div>
 	</Modal>
+{/if}
+
+{#if editDev || addOpen}
+	<DeviceFormModal
+		device={editDev}
+		onClose={closeEditDev}
+		note={t('gaming.editNeedsKbm')}
+		{navItem}
+		pickId={(current, set) => {
+			pickSet = set;
+			idPick = { current, set };
+		}}
+	/>
 {/if}
 
 <style>
@@ -437,81 +493,124 @@
 		font-size: 11px;
 		color: var(--text-faint);
 	}
-	.redit,
-	.rdel {
-		flex: none;
+	/* Card actions (star / edit / remove) float over the card's right edge instead of
+	   taking width beside it: hidden until the card is hovered or holds the (pad) focus, so
+	   the card keeps its full size. A saved star stays visible as a marker. */
+	.rrow {
+		position: relative;
+	}
+	.ractions {
+		--fade: var(--surface-2);
+		position: absolute;
+		top: 1px;
+		bottom: 1px;
+		right: 1px;
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		padding: 0 8px 0 36px;
+		border-radius: 0 var(--r) var(--r) 0;
+		pointer-events: none;
+		/* Shown with the buttons: the card's own colour fades in behind them, so a long name
+		   runs out under a gradient instead of being overdrawn. */
+		background: linear-gradient(90deg, transparent, var(--fade) 30px);
+		opacity: 0;
+		transition: opacity var(--dur) var(--ease);
+	}
+	.rrow:hover .ractions {
+		--fade: var(--surface-3);
+	}
+	.rrow:hover .ractions,
+	.rrow:focus-within .ractions,
+	.rrow:has(:global([data-navfocus])) .ractions {
+		opacity: 1;
+	}
+	.ract {
 		width: 28px;
 		height: 28px;
-		border: none;
-		border-radius: 8px;
-		background: transparent;
-		color: var(--text-faint);
-		font-size: 17px;
-		line-height: 1;
-		cursor: pointer;
+		padding: 0;
 		display: grid;
 		place-items: center;
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		background: var(--surface);
+		color: var(--text-muted);
+		cursor: pointer;
+		box-shadow: 0 2px 8px -2px rgb(0 0 0 / 0.25);
+		opacity: 0;
+		transform: scale(0.9);
+		pointer-events: auto;
+		transition:
+			opacity var(--dur) var(--ease),
+			transform var(--dur) var(--ease);
 	}
-	.redit:hover {
+	.rrow:hover .ract,
+	.rrow:focus-within .ract,
+	.rrow:has(:global([data-navfocus])) .ract {
+		opacity: 1;
+		transform: none;
+	}
+	.ract:hover {
 		background: var(--accent-soft);
 		color: var(--accent-fg);
+		border-color: var(--accent);
 	}
-	.rdel:hover {
+	.rstar.on {
+		color: var(--accent);
+	}
+	/* Saved marker next to the name (the star button itself only shows on hover/focus). */
+	.rsaved {
+		display: inline-grid;
+		place-items: center;
+		flex: none;
+		color: var(--accent);
+	}
+	.rsaved :global(svg) {
+		fill: currentColor;
+	}
+	.rstar.on :global(svg) {
+		fill: currentColor;
+	}
+	/* Add (+) beside the Devices title. */
+	.radd {
+		flex: none;
+		width: 22px;
+		height: 22px;
+		padding: 0;
+		margin-left: 2px;
+		display: grid;
+		place-items: center;
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		background: var(--surface-2);
+		color: var(--text-muted);
+		cursor: pointer;
+	}
+	.radd:hover {
 		background: var(--accent-soft);
 		color: var(--accent-fg);
+		border-color: var(--accent);
 	}
 
-	/* Recents edit modal form — mirrors the Devices add/edit form. */
+	.confirm {
+		margin: 0 0 18px;
+		color: var(--text-muted);
+		line-height: 1.5;
+	}
+	.danger {
+		background: var(--danger);
+		border-color: var(--danger);
+	}
+	/* Remove-device confirm dialog. */
 	.editform {
 		display: flex;
 		flex-direction: column;
 		gap: 6px;
-	}
-	.editform .fl {
-		display: block;
-		font-size: 12px;
-		font-weight: 600;
-		color: var(--text-muted);
-		margin-top: 8px;
 	}
 	.editform .factions {
 		display: flex;
 		justify-content: flex-end;
 		gap: 10px;
 		margin-top: 18px;
-	}
-	.imgrow {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		flex-wrap: wrap;
-	}
-	.imgopt {
-		width: 42px;
-		height: 42px;
-		border: 1px solid var(--border);
-		border-radius: 10px;
-		background: var(--surface);
-		color: var(--text-muted);
-		cursor: pointer;
-		display: grid;
-		place-items: center;
-		overflow: hidden;
-		padding: 0;
-	}
-	.imgopt.active {
-		border-color: var(--accent);
-		color: var(--accent-fg);
-		background: var(--accent-soft);
-	}
-	.uimg {
-		width: 100%;
-		height: 100%;
-		object-fit: cover;
-	}
-	.imghint {
-		font-size: 11.5px;
-		color: var(--text-faint);
-		margin-left: 4px;
 	}
 </style>

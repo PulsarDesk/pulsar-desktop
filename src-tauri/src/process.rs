@@ -1015,6 +1015,13 @@ pub struct HostGame {
 	#[allow(dead_code)]
 	#[serde(rename = "cmdStop", default)]
 	pub cmd_stop: String,
+	/// Same-host co-op: named handles (mutex/event/semaphore, comma-separated, substring match)
+	/// that keep a second copy from starting; renamed per copy (see coop.rs).
+	#[serde(rename = "coopMutexes", default)]
+	pub coop_mutexes: String,
+	/// Same-host co-op: give every extra copy its own user-profile / AppData folder.
+	#[serde(rename = "coopProfile", default)]
+	pub coop_profile: bool,
 }
 
 /// Grab ONE live frame of the host's screen as a small JPEG `data:` URL — the cover for

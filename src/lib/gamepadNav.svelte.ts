@@ -69,6 +69,14 @@ export class GamepadNav {
 	 * user never sees a stray selection border. The first input "wakes" nav at the default action
 	 * (`data-navdefault`, e.g. "Connect to a host") — not whatever registered first. Reset on stop(). */
 	#navActive = false;
+	/** A <select> opened with A/Enter. While open, a list of its options is shown under it
+	 * (#pop) and the d-pad/arrows move the highlight (#pending) instead of focus; A/Enter
+	 * applies the highlighted option, B/Escape closes without changing. Closed selects are
+	 * never changed by navigation — passing over a setting must not edit it. (The native
+	 * popup can't be driven by a pad, so this list is drawn here.) */
+	#editing: HTMLSelectElement | null = null;
+	#pending = -1;
+	#pop: HTMLDivElement | null = null;
 	#now = () => (typeof performance !== 'undefined' ? performance.now() : 0);
 
 	constructor(opts: Opts = {}) {
@@ -116,6 +124,7 @@ export class GamepadNav {
 		if (this.#timer) clearTimeout(this.#timer);
 		this.#timer = 0;
 		if (this.#current) this.#current.removeAttribute('data-navfocus');
+		this.#stopEditing();
 		// Re-entering gaming mode should again start ring-less until the user navigates.
 		this.#navActive = false;
 	}
@@ -156,7 +165,10 @@ export class GamepadNav {
 
 	#modalEl(): HTMLElement | null {
 		if (typeof document === 'undefined') return null;
-		return document.querySelector('[data-navmodal]');
+		// The TOPMOST dialog (the last one opened is the last in the DOM — modals portal to
+		// <body>): e.g. the ID keypad opened over the gaming "add device" form.
+		const all = document.querySelectorAll<HTMLElement>('[data-navmodal]');
+		return all.length ? all[all.length - 1] : null;
 	}
 
 	#focusable(el: HTMLElement): boolean {
@@ -191,7 +203,35 @@ export class GamepadNav {
 		} catch {
 			el.focus();
 		}
-		el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+		// A disabled control can't take DOM focus, so the previous one kept it — and its own
+		// focus style (Delete above a disabled Connect) looked like a second selection. Drop it.
+		if (typeof document !== 'undefined' && document.activeElement !== el) {
+			(document.activeElement as HTMLElement | null)?.blur?.();
+		}
+		// Scroll the item's whole ROW into view, not just the control: a settings toggle sits
+		// at the right of a taller row, so scrolling to the toggle alone left the row's label
+		// half off-screen. The margin keeps a little gap from the scroller's edge.
+		const row = el.closest<HTMLElement>('[data-navrow], .srow') ?? el;
+		row.style.scrollMargin = '12px';
+		row.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+		// The first / last item of a scrolling list scrolls it all the way: non-focusable
+		// content after the last control (notes, a version line) or before the first one
+		// otherwise stays hidden — the list looked like it "never reached the bottom".
+		const box = scrollBox(row);
+		if (box) {
+			const r = row.getBoundingClientRect();
+			let above = false;
+			let below = false;
+			for (const it of this.#items) {
+				if (it === el || !it.isConnected || !box.contains(it) || row.contains(it)) continue;
+				const ir = it.getBoundingClientRect();
+				if (ir.width <= 0 || ir.height <= 0) continue;
+				if (ir.top >= r.bottom - 1) below = true;
+				if (ir.bottom <= r.top + 1) above = true;
+			}
+			if (!below) box.scrollTop = box.scrollHeight;
+			else if (!above) box.scrollTop = 0;
+		}
 	}
 
 	/** The element marked as the default focus (the primary action — e.g. "Connect to a host",
@@ -223,25 +263,33 @@ export class GamepadNav {
 	 * roughly thirds the layout work. */
 	move(dir: Dir) {
 		if (this.#wake()) return; // first nav input only REVEALS the ring at the default action
-		// A native <select> can't be value-edited by a pad's d-pad — focusing it would be a
-		// dead end. So when the FOCUSED element is a <select>, left/right CYCLE its value
-		// (prev/next non-disabled option) instead of moving focus, and we fire a native
-		// `change` event so Svelte's onchange runs. Up/down still move geometrically, so the
-		// user navigates away vertically. Clamps at the ends; a single enabled option no-ops.
-		const cur = this.#current;
-		if (cur && cur.tagName === 'SELECT' && (dir === 'left' || dir === 'right')) {
-			this.#cycleSelect(cur as HTMLSelectElement, dir === 'right' ? 1 : -1);
-			return;
+		// An OPENED <select> (A/Enter on it) takes the d-pad: step its value (prev/next
+		// non-disabled option, native `change` so Svelte's onchange runs). A closed one is
+		// just passed over like any other control.
+		if (this.#editing) {
+			if (this.#editing.isConnected && this.#editing === this.#current) {
+				this.#stepPending(dir === 'down' || dir === 'right' ? 1 : -1);
+				return;
+			}
+			this.#stopEditing();
 		}
 		const modal = this.#modalEl();
-		const cands: { el: HTMLElement; cx: number; cy: number }[] = [];
+		const cands: Cand[] = [];
 		for (const el of this.#items) {
 			if (!el.isConnected) continue;
 			if (modal && !modal.contains(el)) continue;
 			if (el.closest('[inert]')) continue;
 			const r = el.getBoundingClientRect();
 			if (r.width <= 0 || r.height <= 0) continue;
-			cands.push({ el, cx: r.left + r.width / 2, cy: r.top + r.height / 2 });
+			cands.push({
+				el,
+				cx: r.left + r.width / 2,
+				cy: r.top + r.height / 2,
+				top: r.top,
+				bottom: r.bottom,
+				left: r.left,
+				right: r.right
+			});
 		}
 		if (cands.length === 0) return;
 		// No current, or current left the scope (e.g. a modal just opened) → snap to first.
@@ -250,10 +298,100 @@ export class GamepadNav {
 			this.#setCurrent(cands[0].el);
 			return;
 		}
+		// Up/down inside a scrolling box (the Settings card) stays in that box until it runs
+		// out: its next row may be scrolled off-screen BELOW something outside the box (the
+		// gaming dock's controller pill), which is geometrically closer — so the dock used to
+		// steal focus before the list's last rows were reached.
+		if (dir === 'up' || dir === 'down') {
+			const box = scrollBox(from.el);
+			if (box) {
+				const inBox = this.#pickVertical(cands.filter((c) => box.contains(c.el)), from, dir);
+				if (inBox) {
+					this.#setCurrent(inBox);
+					return;
+				}
+			}
+		}
+		if (dir === 'left' || dir === 'right') {
+			const side = this.#pickSideways(cands, from, dir);
+			if (side) this.#setCurrent(side);
+			return;
+		}
+		const best = this.#pickVertical(cands, from, dir);
+		if (best) this.#setCurrent(best);
+	}
+
+	/** Up/down goes to the NEXT ROW, then the item in it closest horizontally. The old
+	 * distance + 2×sideways score skipped a row whose items sat off to the side (gaming home:
+	 * "Connect to a host" → down jumped over "Hosts on your network" to the recents' × buttons,
+	 * which are nearer the centre). A row = the candidates whose near edge is within
+	 * ROW_SLACK px of the nearest one in that direction. */
+	#pickVertical(cands: Cand[], from: Cand, dir: Dir): HTMLElement | null {
+		const ROW_SLACK = 24;
+		const gap = (c: Cand) => (dir === 'down' ? c.top - from.bottom : from.top - c.bottom);
+		const ahead = cands.filter(
+			(c) => c.el !== from.el && (dir === 'down' ? c.cy - from.cy : from.cy - c.cy) > 1 && gap(c) > -4
+		);
+		if (!ahead.length) return null;
+		const near = Math.min(...ahead.map((c) => Math.max(0, gap(c))));
+		const row = ahead.filter((c) => Math.max(0, gap(c)) <= near + ROW_SLACK);
+		const fx0 = from.left;
+		const fx1 = from.right;
+		let best: Cand | null = null;
+		let bestKey = Infinity;
+		for (const c of row) {
+			// Horizontal gap between the two boxes (0 when they overlap), then centre offset.
+			const hgap = Math.max(0, c.left - fx1, fx0 - c.right);
+			const key = hgap * 4 + Math.abs(c.cx - from.cx) * 0.25 + Math.max(0, gap(c));
+			if (key < bestKey) {
+				bestKey = key;
+				best = c;
+			}
+		}
+		return best?.el ?? null;
+	}
+
+	/** Left/right never drifts up or down to a far-away row (it used to: from the dock's
+	 * controller pill "left" went up into the page; from a settings toggle it went to the
+	 * row above instead of the tab rail). Order:
+	 *  1. an item on the SAME ROW (vertical overlap) that way;
+	 *  2. out of the current scrolling box sideways (Settings card → its tab rail), landing on
+	 *     the box's selected entry (`.on` / aria-selected / aria-current) when there is one;
+	 *  3. anything within 45° of the direction;
+	 * else stay put. */
+	#pickSideways(cands: Cand[], from: Cand, dir: Dir): HTMLElement | null {
+		const ahead = cands.filter((c) => {
+			if (c.el === from.el) return false;
+			return (dir === 'right' ? c.cx - from.cx : from.cx - c.cx) > 1;
+		});
+		const sameRow = ahead.filter((c) => c.bottom > from.top + 2 && c.top < from.bottom - 2);
+		if (sameRow.length) return this.#pick(sameRow, from, dir);
+		const box = scrollBox(from.el);
+		if (box) {
+			// Only what sits BESIDE the box (its vertical span), not a dock under it.
+			const br = box.getBoundingClientRect();
+			const out = ahead.filter((c) => !box.contains(c.el) && c.cy >= br.top && c.cy <= br.bottom);
+			const sel = out.filter((c) =>
+				c.el.matches('.on, [aria-selected="true"], [aria-current]:not([aria-current="false"])')
+			);
+			if (sel.length) return this.#pick(sel, from, dir);
+			if (out.length) return this.#pick(out, from, dir);
+		}
+		const cone = ahead.filter((c) => Math.abs(c.cy - from.cy) <= Math.abs(c.cx - from.cx));
+		return cone.length ? this.#pick(cone, from, dir) : null;
+	}
+
+	/** Nearest candidate in `dir` from `from` (geometric score: distance along the direction
+	 * plus twice the sideways offset), or null when nothing lies that way. */
+	#pick(
+		cands: Cand[],
+		from: Cand,
+		dir: Dir
+	): HTMLElement | null {
 		let best: HTMLElement | null = null;
 		let bestScore = Infinity;
 		for (const c of cands) {
-			if (c.el === this.#current) continue;
+			if (c.el === from.el) continue;
 			const dx = c.cx - from.cx;
 			const dy = c.cy - from.cy;
 			let primary: number, cross: number;
@@ -265,20 +403,7 @@ export class GamepadNav {
 			const score = primary + cross * 2;
 			if (score < bestScore) { bestScore = score; best = c.el; }
 		}
-		if (best) this.#setCurrent(best);
-	}
-
-	/** Step a focused <select>'s value to the prev/next NON-disabled option (step ±1),
-	 * skipping disabled entries and clamping at the ends, then dispatch a native `change`
-	 * event so Svelte's onchange fires. No-ops gracefully if there's no enabled option in
-	 * that direction (e.g. a select with a single enabled option). */
-	#cycleSelect(sel: HTMLSelectElement, step: 1 | -1) {
-		const opts = [...sel.options];
-		let i = sel.selectedIndex + step;
-		while (i >= 0 && i < opts.length && opts[i].disabled) i += step; // skip disabled
-		if (i < 0 || i >= opts.length || opts[i].disabled) return; // clamp / nothing to pick
-		sel.selectedIndex = i;
-		sel.dispatchEvent(new Event('change', { bubbles: true }));
+		return best;
 	}
 
 	activate() {
@@ -286,7 +411,97 @@ export class GamepadNav {
 		// cold A/Enter activates "Connect to a host" directly (no stray ring beforehand).
 		this.#wake();
 		const el = this.#current;
-		if (el && this.#focusable(el)) el.click();
+		if (!el || !this.#focusable(el)) return;
+		if (el.tagName === 'SELECT') {
+			// A/Enter opens / closes the select for d-pad editing (never the native popup,
+			// which a pad can't drive).
+			if (this.#editing === el) {
+				this.#applyPending();
+				this.#stopEditing();
+			} else this.#startEditing(el as HTMLSelectElement);
+			return;
+		}
+		el.click();
+	}
+
+	#startEditing(sel: HTMLSelectElement) {
+		this.#stopEditing();
+		this.#editing = sel;
+		this.#pending = sel.selectedIndex;
+		sel.setAttribute('data-navedit', '');
+		if (typeof document === 'undefined') return;
+		const pop = document.createElement('div');
+		pop.className = 'navpop';
+		pop.setAttribute('role', 'listbox');
+		[...sel.options].forEach((o, i) => {
+			const row = document.createElement('div');
+			row.className = 'navpop-opt';
+			row.textContent = o.textContent;
+			if (o.disabled) row.classList.add('off');
+			// Mouse still works on the list: a click picks that option.
+			row.addEventListener('mousedown', (e) => {
+				e.preventDefault();
+				if (o.disabled) return;
+				this.#pending = i;
+				this.#applyPending();
+				this.#stopEditing();
+			});
+			pop.appendChild(row);
+		});
+		document.body.appendChild(pop);
+		this.#pop = pop;
+		// Fixed under the select (above it when the space below is too small), at least as
+		// wide as the select.
+		const r = sel.getBoundingClientRect();
+		pop.style.minWidth = `${Math.round(r.width)}px`;
+		pop.style.left = `${Math.round(Math.min(r.left, window.innerWidth - pop.offsetWidth - 8))}px`;
+		const below = window.innerHeight - r.bottom - 8;
+		if (pop.offsetHeight > below && r.top > below) {
+			pop.style.bottom = `${Math.round(window.innerHeight - r.top + 6)}px`;
+			pop.style.maxHeight = `${Math.round(r.top - 14)}px`;
+		} else {
+			pop.style.top = `${Math.round(r.bottom + 6)}px`;
+			pop.style.maxHeight = `${Math.round(below - 6)}px`;
+		}
+		this.#paintPending();
+	}
+
+	/** Move the highlight to the prev/next NON-disabled option (clamped at the ends). */
+	#stepPending(step: 1 | -1) {
+		const sel = this.#editing;
+		if (!sel) return;
+		let i = this.#pending + step;
+		while (i >= 0 && i < sel.options.length && sel.options[i].disabled) i += step;
+		if (i < 0 || i >= sel.options.length) return;
+		this.#pending = i;
+		this.#paintPending();
+	}
+
+	#paintPending() {
+		const pop = this.#pop;
+		if (!pop) return;
+		[...pop.children].forEach((c, i) => {
+			c.classList.toggle('on', i === this.#pending);
+			c.classList.toggle('cur', i === this.#editing?.selectedIndex);
+		});
+		(pop.children[this.#pending] as HTMLElement | undefined)?.scrollIntoView({ block: 'nearest' });
+	}
+
+	/** Commit the highlighted option (native `change` so Svelte's onchange runs). */
+	#applyPending() {
+		const sel = this.#editing;
+		if (!sel || this.#pending < 0 || this.#pending === sel.selectedIndex) return;
+		if (sel.options[this.#pending]?.disabled) return;
+		sel.selectedIndex = this.#pending;
+		sel.dispatchEvent(new Event('change', { bubbles: true }));
+	}
+
+	#stopEditing() {
+		this.#editing?.removeAttribute('data-navedit');
+		this.#editing = null;
+		this.#pending = -1;
+		this.#pop?.remove();
+		this.#pop = null;
 	}
 
 	/** Click the first element marked with `sel` in the active scope (e.g. the numpad
@@ -299,6 +514,10 @@ export class GamepadNav {
 	}
 
 	#back() {
+		if (this.#editing) {
+			this.#stopEditing();
+			return;
+		}
 		const fn = this.#backStack.at(-1) ?? this.#opts.onBack;
 		fn?.();
 	}
@@ -307,11 +526,20 @@ export class GamepadNav {
 
 	onKeydown(e: KeyboardEvent) {
 		const tgt = e.target as HTMLElement | null;
-		const typing =
-			!!tgt && (tgt.isContentEditable || /^(input|textarea|select)$/i.test(tgt.tagName));
+		// A focused <select> is NOT a typing field here: its native arrow-key handling changed
+		// the value while the user only meant to pass over it. Arrows go through move(), which
+		// edits a select only after A/Enter opened it.
+		const typing = !!tgt && (tgt.isContentEditable || /^(input|textarea)$/i.test(tgt.tagName));
 		if (e.key === 'Escape') {
 			e.preventDefault();
 			this.#back();
+			return;
+		}
+		// A single-line <input> has no use for Up/Down (the caret only moves left/right), so
+		// those still navigate — from the connect modal's ID field down to its keypad and back.
+		if (typing && tgt?.tagName === 'INPUT' && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+			e.preventDefault();
+			this.move(e.key === 'ArrowUp' ? 'up' : 'down');
 			return;
 		}
 		if (typing) return; // let fields own arrows/Enter (caret/submit)
@@ -497,4 +725,23 @@ export function navContainer(node: HTMLElement, enabled: boolean) {
 			clearAll();
 		}
 	};
+}
+
+type Cand = {
+	el: HTMLElement;
+	cx: number;
+	cy: number;
+	top: number;
+	bottom: number;
+	left: number;
+	right: number;
+};
+
+/** Nearest ancestor of `el` that scrolls vertically (overflow-y auto/scroll), or null. */
+function scrollBox(el: HTMLElement): HTMLElement | null {
+	for (let p = el.parentElement; p; p = p.parentElement) {
+		const oy = getComputedStyle(p).overflowY;
+		if ((oy === 'auto' || oy === 'scroll') && p.scrollHeight > p.clientHeight) return p;
+	}
+	return null;
 }

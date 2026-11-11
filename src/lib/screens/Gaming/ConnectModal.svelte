@@ -8,7 +8,7 @@
 	import Icon from '#lib/Icon.svelte';
 	import Numpad from './Numpad.svelte';
 	import { t } from '#lib/i18n.svelte.js';
-	import { canConnectTarget, fmtTarget } from '#lib/connectTarget.js';
+	import { canConnectTarget, fmtTarget, guardIdSpaces, reformatInput } from '#lib/connectTarget.js';
 	import { portal } from '#lib/portal.js';
 	import { openModal, closeModal } from '#lib/overlayModals.svelte.js';
 	import { closeOnEscape } from '#lib/escapeStack.js';
@@ -19,11 +19,15 @@
 		/** Continue with the entered host id → the shell opens the games screen. */
 		onPick: (id: string) => void;
 		onClose: () => void;
+		/** 'add' = the same ID box + keypad used to SAVE a device (gaming home → Devices). */
+		mode?: 'connect' | 'add' | 'id';
+		/** Pre-filled ID (editing an existing device's ID from the device form). */
+		initial?: string;
 	};
-	let { nav, onPick, onClose }: Props = $props();
+	let { nav, onPick, onClose, mode = 'connect', initial = '' }: Props = $props();
 	const navItem = nav.item;
 
-	let target = $state('');
+	let target = $state(fmtTarget((() => initial)()));
 	let inputEl = $state<HTMLInputElement>();
 	const canConnect = $derived(canConnectTarget(target));
 
@@ -67,20 +71,20 @@
 		if (e.target === e.currentTarget) onClose();
 	}}
 >
-	<div class="modal" data-navmodal role="dialog" aria-modal="true" aria-label={t('gaming.title')}>
+	<div class="modal" data-navmodal role="dialog" aria-modal="true" aria-label={t(mode === 'id' ? 'gaming.idTitle' : mode === 'add' ? 'gaming.addTitle' : 'gaming.title')}>
 		<button class="close" use:navItem onclick={onClose} aria-label={t('gaming.close')}>
 			<Icon name="x" size={16} />
 		</button>
 
-		<div class="mhead">{t('gaming.title')}</div>
+		<div class="mhead">{t(mode === 'id' ? 'gaming.idTitle' : mode === 'add' ? 'gaming.addTitle' : 'gaming.title')}</div>
 		<div class="idfield">
 			<Icon name="connect" size={20} />
 			<input
 				bind:this={inputEl}
 				use:navItem
 				value={target}
-				oninput={(e) => setTarget(e.currentTarget.value)}
-				onkeydown={(e) => e.key === 'Enter' && go()}
+				oninput={(e) => (target = reformatInput(e.currentTarget))}
+				onkeydown={(e) => (e.key === 'Enter' ? go() : guardIdSpaces(e))}
 				placeholder="000 000 000"
 				aria-label={t('home.targetAria')}
 				inputmode="numeric"
@@ -91,8 +95,8 @@
 		<Numpad value={target} setValue={setTarget} {navItem} />
 
 		<button class="btn btn-primary go" use:navItem disabled={!canConnect} onclick={go}>
-			<Icon name="gaming" size={18} />
-			{t('gaming.connect')}
+			<Icon name={mode === 'id' ? 'check' : mode === 'add' ? 'plus' : 'gaming'} size={18} />
+			{t(mode === 'id' ? 'gaming.idDone' : mode === 'add' ? 'gaming.addDevice' : 'gaming.connect')}
 		</button>
 	</div>
 </div>
@@ -101,7 +105,8 @@
 	.backdrop {
 		position: fixed;
 		inset: 0;
-		z-index: 60;
+		/* Above the shared Modal (70/71): the keypad can open over the device form. */
+		z-index: 80;
 		display: grid;
 		place-items: center;
 		background: color-mix(in oklch, var(--bg) 40%, transparent);

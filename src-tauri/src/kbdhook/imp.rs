@@ -307,21 +307,51 @@ fn content_rect() -> Option<(i32, i32, i32, i32)> {
 	use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
 	use windows_sys::Win32::Graphics::Gdi::ClientToScreen;
 	use windows_sys::Win32::UI::WindowsAndMessaging::{
-		FindWindowExW, GetClientRect, GetWindowRect, IsWindowVisible,
+		FindWindowExW, GetClientRect, GetCursorPos, GetWindowRect, IsWindowVisible,
 	};
 	let main = VIDEO_MAIN.load(Ordering::SeqCst) as HWND;
 	if main.is_null() {
 		return None;
 	}
 	let class: Vec<u16> = "PulsarRenderChild\0".encode_utf16().collect();
-	let child = unsafe { FindWindowExW(main, std::ptr::null_mut(), class.as_ptr(), std::ptr::null()) };
-	let mut rc: RECT = unsafe { std::mem::zeroed() };
-	let (l, t, r, b, frac) = if !child.is_null() && unsafe { IsWindowVisible(child) } != 0 {
-		if unsafe { GetWindowRect(child, &mut rc) } == 0 {
-			return None;
+	// Several sessions = several renderer children: an inactive tab's is parked 1x1 offscreen,
+	// and the FIRST one found was often that parked child — no usable rect, so the clip was
+	// never re-applied and the mouse walked out of the video after a tab switch. Pick the
+	// on-screen child under the cursor (split panes), else the largest on-screen one.
+	let mut cursor = POINT { x: 0, y: 0 };
+	let have_cursor = unsafe { GetCursorPos(&mut cursor) } != 0;
+	let mut best: Option<(RECT, bool, i64)> = None;
+	let mut child: HWND = std::ptr::null_mut();
+	loop {
+		child = unsafe { FindWindowExW(main, child, class.as_ptr(), std::ptr::null()) };
+		if child.is_null() {
+			break;
 		}
+		let mut r: RECT = unsafe { std::mem::zeroed() };
+		if unsafe { IsWindowVisible(child) } == 0 || unsafe { GetWindowRect(child, &mut r) } == 0 {
+			continue;
+		}
+		if r.right - r.left < 8 || r.bottom - r.top < 8 {
+			continue;
+		}
+		let area = (r.right - r.left) as i64 * (r.bottom - r.top) as i64;
+		let under = have_cursor
+			&& cursor.x >= r.left
+			&& cursor.x < r.right
+			&& cursor.y >= r.top
+			&& cursor.y < r.bottom;
+		let better = match best {
+			None => true,
+			Some((_, bu, ba)) => (under && !bu) || (under == bu && area > ba),
+		};
+		if better {
+			best = Some((r, under, area));
+		}
+	}
+	let mut rc: RECT = unsafe { std::mem::zeroed() };
+	let (l, t, r, b, frac) = if let Some((r, _, _)) = best {
 		let frac = *VIDEO_FRAC.lock().unwrap_or_else(|e| e.into_inner());
-		(rc.left, rc.top, rc.right, rc.bottom, frac)
+		(r.left, r.top, r.right, r.bottom, frac)
 	} else {
 		if unsafe { GetClientRect(main, &mut rc) } == 0 {
 			return None;

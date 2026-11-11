@@ -50,6 +50,8 @@
 	// Connect flow (NO popups): pick a host on the home → 'games' view shows a connecting/
 	// loading state while the host library is fetched, then the games as a full screen.
 	let gamesTarget = $state('');
+	// Display name of the picked host (LAN / recents card), for the games-screen header.
+	let gamesTargetName = $state('');
 	let hostGames = $state<GameInfo[] | null>(null);
 	let gamesLoading = $state(false);
 	let gamesErr = $state('');
@@ -57,8 +59,9 @@
 	// pinned Desktop card.
 	let desktopImg = $state('');
 
-	async function openGames(id: string) {
+	async function openGames(id: string, name = '') {
 		gamesTarget = id;
+		gamesTargetName = name;
 		hostGames = null;
 		desktopImg = '';
 		gamesErr = '';
@@ -110,14 +113,10 @@
 		}
 	});
 
-	// F11 toggles fullscreen (the top bar — and its gaming toggle — is hidden while
-	// fullscreen, so the dock's button is the other way out).
-	function onKey(e: KeyboardEvent) {
-		if (e.key === 'F11') {
-			e.preventDefault();
-			onToggleFullscreen();
-		}
-	}
+	// F11 is NOT handled here: the app-wide shortcut in +page.svelte already toggles
+	// fullscreen (with an auto-repeat guard). This shell had its own F11 listener too, so in
+	// gaming mode one press toggled TWICE (off then straight back on) — fullscreen could not
+	// be left and the window kept re-sizing (2026-11-10). The dock button is the other way out.
 
 	// The gilrs→webview controller-nav bridge: the ONLY pad-nav input on Linux (WebKitGTK
 	// has no Gamepad API) and the preferred one everywhere. Feed each snapshot into the nav.
@@ -125,14 +124,12 @@
 	let dead = false;
 
 	onMount(() => {
-		window.addEventListener('keydown', onKey);
 		onGamepadNav((s) => nav.ingestBridge(s)).then((off) => { if (dead) off(); else unlistenNav = off; });
 	});
 	onDestroy(() => {
 		dead = true;
 		nav.stop();
 		api.gamepadNavStop().catch(() => {});
-		window.removeEventListener('keydown', onKey);
 		unlistenNav?.();
 	});
 
@@ -155,6 +152,7 @@
 			<GamesScreen
 				{nav}
 				target={gamesTarget}
+				targetName={gamesTargetName}
 				games={hostGames}
 				{desktopImg}
 				loading={gamesLoading}

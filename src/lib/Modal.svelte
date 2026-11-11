@@ -13,8 +13,10 @@
 		children,
 		/** Mark the dialog `[data-navmodal]` so the gaming-mode GamepadNav confines roving
 		 * focus to it (controller-navigable popups). Off for normal remote-mode modals. */
-		navModal = false
-	}: { title: string; onClose: () => void; children: Snippet; navModal?: boolean } = $props();
+		navModal = false,
+		/** Large dialog (e.g. Settings shown over split mode). */
+		wide = false
+	}: { title: string; onClose: () => void; children: Snippet; navModal?: boolean; wide?: boolean } = $props();
 
 	// While this modal is up, occlude every pane's native render (split-mode #8): on Linux the
 	// native video composites OVER the webview, so without this a live pane would hide the modal.
@@ -34,7 +36,7 @@
 </script>
 
 <div class="backdrop" use:portal onclick={onClose} role="presentation"></div>
-<div class="modal" use:portal role="dialog" aria-modal="true" aria-label={title} data-navmodal={navModal ? '' : undefined}>
+<div class="modal" class:wide use:portal role="dialog" aria-modal="true" aria-label={title} data-navmodal={navModal ? '' : undefined}>
 	<div class="mhead">
 		<h3>{title}</h3>
 		<button class="x" use:closeNav aria-label={t('modal.close')} onclick={onClose}><Icon name="x" size={16} /></button>
@@ -64,6 +66,10 @@
 		border: 1px solid var(--border);
 		border-radius: var(--r-lg);
 		box-shadow: var(--shadow-lg);
+	}
+	.modal.wide {
+		width: min(1040px, 94%);
+		max-height: 88%;
 	}
 	.mhead {
 		display: flex;

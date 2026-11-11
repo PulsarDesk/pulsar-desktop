@@ -372,9 +372,27 @@ pub(crate) async fn self_avatar(
 	)
 }
 
+/// Settings preview: exactly the image peers receive for identity mode `mode` (the same
+/// `avatar_png` the session push uses), so the picker can show it before/after saving.
+/// `None` = nothing is sent (anonymous, or nothing resolves on this OS).
+#[tauri::command]
+pub(crate) async fn avatar_preview(app: tauri::AppHandle, mode: String) -> Option<String> {
+	tokio::task::spawn_blocking(move || avatar_png(&app, &mode).map(|png| data_url(&png)))
+		.await
+		.unwrap_or(None)
+}
+
 /// The OS user's display name (e.g. "Jane Doe") for the sidebar identity
 /// chip — replaces the generic "Bu cihaz" label with who is actually here.
 #[tauri::command]
 pub(crate) fn device_user_name() -> String {
 	pulsar_core::discovery::os_display_name()
+}
+
+/// The machine's hostname (empty if unknown). A saved display name equal to it is NOT
+/// sent to peers (`util::announce_name` replaces it with the OS user's name), so the
+/// Settings field must treat it as "no custom name" too.
+#[tauri::command]
+pub(crate) fn device_host_name() -> String {
+	crate::util::machine_hostname().unwrap_or_default()
 }

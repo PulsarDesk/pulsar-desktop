@@ -82,6 +82,9 @@ opus = "0.4"
 # Native host capture+encode (DXGI Desktop Duplication + NVENC SDK → RTP, Sunshine-technique).
 # Replaces the ffmpeg ddagrab hot path on Windows/NVENC; ffmpeg stays as the fallback.
 pulsar-capture = { path = "../crates/pulsar-capture" }
+# In-session SYSTEM input helper client (UAC consent / lock screen input) — see
+# docs/agents/system-agent.md. Optional at runtime: without the service it falls back to SendInput.
+pulsar-sysagent = { path = "../crates/pulsar-sysagent" }
 windows-sys = { version = "0.61", features = [
 	"Win32_Foundation",
 	"Win32_Graphics_Gdi",

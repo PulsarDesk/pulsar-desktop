@@ -4,6 +4,10 @@
 //!   (none)          branded UI install
 //!   /S, --silent    headless install/update into the registered (or default) dir
 //!   --uninstall     remove the install (branded confirm → progressless removal)
+//!   --updating <ver> --old-pid <pid> --app <exe>
+//!                   the in-app updater's progress window (the app runs the NSIS installer
+//!                   quietly and exits): waits for the new build to start, then closes;
+//!                   offers to reopen Pulsar if the install never ran or failed
 //!   --mock          UI walkthrough that touches NOTHING (no files, registry, shortcuts or
 //!                   app launch): a fake payload is "extracted" with a real progress bar.
 //!                   Combine with --uninstall or the --mock-* flags (see mock.rs) to reach
@@ -39,6 +43,20 @@ fn main() {
 		});
 	}
 
+	// `--updating`: the in-app updater's branded progress window (no payload needed).
+	let arg_after = |f: &str| {
+		args.iter()
+			.position(|a| a.eq_ignore_ascii_case(f))
+			.and_then(|i| args.get(i + 1))
+			.cloned()
+	};
+	let updating = has("--updating").then(|| Updating {
+		version: arg_after("--updating").unwrap_or_default(),
+		old_pid: arg_after("--old-pid").and_then(|p| p.parse().ok()).unwrap_or(0),
+		app: arg_after("--app").map(PathBuf::from),
+		mock: has("--mock-updating"),
+	});
+
 	let uninstall = has("--uninstall");
 	let mock = (has("--mock") || std::env::var("PULSAR_SETUP_MOCK").is_ok_and(|v| v == "1")).then(|| mock::Mock {
 		fail: has("--mock-fail"),
@@ -49,7 +67,13 @@ fn main() {
 		no_payload: has("--mock-no-payload"),
 		at: args.iter().find_map(|a| a.strip_prefix("--mock-at=")).and_then(mock::At::parse),
 	});
-	let title = if uninstall { "Pulsar Kaldırma" } else { "Pulsar Kurulum" };
+	let title = if uninstall {
+		"Pulsar Kaldırma"
+	} else if updating.is_some() {
+		"Pulsar Güncelleme"
+	} else {
+		"Pulsar Kurulum"
+	};
 	let opts = eframe::NativeOptions {
 		viewport: egui::ViewportBuilder::default()
 			.with_title(title)
@@ -68,7 +92,11 @@ fn main() {
 			cc.egui_ctx.set_fonts(ui::fonts());
 			#[cfg(windows)]
 			round_corners(cc);
-			Ok(Box::new(SetupApp::new(uninstall, mock)))
+			let mut app = SetupApp::new(uninstall, mock);
+			if let Some(u) = updating {
+				app.start_updating(u);
+			}
+			Ok(Box::new(app))
 		}),
 	);
 }
@@ -93,7 +121,20 @@ fn round_corners(cc: &eframe::CreationContext<'_>) {
 	}
 }
 
+/// `--updating` arguments (see the module doc).
+struct Updating {
+	version: String,
+	old_pid: u32,
+	app: Option<PathBuf>,
+	/// `--mock-updating`: run the screen with a fake watcher (screenshots / testing).
+	mock: bool,
+}
+
 enum Phase {
+	/// The in-app update's progress window: the installer runs quietly in the background.
+	Updating,
+	/// The update never ran / failed; Pulsar can be reopened from here.
+	UpdateFailed(String),
 	Welcome,
 	Installing,
 	Done,
@@ -119,6 +160,8 @@ enum Act {
 	Retry,
 	CopyError,
 	Uninstall,
+	/// Reopen Pulsar after a failed update.
+	Reopen,
 }
 
 struct SetupApp {
@@ -141,6 +184,11 @@ struct SetupApp {
 	/// The uninstall confirmation's default focus (Cancel) was set.
 	focus_set: bool,
 	dark: Option<bool>,
+	/// `--updating`: target version, the app to reopen, start time and the watcher.
+	upd_version: String,
+	upd_app: Option<PathBuf>,
+	upd_started: std::time::Instant,
+	upd_rx: Option<Receiver<install::UpdMsg>>,
 	/// UI walkthrough mode (`--mock`): every system-touching step is simulated.
 	mock: Option<mock::Mock>,
 }
@@ -172,6 +220,10 @@ impl SetupApp {
 			have_payload,
 			copied: false,
 			focus_set: false,
+			upd_version: String::new(),
+			upd_app: None,
+			upd_started: std::time::Instant::now(),
+			upd_rx: None,
 			dark: None,
 			mock,
 		};
@@ -194,6 +246,24 @@ impl SetupApp {
 			};
 		}
 		app
+	}
+
+	fn start_updating(&mut self, u: Updating) {
+		self.phase = Phase::Updating;
+		self.upd_version = u.version;
+		self.upd_app = u.app;
+		self.upd_started = std::time::Instant::now();
+		let (tx, rx) = std::sync::mpsc::channel();
+		self.upd_rx = Some(rx);
+		let (old_pid, mock) = (u.old_pid, u.mock);
+		std::thread::spawn(move || {
+			if mock {
+				std::thread::sleep(std::time::Duration::from_secs(8));
+				let _ = tx.send(install::UpdMsg::Failed("Deneme: kurulum başlamadı.".into()));
+			} else {
+				install::watch_update(old_pid, &tx);
+			}
+		});
 	}
 
 	fn start_install(&mut self) {
@@ -247,6 +317,15 @@ impl SetupApp {
 				}
 			}
 		}
+		if let Some(rx) = &self.upd_rx {
+			if let Ok(m) = rx.try_recv() {
+				self.upd_rx = None;
+				match m {
+					install::UpdMsg::Done => self.phase = Phase::Done,
+					install::UpdMsg::Failed(e) => self.phase = Phase::UpdateFailed(e),
+				}
+			}
+		}
 		if let Some(rx) = &self.wv2_rx {
 			if let Ok(r) = rx.try_recv() {
 				self.wv2 = match r {
@@ -276,6 +355,13 @@ impl SetupApp {
 					self.copied = true;
 				}
 			}
+			Act::Reopen => {
+				if let Some(app) = &self.upd_app {
+					// The app's update marker would make it exit as "updating" — tell it why.
+					install::launch_exe(app, &["--update-failed"]);
+				}
+				ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+			}
 			Act::Uninstall => {
 				if self.mock.is_none() {
 					install::uninstall();
@@ -292,7 +378,11 @@ impl eframe::App for SetupApp {
 		self.pump();
 		// Repaint only while something is in flight (the extract's progress, the WebView2
 		// download); a static screen redraws on input alone.
-		if matches!(self.phase, Phase::Installing) || self.wv2_rx.is_some() {
+		// The update window closes itself once the new build is up.
+		if matches!(self.phase, Phase::Done) && self.upd_app.is_some() {
+			ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+		}
+		if matches!(self.phase, Phase::Installing | Phase::Updating) || self.wv2_rx.is_some() {
 			ctx.request_repaint_after(std::time::Duration::from_millis(33));
 		}
 		// `PULSAR_SETUP_THEME=light|dark` forces one (screenshots / testing); otherwise the Windows
@@ -428,6 +518,33 @@ impl SetupApp {
 					closable: !matches!(w, Wv2::Downloading),
 				},
 			},
+			Phase::Updating => Screen {
+				glow: true,
+				neutral: false,
+				title: "Güncelleniyor…".into(),
+				sub: if self.upd_version.is_empty() {
+					"Pulsar · birkaç saniye sürer".into()
+				} else {
+					format!("Pulsar v{} · birkaç saniye sürer", self.upd_version)
+				},
+				pill: Pill::None,
+				note: Some((Icon::Lock, "Bitince Pulsar kendiliğinden açılır.")),
+				buttons: vec![],
+				closable: false,
+			},
+			Phase::UpdateFailed(_) => Screen {
+				glow: false,
+				neutral: true,
+				title: "Güncelleme tamamlanamadı".into(),
+				sub: "Pulsar'ı açıp tekrar deneyebilirsin".into(),
+				pill: Pill::None,
+				note: None,
+				buttons: vec![
+					(Btn::new("Kapat", Kind::Quiet), Act::Close),
+					(Btn::new("Pulsar'ı aç", Kind::Primary).icon_after(Icon::Arrow), Act::Reopen),
+				],
+				closable: true,
+			},
 			Phase::Failed(_) => Screen {
 				glow: false,
 				neutral: true,
@@ -478,6 +595,8 @@ impl SetupApp {
 		}
 		let win_title = if matches!(self.phase, Phase::ConfirmUninstall | Phase::Uninstalled) {
 			"Pulsar Kaldırma"
+		} else if self.upd_app.is_some() || matches!(self.phase, Phase::Updating | Phase::UpdateFailed(_)) {
+			"Pulsar Güncelleme"
 		} else {
 			"Pulsar Kurulum"
 		};
@@ -645,6 +764,17 @@ impl SetupApp {
 						}
 					}
 				}
+			}
+			Phase::Updating => {
+				// The quiet installer reports no progress: ease towards 95 % over ~25 s, the
+				// typical install time, so the bar keeps moving without claiming to be done.
+				let s = self.upd_started.elapsed().as_secs_f32();
+				let frac = 0.95 * (1.0 - (-s / 9.0).exp());
+				ui::progress(&p, at(PAD, y), bw, t, "Dosyalar kuruluyor", "", frac, "Yönetici izni istenirse onayla.");
+			}
+			Phase::UpdateFailed(e) => {
+				let e = e.clone();
+				ui::banner(&p, at(PAD, y), bw, t, Tone::Warn, Icon::Warn, None, &e);
 			}
 			Phase::Failed(e) => {
 				let e = e.clone();

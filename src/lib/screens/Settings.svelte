@@ -40,12 +40,21 @@
 		}
 	});
 
-	const tabs = [
+	const allTabs = [
 		{ id: 'display', icon: 'monitor' },
 		{ id: 'network', icon: 'wifi' },
 		{ id: 'security', icon: 'shield' },
 		{ id: 'general', icon: 'settings' }
 	] as const;
+	// Gaming mode is a pure client (it never hosts), so its Settings show only client
+	// settings by default; "all settings" reveals the host ones (shared with remote mode).
+	let showAll = $state(false);
+	const clientOnly = $derived(padNav && !showAll);
+	// Security holds host-only settings (unattended access, password, remote cursor, UAC).
+	const tabs = $derived(clientOnly ? allTabs.filter((x) => x.id !== 'security') : allTabs);
+	$effect(() => {
+		if (clientOnly && tab === 'security') tab = 'display';
+	});
 
 	// Only these fields affect the relay registration — anything else (audio,
 	// unattended, avatar…) saves without tearing the node down and re-registering.
@@ -126,10 +135,21 @@
 
 <!-- Gaming mode (`padNav`) fills its box: the title and the tab rail stay put and only the
      content card scrolls. The remote shell scrolls the whole page as before (rail sticky). -->
-<div class="settings" class:fill={padNav}>
-<div class="head"><h1>{t('settings.title')}</h1><p class="sub">{t('settings.sub')}</p></div>
-
-<div class="layout" use:navContainer={padNav}>
+<div class="settings" class:fill={padNav} use:navContainer={padNav}>
+{#if padNav}
+	<div class="head gaming">
+		<div>
+			<h1>{t(showAll ? 'settings.title' : 'settings.gamingTitle')}</h1>
+			<p class="sub">{t(showAll ? 'settings.gamingAllSub' : 'settings.gamingSub')}</p>
+		</div>
+		<button class="btn btn-ghost allbtn" onclick={() => (showAll = !showAll)}>
+			<Icon name={showAll ? 'gaming' : 'settings'} size={16} />{t(showAll ? 'settings.gamingOnly' : 'settings.showAll')}
+		</button>
+	</div>
+{:else}
+	<div class="head"><h1>{t('settings.title')}</h1><p class="sub">{t('settings.sub')}</p></div>
+{/if}
+<div class="layout">
 	<div class="rail">
 		{#each tabs as tb (tb.id)}
 			<button class="tab" class:on={tab === tb.id} onclick={() => (tab = tb.id)}>
@@ -146,6 +166,7 @@
 				{saveConfig}
 				{toggleTransmit}
 				{toggleMute}
+				{clientOnly}
 			/>
 		{:else if tab === 'network'}
 			<NetworkTab bind:config {saveConfig} {setMode} {onReconnect} />
@@ -170,6 +191,18 @@
 <style>
 	.head {
 		margin-bottom: 28px;
+	}
+	.head.gaming {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: 16px;
+	}
+	.allbtn {
+		flex: none;
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
 	}
 	h1 {
 		font-size: 27px;

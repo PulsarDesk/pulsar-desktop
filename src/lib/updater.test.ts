@@ -18,6 +18,7 @@ vi.mock('./api.commands', () => ({
 	api: {
 		selfUpdatePossible: vi.fn().mockResolvedValue(true),
 		markUpdateInstalling: vi.fn().mockResolvedValue(undefined),
+		launchUpdateWindow: vi.fn().mockResolvedValue(undefined),
 		clearUpdateInstalling: vi.fn().mockResolvedValue(undefined)
 	}
 }));

@@ -68,6 +68,8 @@ use crate::util::{config_path, display_rotation, identity_path, resolve_relay, D
 #[cfg(target_os = "linux")]
 pub(crate) mod cursor;
 mod handlers;
+/// Desktop injector: SYSTEM helper (UAC / lock screen) first, SendInput fallback.
+mod sysinput;
 pub(crate) mod takeover;
 #[cfg(target_os = "linux")]
 mod libav;
@@ -267,8 +269,15 @@ impl Drop for SessionCleanupGuard {
 		// the normal end and the abort() path (Drop covers both). `take()` makes it idempotent
 		// (a second drop, or a prior revert from an `adapt: None` restream, finds None). No-op
 		// off Windows (the stored PrevMode is always None there).
-		if let Some(prev) = self.adapt_state.lock().unwrap().prev.take() {
-			crate::display_mode::revert(prev);
+		{
+			let mut st = self.adapt_state.lock().unwrap();
+			if let Some(prev) = st.prev.take() {
+				crate::display_mode::revert(prev);
+			}
+			// A host window resized to a split pane's shape goes back to where it was.
+			if let Some(prev) = st.win_prev.take() {
+				crate::display_mode::restore_window(prev);
+			}
 		}
 		// Linux: close the XDG ScreenCast portal session so the compositor's
 		// "your screen is being shared" indicator disappears.
@@ -315,6 +324,7 @@ impl Drop for SessionCleanupGuard {
 		// and is a no-op.
 		let sid = self.sid;
 		let peer = self.peer.clone();
+		crate::coop::set_capture(sid, None);
 		// Keyed by sid now: this entry is uniquely ours, so a plain remove() is correct —
 		// a same-DEVICE co-op session has its OWN sid key and is never touched here.
 		self.incoming.lock().unwrap().remove(&sid);
@@ -488,14 +498,7 @@ pub(crate) async fn go_online(
 	// Identity advertised on the network: the user's chosen device name, or — when
 	// it's the generic default — the OS user's name, so relay-less peers are still
 	// recognizable ("Jane Doe" instead of "Pulsar Cihazı").
-	let announce_name = {
-		let n = cfg.device_name.trim();
-		if n.is_empty() || n == "Pulsar Cihazı" {
-			pulsar_core::discovery::os_display_name()
-		} else {
-			n.to_string()
-		}
-	};
+	let announce_name = crate::util::announce_name(&cfg.device_name);
 	// Port policy: an explicitly configured port (Settings → Ağ) is binding — if it's
 	// already taken, FAIL with a clear error instead of silently sliding to another
 	// port (the user pinned it for a firewall rule / port-forward; a silent ephemeral
@@ -1286,7 +1289,21 @@ pub(crate) async fn go_online(
 							// capture a stale window. The Desktop entry launches nothing (pid None) →
 							// slot stays None → whole-desktop capture, unchanged.
 							*launched_hwnd.lock().unwrap() = None;
-							if let Some(pid) = launch_host_game(&g) {
+							// Same-host co-op: a copy of this game already runs for another pane
+							// → start this one isolated (renamed single-instance locks, own input,
+							// optionally its own profile). Falls back to the normal launch.
+							let coop_on = app_h.state::<AppState>().config.lock().unwrap().coop_isolation;
+							let isolated = if coop_on && crate::coop::running_copies(&g.id) > 0 {
+								crate::process::spawn_shell(&g.cmd_start);
+								crate::coop::launch_isolated(&g)
+							} else {
+								None
+							};
+							let launched = isolated.or_else(|| launch_host_game(&g));
+							if let Some(pid) = launched {
+								crate::coop::note_launch(&g.id, pid);
+							}
+							if let Some(pid) = launched {
 								let slot = launched_hwnd.clone();
 								std::thread::spawn(move || {
 									if let Some(hwnd) = crate::process::resolve_launched_window(pid)
@@ -1351,7 +1368,7 @@ pub(crate) async fn go_online(
 						u8,
 						(ResolvedTarget, Box<dyn VirtualGamepad>),
 					> = std::collections::HashMap::new();
-					let mut desktop: Option<pulsar_core::input::DesktopInput> = None;
+					let mut desktop: Option<sysinput::HostInput> = None;
 					let mut tried = false;
 					// PHASE 3B (same-host co-op): per-WINDOW input target. When THIS session captures
 					// a specific window (a launched game / picked app — Phase 2b stashed its HWND in
@@ -1380,6 +1397,13 @@ pub(crate) async fn go_online(
 					// if the focus moved meanwhile, or the key would stay latched.
 					#[cfg(windows)]
 					let mut desk_keys: std::collections::HashSet<u32> = std::collections::HashSet::new();
+					// Same-host co-op isolation (opt-in): when another pane plays a second instance
+					// of the game THIS session captures, its controllers/keyboard/mouse go to this
+					// instance only, through the injected ProtoInput component (see coop.rs).
+					#[cfg(windows)]
+					let mut coop = crate::coop::SessionRouter::new(sid);
+					#[cfg(windows)]
+					let coop_app = app_h.clone();
 					// Which monitor's geometry is currently applied to the desktop injector, so we
 					// only re-resolve the virtual-desktop rect when the streamed monitor changes.
 					// `u32::MAX` = "none applied yet" (forces the first resolve).
@@ -1503,6 +1527,12 @@ pub(crate) async fn go_online(
 						// append_idx.min(3) ceiling so an authenticated peer cannot create more
 						// than 4 virtual gamepads or storm plug/unplug by cycling the target field.
 						const MAX_PADS: u8 = 4;
+						#[cfg(windows)]
+						let coop_inst = {
+							let target = *win_capture_hwnd_in.lock().unwrap();
+							let enabled = coop_app.state::<AppState>().config.lock().unwrap().coop_isolation;
+							coop.poll(target, enabled).map(|i| (i, target.unwrap_or_default()))
+						};
 						match ev {
 							// Legacy single-pad variant → Player 1 (slot 0), Xbox emulation.
 							InputEvent::Gamepad(state) => {
@@ -1557,6 +1587,13 @@ pub(crate) async fn go_online(
 									pads.insert(slot, (want, pad));
 								}
 								pads.get_mut(&slot).unwrap().1.apply(&state);
+								// Co-op: this instance sees exactly this session's pads.
+								#[cfg(windows)]
+								if let Some((inst, _)) = coop_inst {
+									let slots: Vec<u32> =
+										pads.values_mut().filter_map(|(_, p)| p.xinput_slot()).collect();
+									coop.sync_pads(inst, slots);
+								}
 							}
 							// A client controller went away: neutralize to all-zero but keep the
 							// Box alive so the emulated device stays registered on the host —
@@ -1570,6 +1607,13 @@ pub(crate) async fn go_online(
 								}
 							}
 							other => {
+								// Co-op isolation: kb/mouse go to THIS session's game instance only.
+								#[cfg(windows)]
+								if let Some((inst, hwnd)) = coop_inst {
+									if coop.route(inst, hwnd, &other) {
+										return;
+									}
+								}
 								// PHASE 3B: pick the per-session input target. If this session captured a
 								// specific window (Phase 2b stashed its HWND in `launched_hwnd`), route the
 								// kb/mouse to that window's message pump (`WindowInput`/PostMessage) instead
@@ -1663,7 +1707,7 @@ pub(crate) async fn go_online(
 								}
 								if !tried && !mock_capture() {
 									tried = true;
-									match pulsar_core::input::DesktopInput::new() {
+									match sysinput::HostInput::new() {
 										Ok(d) => desktop = Some(d),
 										Err(e) => tracing::warn!("desktop input unavailable: {e}"),
 									}
@@ -2050,6 +2094,7 @@ pub(crate) async fn go_online(
 					let peer = peer.clone();
 					let peer_meta = peer_meta.clone();
 					move |png: Vec<u8>| {
+						tracing::info!(%peer, bytes = png.len(), "client identity image received");
 						let url = crate::avatar::data_url(&png);
 						peer_meta
 							.lock()

@@ -888,3 +888,34 @@ mod conn_error_tests {
 		);
 	}
 }
+
+/// The name this device advertises (LAN beacon, relay identity, the name pushed to peers):
+/// the user's own device name, or — while it is still a default — the OS user's display name.
+/// The core's default device name is the machine HOSTNAME, so every Windows account on one PC
+/// (or two Duo sessions) used to show up as the same "DESKTOP-AB12CD"; a hostname-equal name
+/// counts as "not chosen" and the signed-in user's name is shown instead.
+pub(crate) fn announce_name(device_name: &str) -> String {
+	let n = device_name.trim();
+	let host = machine_hostname();
+	if n.is_empty() || n == "Pulsar Cihazı" || host.as_deref().is_some_and(|h| h.eq_ignore_ascii_case(n)) {
+		pulsar_core::discovery::os_display_name()
+	} else {
+		n.to_string()
+	}
+}
+
+pub(crate) fn machine_hostname() -> Option<String> {
+	#[cfg(windows)]
+	let h = std::env::var("COMPUTERNAME").ok();
+	#[cfg(not(windows))]
+	let h = std::fs::read_to_string("/proc/sys/kernel/hostname")
+		.ok()
+		.or_else(|| std::env::var("HOSTNAME").ok())
+		.or_else(|| {
+			std::process::Command::new("hostname")
+				.output()
+				.ok()
+				.and_then(|o| String::from_utf8(o.stdout).ok())
+		});
+	h.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}

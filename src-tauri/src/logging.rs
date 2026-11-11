@@ -66,6 +66,23 @@ pub fn init() {
 			tracing::warn!("log directory unavailable — logging to stdout only");
 		}
 	}
+	install_panic_hook();
+}
+
+/// Route panics into the log. A panic in a spawned tokio task (e.g. the host's video
+/// forwarder) only kills that task and prints to stderr — invisible in a release build — so
+/// the session just goes silent with nothing in the log file. Keep the default hook too.
+fn install_panic_hook() {
+	let default = std::panic::take_hook();
+	std::panic::set_hook(Box::new(move |info| {
+		let thread = std::thread::current();
+		let bt = std::backtrace::Backtrace::force_capture();
+		tracing::error!(
+			thread = thread.name().unwrap_or("?"),
+			"PANIC: {info}\n{bt}"
+		);
+		default(info);
+	}));
 }
 
 /// Open the log directory in the platform file manager. Returns the path either way so

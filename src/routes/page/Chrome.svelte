@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import Icon from '#lib/Icon.svelte';
 	import { isTauri, isWindowMaximized } from '#lib/api.js';
-	import { t, i18n, setLang, LANGS, type Lang } from '#lib/i18n.svelte.js';
+	import { t } from '#lib/i18n.svelte.js';
 	import { gamingNav } from '#lib/gamepadNav.svelte.js';
 	import { update } from '#lib/update.svelte.js';
 
@@ -23,10 +23,15 @@
 		onSplit?: () => void;
 		/** Window fullscreen state — lights up the fullscreen toggle. */
 		fullscreen?: boolean;
-		/** Toggle window fullscreen (plain — keeps this bar on the home; immersive is F11). */
-		onToggleFullscreen?: () => void;
+		/** Toggle window fullscreen (plain — keeps this bar on the home; immersive is F11).
+		 *  `dragFrom` is passed only by a title-bar drag-out (see `onBarDown`). */
+		onToggleFullscreen?: (dragFrom?: [number, number]) => void;
 		/** Update badge click (the shell moves to Home first, then opens the modal). */
 		onUpdate?: () => void;
+		/** Split mode only (the home with its settings / controllers is hidden there): open
+		 *  Settings / the controllers popup from the bar. */
+		onOpenSettings?: () => void;
+		onOpenControllers?: () => void;
 	};
 	let {
 		title,
@@ -39,12 +44,10 @@
 		onSplit,
 		fullscreen = false,
 		onToggleFullscreen,
-		onUpdate
+		onUpdate,
+		onOpenSettings,
+		onOpenControllers
 	}: Props = $props();
-
-	// Collapsed switcher shows just the short code (TR/EN/RU/KK); the dropdown lists
-	// the full names.
-	const langShort = $derived(LANGS.find((l) => l.value === i18n.lang)?.short ?? 'EN');
 
 	// Real app version (from tauri.conf) instead of a hardcoded string. Empty outside Tauri.
 	let ver = $state('');
@@ -96,8 +99,41 @@
 		}
 	}
 
+	// Title-bar grab while FULLSCREEN: Tauri's drag region would move the monitor-sized window
+	// as-is. Take the press over instead (this listener runs before Tauri's document-level one):
+	// once the pointer actually moves, leave fullscreen and hand the drag to the OS with the
+	// window re-centred under the grab point — like dragging a maximized window. A double-click
+	// leaves fullscreen too (Tauri's would toggle maximize underneath it).
+	const DRAG_SLOP = 4;
+	function onBarDown(e: MouseEvent) {
+		if (!fullscreen || !onToggleFullscreen || e.button !== 0) return;
+		const el = e.target as HTMLElement | null;
+		if (!el?.hasAttribute('data-tauri-drag-region')) return;
+		e.stopPropagation();
+		e.preventDefault();
+		const toggle = onToggleFullscreen;
+		if (e.detail === 2) {
+			toggle();
+			return;
+		}
+		const x0 = e.clientX;
+		const y0 = e.clientY;
+		const done = () => {
+			window.removeEventListener('mousemove', move, true);
+			window.removeEventListener('mouseup', done, true);
+		};
+		const move = (m: MouseEvent) => {
+			if (Math.abs(m.clientX - x0) < DRAG_SLOP && Math.abs(m.clientY - y0) < DRAG_SLOP) return;
+			done();
+			if ((m.buttons & 1) === 0) return;
+			toggle([x0 / Math.max(1, window.innerWidth), y0]);
+		};
+		window.addEventListener('mousemove', move, true);
+		window.addEventListener('mouseup', done, true);
+	}
+
 	// Register a top-bar button with the gaming nav ONLY while in gaming mode, so the
-	// controller can roam up to it (gaming/language/theme). Reactive: re-applies when the
+	// controller can roam up to it (gaming/theme). Reactive: re-applies when the
 	// mode toggles. In remote mode the nav isn't running, so it stays a plain button.
 	function navItem(node: HTMLElement, on: boolean) {
 		let off: (() => void) | undefined;
@@ -112,7 +148,8 @@
 </script>
 
 <!-- App toolbar (the OS now draws the title bar + window controls + drag/resize). -->
-<div class="chrome" data-tauri-drag-region>
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="chrome" data-tauri-drag-region onmousedown={onBarDown}>
 	<div class="ctitle">{title}</div>
 	<div class="cright">
 		{#if update.available}
@@ -143,6 +180,28 @@
 				<Icon name="split" size={16} />
 			</button>
 		{/if}
+		{#if splitMode !== 'off' && onOpenControllers}
+			<button
+				class="game-btn"
+				use:navItem={gaming}
+				title={t('controllers.title')}
+				aria-label={t('controllers.title')}
+				onclick={onOpenControllers}
+			>
+				<Icon name="gaming" size={16} />
+			</button>
+		{/if}
+		{#if splitMode !== 'off' && onOpenSettings}
+			<button
+				class="game-btn"
+				use:navItem={gaming}
+				title={t('nav.settings')}
+				aria-label={t('nav.settings')}
+				onclick={onOpenSettings}
+			>
+				<Icon name="settings" size={16} />
+			</button>
+		{/if}
 		{#if onToggleFullscreen}
 			<button
 				class="game-btn"
@@ -151,7 +210,7 @@
 				title={t('gaming.fullscreen')}
 				aria-label={t('gaming.fullscreen')}
 				aria-pressed={fullscreen}
-				onclick={onToggleFullscreen}
+				onclick={() => onToggleFullscreen()}
 			>
 				<Icon name="expand" size={16} />
 			</button>
@@ -170,23 +229,6 @@
 		>
 			<Icon name="gaming" size={16} />
 		</button>
-		<label class="lang-select" title={t('chrome.language')}>
-			<Icon name="globe" size={15} />
-			<span class="lang-code mono">{langShort}</span>
-			<!-- The native <select> sits invisibly over the label so the collapsed control
-			     shows only the short code while the dropdown still lists the full names
-			     (and keeps native keyboard / click-outside behaviour). -->
-			<select
-				use:navItem={gaming}
-				aria-label={t('chrome.language')}
-				value={i18n.lang}
-				onchange={(e) => setLang(e.currentTarget.value as Lang)}
-			>
-				{#each LANGS as l (l.value)}
-					<option value={l.value}>{l.label}</option>
-				{/each}
-			</select>
-		</label>
 		<button
 			class="icon-btn"
 			use:navItem={gaming}
@@ -301,51 +343,6 @@
 		background: var(--accent-soft);
 		border-color: var(--accent);
 		color: var(--accent-ink);
-	}
-	.lang-select {
-		position: relative;
-		display: inline-flex;
-		align-items: center;
-		gap: 5px;
-		height: 28px;
-		padding: 0 9px;
-		border: 1px solid var(--border);
-		border-radius: var(--r-sm);
-		background: var(--surface-2);
-		color: var(--text-muted);
-		cursor: pointer;
-		transition:
-			background var(--dur) var(--ease),
-			color var(--dur) var(--ease);
-	}
-	.lang-select:hover {
-		background: var(--surface-3);
-		color: var(--text);
-	}
-	.lang-code {
-		font-size: 11px;
-		font-weight: 600;
-		letter-spacing: 0.04em;
-	}
-	/* Invisible native <select> layered over the whole control: it catches the click
-	   and shows the OS dropdown (full names + keyboard nav), while the visible globe +
-	   short code above are all the user actually sees when collapsed. */
-	.lang-select select {
-		position: absolute;
-		inset: 0;
-		width: 100%;
-		height: 100%;
-		margin: 0;
-		border: 0;
-		opacity: 0;
-		cursor: pointer;
-		appearance: none;
-	}
-	/* The popup list is drawn by the OS — give its options a real background so they
-	   aren't unreadable. */
-	.lang-select select option {
-		background: var(--surface);
-		color: var(--text);
 	}
 	/* Frameless window controls: flush to the top-right corner, full bar height, no border —
 	   the standard custom-title-bar look. `margin-right` cancels the bar's right padding so they

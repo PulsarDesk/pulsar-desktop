@@ -73,6 +73,14 @@ export interface HostDisplay {
 	primary: boolean;
 }
 
+/** Everything a split pane can stream from one host (`list_remote_sources`): its games,
+ * its open app windows (stream only that window) and its monitors. */
+export interface RemoteSources {
+	games: GameInfo[];
+	windows: WindowInfo[];
+	displays: HostDisplay[];
+}
+
 /** A side-channel text message: `peer` is the host-side peer id, or (for client
  * events) the play id as a string. */
 export interface DataText {

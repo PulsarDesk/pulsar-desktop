@@ -56,6 +56,7 @@ windows = { version = "0.62", features = [
 	                                    #   is gated behind this feature (windows ≥0.59)
 	"Win32_System_Performance",         # QueryPerformanceCounter/Frequency (QPC→Instant for pacing)
 	"Win32_System_Power",               # SetThreadExecutionState (keep display awake)
+	"Win32_Graphics_Dwm",               # window.rs: DWMWA_CLOAKED (hide cloaked UWP/background windows from the picker)
 	"Win32_Graphics_Gdi",               # HMONITOR in DXGI_OUTPUT_DESC → IDXGIOutput::GetDesc()
 	"Win32_UI_WindowsAndMessaging",     # GetCursorInfo + CURSORINFO + CURSOR_SHOWING (live cursor pos);
 	                                    #   window.rs: EnumWindows, GetWindowThreadProcessId,

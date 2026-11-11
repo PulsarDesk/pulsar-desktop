@@ -28,6 +28,8 @@ mod logging;
 // best-fit display mode for a client split-pane and revert on teardown. Windows-only
 // implementation; no-op stubs elsewhere.
 mod display_mode;
+// Same-host co-op input isolation (opt-in ProtoInput component, Windows host).
+mod coop;
 mod events;
 mod files;
 mod files_window;
@@ -43,6 +45,7 @@ mod legacy_install;
 mod kbdhook;
 mod native_audio;
 mod native_view;
+mod pad_wake;
 mod play;
 mod process;
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -57,6 +60,7 @@ mod controllers;
 mod session_cmds;
 mod remote_cursor;
 mod splash;
+mod split_join;
 mod state;
 mod toast;
 mod twofa;
@@ -73,14 +77,14 @@ pub(crate) use process::no_window;
 // Re-export every `#[tauri::command]` so `tauri::generate_handler!` below resolves
 // them by bare name (they're defined across the submodules above).
 use auth::{disconnect_all_peers, disconnect_peer, respond_request, submit_password};
-use avatar::{device_user_name, self_avatar};
+use avatar::{avatar_preview, device_host_name, device_user_name, self_avatar};
 use commands::{
 	auto_connect_target, available_encoders, connect, controllers, default_ui_hwaccel, force_ac,
 	forget_peer, gamepad_nav_start, gamepad_nav_stop, get_config, lan_devices, launch_remote_game,
-	list_audio_sources, list_remote_games, local_ip, log_dir_path, new_password, node_port,
+	list_audio_sources, list_remote_games, list_remote_sources, coop_status, open_coop_dir, local_ip, log_dir_path, new_password, node_port,
 	open_log_dir, publish_games, run_command, scan_folder, self_update_possible, session_password,
 	set_config, set_controller_emulation, set_controller_order, set_controller_rumble,
-	set_disabled_controllers, set_host_serving, set_language, set_stream_settings, set_tray,
+	set_disabled_controllers, set_host_serving, set_language, set_pad_wake, set_stream_settings, set_tray,
 	steam_path, test_controller_rumble, webview_sw_painted,
 };
 use connections::{list_connections, set_view_only, show_connections};
@@ -609,16 +613,23 @@ pub fn run() {
 			self_update_possible,
 			update_guard::mark_update_installing,
 			update_guard::clear_update_installing,
+			update_guard::launch_update_window,
+			split_join::set_split_join,
+			split_join::controller_locks,
 			steam_path,
 			scan_folder,
 			run_command,
 			publish_games,
 			list_remote_games,
+			list_remote_sources,
+			coop_status,
+			open_coop_dir,
 			launch_remote_game,
 			available_encoders,
 			list_audio_sources,
 			set_stream_settings,
 			set_tray,
+			set_pad_wake,
 			set_host_serving,
 			gamepad_nav_start,
 			gamepad_nav_stop,
@@ -658,6 +669,8 @@ pub fn run() {
 			crate::caps::local_caps,
 			self_avatar,
 			device_user_name,
+			device_host_name,
+			avatar_preview,
 			session_password,
 			new_password,
 			respond_request,

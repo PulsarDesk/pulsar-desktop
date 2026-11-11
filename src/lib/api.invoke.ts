@@ -76,11 +76,16 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 			return Promise.resolve('192.168.1.42' as unknown as T);
 		case 'node_port':
 			return Promise.resolve(21118 as unknown as T);
+		case 'avatar_preview':
 		case 'self_avatar':
 			// No OS account image in the browser mock — the UI keeps its textual chip.
 			return Promise.resolve(null as unknown as T);
 		case 'device_user_name':
 			return Promise.resolve('Deniz Yılmaz' as unknown as T);
+		case 'controller_locks':
+			return Promise.resolve({} as unknown as T);
+		case 'device_host_name':
+			return Promise.resolve('DESKTOP-MOCK' as unknown as T);
 		case 'steam_path':
 			return Promise.resolve('' as unknown as T);
 		case 'scan_folder':
@@ -93,6 +98,22 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 		case 'list_remote_games':
 			// No real host in the browser mock.
 			return Promise.resolve([] as unknown as T);
+		case 'coop_status':
+			return Promise.resolve({ supported: false, installed: false, dir: '', missing: [] } as unknown as T);
+		case 'open_coop_dir':
+			return Promise.resolve(undefined as unknown as T);
+		case 'list_remote_sources':
+			return Promise.resolve({
+				games: [],
+				windows: [
+					{ hwnd: 65772, title: 'Not Defteri' },
+					{ hwnd: 131308, title: 'Hesap Makinesi' }
+				],
+				displays: [
+					{ idx: 0, name: 'DISPLAY1', width: 1920, height: 1080, primary: true },
+					{ idx: 1, name: 'DISPLAY2', width: 2560, height: 1440, primary: false }
+				]
+			} as unknown as T);
 		case 'launch_remote_game':
 			return Promise.resolve(undefined as unknown as T);
 		case 'host_window_list':
@@ -150,6 +171,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 		case 'set_clipboard_sync':
 		case 'mark_update_installing':
 		case 'clear_update_installing':
+		case 'launch_update_window':
 			return Promise.resolve(undefined as unknown as T);
 		case 'list_connections':
 			return Promise.resolve([] as unknown as T);
@@ -164,6 +186,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 		case 'set_controller_rumble':
 		case 'set_disabled_controllers':
 		case 'set_tray':
+		case 'set_pad_wake':
 		case 'set_host_serving':
 		case 'gamepad_nav_start':
 		case 'gamepad_nav_stop':
@@ -174,6 +197,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 		case 'set_active_session':
 		case 'set_pane_count':
 		case 'set_controller_lock':
+		case 'set_split_join':
 		case 'set_play_bitrate':
 		case 'set_play_quality':
 		case 'set_play_audio_quality':
