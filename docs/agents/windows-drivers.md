@@ -23,7 +23,9 @@ required" notice. Payloads fetched by `scripts/fetch-drivers.mjs` into
 `src-tauri/resources/` (`bun scripts/fetch-drivers.mjs [--arch x64|arm64]`; default = this
 machine's arch). Every payload must also be listed under `bundle.resources` in
 `tauri.windows.conf.json`, or Tauri never copies it into `$INSTDIR` and the hook's
-`IfFileExists` silently skips it. For a plain `cargo check`/`build`, zero-byte stubs at the
+`IfFileExists` silently skips it. (Until 2026-11-11 `ViGEmBus_Setup.exe` was fetched but not listed, so no NSIS
+install ever ran it. `install-interception.exe` is still neither extracted nor listed: the
+Interception step is a no-op, see the umbrella `windows-input-plan.md`.) For a plain `cargo check`/`build`, zero-byte stubs at the
 listed paths are enough (`resources/usbip/` needs at least one file, e.g. an empty
 `USBip-x64.exe`, because the glob must match).
 

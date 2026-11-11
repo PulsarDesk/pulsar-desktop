@@ -8,6 +8,7 @@
 			"resources/pulsar-update.exe",
 			"resources/ffplay.exe",
 			"resources/interception/interception.dll",
+			"resources/ViGEmBus_Setup.exe",
 			"resources/virtual-audio-driver/VirtualAudioDriver.inf",
 			"resources/virtual-audio-driver/VirtualAudioDriver.sys",
 			"resources/virtual-audio-driver/virtualaudiodriver.cat",
