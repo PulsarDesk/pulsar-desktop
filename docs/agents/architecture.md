@@ -37,3 +37,18 @@ named mutex).
   `pw = "pair"`). Settings → Güvenlik lists and revokes paired keys; revoking also drops the
   key's 90 s pre-auth grace. The client unpairs locally and, when the host is reachable,
   sends `Unpair`. Decision logic (`gate`, `needs_totp`, `pair_decision`) is unit-tested.
+
+## Startup without a window (locked session)
+
+The host core must come online even when no webview can be created. Inside a LOCKED Windows
+session (LogonUI up, e.g. an unattended Duo seat, autostart, a restart after a crash) WebView2
+controller creation hangs or fails after ~2 min with `0x800705B4`, and Tauri builds config
+windows before `setup` and panics on failure. So the main window is `create:false` in
+`tauri.conf.json` and built by `ui_start.rs`: right away in a usable session (normal startup
+unchanged); deferred while the session is locked (WTS lock flag / input desktop name, polled
+every 2 s) or retried with a backoff after a failed build. Meanwhile `headless.rs` runs
+`go_online` itself (same 3→12 s retry as the UI); the UI's first plain `go_online` adopts that
+node instead of rebinding, so sessions accepted while locked survive the window showing up. A
+60 s watchdog does the same when a built UI never calls `go_online`. While locked the host opens
+no approval popup (password only), connections window, toast or remote-cursor window.
+Test hooks: `PULSAR_TEST_LOCKED=<secs>`, `PULSAR_TEST_WEBVIEW_FAIL=1`.
