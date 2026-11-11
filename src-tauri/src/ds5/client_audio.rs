@@ -155,6 +155,30 @@ impl PadAudio {
 		}
 	}
 
+	/// A headset slot for a USB pad (`headset.rs`): haptics + mixed 480-frame speaker PCM.
+	pub fn push_usb_pcm(
+		&mut self,
+		haptics: Option<Frame>,
+		pcm480: Option<&[f32]>,
+		f: &Ds5Features,
+	) {
+		if let Some(u) = self.usb.as_mut() {
+			u.push_pcm(haptics.filter(|_| f.haptics), pcm480);
+		}
+	}
+
+	/// Drop the USB pad's queued audio (the headset route ended: what is queued was meant
+	/// for the headphones only).
+	pub fn flush_usb(&mut self) {
+		if let Some(o) = self.usb.as_mut().and_then(|u| u.out.as_mut()) {
+			// SAFETY: live stream.
+			unsafe { sdl3_sys::audio::SDL_ClearAudioStream(o.stream.0) };
+			o.playing = false;
+			o.pacer.reset();
+			o.stream.play(false);
+		}
+	}
+
 	/// A mic packet a BT pad sent.
 	pub fn on_pad_mic(&mut self, opus: Vec<u8>) {
 		self.mic.send(&self.media, self.slot, opus);
@@ -385,24 +409,35 @@ impl UsbAudio {
 		if haptics.is_none() && speaker.is_none() {
 			return;
 		}
-		self.last_slot = Some(Instant::now());
 		let Some(o) = self.open_out() else {
+			self.last_slot = Some(Instant::now());
 			return;
 		};
 		let spk =
 			speaker.and_then(
 				|(_, opus)| match o.dec.decode_float(&opus, &mut o.spk, false) {
-					Ok(n) => Some(n * 2),
+					Ok(n) => Some(o.spk[..n * 2].to_vec()),
 					Err(e) => {
 						tracing::debug!("ds5 usb audio: speaker decode failed: {e}");
 						None
 					}
 				},
 			);
+		self.push_pcm(haptics, spk.as_deref());
+	}
+
+	/// One slot as decoded PCM: haptics and 480-frame stereo speaker audio (each optional).
+	pub fn push_pcm(&mut self, haptics: Option<Frame>, speaker480: Option<&[f32]>) {
+		if haptics.is_none() && speaker480.is_none() {
+			return;
+		}
+		self.last_slot = Some(Instant::now());
+		let Some(o) = self.open_out() else {
+			return;
+		};
 		let haptics = haptics.filter(|_| o.haptics_ok);
 		o.pcm.clear();
-		o.mixer
-			.mix(haptics.as_ref(), spk.map(|n| &o.spk[..n]), &mut o.pcm);
+		o.mixer.mix(haptics.as_ref(), speaker480, &mut o.pcm);
 		let bytes_per_ms = (48 * USB_CHANNELS * 4) as f32;
 		let before = o.stream.queued() as f32 / bytes_per_ms;
 		// SAFETY: live stream; the buffer is valid for its byte length.

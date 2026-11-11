@@ -7,6 +7,7 @@ pub mod bridge;
 pub mod client;
 pub mod client_audio;
 pub mod endpoint;
+pub mod headset;
 pub mod hid;
 pub mod policy;
 pub mod host;

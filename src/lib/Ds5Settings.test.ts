@@ -14,6 +14,7 @@ describe('DualSense settings model', () => {
 			mic: 'auto',
 			leds: 'auto',
 			rumble: 'auto',
+			headset: 'auto',
 			autoDegrade: true,
 			jitterMs: 64
 		});
@@ -39,10 +40,12 @@ describe('Ds5Settings', () => {
 	it('shows the Turkish labels and the shedding help', () => {
 		render(Ds5Settings);
 		expect(screen.getByText('DualSense özelliklerini kullan')).toBeTruthy();
-		for (const l of ['Adaptif tetik', 'HD titreşim', 'Kol hoparlörü', 'Kol mikrofonu', 'Işık çubuğu / LED', 'Klasik titreşim'])
+		for (const l of ['Adaptif tetik', 'HD titreşim', 'Kol hoparlörü', 'Kol mikrofonu', 'Işık çubuğu / LED', 'Klasik titreşim', 'Kolun kulaklık girişi'])
 			expect(screen.getByRole('group', { name: l })).toBeTruthy();
 		expect(screen.getByText('Bağlantı zayıflayınca özellikleri otomatik kıs')).toBeTruthy();
 		expect(screen.getByText(/önce hoparlör, sonra mikrofon, sonra HD titreşim kapanır/)).toBeTruthy();
+		expect(screen.getByText(/en son kulaklık girişine giden ses durur/)).toBeTruthy();
+		expect(screen.getByText(/oturumun sesi yalnız kulaklıktan çalar/)).toBeTruthy();
 	});
 
 	it('a feature mode change is saved and pushed to Rust', async () => {
@@ -54,6 +57,21 @@ describe('Ds5Settings', () => {
 		expect(ui.ds5.speaker).toBe('off');
 		expect(off.getAttribute('aria-pressed')).toBe('true');
 		expect(spy).toHaveBeenLastCalledWith(expect.objectContaining({ speaker: 'off', haptics: 'auto' }));
+		spy.mockRestore();
+	});
+
+	it('the headset jack mode is saved and pushed to Rust', async () => {
+		const spy = vi.spyOn(api, 'setDs5Settings');
+		render(Ds5Settings);
+		const group = screen.getByRole('group', { name: 'Kolun kulaklık girişi' });
+		const on = Array.from(group.querySelectorAll('button')).find((b) => b.textContent === 'Otomatik')!;
+		expect(on.getAttribute('aria-pressed')).toBe('true');
+		const off = Array.from(group.querySelectorAll('button')).find((b) => b.textContent === 'Kapalı')!;
+		await fireEvent.click(off);
+		expect(ui.ds5.headset).toBe('off');
+		expect(spy).toHaveBeenLastCalledWith(expect.objectContaining({ headset: 'off' }));
+		expect(normalizeDs5({ headset: 'on' }).headset).toBe('on');
+		expect(normalizeDs5({}).headset).toBe('auto');
 		spy.mockRestore();
 	});
 

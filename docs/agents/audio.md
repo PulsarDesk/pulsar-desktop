@@ -90,6 +90,13 @@ Native and in-process, Moonlight's model: `src-tauri/src/native_audio.rs`.
   WebSocket, Windows/macOS) and Linux's ffmpeg → SDL3 subprocess.
 - Live check: `cargo test -p pulsar-tauri native_audio -- --ignored` plays a
   quiet tone through the player and captures it back with process loopback.
+- **DualSense headset jack** (`ds5/headset.rs`, Settings → Kumandalar → DualSense →
+  "Kolun kulaklık girişi"): with headphones in a driven pad's jack, every decoded packet
+  goes to that pad (`ds5::headset::tap`) and the client output stays silent; while the
+  route is shed by auto-degrade the packets are dropped (never back to the laptop while
+  the headphones are in). The last local packet fades out (5 ms), the first one after
+  the route ends fades in and the SDL queue re-buffers. Pulsar has no other UI sounds.
+  Design: pulsar-core `docs/dualsense.md` ("Headset jack").
 
 ## Host policy
 

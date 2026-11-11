@@ -22,7 +22,10 @@ export interface Ds5Settings {
 	mic: Ds5Mode;
 	leds: Ds5Mode;
 	rumble: Ds5Mode;
-	/** Shed `auto` features (speaker → mic → HD haptics) while Bluetooth is weak. */
+	/** "Kolun kulaklık girişi": headphones in the pad's jack get the session audio and this
+	 *  device stays silent (PS5 gibi). Shed last. */
+	headset: Ds5Mode;
+	/** Shed `auto` features (speaker → mic → HD haptics → headset jack) while Bluetooth is weak. */
 	autoDegrade: boolean;
 	/** Haptics/speaker jitter buffer in ms (advanced). */
 	jitterMs: number;
@@ -36,6 +39,7 @@ export const DS5_DEFAULTS: Ds5Settings = {
 	mic: 'auto',
 	leds: 'auto',
 	rumble: 'auto',
+	headset: 'auto',
 	autoDegrade: true,
 	jitterMs: 64
 };
@@ -47,7 +51,8 @@ export const DS5_FEATURES = [
 	{ key: 'speaker', label: 'ds5.speaker' },
 	{ key: 'mic', label: 'ds5.mic' },
 	{ key: 'leds', label: 'ds5.leds' },
-	{ key: 'rumble', label: 'ds5.rumble' }
+	{ key: 'rumble', label: 'ds5.rumble' },
+	{ key: 'headset', label: 'ds5.headset' }
 ] as const satisfies readonly { key: keyof Ds5Settings; label: string }[];
 
 const DS5_MODES: readonly Ds5Mode[] = ['auto', 'on', 'off'];

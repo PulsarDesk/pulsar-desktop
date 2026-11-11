@@ -22,6 +22,12 @@
 //! semitone) the whole run, with 114 dropouts and 478 clicks in 30 s — the "crackle".
 //!
 //! The SDL device opens on the first packet, so a session without audio never holds it.
+//!
+//! Headphones in a driven DualSense's jack (`ds5/headset.rs`): each decoded packet goes to
+//! that pad instead (`Route`), and the client output stays silent; while a pad has the
+//! headphones in but its route is shed, packets are dropped (no sound anywhere else). The
+//! switch fades the last local packet out, and the first one after the route ends back in;
+//! the device is re-buffered on return so the dry-queue logic doesn't count the pause.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -53,7 +59,7 @@ impl Drop for NativeAudio {
 
 /// Play every RTP/Opus datagram that arrives on `rx`. Must be called inside the tokio
 /// runtime (a task bridges the broadcast to the player thread).
-pub fn start(mut rx: tokio::sync::broadcast::Receiver<Vec<u8>>) -> NativeAudio {
+pub fn start(mut rx: tokio::sync::broadcast::Receiver<Vec<u8>>, play_id: u64) -> NativeAudio {
 	let stop = Arc::new(AtomicBool::new(false));
 	let (tx, packets) = mpsc::sync_channel::<Vec<u8>>(QUEUE);
 	tokio::spawn(async move {
@@ -72,7 +78,7 @@ pub fn start(mut rx: tokio::sync::broadcast::Receiver<Vec<u8>>) -> NativeAudio {
 	let flag = stop.clone();
 	let spawned = std::thread::Builder::new()
 		.name("native-audio".into())
-		.spawn(move || run(packets, flag));
+		.spawn(move || run(packets, flag, play_id));
 	if let Err(e) = spawned {
 		tracing::warn!("audio: player thread failed to start: {e}");
 	}
@@ -159,7 +165,87 @@ impl Sequencer {
 	}
 }
 
-fn run(packets: mpsc::Receiver<Vec<u8>>, stop: Arc<AtomicBool>) {
+/// Where decoded audio goes: the client output or a DualSense's headset jack (module docs).
+struct Route {
+	play_id: u64,
+	/// Audio currently goes elsewhere (pad, or dropped).
+	away: bool,
+	/// The next local packet fades in.
+	fade_in: bool,
+}
+
+/// Fade length on a switch, frames (5 ms).
+const FADE_FRAMES: usize = 240;
+
+/// Scale the first `FADE_FRAMES` frames up from 0 (`up`) or the whole packet's tail down.
+fn fade(pcm: &mut [f32], up: bool) {
+	let frames = pcm.len() / CHANNELS;
+	let n = FADE_FRAMES.min(frames);
+	if up {
+		for i in 0..n {
+			let g = i as f32 / n as f32;
+			for c in 0..CHANNELS {
+				pcm[i * CHANNELS + c] *= g;
+			}
+		}
+	} else {
+		let start = frames - n;
+		for i in 0..n {
+			let g = 1.0 - (i + 1) as f32 / n as f32;
+			for c in 0..CHANNELS {
+				pcm[(start + i) * CHANNELS + c] *= g;
+			}
+		}
+	}
+}
+
+impl Route {
+	/// Deliver one decoded packet. Opens the SDL device only for local playback.
+	fn emit(&mut self, out: &mut Option<SdlOut>, pcm: &mut [f32]) {
+		if pcm.is_empty() {
+			return;
+		}
+		match crate::ds5::headset::tap(self.play_id) {
+			crate::ds5::headset::Tap::Local => {
+				if self.away {
+					self.away = false;
+					self.fade_in = true;
+					if let Some(s) = out.as_mut() {
+						s.rebuffer();
+					}
+					tracing::info!("audio: back on the client output");
+				}
+				if out.is_none() {
+					*out = SdlOut::open();
+				}
+				if self.fade_in {
+					self.fade_in = false;
+					fade(pcm, true);
+				}
+				if let Some(s) = out.as_mut() {
+					s.push(pcm);
+				}
+			}
+			tap => {
+				if !self.away {
+					self.away = true;
+					tracing::info!("audio: client output silenced (DualSense headset jack)");
+					// The last local packet fades out; the pad's route fades in on its own.
+					if let Some(s) = out.as_mut() {
+						fade(pcm, false);
+						s.push(pcm);
+						return;
+					}
+				}
+				if let crate::ds5::headset::Tap::Pad(tx) = tap {
+					crate::ds5::headset::send(&tx, pcm);
+				}
+			}
+		}
+	}
+}
+
+fn run(packets: mpsc::Receiver<Vec<u8>>, stop: Arc<AtomicBool>, play_id: u64) {
 	let mut decoder = match opus::Decoder::new(RATE, opus::Channels::Stereo) {
 		Ok(d) => d,
 		Err(e) => {
@@ -178,6 +264,13 @@ fn run(packets: mpsc::Receiver<Vec<u8>>, stop: Arc<AtomicBool>) {
 	let mut last_arrival: Option<std::time::Instant> = None;
 	// The last uncompressed packet (L16), replayed (faded) for a lost one.
 	let mut last_l16: Vec<f32> = Vec::new();
+	let mut route = Route {
+		play_id,
+		away: false,
+		fade_in: false,
+	};
+	// Counters kept while no local device is open (the stats live on the device).
+	let mut spare = Stats::default();
 	while !stop.load(Ordering::Relaxed) {
 		let pkt = match packets.recv_timeout(Duration::from_millis(100)) {
 			Ok(p) => p,
@@ -187,19 +280,27 @@ fn run(packets: mpsc::Receiver<Vec<u8>>, stop: Arc<AtomicBool>) {
 		let Some((pt, n, payload)) = rtp_audio(&pkt) else {
 			continue;
 		};
-		if out.is_none() {
+		if out.is_none() && matches!(crate::ds5::headset::tap(play_id), crate::ds5::headset::Tap::Local) {
 			out = SdlOut::open();
+			if out.is_none() {
+				return; // logged by open()
+			}
 		}
-		let Some(sink) = out.as_mut() else {
-			return; // logged by open()
-		};
+		macro_rules! stats {
+			() => {
+				match out.as_mut() {
+					Some(s) => &mut s.stats,
+					None => &mut spare,
+				}
+			};
+		}
 		match seq.step(n) {
 			Step::Late => {
-				sink.stats.late += 1;
+				stats!().late += 1;
 				continue;
 			}
 			Step::Restart => {
-				sink.stats.restarts += 1;
+				stats!().restarts += 1;
 				let _ = decoder.reset_state();
 			}
 			Step::Play { conceal } => {
@@ -210,31 +311,33 @@ fn run(packets: mpsc::Receiver<Vec<u8>>, stop: Arc<AtomicBool>) {
 						for x in last_l16.iter_mut() {
 							*x *= 0.5;
 						}
-						sink.push(&last_l16);
+						let mut l = last_l16.clone();
+						route.emit(&mut out, &mut l);
 						concealed += 1;
-						sink.stats.concealed += 1;
+						stats!().concealed += 1;
 					} else if let Ok(got) = decoder.decode_float(&[], &mut pcm[..frame * CHANNELS], false) {
-						sink.push(&pcm[..got * CHANNELS]);
+						route.emit(&mut out, &mut pcm[..got * CHANNELS]);
 						concealed += 1;
-						sink.stats.concealed += 1;
+						stats!().concealed += 1;
 					}
 				}
 			}
 		}
-		sink.stats.packets += 1;
+		stats!().packets += 1;
 		let now = std::time::Instant::now();
 		if let Some(prev) = last_arrival.replace(now) {
 			let gap = now.duration_since(prev).as_secs_f32() * 1000.0;
-			sink.stats.gap_max_ms = sink.stats.gap_max_ms.max(gap);
+			let st = stats!();
+			st.gap_max_ms = st.gap_max_ms.max(gap);
 		}
 		if pt == pulsar_core::audio::L16_PAYLOAD_TYPE {
-			sink.stats.raw = true;
+			stats!().raw = true;
 			let got = decode_l16(payload, &mut pcm);
 			if got > 0 {
 				frame = got.min(MAX_FRAME);
 				last_l16.clear();
 				last_l16.extend_from_slice(&pcm[..got * CHANNELS]);
-				sink.push(&pcm[..got * CHANNELS]);
+				route.emit(&mut out, &mut pcm[..got * CHANNELS]);
 			}
 			continue;
 		}
@@ -243,7 +346,7 @@ fn run(packets: mpsc::Receiver<Vec<u8>>, stop: Arc<AtomicBool>) {
 				if got > 0 {
 					frame = got.min(MAX_FRAME);
 				}
-				sink.push(&pcm[..got * CHANNELS]);
+				route.emit(&mut out, &mut pcm[..got * CHANNELS]);
 			}
 			Err(e) => tracing::debug!("audio: undecodable Opus packet: {e}"),
 		}
@@ -390,6 +493,18 @@ impl SdlOut {
 				stats_at: now,
 			})
 		}
+	}
+
+	/// Audio is coming back after a pause (headset route ended): drop whatever is left and
+	/// prebuffer again, without counting the pause as a dry queue.
+	fn rebuffer(&mut self) {
+		// SAFETY: as in queued_ms.
+		unsafe {
+			sdl3_sys::audio::SDL_ClearAudioStream(self.stream);
+		}
+		self.set_ratio(1.0);
+		self.set_playing(false);
+		self.level_ms = None;
 	}
 
 	fn queued_ms(&self) -> f32 {
@@ -555,6 +670,24 @@ mod tests {
 	}
 
 	#[test]
+	fn fades_ramp_in_and_out() {
+		let mut a = vec![1.0f32; 480 * CHANNELS];
+		fade(&mut a, true);
+		assert_eq!((a[0], a[1]), (0.0, 0.0));
+		assert!(a[(FADE_FRAMES / 2) * CHANNELS] > 0.4 && a[(FADE_FRAMES / 2) * CHANNELS] < 0.6);
+		assert_eq!(a[FADE_FRAMES * CHANNELS], 1.0);
+		let mut b = vec![1.0f32; 480 * CHANNELS];
+		fade(&mut b, false);
+		assert_eq!(b[0], 1.0);
+		assert_eq!(*b.last().unwrap(), 0.0);
+		// Shorter than the fade: the whole packet ramps.
+		let mut c = vec![1.0f32; 10 * CHANNELS];
+		fade(&mut c, false);
+		assert_eq!(c[c.len() - 1], 0.0);
+		assert!(c[0] > 0.8);
+	}
+
+	#[test]
 	fn the_payload_skips_the_rtp_header_csrcs_extension_and_padding() {
 		assert_eq!(rtp_opus(&rtp(7, &[1, 2, 3])), Some((7, &[1u8, 2, 3][..])));
 		// 1 CSRC + a 1-word extension + 2 padding bytes.
@@ -659,7 +792,7 @@ mod tests {
 			}
 		}
 		let (tx, rx) = tokio::sync::broadcast::channel::<Vec<u8>>(1024);
-		let player = start(rx);
+		let player = start(rx, 0);
 		let feed = tokio::spawn(async move {
 			let mut enc =
 				opus::Encoder::new(RATE, opus::Channels::Stereo, opus::Application::LowDelay).unwrap();

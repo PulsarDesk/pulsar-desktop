@@ -6,12 +6,19 @@
 //! - `Otomatik` (Auto) = on, sheddable while the Bluetooth link is weak (speaker → mic →
 //!   HD haptics; shed haptics keep the motors going as classic rumble).
 //! - `Açık` (On) = always on, never shed.
+//!
+//! The headset route ("Kolun kulaklık girişi", `headset.rs`) is shed last, after speaker,
+//! mic and haptics. Shed, the session audio goes silent; it never falls back to the client
+//! output while the headphones are in (maintainer's rule: no sound anywhere else). Note that
+//! with the route on, shedding speaker or haptics does not shrink the BT reports (the Opus
+//! frame carries the session audio anyway); the order is the maintainer's priority.
 
 use std::time::Instant;
 
 use pulsar_core::input::ds5::degrade::{
 	Change, Degrader, Ds5Prefs, LinkMonitor, Shed, WARMUP_WINDOWS,
 };
+use pulsar_core::input::ds5::headset::Route;
 use pulsar_core::input::ds5::pad::Pad;
 use pulsar_core::input::ds5::wire::Ds5Transport;
 use pulsar_core::input::ds5::Ds5Features;
@@ -24,6 +31,8 @@ pub struct PadPolicy {
 	/// Whether the pad mic is actually streaming (a game on the host has it open and it is
 	/// allowed; `client_audio.rs` decides). Only a live mic counts as in use for shedding.
 	mic_live: bool,
+	/// Session audio is flowing to the pad's headset jack.
+	headset_live: bool,
 	/// Windows seen so far (the first [`WARMUP_WINDOWS`] are not judged).
 	windows: u32,
 }
@@ -36,6 +45,7 @@ impl PadPolicy {
 			mon: LinkMonitor::new(now, pad.stats()),
 			bt: transport == Ds5Transport::Bt,
 			mic_live: false,
+			headset_live: false,
 			windows: 0,
 		}
 	}
@@ -51,6 +61,16 @@ impl PadPolicy {
 		let mut f = self.allowed();
 		f.mic &= self.mic_live;
 		f
+	}
+
+	/// What the settings and auto-degrade allow for the headset route.
+	pub fn headset(&self) -> Route {
+		self.deg.headset(&self.prefs)
+	}
+
+	/// The headset route started or stopped carrying session audio.
+	pub fn set_headset_live(&mut self, live: bool) {
+		self.headset_live = live;
 	}
 
 	/// The pad mic started or stopped streaming.
@@ -95,7 +115,9 @@ impl PadPolicy {
 			mic: self.mic_live,
 			..self.prefs.features()
 		};
-		let c = self.deg.on_window(&w, &self.prefs, live);
+		let c = self
+			.deg
+			.on_window_with_headset(&w, &self.prefs, live, self.headset_live);
 		if let Some(c) = c {
 			tracing::info!(?c, window = ?w, "ds5 client: auto-degrade");
 		}
@@ -112,6 +134,8 @@ pub fn notice_text(c: Change) -> &'static str {
 		(Shed::Speaker, false) => "ds5.restore.speaker",
 		(Shed::Mic, false) => "ds5.restore.mic",
 		(Shed::Haptics, false) => "ds5.restore.haptics",
+		(Shed::Headset, true) => "ds5.shed.headset",
+		(Shed::Headset, false) => "ds5.restore.headset",
 	};
 	crate::i18n::t(key)
 }
@@ -187,6 +211,31 @@ mod tests {
 	}
 
 	#[test]
+	fn headset_is_shed_after_everything_else() {
+		let mut pad = pad(Ds5Transport::Bt);
+		let t0 = Instant::now();
+		let mut pol = PadPolicy::new(Ds5Prefs::default(), Ds5Transport::Bt, &pad, t0);
+		pol.set_headset_live(true);
+		pol.set_mic_live(true);
+		let mut order = Vec::new();
+		for i in 1..=WARMUP_WINDOWS + 10 {
+			if let Some(c) = pol.tick(t0 + WINDOW * i, &mut pad) {
+				order.push(c.feature);
+			}
+		}
+		assert_eq!(
+			order,
+			vec![Shed::Speaker, Shed::Mic, Shed::Haptics, Shed::Headset]
+		);
+		assert_eq!(pol.headset(), Route::Shed);
+		pol.set_prefs(Ds5Prefs {
+			headset: Mode::Off,
+			..Default::default()
+		});
+		assert_eq!(pol.headset(), Route::Off);
+	}
+
+	#[test]
 	fn usb_pads_never_shed() {
 		let mut pad = pad(Ds5Transport::Usb);
 		let t0 = Instant::now();
@@ -198,7 +247,7 @@ mod tests {
 
 	#[test]
 	fn notice_keys_exist() {
-		for f in [Shed::Speaker, Shed::Mic, Shed::Haptics] {
+		for f in [Shed::Speaker, Shed::Mic, Shed::Haptics, Shed::Headset] {
 			for shed in [true, false] {
 				let t = notice_text(Change { feature: f, shed });
 				assert!(t.starts_with("Bluetooth"), "{t}");

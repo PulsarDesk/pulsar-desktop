@@ -77,6 +77,7 @@
 				</li>
 			{/each}
 		</ul>
+		<p class="hint">{t('ds5.headsetDesc')}</p>
 
 		<div class="row">
 			<div class="txt">
