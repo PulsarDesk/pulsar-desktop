@@ -147,6 +147,7 @@ impl Ds5Client {
 
 	/// Drop the session's pads (each thread stops and leaves its pad reset).
 	pub fn unregister(play_id: u64) {
+		release_claims(play_id);
 		if let Some(c) = registry().lock().unwrap().remove(&play_id) {
 			c.0.lock().unwrap().pads.clear();
 		}
@@ -173,18 +174,27 @@ impl Ds5Client {
 	/// uuids actually driven here, so the caller skips `GamepadSlot` only for those.
 	pub fn sync(&self, pads: &[(String, u8, Option<CString>)]) -> Vec<String> {
 		let mut inner = self.0.lock().unwrap();
+		let me = inner.play_id;
 		inner
 			.pads
 			.retain(|slot, t| pads.iter().any(|(u, s, _)| u == &t.uuid && s == slot));
 		let mut driven = Vec::new();
 		for (uuid, slot, path) in pads {
+			let Some(dev) = find_device(path.as_ref()) else {
+				continue;
+			};
+			// One physical pad, one driver: with two sessions open (two hosts) both wanted
+			// the same DualSense and their output reports fought (lightbar flicker,
+			// 2026-11-11). The newest session that wants the pad drives it; older ones let
+			// go until it releases.
+			if !claim_pad(dev.path.as_bytes(), me) {
+				inner.pads.remove(slot);
+				continue;
+			}
 			if inner.pads.get(slot).is_some_and(|t| &t.uuid == uuid) {
 				driven.push(uuid.clone());
 				continue;
 			}
-			let Some(dev) = find_device(path.as_ref()) else {
-				continue;
-			};
 			let (tx, rx) = std::sync::mpsc::channel();
 			let stop = Arc::new(AtomicBool::new(false));
 			let ctx = PadCtx {
@@ -217,6 +227,43 @@ impl Ds5Client {
 		}
 		driven
 	}
+}
+
+/// How long a session's want for a pad stays valid without being renewed by `sync`
+/// (the play loop calls `sync` at least ~1 Hz with its keepalive).
+const CLAIM_TTL: Duration = Duration::from_secs(3);
+
+/// HID path (lowercased) → play id → when that session last asked to drive the pad.
+fn wants() -> &'static Mutex<HashMap<Vec<u8>, HashMap<u64, Instant>>> {
+	static W: OnceLock<Mutex<HashMap<Vec<u8>, HashMap<u64, Instant>>>> = OnceLock::new();
+	W.get_or_init(Default::default)
+}
+
+/// Record that `play_id` wants the pad at `path`; true when it is the one to drive it
+/// (the newest live session that wants it).
+fn claim_pad(path: &[u8], play_id: u64) -> bool {
+	claim_at(&mut wants().lock().unwrap(), path, play_id, Instant::now())
+}
+
+fn claim_at(
+	w: &mut HashMap<Vec<u8>, HashMap<u64, Instant>>,
+	path: &[u8],
+	play_id: u64,
+	now: Instant,
+) -> bool {
+	let e = w.entry(path.to_ascii_lowercase()).or_default();
+	e.insert(play_id, now);
+	e.retain(|_, t| now.saturating_duration_since(*t) < CLAIM_TTL);
+	e.keys().max() == Some(&play_id)
+}
+
+/// A session ended: drop all its wants so an older session can take the pad back.
+fn release_claims(play_id: u64) {
+	let mut w = wants().lock().unwrap();
+	for e in w.values_mut() {
+		e.remove(&play_id);
+	}
+	w.retain(|_, e| !e.is_empty());
 }
 
 /// Route a host `Ds5Output` to the pad at `slot` of play session `play_id`.
@@ -515,5 +562,24 @@ mod focus_tests {
 		assert_eq!(r[36], 0x86);
 		assert_eq!((r[6], r[15]), (0x42, 0x55), "counter + motion untouched");
 		assert_eq!(released(Ds5Report(r)).0, r, "idempotent");
+	}
+}
+
+#[cfg(test)]
+mod claim_tests {
+	use super::*;
+
+	#[test]
+	fn newest_session_drives_the_pad_and_the_older_one_takes_it_back() {
+		let mut w = HashMap::new();
+		let t0 = Instant::now();
+		assert!(claim_at(&mut w, b"HID#A", 1, t0));
+		// A second session wants the same pad (path case differs): it wins, 1 lets go.
+		assert!(claim_at(&mut w, b"hid#a", 2, t0));
+		assert!(!claim_at(&mut w, b"HID#A", 1, t0 + Duration::from_millis(500)));
+		// Another pad is independent.
+		assert!(claim_at(&mut w, b"HID#B", 1, t0));
+		// Session 2 stops asking (closed): after the TTL session 1 drives again.
+		assert!(claim_at(&mut w, b"HID#A", 1, t0 + CLAIM_TTL + Duration::from_millis(1)));
 	}
 }
