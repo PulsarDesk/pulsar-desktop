@@ -12,7 +12,8 @@
 			"resources/virtual-audio-driver/VirtualAudioDriver.sys",
 			"resources/virtual-audio-driver/virtualaudiodriver.cat",
 			"resources/nefcon/x64/nefconw.exe",
-			"resources/nefcon/arm64/nefconw.exe"
+			"resources/nefcon/arm64/nefconw.exe",
+			"resources/usbip/*"
 		],
 		"windows": {
 			"nsis": {

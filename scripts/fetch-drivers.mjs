@@ -1,6 +1,9 @@
 // Fetch the Windows driver payloads Pulsar bundles + auto-installs:
 //   • Interception   (keyboard capture under ASTER) — interception.dll + installer
 //   • ViGEmBus       (virtual Xbox gamepad on the host)        — installer
+//   • usbip-win2     (virtual wired DualSense on the host: a USB/IP client + vhci
+//     driver that attaches pulsar-core's loopback USB/IP server) — installer for the
+//     TARGET arch only (x64 or arm64; kernel drivers must match the native arch)
 //   • Virtual-Audio-Driver (sinkless render endpoint we redirect to so the host
 //     can stream its audio while staying SILENT, Sunshine-style) — signed
 //     inf/sys/cat, plus nefconw to create the device node + install the driver
@@ -13,10 +16,16 @@
 // Licensing: Interception is LGPL-3.0 for non-commercial use with explicit
 // redistribution rights for the driver + installer (fine for GPLv3 Pulsar).
 // ViGEmBus is BSD-3-Clause. Virtual-Audio-Driver is MIT + MS-PL (signed by the
-// SignPath Foundation); nefcon (NefCon) is BSD-3-Clause. All redistributable.
+// SignPath Foundation); nefcon (NefCon) is BSD-3-Clause. usbip-win2 is GPL-3.0
+// (same license as Pulsar; signed Inno Setup installers). All redistributable.
+//
+// Usage: bun scripts/fetch-drivers.mjs [--arch x64|arm64]
+//   --arch picks the per-arch payloads (usbip-win2); default = this machine's arch.
+//   CI passes the matrix's `--os windows --arch arm64` for the cross-built ARM64 job.
 // See desktop-app/CLAUDE.md → "Windows drivers".
 
-import { mkdir, writeFile, access, rm, readdir, copyFile } from 'node:fs/promises';
+import { mkdir, writeFile, access, rm, readdir, copyFile, readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
@@ -27,6 +36,7 @@ const resDir = join(here, '..', 'src-tauri', 'resources');
 const interceptionDir = join(resDir, 'interception');
 const vadDir = join(resDir, 'virtual-audio-driver');
 const nefconDir = join(resDir, 'nefcon');
+const usbipDir = join(resDir, 'usbip');
 
 // Pinned release assets (bump deliberately; all are signed / from signed sources).
 const INTERCEPTION_ZIP =
@@ -42,6 +52,35 @@ const VAD_ZIP =
 // INF silently. Zip layout: "{x64,ARM64,x86}/nefconw.exe".
 const NEFCON_ZIP =
 	'https://github.com/nefarius/nefcon/releases/download/v1.17.40/nefcon_v1.17.40.zip';
+
+// usbip-win2 (github.com/vadimgrn/usbip-win2): signed Inno Setup installers, one per
+// arch. Pinned by version + the sha256 GitHub publishes for each release asset. The NSIS
+// hook (installer-hooks.nsh) and pulsar-setup compare USBIP_VERSION against the installed
+// one, so bump the three together (fetch-drivers.mjs, installer-hooks.nsh USBIP_VERSION,
+// crates/pulsar-setup/src/drivers.rs USBIP_VERSION).
+const USBIP_VERSION = '0.9.8.1';
+const USBIP = {
+	x64: {
+		url: `https://github.com/vadimgrn/usbip-win2/releases/download/v.${USBIP_VERSION}/USBip-${USBIP_VERSION}-x64.exe`,
+		sha256: '38cad6d4432b52d5bb9409d9ad03b72fdffc4ada4cd3a48fbeca1a2752a8518a'
+	},
+	arm64: {
+		url: `https://github.com/vadimgrn/usbip-win2/releases/download/v.${USBIP_VERSION}/USBip-${USBIP_VERSION}-arm64.exe`,
+		sha256: 'cab7ff97f79275eeb5c5b8bb2eb3111ff6b6c4eead07d9bec9be5bd1e3a35800'
+	}
+};
+
+function targetArch() {
+	const i = process.argv.indexOf('--arch');
+	const a = i >= 0 ? process.argv[i + 1] : process.arch;
+	if (a === 'arm64' || a === 'aarch64') return 'arm64';
+	if (a === 'x64' || a === 'x86_64' || a === 'amd64') return 'x64';
+	throw new Error(`unsupported --arch ${a} (x64 | arm64)`);
+}
+
+async function sha256(p) {
+	return createHash('sha256').update(await readFile(p)).digest('hex');
+}
 
 async function exists(p) {
 	try {
@@ -153,6 +192,32 @@ async function fetchNefcon() {
 	}
 }
 
+// Pull the usbip-win2 installer for the target arch into
+// resources/usbip/USBip-<arch>.exe (tauri.windows.conf.json bundles resources/usbip/*).
+// Exactly one file lives there: the other arch's installer is removed so a local
+// arch switch never ships both. A file whose hash does not match is re-downloaded.
+async function fetchUsbip(arch) {
+	const { url, sha256: want } = USBIP[arch];
+	const dest = join(usbipDir, `USBip-${arch}.exe`);
+	await mkdir(usbipDir, { recursive: true });
+	for (const f of await readdir(usbipDir)) {
+		if (f !== `USBip-${arch}.exe`) await rm(join(usbipDir, f), { force: true });
+	}
+	if ((await exists(dest)) && (await sha256(dest)) === want) {
+		process.stdout.write(`usbip-win2 ${USBIP_VERSION} ${arch}: present, sha256 ok
+`);
+		return;
+	}
+	await download(url, dest);
+	const got = await sha256(dest);
+	if (got !== want) {
+		await rm(dest, { force: true });
+		throw new Error(`usbip-win2 ${arch} sha256 mismatch: got ${got}, want ${want}`);
+	}
+	process.stdout.write(`  sha256 ok (${got})
+`);
+}
+
 async function main() {
 	if (process.platform !== 'win32') {
 		process.stdout.write('fetch-drivers: non-Windows host — skipping.\n');
@@ -179,6 +244,9 @@ async function main() {
 	// here, capture ITS loopback, restore on teardown — never mute the real one).
 	await fetchVirtualAudioDriver();
 	await fetchNefcon();
+
+	// Virtual wired DualSense on the host (pulsar_core::input::ds5::attach).
+	await fetchUsbip(targetArch());
 
 	process.stdout.write('fetch-drivers: done.\n');
 }

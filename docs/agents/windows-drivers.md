@@ -15,11 +15,71 @@ Both are **bundled and auto-installed** (GPLv3 build is license-clear):
   for GPLv3; commercial Pulsar would need their commercial license.
 - **Virtual gamepad** (pulsar-core `input`, `vigem.rs`): **ViGEmBus** (X360 + DS4
   via the vendored `vigem-client` fork). Linux uses uinput; macOS is a no-op stub.
+- **Virtual DualSense** (pulsar-core `input::ds5`): **usbip-win2** — see below.
 
 **Bundling:** `interception.dll` ships next to the exe; the NSIS installer runs
-the Interception + ViGEmBus silent installers (elevated) with a "restart
+the Interception + ViGEmBus + usbip-win2 silent installers (elevated) with a "restart
 required" notice. Payloads fetched by `scripts/fetch-drivers.mjs` into
-`src-tauri/resources/`.
+`src-tauri/resources/` (`bun scripts/fetch-drivers.mjs [--arch x64|arm64]`; default = this
+machine's arch). Every payload must also be listed under `bundle.resources` in
+`tauri.windows.conf.json`, or Tauri never copies it into `$INSTDIR` and the hook's
+`IfFileExists` silently skips it. For a plain `cargo check`/`build`, zero-byte stubs at the
+listed paths are enough (`resources/usbip/` needs at least one file, e.g. an empty
+`USBip-x64.exe`, because the glob must match).
+
+**Uninstall policy:** Pulsar's uninstallers (NSIS and `pulsar-setup --uninstall`) remove
+none of the drivers (Interception, ViGEmBus, Virtual-Audio-Driver, usbip-win2). They are
+shared system components with their own uninstallers, and removing a kernel driver another
+app uses would break it.
+
+## usbip-win2 (virtual wired DualSense on the host)
+
+**Why:** a DualSense's haptics, adaptive triggers, speaker, mic and lightbar only work in
+games (and in Windows' own audio stack) when the pad is a real USB device, not a HID-only
+ViGEm target. pulsar-core runs a tiny USB/IP server on `127.0.0.1` that emulates a wired
+DualSense (`input/ds5/{usbip,device,virtual_pad}.rs`); usbip-win2's vhci driver attaches it,
+so Windows sees a genuine USB `VID_054C&PID_0CE6` device. Design: pulsar-core
+`docs/dualsense.md`.
+
+**Where the host uses it:** `pulsar_core::input::ds5::attach::locate` looks for
+`%ProgramFiles%\USBip\usbip.exe`, then `usbip.exe` on `PATH`, and runs
+`usbip attach -r 127.0.0.1 -b <busid>` / `detach` (elevated process). Desktop
+`src-tauri/src/ds5/host.rs::available()` advertises `FEAT_DS5` only when that lookup
+succeeds, so a host without usbip-win2 just does not offer the virtual DualSense.
+
+**Version:** **0.9.8.1** (github.com/vadimgrn/usbip-win2), signed Inno Setup installers
+`USBip-0.9.8.1-x64.exe` / `USBip-0.9.8.1-arm64.exe`. `fetch-drivers.mjs` pins URL + the
+sha256 GitHub publishes, fetches ONLY the target arch into `resources/usbip/USBip-<arch>.exe`
+(deletes the other arch's file) and fails on a hash mismatch. `tauri.windows.conf.json`
+bundles `resources/usbip/*`. CI passes `${{ matrix.ffmpeg }}` (`--arch arm64` for the
+cross-built ARM64 job). Bump the version in three places together: `fetch-drivers.mjs`
+(`USBIP_VERSION` + both sha256), `installer-hooks.nsh` (`USBIP_VERSION`),
+`crates/pulsar-setup/src/drivers.rs` (`USBIP_VERSION`).
+
+**Install (only when missing or older):** both installers read `DisplayVersion` from the Inno
+uninstall key `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{199505b0-b93d-4521-a8c7-897818e0205a}_is1`
+(64-bit view). Missing key + no `%ProgramFiles%\USBip\usbip.exe` → install; key older than
+the bundled version → install; otherwise skip. A `usbip.exe` without the key (manual or
+source install) is left alone. Command: `USBip-<arch>.exe /VERYSILENT /SUPPRESSMSGBOXES
+/NORESTART /SP-` (no reboot was needed on the test PC; the generic restart notice covers it).
+- **NSIS** (`installer-hooks.nsh`, perMachine, already elevated): picks the file by the
+  NATIVE arch (`${IsNativeARM64}` / `${IsNativeAMD64}`). A kernel driver must match the
+  native arch, so an x64 Pulsar on an ARM64 PC finds no matching file and skips. Runs on
+  updates too, but the version check makes that a no-op until the bundled version changes.
+- **pulsar-setup** (per-user, no UAC for the app itself, `src/drivers.rs`): after the files,
+  shortcuts and registry entry, the interactive install runs the bundled installer through
+  its OWN UAC prompt (`Start-Process -Verb RunAs`), progress line "Sanal DualSense sürücüsü
+  (usbip-win2)…". A declined prompt or failure never fails the Pulsar install. The headless
+  `/S` path never runs it (no surprise UAC prompt). CI copies `resources/usbip/USBip-*.exe`
+  into the setup payload.
+
+**usbipd-win coexistence:** usbipd-win (Microsoft's WSL USB tool, a USB/IP *server*) often
+owns TCP 3240 on dev machines. Our server binds an ephemeral loopback port and passes it with
+`--tcp-port` (pulsar-core `attach.rs`), so the two do not conflict; both can stay installed.
+
+**Altyapı/lisans:** usbip-win2 is **GPL-3.0** (same license as Pulsar), signed by its
+author; redistributing its unmodified installer is compatible with GPLv3 Pulsar (the source
+is the upstream GitHub release).
 
 **In-app updates (Windows):** the updater runs the NSIS installer **quietly**
 (`plugins.updater.windows.installMode: "quiet"`), so no installer wizard appears. Right

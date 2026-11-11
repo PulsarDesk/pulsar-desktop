@@ -17,6 +17,7 @@
 //! dark by the Windows app theme, and no animation.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod drivers;
 mod install;
 mod mock;
 mod ui;
@@ -172,6 +173,8 @@ struct SetupApp {
 	done_entries: usize,
 	current: String,
 	finishing: bool,
+	/// The usbip-win2 installer runs (after the shortcuts/registry stage).
+	driver: bool,
 	rx: Option<Receiver<install::Msg>>,
 	wv2: Option<Wv2>,
 	wv2_rx: Option<Receiver<Result<(), String>>>,
@@ -212,6 +215,7 @@ impl SetupApp {
 			done_entries: 0,
 			current: String::new(),
 			finishing: false,
+			driver: false,
 			rx: None,
 			wv2: None,
 			wv2_rx: None,
@@ -270,7 +274,7 @@ impl SetupApp {
 		let (tx, rx): (Sender<install::Msg>, Receiver<install::Msg>) = std::sync::mpsc::channel();
 		self.rx = Some(rx);
 		self.phase = Phase::Installing;
-		(self.total, self.done_entries, self.finishing, self.copied) = (0, 0, false, false);
+		(self.total, self.done_entries, self.finishing, self.driver, self.copied) = (0, 0, false, false, false);
 		self.current.clear();
 		let dir = self.dir.clone();
 		let desktop = self.desktop_shortcut;
@@ -278,7 +282,7 @@ impl SetupApp {
 			std::thread::spawn(move || mock::install(m, &tx));
 			return;
 		}
-		std::thread::spawn(move || install::install(&dir, desktop, &tx));
+		std::thread::spawn(move || install::install(&dir, desktop, true, &tx));
 	}
 
 	fn start_webview2(&mut self) {
@@ -305,6 +309,7 @@ impl SetupApp {
 						self.current = name;
 					}
 					install::Msg::Finishing => self.finishing = true,
+					install::Msg::Driver => self.driver = true,
 					install::Msg::Done => {
 						let missing = match self.mock {
 							Some(m) => m.no_webview2,
@@ -689,7 +694,14 @@ impl SetupApp {
 				}
 			}
 			Phase::Installing => {
-				let (label, counter, frac, file) = if self.finishing {
+				let (label, counter, frac, file) = if self.driver {
+					(
+						"Sanal DualSense sürücüsü (usbip-win2)…",
+						format!("{0} / {0}", self.total),
+						1.0,
+						"Yönetici izni istenirse onayla.".to_string(),
+					)
+				} else if self.finishing {
 					(
 						"Kısayollar ve kayıt…",
 						format!("{0} / {0}", self.total),

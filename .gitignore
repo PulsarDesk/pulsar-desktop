@@ -23,6 +23,7 @@ node_modules
 /src-tauri/resources/ViGEmBus_Setup.exe
 /src-tauri/resources/virtual-audio-driver/
 /src-tauri/resources/nefcon/
+/src-tauri/resources/usbip/
 
 # Local machine-specific env workaround (not for committing).
 /envfix.cjs

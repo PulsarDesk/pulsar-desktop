@@ -9,9 +9,11 @@
 # headlessly (updater / scripted installs).
 #
 # The kernel drivers (Interception/ViGEmBus) are NOT installed here — they need
-# admin + reboot. The app itself elevates at runtime (request_admin) and the
-# driver payloads ship in resources/, so hosting still gets them; a client-only
-# user never pays the UAC prompt.
+# admin + reboot. The app itself elevates at runtime (request_admin); a client-only
+# user never pays the UAC prompt for them. Exception: usbip-win2 (the host's virtual
+# DualSense) — the interactive install runs its signed installer through its OWN UAC
+# prompt when it is missing or older (src/drivers.rs). Declining it never fails the
+# install, and the headless `/S` path never prompts.
 [package]
 name = "pulsar-setup"
 version.workspace = true

@@ -131,11 +131,13 @@ jobs:
         run: bun scripts/fetch-player.mjs ${{ matrix.ffmpeg }}
 
       # Windows driver payloads (Interception / ViGEmBus / Virtual-Audio-Driver /
-      # nefcon) land in src-tauri/resources/ and are listed under bundle.resources
-      # in tauri.windows.conf.json — without them the tauri bundler FAILS.
-      - name: Fetch bundled Windows drivers (ViGEm/Interception/Virtual-Audio-Driver/nefcon)
+      # nefcon / usbip-win2) land in src-tauri/resources/ and are listed under
+      # bundle.resources in tauri.windows.conf.json — without them the tauri bundler
+      # FAILS. usbip-win2 is per arch (kernel driver): matrix.ffmpeg carries
+      # `--arch arm64` for the cross-built ARM64 job; empty = the runner's x64.
+      - name: Fetch bundled Windows drivers (ViGEm/Interception/Virtual-Audio-Driver/nefcon/usbip-win2)
         if: startsWith(matrix.os, 'windows')
-        run: bun scripts/fetch-drivers.mjs
+        run: bun scripts/fetch-drivers.mjs ${{ matrix.ffmpeg }}
 
       # pulsar-render is the DEFAULT video renderer on Windows and Linux, and the
       # native OVERLAY renderer on macOS. It's a separate workspace crate — tauri-action
@@ -291,7 +293,7 @@ jobs:
         shell: bash
         run: |
           set -e
-          mkdir -p setup-payload/resources/interception setup-payload/resources/virtual-audio-driver setup-payload/resources/nefcon/x64 setup-payload/resources/nefcon/arm64
+          mkdir -p setup-payload/resources/interception setup-payload/resources/virtual-audio-driver setup-payload/resources/nefcon/x64 setup-payload/resources/nefcon/arm64 setup-payload/resources/usbip
           # Cross-built targets land under target/<triple>/release.
           TDIR=target/release
           if [ -n "${{ matrix.rust_targets }}" ]; then TDIR="target/${{ matrix.rust_targets }}/release"; fi
@@ -302,6 +304,8 @@ jobs:
           cp src-tauri/resources/virtual-audio-driver/* setup-payload/resources/virtual-audio-driver/
           cp src-tauri/resources/nefcon/x64/nefconw.exe setup-payload/resources/nefcon/x64/
           cp src-tauri/resources/nefcon/arm64/nefconw.exe setup-payload/resources/nefcon/arm64/
+          # usbip-win2 installer for this arch (pulsar-setup runs it behind its own UAC prompt).
+          cp src-tauri/resources/usbip/USBip-*.exe setup-payload/resources/usbip/
           (cd setup-payload && 7z a -tzip ../setup-payload.zip . >/dev/null)
           if [ -n "${{ matrix.rust_targets }}" ]; then
             PULSAR_SETUP_PAYLOAD="$PWD/setup-payload.zip" cargo build --release -p pulsar-setup --target "${{ matrix.rust_targets }}"

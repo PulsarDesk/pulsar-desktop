@@ -15,6 +15,15 @@
 ; compiles standalone.
 !include "LogicLib.nsh"
 !include "x64.nsh"
+; ${VersionCompare} for the usbip-win2 "missing or older" check (Tauri's installer.nsi
+; includes it too; the header has its own include guard).
+!include "WordFunc.nsh"
+
+; usbip-win2 (virtual wired DualSense on the host). Bump together with
+; scripts/fetch-drivers.mjs (USBIP_VERSION + sha256) and crates/pulsar-setup/src/drivers.rs.
+!define USBIP_VERSION "0.9.8.1"
+; Inno Setup uninstall key = AppId + "_is1" (64-bit registry view, read via HKLM64 below).
+!define USBIP_UNINST_KEY "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{199505b0-b93d-4521-a8c7-897818e0205a}_is1"
 
 ; Substring matching uses StrFunc's ${StrLoc}, which Tauri's generated installer.nsi
 ; already declares (`${StrLoc}` near the top of that file) before it !includes this
@@ -37,6 +46,40 @@
   IfFileExists "$INSTDIR\resources\ViGEmBus_Setup.exe" 0 +3
     DetailPrint "Pulsar: ViGEmBus gamepad sürücüsü kuruluyor..."
     ExecWait '"$INSTDIR\resources\ViGEmBus_Setup.exe" /quiet /norestart'
+
+  ; usbip-win2 — the host's virtual wired DualSense (pulsar_core::input::ds5::attach runs
+  ; %ProgramFiles%\USBip\usbip.exe to attach pulsar-core's loopback USB/IP server). One
+  ; signed Inno Setup installer per arch is bundled (resources/usbip/USBip-<arch>.exe, only
+  ; the build's arch); a kernel driver must match the NATIVE arch, so an x64 Pulsar on an
+  ; ARM64 PC finds no matching file and skips. Installed only when missing or older than
+  ; USBIP_VERSION, so updates do not re-run it. A usbip.exe without the Inno uninstall key
+  ; (manual / source install) is left alone. This installer is already elevated
+  ; (perMachine), so the Inno child inherits admin and shows no prompt of its own.
+  ; Never uninstalled by Pulsar's uninstaller (same as ViGEmBus / Interception / VAD).
+  StrCpy $0 ""
+  ${If} ${IsNativeARM64}
+    StrCpy $0 "$INSTDIR\resources\usbip\USBip-arm64.exe"
+  ${ElseIf} ${IsNativeAMD64}
+    StrCpy $0 "$INSTDIR\resources\usbip\USBip-x64.exe"
+  ${EndIf}
+  StrCmp $0 "" usbip_done
+  IfFileExists "$0" 0 usbip_done
+  ClearErrors
+  ReadRegStr $1 HKLM64 "${USBIP_UNINST_KEY}" "DisplayVersion"
+  StrCmp $1 "" 0 usbip_cmp
+    IfFileExists "$PROGRAMFILES64\USBip\usbip.exe" usbip_present usbip_install
+  usbip_cmp:
+  ; $2: 0 = same, 1 = installed is newer, 2 = bundled is newer.
+  ${VersionCompare} "$1" "${USBIP_VERSION}" $2
+  StrCmp $2 "2" usbip_install usbip_present
+  usbip_install:
+    DetailPrint "Pulsar: usbip-win2 ${USBIP_VERSION} (sanal DualSense sürücüsü) kuruluyor..."
+    ExecWait '"$0" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-' $3
+    DetailPrint "Pulsar: usbip-win2 kurulumu bitti (çıkış kodu $3)."
+    Goto usbip_done
+  usbip_present:
+    DetailPrint "Pulsar: usbip-win2 zaten kurulu ($1) — atlandı."
+  usbip_done:
 
   ; Virtual Audio Driver — a sinkless render endpoint we redirect the default
   ; output to so the host can STREAM its audio while staying silent (Sunshine

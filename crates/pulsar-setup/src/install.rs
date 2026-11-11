@@ -24,6 +24,8 @@ pub enum Msg {
 	Entry(usize, String),
 	/// Post-extract bookkeeping stage (shortcuts / registry / uninstaller copy).
 	Finishing,
+	/// The usbip-win2 driver installer is running behind its own UAC prompt.
+	Driver,
 	Done,
 	Err(String),
 }
@@ -53,9 +55,10 @@ pub fn default_install_dir() -> PathBuf {
 }
 
 /// The full install: stop a running Pulsar, extract the payload, copy this exe in
-/// as the uninstaller, write shortcuts + the uninstall registry entry. Blocking —
-/// run on a worker thread.
-pub fn install(dir: &Path, desktop_shortcut: bool, tx: &Sender<Msg>) {
+/// as the uninstaller, write shortcuts + the uninstall registry entry. With `drivers`
+/// (the interactive install only), also install usbip-win2 when it is missing or older
+/// (UAC prompt; never fatal, see drivers.rs). Blocking — run on a worker thread.
+pub fn install(dir: &Path, desktop_shortcut: bool, drivers: bool, tx: &Sender<Msg>) {
 	let r = (|| -> Result<(), String> {
 		if !have_payload() {
 			return Err("bu kurulum dosyasında uygulama paketi yok (geliştirme derlemesi)".into());
@@ -101,6 +104,13 @@ pub fn install(dir: &Path, desktop_shortcut: bool, tx: &Sender<Msg>) {
 		}
 		write_shortcuts(dir, desktop_shortcut);
 		write_uninstall_registry(dir);
+		if drivers {
+			if let Some(installer) = crate::drivers::bundled_usbip(dir).filter(|_| crate::drivers::usbip_needed()) {
+				let _ = tx.send(Msg::Driver);
+				// Not fatal: without usbip-win2 the host just does not offer the virtual DualSense.
+				let _ = crate::drivers::install_usbip(&installer);
+			}
+		}
 		Ok(())
 	})();
 	let _ = tx.send(match r {
@@ -111,11 +121,12 @@ pub fn install(dir: &Path, desktop_shortcut: bool, tx: &Sender<Msg>) {
 
 /// Headless install for `/S` / `--silent` (updater / scripted): reuse the
 /// registered InstallLocation when present, else the default dir. Keeps existing
-/// shortcut choices (registry entry rewrite only refreshes metadata).
+/// shortcut choices (registry entry rewrite only refreshes metadata). Never installs
+/// drivers: a headless run must not raise a UAC prompt.
 pub fn silent_install() -> Result<(), String> {
 	let dir = registered_install_dir().unwrap_or_else(default_install_dir);
 	let (tx, rx) = std::sync::mpsc::channel();
-	install(&dir, false, &tx);
+	install(&dir, false, false, &tx);
 	// install() is synchronous — drain the channel for the outcome.
 	let mut err = None;
 	while let Ok(m) = rx.try_recv() {
