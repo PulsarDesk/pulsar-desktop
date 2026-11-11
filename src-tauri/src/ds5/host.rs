@@ -8,7 +8,8 @@
 //!   media slots (`Ds5Media::Slot`), one per 10.667 ms.
 //!
 //! Pads are dropped (usbip detach) when the client disconnects the slot or the session
-//! ends. `FEAT_DS5` is advertised only when usbip-win2 / usbip is installed.
+//! ends. `FEAT_DS5` is advertised only when a backend can work (`host_duo.rs`: usbip-win2 /
+//! usbip installed, or Duo's driver inside a Duo seat — HID only there, no media).
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,12 +19,13 @@ use std::time::{Duration, Instant};
 use pulsar_core::input::ds5::bt_audio::SpeakerOut;
 use pulsar_core::input::ds5::haptics::Frame;
 use pulsar_core::input::ds5::report::SetState;
-use pulsar_core::input::ds5::virtual_pad::{local_mac, Ds5HostEvent, VirtualDs5, VirtualDs5Config};
+use pulsar_core::input::ds5::virtual_pad::{local_mac, Ds5HostEvent, VirtualDs5Config};
 use pulsar_core::input::ds5::wire::{Ds5Media, Ds5Report};
 use pulsar_core::input::ds5::Ds5Features;
 use pulsar_core::service::DataMsg;
 
 use super::audio::{SpeakerEncoder, Volume};
+use super::host_duo::HostPad;
 
 /// Same cap as the ViGEm pads (`MAX_PADS` in host.rs).
 const MAX_SLOTS: u8 = 4;
@@ -35,13 +37,13 @@ const STATE_REFRESH: Duration = Duration::from_millis(500);
 /// time out (doubled audio, 2026-11-11). A 3 s late pad costs nothing in a game.
 const PLUG_DELAY: Duration = Duration::from_secs(3);
 
-/// Whether this host can present a virtual DualSense (usbip tool installed).
+/// Whether this host can present a virtual DualSense (see `host_duo.rs`).
 pub fn available() -> bool {
-	cfg!(any(windows, target_os = "linux")) && pulsar_core::input::ds5::attach::locate(None).is_ok()
+	super::host_duo::current().is_some()
 }
 
 struct Slot {
-	vpad: Arc<VirtualDs5>,
+	vpad: Arc<HostPad>,
 	features: Arc<Mutex<Ds5Features>>,
 	stop: Arc<AtomicBool>,
 }
@@ -135,9 +137,9 @@ impl Ds5Host {
 			mac: local_mac(format!("{}/{slot}", self.peer).as_bytes()),
 			..Default::default()
 		};
-		match VirtualDs5::start(cfg) {
+		match HostPad::start(cfg) {
 			Ok((vpad, rx)) => {
-				tracing::info!(slot, port = vpad.port(), "ds5 host: virtual DualSense up");
+				tracing::info!(slot, pad = %vpad.describe(), "ds5 host: virtual DualSense up");
 				vpad.set_input(&first.to_usb_input());
 				let vpad = Arc::new(vpad);
 				let features = Arc::new(Mutex::new(Ds5Features::all()));

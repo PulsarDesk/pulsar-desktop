@@ -7,4 +7,5 @@ pub mod bridge;
 pub mod client;
 pub mod hid;
 pub mod host;
+pub mod host_duo;
 pub mod probe;
