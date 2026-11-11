@@ -74,6 +74,11 @@ fn main() {
 		pulsar_tauri::run_relay(&args);
 		return;
 	}
+	// `pulsar --ds5-bridge [seconds]`: local bridge mode, headless (needs admin).
+	if let Some(i) = args.iter().position(|a| a == "--ds5-bridge") {
+		let secs = args.get(i + 1).and_then(|s| s.parse().ok());
+		std::process::exit(pulsar_tauri::ds5_bridge(secs));
+	}
 	// `pulsar --ds5-probe`: drive a DualSense through the passthrough client path, exit.
 	if args.iter().any(|a| a == "--ds5-probe") {
 		std::process::exit(pulsar_tauri::ds5_probe());

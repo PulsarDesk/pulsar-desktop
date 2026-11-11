@@ -4,3 +4,4 @@
 
 pub mod hid;
 pub mod probe;
+pub mod bridge;

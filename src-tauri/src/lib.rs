@@ -117,6 +117,10 @@ mod ds5;
 pub fn ds5_probe() -> i32 {
 	ds5::probe::run()
 }
+/// Headless `pulsar --ds5-bridge [seconds]`: show a BT DualSense to local games as wired.
+pub fn ds5_bridge(secs: Option<u64>) -> i32 {
+	ds5::bridge::run_cli(secs)
+}
 
 // Headless `pulsar --selftest` (bundled media stack check; CI runs it on the AppImage).
 mod selftest;
