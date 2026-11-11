@@ -14,7 +14,7 @@
 		avatarFor,
 		savedPeers,
 		isSaved,
-		toggleSaved,
+		addPeer,
 		unsavePeer
 	} from '#lib/peers.svelte.js';
 	import { isLive } from '#lib/presence.svelte.js';
@@ -44,9 +44,14 @@
 		nav.pushBack(closeEditDev);
 		tick().then(() => nav.focusFirst());
 	}
-	// Removing a saved device asks first (one stray pad press must not delete it).
+	// Removing a saved device asks first (one stray pad press must not delete it) — both the
+	// Devices card's × and un-starring a LAN / recent card.
 	let removeDev = $state<{ id: string; name: string } | null>(null);
+	// The button that opened the confirm: focus returns to it on cancel (so a pad user lands
+	// back inside the same card), else to the first item.
+	let removeFrom: HTMLElement | null = null;
 	function askRemove(p: { id: string; name: string }) {
+		removeFrom = typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null;
 		removeDev = { id: p.id, name: p.name };
 		nav.pushBack(closeRemove); // B / Escape cancels
 		tick().then(() => nav.focusFirst());
@@ -54,7 +59,17 @@
 	function closeRemove() {
 		removeDev = null;
 		nav.popBack(closeRemove);
-		tick().then(() => nav.focusFirst());
+		const from = removeFrom;
+		removeFrom = null;
+		tick().then(() => {
+			if (from?.isConnected) nav.focus(from);
+			else nav.focusFirst();
+		});
+	}
+	// The star adds at once; taking a device out of Devices goes through the confirm.
+	function toggleStar(id: string, name: string) {
+		if (isSaved(id)) askRemove({ id, name: savedPeers().find((p) => p.id === normalizeId(id))?.name ?? name });
+		else addPeer(name, id);
 	}
 	function confirmRemove() {
 		if (removeDev) unsavePeer(removeDev.id);
@@ -123,8 +138,8 @@
 			<div class="rlab"><span class="lpulse"></span>{t('gaming.lan')}</div>
 			<div class="rgrid">
 				{#each lanHosts as d (d.addr + '|' + d.id)}
-					<div class="rrow">
-						<button class="rcard" use:navItem onclick={() => onPickHost(d.id, d.name)}>
+					<div class="rrow" data-navgroup>
+						<button class="rcard" data-navcard use:navItem onclick={() => onPickHost(d.id, d.name)}>
 							<span class="ravatar">
 								{#if avatarFor(d.id)}<img class="rimg" src={avatarFor(d.id)} alt="" />{:else}{initials(d.name)}{/if}
 							</span>
@@ -133,7 +148,7 @@
 								<span class="rid mono">{fmtPeerId(d.id)}</span>
 							</span>
 						</button>
-						<div class="ractions">{@render star(d.id, d.name)}</div>
+						<div class="ractions">{@render go(d.id, d.name)}{@render star(d.id, d.name)}</div>
 					</div>
 				{/each}
 			</div>
@@ -147,8 +162,8 @@
 		{:else}
 			<div class="rgrid">
 				{#each recents as r (r.id)}
-					<div class="rrow">
-						<button class="rcard" use:navItem onclick={() => onPickHost(r.id, r.name)}>
+					<div class="rrow" data-navgroup>
+						<button class="rcard" data-navcard use:navItem onclick={() => onPickHost(r.id, r.name)}>
 							<span class="ravatar">
 								{#if recentImg(r)}
 									<img class="rimg" src={recentImg(r)} alt="" />
@@ -165,6 +180,7 @@
 							</span>
 						</button>
 						<div class="ractions">
+							{@render go(r.id, r.name)}
 							{@render star(r.id, r.name)}
 							<button
 								class="ract"
@@ -196,8 +212,8 @@
 		{/if}
 		<div class="rgrid">
 			{#each devices as p (p.id)}
-				<div class="rrow">
-					<button class="rcard" use:navItem onclick={() => onPickHost(p.id, p.name)}>
+				<div class="rrow" data-navgroup>
+					<button class="rcard" data-navcard use:navItem onclick={() => onPickHost(p.id, p.name)}>
 						<span class="ravatar">
 							{#if recentImg(p)}
 								<img class="rimg" src={recentImg(p)} alt="" />
@@ -214,6 +230,7 @@
 						</span>
 					</button>
 					<div class="ractions">
+						{@render go(p.id, p.name)}
 						<button
 							class="ract"
 							use:navItem
@@ -247,7 +264,19 @@
 		title={t(isSaved(id) ? 'gaming.unstar' : 'gaming.star')}
 		aria-label={t(isSaved(id) ? 'gaming.unstar' : 'gaming.star')}
 		aria-pressed={isSaved(id)}
-		onclick={() => toggleSaved(id, name)}><Icon name="star" size={15} /></button
+		onclick={() => toggleStar(id, name)}><Icon name="star" size={15} /></button
+	>
+{/snippet}
+
+{#snippet go(id: string, name: string)}
+	<!-- The card's own action as its first inner button: A on a card enters it and lands here,
+	     so A, A connects. Only shown while the card holds focus (mouse users click the card). -->
+	<button
+		class="ract rgo"
+		use:navItem
+		title={t('gaming.connect')}
+		aria-label={t('gaming.connect')}
+		onclick={() => onPickHost(id, name)}><Icon name="connect" size={14} /></button
 	>
 {/snippet}
 
@@ -557,6 +586,20 @@
 	}
 	.rstar.on {
 		color: var(--accent);
+	}
+	/* Connect button: only while the card (or one of its buttons) holds focus — the pad needs
+	   it inside an entered card; on hover the card itself is the click target. */
+	.rgo {
+		display: none;
+	}
+	.rrow:focus-within .rgo,
+	.rrow:has(:global([data-navfocus])) .rgo {
+		display: grid;
+	}
+	/* An entered card (focus on one of its buttons) keeps an accent edge, so it is clear which
+	   card the buttons belong to. */
+	.rrow:has(.ract:global([data-navfocus])) .rcard {
+		border-color: var(--accent);
 	}
 	/* Saved marker next to the name (the star button itself only shows on hover/focus). */
 	.rsaved {
