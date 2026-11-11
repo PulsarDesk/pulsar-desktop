@@ -35,6 +35,8 @@ let mockConfig: Config = { ...DEFAULT_CONFIG };
 
 // Browser-mock credential + pairing stores (the real ones live in Rust files).
 const mockCreds = new Map<string, { pw: string; paired: boolean }>();
+/** Browser mock of the machine-wide "Kullanıcılar arası ortak Pulsar" setting. */
+let mockShared = true;
 let mockPaired: { key: string; fingerprint: string; name: string; id: string; pairedAt: number; lastSeen: number }[] = [
 	{ key: 'ab'.repeat(32), fingerprint: 'abab abab abab abab', name: 'Salon Laptopu', id: '641 724 395', pairedAt: 1_762_000_000_000, lastSeen: 0 }
 ];
@@ -175,6 +177,23 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 		case 'totp_verify':
 			// The browser mock accepts any 6 digits.
 			return Promise.resolve(/^\d{6}$/.test(String((args as { code?: string })?.code ?? '')) as unknown as T);
+		case 'shared_mode_status':
+			return Promise.resolve({
+				supported: true,
+				enabled: mockShared,
+				active: mockShared,
+				noAccess: false,
+				elevated: true,
+				held: true,
+				holder: null
+			} as unknown as T);
+		case 'set_shared_mode':
+			mockShared = !!(args as { enabled?: boolean })?.enabled;
+			return Promise.resolve(undefined as T);
+		case 'shared_peers_get':
+			return Promise.resolve(null as T);
+		case 'shared_peers_set':
+			return Promise.resolve(undefined as T);
 		case 'device_creds': {
 			const out: Record<string, { hasPassword: boolean; paired: boolean }> = {};
 			for (const t of (args?.targets as string[]) ?? []) {

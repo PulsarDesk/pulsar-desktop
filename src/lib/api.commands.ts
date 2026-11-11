@@ -416,6 +416,14 @@ export const api = {
 	/** Background controller input (Settings → General): the pad keeps driving the host
 	 * while another app is focused. Off = the host gets a released pad. */
 	setPadBackground: (enabled: boolean) => invoke<void>('set_pad_background', { enabled }),
+	/** "Kullanıcılar arası ortak Pulsar" (Settings → Genel): machine-wide identity + host. */
+	sharedModeStatus: () => invoke<import('./api.types').SharedModeStatus>('shared_mode_status'),
+	/** Turn the machine-wide setting on/off; the app restarts itself on success. Rejects with
+	 * `SHARED_ELEVATION` when Pulsar isn't running as administrator. */
+	setSharedMode: (enabled: boolean) => invoke<void>('set_shared_mode', { enabled }),
+	/** Shared mode: the machine-wide saved-devices list (JSON), `null` when per-user. */
+	sharedPeersGet: () => invoke<string | null>('shared_peers_get'),
+	sharedPeersSet: (json: string) => invoke<void>('shared_peers_set', { json }),
 	/** Settings → Güvenlik 2FA: a fresh TOTP secret + its QR for the enrollment dialog. */
 	totpBegin: () => invoke<import('./api.types').TotpSetup>('totp_begin'),
 	/** Saved-password / paired badges for these device targets (Devices list). */

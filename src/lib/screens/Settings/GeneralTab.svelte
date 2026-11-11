@@ -4,6 +4,7 @@
 	import { ui, saveUi } from '#lib/settings.svelte.js';
 	import { t, i18n, setLang, LANGS } from '#lib/i18n.svelte.js';
 	import { api, isTauri } from '#lib/api.js';
+	import type { SharedModeStatus } from '#lib/api.types.js';
 	import pkg from '../../../../package.json';
 
 	let {
@@ -39,6 +40,41 @@
 		api.openLogDir()
 			.then((p) => (logDir = p))
 			.catch(() => {});
+	}
+
+	// "Kullanıcılar arası ortak Pulsar": one device ID / config / pairings for the whole PC
+	// (machine-wide, admin-only files) instead of one per Windows user. Changing it restarts
+	// Pulsar; other users' Pulsar follows on its next start.
+	let shared = $state<SharedModeStatus | null>(null);
+	let sharedBusy = $state(false);
+	let sharedErr = $state('');
+	api.sharedModeStatus()
+		.then((s) => (shared = s))
+		.catch(() => {});
+	const sharedNote = $derived.by(() => {
+		if (sharedErr) return sharedErr;
+		if (!shared) return '';
+		if (shared.noAccess) return t('shared.noAccess');
+		if (shared.enabled !== shared.active) return t('settings.restartRequired');
+		if (shared.active && !shared.held)
+			return shared.holder ? t('shared.standbyUser', { user: shared.holder }) : t('shared.standby');
+		return '';
+	});
+	function toggleShared() {
+		if (!shared || sharedBusy) return;
+		const next = !shared.enabled;
+		sharedBusy = true;
+		sharedErr = '';
+		// On success the app restarts itself; the browser mock just flips.
+		api.setSharedMode(next)
+			.then(() => {
+				if (shared) shared = { ...shared, enabled: next };
+			})
+			.catch((e) => {
+				const msg = e instanceof Error ? e.message : String(e);
+				sharedErr = msg === 'SHARED_ELEVATION' ? t('shared.needAdmin') : t('shared.failed');
+			})
+			.finally(() => (sharedBusy = false));
 	}
 
 	// Display name defaults: an unset name falls back to the OS user's name on the
@@ -129,6 +165,15 @@
 		{/each}
 	</div>
 </div>
+{#if shared?.supported}
+	<div class="srow">
+		<div class="st">
+			<b>{t('settings.sharedMode')}</b>
+			<span>{t('settings.sharedModeDesc')}{#if sharedNote} <strong class="restart">· {sharedNote}</strong>{/if}</span>
+		</div>
+		<button class="toggle" aria-label={t('settings.sharedMode')} class:on={shared.enabled} aria-pressed={shared.enabled} disabled={sharedBusy} onclick={toggleShared}><span class="knob"></span></button>
+	</div>
+{/if}
 <div class="srow">
 	<div class="st"><b>{t('settings.tray')}</b><span>{t('settings.trayDesc')}</span></div>
 	<button class="toggle" aria-label={t('settings.tray')} class:on={ui.tray} aria-pressed={ui.tray} onclick={() => { ui.tray = !ui.tray; saveUi(); api.setTray(ui.tray).catch(() => {}); }}><span class="knob"></span></button>

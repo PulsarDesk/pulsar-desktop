@@ -2,6 +2,8 @@
 // entries appear only when you actually connect to an ID or add a device, so the
 // UI never shows connections that didn't happen.
 
+import { api, isTauri } from './api';
+
 export type PeerCategory = 'pc' | 'server' | 'console';
 
 export interface Peer {
@@ -57,9 +59,18 @@ export function fmtPeerId(id: string): string {
 function load(): Peer[] {
 	if (!hasLS) return [];
 	try {
-		const raw = localStorage.getItem(KEY);
+		return parse(localStorage.getItem(KEY));
+	} catch {
+		return [];
+	}
+}
+
+/** Parse + migrate a stored list (localStorage or the shared-mode file). */
+function parse(raw: string | null): Peer[] {
+	try {
 		if (!raw) return [];
 		const list = JSON.parse(raw) as Peer[];
+		if (!Array.isArray(list)) return [];
 		// Migrate pre-`saved` entries: treat never-connected ones as explicitly saved
 		// (they could only have come from "add device"), connected ones as history.
 		for (const p of list) {
@@ -94,7 +105,27 @@ function load(): Peer[] {
 
 const peers = $state<Peer[]>(load());
 
+/** Shared mode ("Kullanıcılar arası ortak Pulsar"): the list lives in a machine-wide file so
+ * every Windows user's Pulsar sees the same saved devices. Set once `loadSharedPeers` found it. */
+let shared = false;
+
+/** Startup: in shared mode, replace this user's webview list with the machine-wide one. The
+ * first time (no shared file yet) the current list seeds it. Per-user mode: no-op. */
+export async function loadSharedPeers(): Promise<void> {
+	if (!isTauri) return;
+	const raw = await api.sharedPeersGet();
+	if (raw == null) return;
+	shared = true;
+	const list = parse(raw);
+	if (list.length === 0 && peers.length > 0) {
+		persist();
+		return;
+	}
+	peers.splice(0, peers.length, ...list);
+}
+
 function persist() {
+	if (shared) api.sharedPeersSet(JSON.stringify($state.snapshot(peers))).catch(() => {});
 	if (!hasLS) return;
 	try {
 		localStorage.setItem(KEY, JSON.stringify($state.snapshot(peers)));

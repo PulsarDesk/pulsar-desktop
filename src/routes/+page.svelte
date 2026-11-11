@@ -22,8 +22,8 @@
 		onNodeVersionError,
 		onSessionPassword
 	} from '#lib/api.js';
-	import { onRelayE2e } from '#lib/api.js';
-	import { setPeerIdentity } from '#lib/peers.svelte.js';
+	import { onRelayE2e, onSharedHost } from '#lib/api.js';
+	import { setPeerIdentity, loadSharedPeers } from '#lib/peers.svelte.js';
 	import {
 		relayAuth,
 		promptRelayAuth,
@@ -405,6 +405,21 @@
 				connecting = false;
 				return;
 			}
+			// Shared mode ("Kullanıcılar arası ortak Pulsar"): another Windows session's Pulsar
+			// is this PC's host. Keep retrying quietly — the `shared-host` event brings this one
+			// online the moment its session takes the host over.
+			if (msg.startsWith('SHARED_STANDBY')) {
+				const user = msg.slice('SHARED_STANDBY:'.length);
+				connError = user ? t('shared.standbyUser', { user }) : t('shared.standby');
+				connecting = false;
+				return;
+			}
+			if (msg === 'SHARED_NO_ACCESS') {
+				versionBlocked = true;
+				connError = t('shared.noAccess');
+				connecting = false;
+				return;
+			}
 			if (msg === 'RELAY_AUTH_FAILED') {
 				markRelayAuthFailed();
 				versionBlocked = true;
@@ -613,6 +628,21 @@
 		// in the UI so the user sees the "update required" message instead of a
 		// stale (unreachable) ID. Auto-retry is intentionally NOT triggered here
 		// (every re-register would be refused too) — the user must update first.
+		// Shared mode: this session took the PC's host over (go online now) or handed it to
+		// the session that is active now (show standby; the retry loop keeps polling).
+		onSharedHost((e) => {
+			if (e.held) {
+				if (!online && !connecting) goOnline();
+			} else {
+				online = false;
+				selfId = '—';
+				selfPw = '';
+				connError = e.holder ? t('shared.standbyUser', { user: e.holder }) : t('shared.standby');
+			}
+		});
+		// Shared mode: the saved-devices list is machine-wide (Rust file), not this user's
+		// webview storage.
+		loadSharedPeers().catch(() => {});
 		onNodeVersionError(() => {
 			versionBlocked = true;
 			online = false;
