@@ -1446,6 +1446,21 @@ pub(crate) async fn start_remote_play(
 		// App handle so the reader can OPEN/close the overlay from a controller button
 		// (the GUIDE/PS button — pad equivalent of the keyboard Ctrl+Shift+M).
 		let ov_app = app.clone();
+		// DualSense passthrough: a host advertising FEAT_DS5 gets raw DualSense reports
+		// (ds5/client.rs) instead of GamepadSlot for every forwarded DualSense.
+		// `PULSAR_DS5=0` turns it off (settings toggle comes later).
+		let ds5_client = (host_caps
+			.features
+			.iter()
+			.any(|f| f == pulsar_core::input::ds5::wire::FEAT_DS5)
+			&& std::env::var("PULSAR_DS5").as_deref() != Ok("0"))
+		.then(|| {
+			crate::ds5::client::Ds5Client::register(
+				id,
+				input_tx.clone(),
+				pulsar_core::input::ds5::Ds5Features::all(),
+			)
+		});
 		tokio::task::spawn_blocking(move || {
 			let Some(mgr) = crate::controllers::manager() else {
 				return;
@@ -1769,6 +1784,23 @@ pub(crate) async fn start_remote_play(
 						fwd_slot_of.insert(r.uuid.clone(), r.orig_slot);
 					}
 				}
+				// DualSense passthrough: hand forwarded DualSenses to their raw-HID threads;
+				// those skip GamepadSlot below (their input goes as Ds5Input).
+				let ds5_driven: Vec<String> = match &ds5_client {
+					Some(c) => {
+						let list: Vec<_> = fwd_records
+							.iter()
+							.filter(|r| r.route_here && r.kind == pulsar_core::input::GamepadKind::Ds5)
+							.map(|r| {
+								let slot = fwd_slot_of.get(&r.uuid).copied().unwrap_or(r.orig_slot);
+								let path = pads.iter().find(|p| p.uuid == r.uuid).and_then(|p| p.path.clone());
+								(r.uuid.clone(), slot, path)
+							})
+							.collect();
+						c.sync(&list)
+					}
+					None => Vec::new(),
+				};
 				// Second pass: forward each pad at its (possibly remapped) host-facing slot.
 				for r in &fwd_records {
 					let uuid = &r.uuid;
@@ -1798,7 +1830,11 @@ pub(crate) async fn start_remote_play(
 					// Send-on-change (+ ~1 Hz keepalive): 250 Hz poll, instant on movement, no flood idle.
 					// Gated by `route_here` (split mode): a pad not owned by / focused on this session
 					// isn't forwarded here, so its input reaches only the pane it belongs to.
-					if r.route_here && !overlay_open && (last_sent.get(uuid) != Some(&r.eff_state) || keepalive) {
+					if r.route_here
+						&& !overlay_open
+						&& !ds5_driven.contains(uuid)
+						&& (last_sent.get(uuid) != Some(&r.eff_state) || keepalive)
+					{
 						let _ = gtx.blocking_send(InputEvent::GamepadSlot {
 							slot: fwd_slot,
 							kind: r.kind,
@@ -1924,6 +1960,7 @@ pub(crate) async fn start_remote_play(
 				// Build a teardown slot→uuid map so stop commands route to the
 				// correct physical pad (mirrors the per-tick map above).
 				let teardown_order: Vec<String> = order_arc.lock().unwrap().clone();
+				crate::ds5::client::Ds5Client::unregister(play_id);
 				let teardown_pads = mgr.snapshot();
 				let teardown_slot_to_uuid: std::collections::HashMap<u8, String> = {
 					let teardown_live: std::collections::HashSet<&String> =
@@ -1973,6 +2010,7 @@ pub(crate) async fn start_remote_play(
 
 	// Side-channel queue (clipboard / chat / file / mic audio → host).
 	let (data_tx, data_rx) = tokio::sync::mpsc::channel::<DataMsg>(512);
+	crate::ds5::client::Ds5Client::set_data_tx(id, data_tx.clone());
 	// Push our identity image to the host (client → host direction; the host's
 	// connections list shows it next to our id). Queued here and drained by
 	// hold_session's data_rx → send_data like any side-channel message, so it goes

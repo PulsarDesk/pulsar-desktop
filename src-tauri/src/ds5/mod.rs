@@ -2,6 +2,9 @@
 //! the local bridge mode and host integration. Engine logic lives in
 //! `pulsar_core::input::ds5`; design in pulsar-core `docs/dualsense.md`.
 
-pub mod hid;
-pub mod probe;
+pub mod audio;
 pub mod bridge;
+pub mod client;
+pub mod hid;
+pub mod host;
+pub mod probe;

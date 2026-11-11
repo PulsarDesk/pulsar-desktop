@@ -60,6 +60,9 @@ pub struct PadView {
     pub state: GamepadState,
     /// Battery charge 0..100, or `None` for a wired pad / unknown (SDL_GetGamepadPowerInfo).
     pub battery: Option<u8>,
+    /// The pad's HID device path (SDL_GetGamepadPath), for raw HID access (DualSense
+    /// passthrough, `ds5::client`). `None` when SDL doesn't drive it through hidapi.
+    pub path: Option<std::ffi::CString>,
 }
 
 /// A rumble request routed to the SDL thread: prefer the GUID-matched pad, else slot-Nth.
@@ -322,6 +325,7 @@ struct OpenPad {
     uuid: String,
     kind: GamepadKind,
     name: String,
+    path: Option<std::ffi::CString>,
 }
 
 /// The SDL thread body: init the gamepad subsystem, then run the Moonlight-style event loop
@@ -408,6 +412,7 @@ fn run(shared: Arc<Shared>, rumble_rx: Receiver<RumbleCmd>, ready: std::sync::mp
                     name: p.name.clone(),
                     state: st,
                     battery,
+                    path: p.path.clone(),
                 });
             }
             views.sort_by(|a, b| a.uuid.cmp(&b.uuid));
@@ -452,7 +457,9 @@ fn refresh(open: &mut HashMap<u32, OpenPad>) {
                         CStr::from_ptr(name_ptr).to_string_lossy().into_owned()
                     };
                     tracing::info!(instance = id.0, %uuid, ?kind, %name, "controllers: SDL opened pad");
-                    open.insert(id.0, OpenPad { ptr, uuid, kind, name });
+                    let path_ptr = SDL_GetGamepadPath(ptr);
+                    let path = (!path_ptr.is_null()).then(|| CStr::from_ptr(path_ptr).to_owned());
+                    open.insert(id.0, OpenPad { ptr, uuid, kind, name, path });
                 }
             }
             SDL_free(ids as *mut c_void);

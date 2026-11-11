@@ -842,6 +842,11 @@ pub(super) async fn hold_session(
 					// Checked FIRST — these are the highest-rate payloads on the session.
 					if let Some((tag, rtp)) = media::parse(&bytes) {
 						last_media = std::time::Instant::now();
+						// DualSense passthrough haptics/speaker slots → the pad threads.
+						if tag == pulsar_core::input::ds5::wire::TAG_DS5 {
+							crate::ds5::client::on_media(id, &bytes);
+							continue;
+						}
 						// FEC parity (Phase 2.1): rebuild the group's single missing packet — a
 						// repair with ZERO round-trips — and hand it to the renderer as if it had
 						// arrived (late: the reorder buffer slots it in). Also the only place we
@@ -1252,6 +1257,9 @@ pub(super) async fn hold_session(
 								if let Some(si) = render_stdin.lock().unwrap().as_mut() {
 									let _ = writeln!(si, "cursorhide");
 								}
+							}
+							DataMsg::Ds5Output { slot, report } => {
+								crate::ds5::client::on_output(id, slot, &report);
 							}
 							DataMsg::Rumble { slot, large, small } => {
 								// The host forwarded the game's force-feedback — hand it to the

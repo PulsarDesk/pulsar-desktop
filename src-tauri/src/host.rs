@@ -138,6 +138,10 @@ fn media_features() -> Vec<String> {
 	v.push(pulsar_core::service::media::FEAT_RFI.to_string());
 	// The session-start bandwidth probe (pulsar-core serve loop answers it on every platform).
 	v.push(pulsar_core::service::media::FEAT_PROBE.to_string());
+	// DualSense passthrough: a virtual wired DualSense over USB/IP (usbip-win2 / vhci-hcd).
+	if crate::ds5::host::available() {
+		v.push(pulsar_core::input::ds5::wire::FEAT_DS5.to_string());
+	}
 	// Uncompressed audio (RTP L16) from the in-process encoder — the Windows process-loopback
 	// path. A host that ends up on an ffmpeg path sends High Opus instead.
 	#[cfg(windows)]
@@ -997,6 +1001,8 @@ pub(crate) async fn go_online(
 				// tasks (they transmit concurrently with the serve loop's recv), and the
 				// NACK channel slot the active video forwarder registers itself into.
 				let media_tx = session.sender();
+				// DualSense passthrough: virtual wired DualSense per client slot (ds5/host.rs).
+				let ds5_host = crate::ds5::host::Ds5Host::new(out_tx.clone(), media_tx.clone(), format!("{peer:?}"));
 				let nack_slot: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Vec<u16>>>>> =
 					Arc::new(Mutex::new(None));
 				// The running RTP forwarder tasks for this session's CURRENT stream; a
@@ -1360,6 +1366,7 @@ pub(crate) async fn go_online(
 				// Route the client's input: controllers into a virtual gamepad, and
 				// mouse/keyboard into a uinput desktop injector — both created lazily.
 				let on_input = {
+					let ds5_host = ds5_host.clone();
 					// One virtual pad per player slot (0-based). The legacy `Gamepad` variant
 					// maps to slot 0; `GamepadSlot`/`GamepadDisconnect` address slots directly.
 					// Pads are created lazily on the first frame for a slot and dropped on
@@ -1598,10 +1605,12 @@ pub(crate) async fn go_online(
 							// A client controller went away: neutralize to all-zero but keep the
 							// Box alive so the emulated device stays registered on the host —
 							// avoids reconnect churn when the client briefly re-enumerates pads.
+							InputEvent::Ds5Input { slot, report } => ds5_host.on_input(slot, &report),
 							InputEvent::GamepadDisconnect { slot } => {
 								if slot >= MAX_PADS {
 									return;
 								}
+								ds5_host.disconnect(slot);
 								if let Some((_, p)) = pads.get_mut(&slot) {
 									p.apply(&pulsar_core::input::GamepadState::default());
 								}
@@ -2269,9 +2278,11 @@ pub(crate) async fn go_online(
 					// File manager: FsList/FsGet from this client, answered through the
 					// same outbound queue (HOME-jailed; see fs_browse).
 					on_fs: Box::new(crate::fs_browse::make_on_fs(fs_out)),
-					// DualSense passthrough (Ds5Caps / Ds5Feature): not wired to a virtual pad
-					// yet (step 5), so ignored; FEAT_DS5 is not advertised either.
-					on_ds5: Box::new(|_| {}),
+					// DualSense passthrough: Ds5Caps / Ds5Feature for the slot's virtual pad.
+					on_ds5: Box::new({
+						let ds5_host = ds5_host.clone();
+						move |m| ds5_host.on_data(m)
+					}),
 					// The client's adaptive controller's per-window feedback (Phase 0 / 2.4):
 					// logged next to the host's own encode stats, and the one input to the FEC
 					// parity sizing (Phase 2.1) — the forwarder reads `fec_n` live. The parity is
