@@ -149,7 +149,7 @@ fn pin_peer_key(app: &AppHandle, relay: &str, id: &DeviceId, key: &PublicKey) {
 /// truncate-then-write (the worst outcome of a rename race is the tmp file being
 /// orphaned, not a zero-byte or half-written target). This prevents a crash during
 /// `std::fs::write` from leaving a partial/corrupt JSON that silently resets all pins.
-fn atomic_write_json(path: &std::path::Path, json: &str) {
+pub(crate) fn atomic_write_json(path: &std::path::Path, json: &str) {
 	let tmp = path.with_extension("json.tmp");
 	if std::fs::write(&tmp, json).is_ok() {
 		if let Err(e) = std::fs::rename(&tmp, path) {

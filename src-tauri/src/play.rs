@@ -254,7 +254,14 @@ pub(crate) async fn start_remote_play(
 	const AUTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(40);
 	let auth_result = tokio::time::timeout(
 		AUTH_TIMEOUT,
-		crate::auth::client_authenticate(&mut sess, &app, &pw_pending, &next_auth, &peer_label),
+		crate::auth::client_authenticate(
+			&mut sess,
+			&app,
+			&pw_pending,
+			&next_auth,
+			&peer_label,
+			crate::device_creds::saved_password(&app, &relay, &target).as_deref(),
+		),
 	)
 	.await
 	// The JS friendlyConnectError checks for the literal substring "connect-timed-out"

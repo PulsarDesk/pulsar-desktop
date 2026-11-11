@@ -100,6 +100,7 @@ windows-sys = { version = "0.61", features = [
 	"Win32_System_Threading", # also load-bearing for JOBOBJECT_EXTENDED_LIMIT_INFORMATION (IO_COUNTERS)
 	"Win32_System_JobObjects", # job.rs: kill orphaned ffmpeg/ffplay when Pulsar dies (needs Threading + Security)
 	"Win32_System_LibraryLoader",
+	"Win32_Security_Cryptography", # device_creds: DPAPI (CryptProtectData) for saved per-device connect passwords
 	"Win32_Security", # SECURITY_ATTRIBUTES (CreateMutexW single-instance); also CreateJobObjectW
 	"Win32_System_Diagnostics_Debug", # SetErrorMode: probe ffmpeg crashes must not pop a WER dialog
 	"Win32_System_DataExchange", # clipboard_sync: GetClipboardSequenceNumber (poll only on change)

@@ -801,11 +801,26 @@ pub(crate) async fn go_online(
 				let mut approved_view_only = false;
 				// The host USER clicked Allow (vs. a password / unattended let it in).
 				let mut by_operator = false;
-				let approved = if require_auth && !preauthorized {
-					if let Some(rem) = crate::auth::throttle::locked_out(&peer) {
-						tracing::warn!(%peer, secs = rem.as_secs(), "auth throttled: rejecting without prompt");
-						false
-					} else {
+				// Paired device (Settings → Güvenlik → Eşleşmiş cihazlar): its static key is in the
+				// trust store, so no password and no popup — the same no-MITM-safe pubkey identity
+				// as the pre-auth above. 2FA still applies (see `pairing::needs_totp`).
+				let paired = require_auth
+					&& !preauthorized
+					&& peer_pubkey.as_ref().is_some_and(|k| crate::pairing::is_paired(&app_h, k));
+				let gate = crate::pairing::gate(
+					require_auth,
+					preauthorized,
+					paired,
+					crate::auth::throttle::locked_out(&peer).is_some(),
+				);
+				if gate == crate::pairing::Gate::Paired {
+					tracing::info!(%peer, "paired device — skipping password + popup");
+				}
+				let approved = if gate == crate::pairing::Gate::Locked {
+					tracing::warn!(%peer, "auth throttled: rejecting without prompt");
+					false
+				} else if gate == crate::pairing::Gate::Challenge {
+					{
 						let host_pw = password_store.lock().unwrap().clone();
 						let custom_pw = app_h
 							.state::<crate::state::AppState>()
@@ -833,8 +848,7 @@ pub(crate) async fn go_online(
 						let cred = provided.verify(&mut session, &host_pw, &custom_pw).await;
 						let otp_accepted = cred == pulsar_core::service::Credential::OneTime
 							&& crate::commands::try_consume_otp(&app_h, &host_pw);
-						let custom_accepted = cred == pulsar_core::service::Credential::Fixed;
-						if !accepted.is_empty() && (otp_accepted || custom_accepted) {
+						if crate::pairing::password_ok(cred, otp_accepted, !accepted.is_empty()) {
 							true
 						} else {
 							// Count a NON-EMPTY wrong up-front guess here: otherwise an
@@ -884,12 +898,24 @@ pub(crate) async fn go_online(
 				// access let in must also send the authenticator code. One the host user
 				// approved on the popup doesn't (a human already vouched for it), and a 2nd
 				// pane of an already-authorized device is pre-authorized.
+				let auth_via = match gate {
+					crate::pairing::Gate::Open => crate::pairing::AuthVia::Unattended,
+					crate::pairing::Gate::PreAuth => crate::pairing::AuthVia::PreAuth,
+					crate::pairing::Gate::Paired => crate::pairing::AuthVia::Paired,
+					_ if by_operator => crate::pairing::AuthVia::Operator,
+					_ => crate::pairing::AuthVia::Password,
+				};
 				let totp_secret = app_h.state::<AppState>().config.lock().unwrap().totp_secret.clone();
-				let approved = if approved && !by_operator && !preauthorized && !totp_secret.is_empty() {
+				let approved = if approved && crate::pairing::needs_totp(auth_via, !totp_secret.is_empty()) {
 					crate::auth::host_totp(&mut session, &totp_secret, &peer).await
 				} else {
 					approved
 				};
+				if approved && auth_via == crate::pairing::AuthVia::Paired {
+					if let Some(pk) = peer_pubkey.as_ref() {
+						crate::pairing::touch(&app_h, pk);
+					}
+				}
 				if approved {
 					crate::auth::throttle::clear(&peer);
 					// Same-host co-op: mark this DEVICE authorized so a subsequent same-pubkey
@@ -945,6 +971,8 @@ pub(crate) async fn go_online(
 				let stats_out = out_tx.clone();
 				// A clone for the file-manager handler's replies (FsEntries / file stream).
 				let fs_out = out_tx.clone();
+				// A clone for the pairing handler's PairResult replies.
+				let pair_out = out_tx.clone();
 				// A clone the on_input gamepad path uses to forward the game's rumble back to
 				// the client (one dedicated thread per emulated DS4 pad).
 				let rumble_out = out_tx.clone();
@@ -2288,6 +2316,24 @@ pub(crate) async fn go_online(
 						let ds5_host = ds5_host.clone();
 						move |p| ds5_host.on_media(p)
 					}),
+					// Pairing (PairRequest / Unpair): trust this session's key, after the pairing
+					// popup unless this session proved a password (see `pairing`).
+					on_pair: Box::new(crate::pairing::make_on_pair(
+						app_h.clone(),
+						peer.clone(),
+						peer_pubkey,
+						auth_via,
+						pair_out,
+						pending.clone(),
+						next_req.clone(),
+						{
+							let peer_meta = peer_meta.clone();
+							let peer = peer.clone();
+							std::sync::Arc::new(move || {
+								peer_meta.lock().unwrap().get(&peer).and_then(|m| m.0.clone())
+							})
+						},
+					)),
 					// The client's adaptive controller's per-window feedback (Phase 0 / 2.4):
 					// logged next to the host's own encode stats, and the one input to the FEC
 					// parity sizing (Phase 2.1) — the forwarder reads `fec_n` live. The parity is

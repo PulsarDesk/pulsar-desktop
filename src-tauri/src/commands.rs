@@ -368,7 +368,14 @@ pub(crate) async fn list_remote_games(
 	// attempts.  Mirror the same guard already applied in start_remote_play.
 	let auth_result = tokio::time::timeout(
 		AUTH_TIMEOUT,
-		crate::auth::client_authenticate(&mut sess, &app, &pw_pending, &next_auth, &peer_label),
+		crate::auth::client_authenticate(
+			&mut sess,
+			&app,
+			&pw_pending,
+			&next_auth,
+			&peer_label,
+			crate::device_creds::saved_password(&app, &relay, &target).as_deref(),
+		),
 	)
 	.await
 	.map_err(|_| "connect-timed-out".to_string())?;
@@ -445,7 +452,14 @@ pub(crate) async fn list_remote_sources(
 		connect_target(&app, &node, disc, &target, net_mode, &relay).await?;
 	let auth_result = tokio::time::timeout(
 		AUTH_TIMEOUT,
-		crate::auth::client_authenticate(&mut sess, &app, &pw_pending, &next_auth, &peer_label),
+		crate::auth::client_authenticate(
+			&mut sess,
+			&app,
+			&pw_pending,
+			&next_auth,
+			&peer_label,
+			crate::device_creds::saved_password(&app, &relay, &target).as_deref(),
+		),
 	)
 	.await
 	.map_err(|_| "connect-timed-out".to_string())?;
@@ -486,7 +500,14 @@ pub(crate) async fn launch_remote_game(
 	// Same auth-timeout guard as list_remote_games and start_remote_play.
 	let auth_result = tokio::time::timeout(
 		AUTH_TIMEOUT,
-		crate::auth::client_authenticate(&mut sess, &app, &pw_pending, &next_auth, &peer_label),
+		crate::auth::client_authenticate(
+			&mut sess,
+			&app,
+			&pw_pending,
+			&next_auth,
+			&peer_label,
+			crate::device_creds::saved_password(&app, &relay, &target).as_deref(),
+		),
 	)
 	.await
 	.map_err(|_| "connect-timed-out".to_string())?;

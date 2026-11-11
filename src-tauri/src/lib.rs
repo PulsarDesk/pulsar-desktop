@@ -17,6 +17,7 @@ use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 mod adapt_memory;
 mod audio_io;
 mod auth;
+mod device_creds;
 mod avatar;
 mod caps;
 mod clipboard_sync;
@@ -67,6 +68,7 @@ mod split_join;
 mod state;
 mod toast;
 mod twofa;
+mod pairing;
 mod update_guard;
 mod util;
 mod viewer;
@@ -720,6 +722,14 @@ pub fn run() {
 			clipboard_sync::set_clipboard_sync,
 			twofa::totp_begin,
 			twofa::totp_verify,
+			pairing::list_paired_devices,
+			pairing::revoke_paired_device,
+			device_creds::device_creds,
+			device_creds::get_device_password,
+			device_creds::set_device_password,
+			device_creds::forget_device_creds,
+			device_creds::pair_device,
+			device_creds::unpair_device,
 			read_clipboard_text,
 			write_clipboard_text,
 			send_chat,

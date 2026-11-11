@@ -285,6 +285,13 @@ pub(crate) mod preauth {
 		}
 	}
 
+	/// Drop the recent-auth grace for this device (its pairing was revoked or removed): a
+	/// reconnect within [`RECENT_TTL`] must authenticate again. Live sessions keep their
+	/// refcount — kicking them is the Connections window's job.
+	pub(crate) fn forget_recent(pubkey: &[u8; 32]) {
+		RECENT.lock().unwrap().remove(pubkey);
+	}
+
 	/// go_online re-run hook: a fresh serve loop has no live sessions, so clear the set
 	/// (mirrors `reset_redirect_all`). Prevents a stranded pre-auth entry from a session
 	/// whose teardown was skipped by an abort surviving across reconnects.
@@ -616,6 +623,39 @@ pub(crate) async fn race_host_auth(
 	}
 }
 
+/// Host: ask the host user to PAIR a device (the pairing popup: `open_approval_window` with
+/// `pw = "pair"`). `Some(allow)` once they decide (the popup denies itself after 30 s),
+/// `None` when no popup could be shown (the concurrent-popup cap, a window error) or nobody
+/// answered in time.
+pub(crate) async fn ask_operator_pair(
+	app: &AppHandle,
+	pending: &Arc<Mutex<HashMap<u64, oneshot::Sender<AuthDecision>>>>,
+	next_req: &Arc<AtomicU64>,
+	peer: &str,
+) -> Option<bool> {
+	if OPEN_POPUP_COUNT.load(Ordering::Relaxed) >= MAX_CONCURRENT_POPUPS {
+		tracing::warn!(%peer, "pairing: concurrent popup cap reached — not asking");
+		return None;
+	}
+	let id = next_req.fetch_add(1, Ordering::SeqCst);
+	let (tx, rx) = oneshot::channel::<AuthDecision>();
+	pending.lock().unwrap().insert(id, tx);
+	let guard = open_approval_window(app, id, peer, "pair");
+	let out = if guard.is_some() {
+		match tokio::time::timeout(std::time::Duration::from_secs(40), rx).await {
+			Ok(Ok(d)) => Some(d.allow),
+			_ => None,
+		}
+	} else {
+		None
+	};
+	pending.lock().unwrap().remove(&id);
+	close_approval_window(app, id);
+	drop(guard);
+	tracing::info!(%peer, decision = ?out, "pairing: operator decision");
+	out
+}
+
 /// Which secret the client prompt asks for.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PromptKind {
@@ -669,8 +709,22 @@ pub(crate) async fn client_authenticate(
 	pw_pending: &Arc<Mutex<HashMap<u64, oneshot::Sender<Option<String>>>>>,
 	next_auth: &Arc<AtomicU64>,
 	peer: &str,
+	saved_pw: Option<&str>,
 ) -> Result<bool, String> {
-	send_auth(sess, "").await.map_err(auth_err)?;
+	// A password saved for this device (Devices → edit) goes up front, so a host that
+	// accepts it never opens the prompt. An old host can't take a PAKE password: fall back
+	// to the empty probe (the prompt then appears as before).
+	let mut upfront = saved_pw.filter(|p| !p.is_empty());
+	match upfront {
+		Some(pw) => match send_auth(sess, pw).await {
+			Err(pulsar_core::ConnError::PeerOutdated) => {
+				upfront = None;
+				send_auth(sess, "").await.map_err(auth_err)?
+			}
+			r => r.map_err(auth_err)?,
+		},
+		None => send_auth(sess, "").await.map_err(auth_err)?,
+	}
 	let mut prompt: Option<OpenPrompt> = None;
 	let cleanup = |id: u64| {
 		pw_pending.lock().unwrap().remove(&id);
@@ -735,11 +789,15 @@ pub(crate) async fn client_authenticate(
 				let out = if answered || probes >= PROBE_MAX {
 					recv_host_auth(sess).await
 				} else {
-					match tokio::time::timeout(PROBE_EVERY, recv_host_auth(sess)).await {
+					// A saved password went up front as a PAKE offer: an empty probe would drop
+					// the client's PAKE state (the host's reply could then never be confirmed and
+					// would count as a wrong guess), so wait longer and repeat the offer instead.
+					let every = if upfront.is_some() { UPFRONT_PROBE_EVERY } else { PROBE_EVERY };
+					match tokio::time::timeout(every, recv_host_auth(sess)).await {
 						Ok(out) => out,
 						Err(_) => {
 							probes += 1;
-							send_auth(sess, "").await.map_err(auth_err)?;
+							send_auth(sess, upfront.unwrap_or("")).await.map_err(auth_err)?;
 							continue;
 						}
 					}
@@ -814,6 +872,9 @@ pub(crate) async fn host_totp(session: &mut pulsar_core::Session, secret: &str, 
 /// and how many times (then it just waits, bounded by the caller's AUTH_TIMEOUT).
 const PROBE_EVERY: std::time::Duration = std::time::Duration::from_millis(800);
 const PROBE_MAX: u32 = 12;
+/// The re-probe interval while a saved password's PAKE offer is in flight (each repeat
+/// restarts the PAKE, so give one round trip plenty of room first).
+const UPFRONT_PROBE_EVERY: std::time::Duration = std::time::Duration::from_secs(3);
 /// How often it re-probes while its password prompt is open (the host user is deciding).
 const PROMPT_PROBE_EVERY: std::time::Duration = std::time::Duration::from_secs(3);
 
