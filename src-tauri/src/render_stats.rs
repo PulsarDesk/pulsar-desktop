@@ -248,6 +248,18 @@ pub(crate) fn start_render_reader(
 				match (it.next(), it.next()) {
 					(Some("ov"), Some("set")) => {
 						if let (Some(field), Some(val)) = (it.next(), it.next()) {
+							// DualSense headphone bar (`hpvol uuid,level`): apply at once on the pad
+							// thread's next block; the webview persists it (ui.headsetVolume).
+							// Not logged: a drag sends one per step.
+							if field == "hpvol" {
+								if let Some((uuid, v)) = val.split_once(',') {
+									if let Ok(v) = v.parse::<u8>() {
+										crate::ds5::headset::set_volume(uuid, v);
+									}
+								}
+								let _ = app.emit("overlay-cmd", (cur_id, field.to_string(), val.to_string()));
+								continue 'lines;
+							}
 							tracing::info!(field, val, "overlay-cmd from renderer");
 							// Mirror stream-selection fields into RenderSeed so a codec-switch
 							// respawn can replay the user's choices onto the fresh renderer

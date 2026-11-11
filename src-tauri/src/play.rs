@@ -1493,6 +1493,8 @@ pub(crate) async fn start_remote_play(
 			// order change). Also throttled to ~1 Hz (every 60 ticks × 16 ms) so a
 			// stale renderer that missed the initial line eventually gets it.
 			let mut prev_ctrls_line = String::new();
+			// Last `hpvol` line (DualSense headphone volume bars, ds5/headset.rs).
+			let mut prev_hp_line: Option<String> = None;
 			// ~1 Hz WALL-CLOCK keepalive. The loop is now event-driven (iterates at the pad's
 				// event rate, not a fixed tick), so a tick-modulo cadence would swing from ~0.25 Hz
 				// idle to >4 Hz at 1000 Hz — wrong for both the GamepadSlot resync (host holds the
@@ -1935,6 +1937,17 @@ pub(crate) async fn start_remote_play(
 					if changed {
 						prev_ctrls_line = ctrls_payload;
 					}
+				}
+				// DualSense headphone volume bars for the in-session menu: one per pad whose
+				// headphones carry this session's audio (`hpvol uuid:volume:rrggbb,...`).
+				let hp_line = crate::ds5::headset::overlay_line(&crate::ds5::headset::routed_pads(play_id));
+				if prev_hp_line.as_deref() != Some(hp_line.as_str()) || keepalive {
+					use std::io::Write as _;
+					if let Some(si) = ctrls_stdin.lock().unwrap().as_mut() {
+						let _ = writeln!(si, "hpvol {hp_line}");
+						let _ = si.flush();
+					}
+					prev_hp_line = Some(hp_line);
 				}
 				// Event-driven: block until the SDL manager signals a pad change (wakes at the
 					// pad's native rate, up to 1000Hz — no fixed cap), else every 16 ms to

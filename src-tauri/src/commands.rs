@@ -1001,6 +1001,16 @@ pub(crate) async fn set_ds5_settings(
 	Ok(())
 }
 
+/// Headphone level per DualSense uuid (0-100), from the UI store (`ui.headsetVolume`):
+/// the software gain on each pad's headset mix (`ds5/headset.rs`). Applies live.
+#[tauri::command]
+pub(crate) async fn set_ds5_headset_volume(
+	map: std::collections::HashMap<String, u8>,
+) -> Result<(), String> {
+	crate::ds5::headset::set_volumes(map);
+	Ok(())
+}
+
 #[tauri::command]
 pub(crate) async fn set_controller_rumble(
 	map: std::collections::HashMap<String, String>,

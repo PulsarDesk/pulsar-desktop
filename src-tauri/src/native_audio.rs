@@ -24,7 +24,7 @@
 //! The SDL device opens on the first packet, so a session without audio never holds it.
 //!
 //! Headphones in a driven DualSense's jack (`ds5/headset.rs`): each decoded packet goes to
-//! that pad instead (`Route`), and the client output stays silent; while a pad has the
+//! every routed pad of the session instead (`Route`), and the client output stays silent; while a pad has the
 //! headphones in but its route is shed, packets are dropped (no sound anywhere else). The
 //! switch fades the last local packet out, and the first one after the route ends back in;
 //! the device is re-buffered on return so the dry-queue logic doesn't count the pause.
@@ -237,8 +237,10 @@ impl Route {
 						return;
 					}
 				}
-				if let crate::ds5::headset::Tap::Pad(tx) = tap {
-					crate::ds5::headset::send(&tx, pcm);
+				if let crate::ds5::headset::Tap::Pads(txs) = tap {
+					for tx in &txs {
+						crate::ds5::headset::send(tx, pcm);
+					}
 				}
 			}
 		}

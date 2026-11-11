@@ -714,6 +714,8 @@ pub fn run() {
 						}
 					}
 				}
+				// DualSense headphone volume bars: `hpvol uuid:volume:rrggbb,...` (overlay.rs).
+				Some("hpvol") => crate::overlay::set_headsets(it.next().unwrap_or("")),
 				// Connected controller list (game mode only): `ctrls slot:kind:name[:uuid:target],...`
 				// 5-field form (T11+): slot:kind_tag:name:uuid:target
 				// 3-field form (legacy): slot:kind_tag:name  → uuid="" target="auto"

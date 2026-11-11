@@ -36,7 +36,7 @@ use pulsar_core::input::ds5::Ds5Features;
 use pulsar_core::service::{DataMsg, InputEvent};
 
 use super::client_audio::{MediaTx, PadAudio};
-use super::headset::{notice_key, PadHeadset};
+use super::headset::{notice_key, notice_text as headset_notice, PadHeadset};
 use super::hid::{enumerate, Ds5Device, SdlHid};
 use super::policy::{notice_text, PadPolicy};
 
@@ -173,6 +173,7 @@ impl Ds5Client {
 			let stop = Arc::new(AtomicBool::new(false));
 			let ctx = PadCtx {
 				slot: *slot,
+				uuid: uuid.clone(),
 				dev,
 				rx,
 				stop: stop.clone(),
@@ -222,6 +223,15 @@ pub fn on_mic(play_id: u64, slot: u8, on: bool) {
 	send(play_id, slot, Cmd::Mic(on));
 }
 
+/// How many pads the passthrough drives in play session `play_id`.
+fn pad_count(play_id: u64) -> usize {
+	registry()
+		.lock()
+		.unwrap()
+		.get(&play_id)
+		.map_or(0, |c| c.0.lock().unwrap().pads.len())
+}
+
 fn send(play_id: u64, slot: u8, cmd: Cmd) {
 	let reg = registry().lock().unwrap();
 	if let Some(c) = reg.get(&play_id) {
@@ -260,6 +270,7 @@ fn triggers_off() -> SetState {
 }
 
 struct PadCtx {
+	uuid: String,
 	slot: u8,
 	dev: Ds5Device,
 	rx: Receiver<Cmd>,
@@ -320,7 +331,8 @@ impl PadCtx {
 			}
 		}
 		let mut audio = PadAudio::new(slot, &self.dev, self.media_tx.clone());
-		let mut headset = PadHeadset::new(self.play_id, slot, self.dev.transport);
+		let mut headset =
+			PadHeadset::new(self.play_id, slot, self.uuid.clone(), self.dev.transport);
 		let mut buf = [0u8; 600];
 		let mut latest: Option<Ds5Report> = None;
 		let mut sent: Option<(Ds5Report, Instant)> = None;
@@ -331,7 +343,10 @@ impl PadCtx {
 		while !self.stop.load(Ordering::Relaxed) {
 			while let Ok(cmd) = self.rx.try_recv() {
 				match cmd {
-					Cmd::Output(s) => pad.set_output(s),
+					Cmd::Output(s) => {
+						headset.on_host_state(&s);
+						pad.set_output(s);
+					}
 					Cmd::Media(Ds5Media::Slot {
 						haptics, speaker, ..
 					}) => {
@@ -379,7 +394,10 @@ impl PadCtx {
 			let was_routed = headset.routed();
 			for sw in headset.tick(policy.headset(), &mut pad, &mut audio, &policy.features()) {
 				if let Some(k) = notice_key(sw, was_routed) {
-					crate::play_notice::push(self.play_id, crate::i18n::t(k));
+					crate::play_notice::push(
+						self.play_id,
+						headset_notice(k, slot, pad_count(self.play_id)),
+					);
 				}
 			}
 			policy.set_headset_live(headset.routed());
