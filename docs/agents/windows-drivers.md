@@ -98,3 +98,46 @@ update marker does not block the launch. CI builds it in the "Build update windo
 A local full `tauri build` needs it too:
 `cargo build --release -p pulsar-setup && cp target/release/pulsar-setup.exe src-tauri/resources/pulsar-update.exe`.
 Mock run for screenshots: `pulsar-setup --updating 0.0.0 --mock-updating`.
+
+## Mouse input inside a Duo seat (investigated 2026-11-11)
+
+Report: in The Witcher 3 (`witcher3.exe`, dx12, imports DINPUT8 + Raw Input + `SetCursorPos`)
+on a host running in a Duo seat (`rdp-tcp#0`, session 2), with the host pointer lock on,
+the camera spun without stopping after a tiny mouse move.
+
+Checked against the live seat with the throwaway probes in `scripts/windows/`. Each probe
+ran as a scheduled task inside the seat (`schtasks /create … /it /ru <seat user>`; the SYSTEM
+case used `CreateProcessAsUser` into the seat, as `pulsar-sysagent` does):
+
+- Relative `SendInput` (`MOUSEEVENTF_MOVE`, no ABSOLUTE flag) from the seat user and from
+  SYSTEM: Raw Input sees **relative** packets (`usFlags = 0`, `lLastX/lLastY` = the
+  injected delta, `hDevice = NULL`). The cursor moves, and a `SetCursorPos` recenter holds.
+- DirectInput8 system mouse (background, non-exclusive, relative format):
+  `DIPROP_AXISMODE = REL`, and `GetDeviceState` returns the injected deltas, then 0 when idle.
+- Seat geometry is consistent: one 1920×1080 monitor at (0,0), and the clip covers the
+  whole screen. So the clamp in `pointer_relative` (`SetCursorPos` back onto the streamed
+  monitor) is a no-op there.
+- While idle, the seat produced no mouse packets from other devices (DuoRdp, Duo's own
+  Sunshine).
+
+So the theory that "RDS turns injected relative moves into absolute packets" is **false**
+for Duo 1.6 seats. The cause of the spin is still open. The next step is to capture during
+a reproduction: run `rawmouse-probe.ps1 -Listen 20000` in the seat while the game spins.
+It logs every packet the game can see, with its device and the cursor position.
+
+What Duo offers for input (Duo 1.6 binaries, static analysis):
+
+- `DuoController.dll` exports only `DuoController_{Initialize,Uninitialize,CreateController,
+  SendReport,RemoveController}`, for controller types 0–3 (Xbox One, DS4, DualSense, Edge).
+  It has **no mouse or keyboard device**.
+- Duo's bundled `sunshine.exe` runs as SYSTEM in each seat and injects with plain
+  `SendInput`. It uses synthetic pointer devices only for touch and pen. This is the same
+  path as Pulsar.
+- `DuoRds.dll` is a WRDS protocol provider (`GetInputHandles`, IPC `Global\Duo_RDS_*` for
+  connect/config only). `DuoRdp.exe` is a headless aardwolf RDP client that keeps the seat
+  connected. `DuoAcRes64.dll` (the per-process shim) hooks HID opens, registry and the
+  Steam IPC, not mouse input.
+
+No other relative mouse source exists in a seat: ViGEm has no mouse, and no virtual HID
+mouse driver is installed. Duo's per-seat device mechanism covers pads only, so Pulsar
+keeps `SendInput` for the mouse in Duo seats.
