@@ -195,21 +195,6 @@
 {:else}
 	<div class="head"><h1>{t('settings.title')}</h1><p class="sub">{t('settings.sub')}</p></div>
 {/if}
-<div class="search">
-	<Icon name="search" size={15} />
-	<input
-		bind:this={searchEl}
-		bind:value={query}
-		type="search"
-		placeholder={t('settings.searchPlaceholder')}
-		aria-label={t('settings.search')}
-		spellcheck="false"
-		autocomplete="off"
-	/>
-	{#if searching}
-		<button class="clear" aria-label={t('settings.searchClear')} onclick={() => { query = ''; searchEl?.focus(); }}><Icon name="x" size={14} /></button>
-	{/if}
-</div>
 <div class="layout">
 	<div class="rail">
 		{#each tabs as tb (tb.id)}
@@ -219,6 +204,23 @@
 		{/each}
 	</div>
 
+	<!-- Right column: the search box on top (level with the tab rail), the content card below. -->
+	<div class="main">
+		<div class="search">
+			<Icon name="search" size={15} />
+			<input
+				bind:this={searchEl}
+				bind:value={query}
+				type="search"
+				placeholder={t('settings.searchPlaceholder')}
+				aria-label={t('settings.search')}
+				spellcheck="false"
+				autocomplete="off"
+			/>
+			{#if searching}
+				<button class="clear" aria-label={t('settings.searchClear')} onclick={() => { query = ''; searchEl?.focus(); }}><Icon name="x" size={14} /></button>
+			{/if}
+		</div>
 	<div class="card" bind:this={cardEl}>
 		{#if searching}
 			<!-- Every tab at once; settingsSearch.ts hides what doesn't match. -->
@@ -259,6 +261,7 @@
 			<div class="saveerr selectable" role="alert">{t('settings.saveFailed')} · {saveErr}</div>
 		{/if}
 	</div>
+	</div>
 </div>
 </div>
 
@@ -278,14 +281,20 @@
 		align-items: center;
 		gap: 8px;
 		max-width: 420px;
-		margin: -12px 0 18px;
+		margin: 0 0 14px;
 		padding: 8px 12px;
 		border: 1px solid var(--border-strong);
 		border-radius: var(--r-sm);
 		background: var(--surface);
 		color: var(--text-faint);
 	}
-	.settings.fill .search {
+	.main {
+		display: flex;
+		flex-direction: column;
+		min-width: 0;
+		min-height: 0;
+	}
+	.search {
 		flex: none;
 	}
 	.search:focus-within {
@@ -395,6 +404,7 @@
 		position: static;
 	}
 	.settings.fill .card {
+		flex: 1;
 		min-height: 0;
 		overflow-y: auto;
 	}
