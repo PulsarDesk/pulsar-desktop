@@ -1116,6 +1116,14 @@
 		lossPct={media.lossPct}
 		menu={native && ui.statusBarMenu}
 		onMenu={() => dock.toggleOverlay()}
+		buttons={ui.statusButtons}
+		speakerOn={controls.transmitAudio}
+		micOn={sidechan.micOn}
+		micAvailable={mode === 'remote'}
+		hostMuted={controls.muteHost}
+		onSpeaker={controls.toggleTransmit}
+		onMic={sidechan.toggleMic}
+		onHostMute={controls.toggleMute}
 	/>
 {/if}
 

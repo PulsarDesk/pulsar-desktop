@@ -15,12 +15,17 @@
 	import { caps, decodeAvailable, encoderAvailable } from '#lib/caps.svelte.js';
 	import { gameStore, saveGames } from '#lib/games.svelte.js';
 	import { t } from '#lib/i18n.svelte.js';
-	import { STATUS_FIELDS } from '../Session/StatusBar.svelte';
+	import { STATUS_FIELDS, STATUS_BUTTONS } from '../Session/StatusBar.svelte';
 
 	// Status bar field picker: keep the canonical order whatever the click order was.
 	function toggleField(f: string) {
 		const on = ui.statusFields.includes(f);
 		ui.statusFields = STATUS_FIELDS.filter((x) => (x === f ? !on : ui.statusFields.includes(x)));
+		saveUi();
+	}
+	function toggleButton(b: string) {
+		const on = ui.statusButtons.includes(b);
+		ui.statusButtons = STATUS_BUTTONS.filter((x) => (x === b ? !on : ui.statusButtons.includes(x)));
 		saveUi();
 	}
 	// Same-host co-op component (ProtoInput) status, refreshed when the tab opens.
@@ -144,6 +149,15 @@
 		<div class="chips" role="group" aria-label={t('settings.statusFields')}>
 			{#each STATUS_FIELDS as f (f)}
 				<button class="chip" class:on={ui.statusFields.includes(f)} aria-pressed={ui.statusFields.includes(f)} onclick={() => toggleField(f)}>{t(`status.${f}`)}</button>
+			{/each}
+		</div>
+	</div>
+</div>
+<div class="srow sub">
+	<div class="st"><b>{t('settings.statusButtons')}</b><span>{t('settings.statusButtonsDesc')}</span>
+		<div class="chips" role="group" aria-label={t('settings.statusButtons')}>
+			{#each STATUS_BUTTONS as b (b)}
+				<button class="chip" class:on={ui.statusButtons.includes(b)} aria-pressed={ui.statusButtons.includes(b)} onclick={() => toggleButton(b)}>{t('status.btnName.' + b)}</button>
 			{/each}
 		</div>
 	</div>

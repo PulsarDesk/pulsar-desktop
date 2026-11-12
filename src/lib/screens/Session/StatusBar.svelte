@@ -2,6 +2,10 @@
 	/** Fields the session status bar can show (Settings → Görüntü picks which, in this order). */
 	export const STATUS_FIELDS = ['conn', 'res', 'fps', 'codec', 'encoder', 'decoder', 'latency', 'decode', 'bitrate', 'loss'] as const;
 	export type StatusField = (typeof STATUS_FIELDS)[number];
+	/** Quick audio toggles the bar can carry (issue #9): host audio here, my mic to the host,
+	 * the host's own speakers. Same state as the session menu's Ses toggles. */
+	export const STATUS_BUTTONS = ['speaker', 'mic', 'hostmute'] as const;
+	export type StatusButton = (typeof STATUS_BUTTONS)[number];
 	/** Height of the bar in CSS px — the video area shrinks by this much (nothing covers it). */
 	export const STATUS_BAR_H = 26;
 </script>
@@ -28,7 +32,15 @@
 		mbps,
 		lossPct,
 		menu = false,
-		onMenu
+		onMenu,
+		buttons = [],
+		speakerOn = true,
+		micOn = false,
+		micAvailable = false,
+		hostMuted = false,
+		onSpeaker,
+		onMic,
+		onHostMute
 	}: {
 		fields: readonly string[];
 		conn: 'direct' | 'relay';
@@ -43,7 +55,32 @@
 		lossPct: number;
 		menu?: boolean;
 		onMenu?: () => void;
+		buttons?: readonly string[];
+		speakerOn?: boolean;
+		micOn?: boolean;
+		/** The mic side channel exists here (remote mode). */
+		micAvailable?: boolean;
+		hostMuted?: boolean;
+		onSpeaker?: () => void;
+		onMic?: () => void;
+		onHostMute?: () => void;
 	} = $props();
+
+	type Btn = { key: string; icon: string; on: boolean; label: string; run?: () => void };
+	const quick = $derived.by(() => {
+		const out: Btn[] = [];
+		for (const b of STATUS_BUTTONS) {
+			if (!buttons.includes(b)) continue;
+			if (b === 'speaker')
+				out.push({ key: b, icon: 'speaker', on: speakerOn, label: t(speakerOn ? 'status.btn.speakerOn' : 'status.btn.speakerOff'), run: onSpeaker });
+			else if (b === 'mic' && micAvailable)
+				out.push({ key: b, icon: 'mic', on: micOn, label: t(micOn ? 'status.btn.micOn' : 'status.btn.micOff'), run: onMic });
+			// "on" = the host's speakers play (not muted).
+			else if (b === 'hostmute')
+				out.push({ key: b, icon: 'monitor', on: !hostMuted, label: t(hostMuted ? 'status.btn.hostMuted' : 'status.btn.hostPlays'), run: onHostMute });
+		}
+		return out;
+	});
 
 	const items = $derived.by(() => {
 		const out: { key: string; label: string; text: string }[] = [];
@@ -74,6 +111,12 @@
 			<span class="item" title={it.label}><span class="k">{it.label}</span> {it.text}</span>
 		{/each}
 	</div>
+	{#each quick as b (b.key)}
+		<button class="qbtn" class:off={!b.on} aria-pressed={b.on} aria-label={b.label} title={b.label} onclick={() => b.run?.()}>
+			<Icon name={b.icon} size={14} />
+			{#if !b.on}<span class="slash" aria-hidden="true"></span>{/if}
+		</button>
+	{/each}
 	{#if menu}
 		<button class="menu" aria-label={t('session.overlayBtn')} title={t('session.overlayBtn')} onclick={() => onMenu?.()}>
 			<Icon name="menu" size={15} />
@@ -129,5 +172,36 @@
 	}
 	.menu:hover {
 		background: oklch(1 0 0 / 0.1);
+	}
+	.qbtn {
+		position: relative;
+		flex-shrink: 0;
+		display: grid;
+		place-items: center;
+		width: 24px;
+		height: 20px;
+		padding: 0;
+		border: none;
+		border-radius: 5px;
+		background: transparent;
+		color: inherit;
+		cursor: pointer;
+	}
+	.qbtn:hover {
+		background: oklch(1 0 0 / 0.1);
+	}
+	/* Off: red-tinted and crossed out. */
+	.qbtn.off {
+		color: oklch(0.68 0.16 25);
+	}
+	.slash {
+		position: absolute;
+		left: 4px;
+		right: 4px;
+		top: 50%;
+		height: 1.6px;
+		background: currentColor;
+		transform: rotate(-40deg);
+		border-radius: 1px;
 	}
 </style>
