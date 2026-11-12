@@ -6,6 +6,8 @@
 	import { t } from '#lib/i18n.svelte.js';
 	import { saveTick, configTick } from '#lib/settings.svelte.js';
 	import { navContainer } from '#lib/gamepadNav.svelte.js';
+	import { closeOnEscape } from '#lib/escapeStack.js';
+	import { applySettingsFilter, clearSettingsHighlight } from '#lib/settingsSearch.js';
 	import DisplayTab from './Settings/DisplayTab.svelte';
 	import NetworkTab from './Settings/NetworkTab.svelte';
 	import SecurityTab from './Settings/SecurityTab.svelte';
@@ -16,6 +18,50 @@
 	let { onReconnect, padNav = false }: { onReconnect?: () => void; padNav?: boolean } = $props();
 
 	let tab = $state<'display' | 'network' | 'security' | 'general'>('display');
+
+	// Search across every tab (issue #6): while a query is set, all tabs render stacked and
+	// settingsSearch.ts hides what doesn't match. Ctrl/Cmd+F focuses the box, Esc clears it.
+	let query = $state('');
+	let searchEl = $state<HTMLInputElement | null>(null);
+	let cardEl = $state<HTMLDivElement | null>(null);
+	let found = $state(-1);
+	const searching = $derived(query.trim().length > 0);
+	$effect(() => {
+		const q = query;
+		const el = cardEl;
+		if (!el) return;
+		const run = () => (found = applySettingsFilter(el, q));
+		run();
+		if (!q.trim()) return;
+		// Rows that appear while searching (a toggle revealing sub-rows, config loading) get
+		// filtered too.
+		const mo = new MutationObserver(() => {
+			mo.disconnect();
+			run();
+			mo.observe(el, { childList: true, subtree: true });
+		});
+		mo.observe(el, { childList: true, subtree: true });
+		return () => mo.disconnect();
+	});
+	$effect(() => clearSettingsHighlight);
+	$effect(() => {
+		if (searching) return closeOnEscape(() => (query = ''));
+	});
+	$effect(() => {
+		const onKey = (e: KeyboardEvent) => {
+			if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'f') {
+				e.preventDefault();
+				searchEl?.focus();
+				searchEl?.select();
+			}
+		};
+		window.addEventListener('keydown', onKey);
+		return () => window.removeEventListener('keydown', onKey);
+	});
+	function pickTab(id: typeof tab) {
+		query = '';
+		tab = id;
+	}
 	let config = $state<Config | null>(null);
 	let saveErr = $state('');
 	let detected = $state<string[]>([]);
@@ -149,17 +195,51 @@
 {:else}
 	<div class="head"><h1>{t('settings.title')}</h1><p class="sub">{t('settings.sub')}</p></div>
 {/if}
+<div class="search">
+	<Icon name="search" size={15} />
+	<input
+		bind:this={searchEl}
+		bind:value={query}
+		type="search"
+		placeholder={t('settings.searchPlaceholder')}
+		aria-label={t('settings.search')}
+		spellcheck="false"
+		autocomplete="off"
+	/>
+	{#if searching}
+		<button class="clear" aria-label={t('settings.searchClear')} onclick={() => { query = ''; searchEl?.focus(); }}><Icon name="x" size={14} /></button>
+	{/if}
+</div>
 <div class="layout">
 	<div class="rail">
 		{#each tabs as tb (tb.id)}
-			<button class="tab" class:on={tab === tb.id} onclick={() => (tab = tb.id)}>
+			<button class="tab" class:on={!searching && tab === tb.id} onclick={() => pickTab(tb.id)}>
 				<Icon name={tb.icon} size={17} />{t('settings.tab.' + tb.id)}
 			</button>
 		{/each}
 	</div>
 
-	<div class="card">
-		{#if tab === 'display'}
+	<div class="card" bind:this={cardEl}>
+		{#if searching}
+			<!-- Every tab at once; settingsSearch.ts hides what doesn't match. -->
+			{#each tabs as tb (tb.id)}
+				<section class="tabpane" data-tab={tb.id}>
+					<div class="tabhead"><Icon name={tb.icon} size={15} />{t('settings.tab.' + tb.id)}</div>
+					{#if tb.id === 'display'}
+						<DisplayTab bind:config {detected} {saveConfig} {toggleTransmit} {toggleMute} {clientOnly} />
+					{:else if tb.id === 'network'}
+						<NetworkTab bind:config {saveConfig} {setMode} {onReconnect} />
+					{:else if tb.id === 'security'}
+						<SecurityTab bind:config {toggleUnattended} {saveConfig} />
+					{:else}
+						<GeneralTab bind:config {saveConfig} {setAvatar} />
+					{/if}
+				</section>
+			{/each}
+			{#if found === 0}
+				<p class="noresult">{t('settings.searchEmpty', { q: query.trim() })}</p>
+			{/if}
+		{:else if tab === 'display'}
 			<DisplayTab
 				bind:config
 				{detected}
@@ -189,6 +269,71 @@
 {/if}
 
 <style>
+	/* The search filter hides nodes with the `hidden` attribute; rows set their own display. */
+	.card :global([hidden]) {
+		display: none !important;
+	}
+	.search {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		max-width: 420px;
+		margin: -12px 0 18px;
+		padding: 8px 12px;
+		border: 1px solid var(--border-strong);
+		border-radius: var(--r-sm);
+		background: var(--surface);
+		color: var(--text-faint);
+	}
+	.settings.fill .search {
+		flex: none;
+	}
+	.search:focus-within {
+		border-color: var(--accent);
+	}
+	.search input {
+		flex: 1;
+		min-width: 0;
+		border: none;
+		outline: none;
+		background: transparent;
+		color: var(--text);
+		font-family: var(--font-sans);
+		font-size: 13.5px;
+	}
+	.search input::-webkit-search-cancel-button {
+		display: none;
+	}
+	.search .clear {
+		display: grid;
+		place-items: center;
+		padding: 2px;
+		border: none;
+		background: transparent;
+		color: inherit;
+		cursor: pointer;
+	}
+	.tabpane + .tabpane {
+		margin-top: 26px;
+	}
+	.tabhead {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		font-size: 15px;
+		font-weight: 700;
+		color: var(--text);
+		margin-bottom: 4px;
+	}
+	.noresult {
+		color: var(--text-muted);
+		font-size: 13.5px;
+		padding: 18px 0;
+	}
+	:global(::highlight(pulsar-settings-search)) {
+		background-color: var(--accent-soft);
+		color: var(--accent-ink);
+	}
 	.head {
 		margin-bottom: 28px;
 	}

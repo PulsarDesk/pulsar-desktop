@@ -24,4 +24,20 @@ describe('Settings screen', () => {
 		// restore for other tests
 		await api.setConfig({ ...cfg, network_mode: 'auto' });
 	});
+
+	it('search shows matching settings from every tab and clearing it restores the tabs', async () => {
+		render(Settings);
+		const box = screen.getByRole('searchbox', { name: 'Ayarlarda ara' });
+		await fireEvent.input(box, { target: { value: 'relay sunucusu' } });
+		// The Ağ tab's relay row is reachable without opening the tab, still editable.
+		const relay = await screen.findByLabelText('Relay sunucusu adresi');
+		expect(relay.closest('[hidden]')).toBeNull();
+		// A Yayın-tab setting is filtered out.
+		const codec = screen.getByText('Video kodek');
+		expect(codec.closest('[hidden]')).not.toBeNull();
+		await fireEvent.input(box, { target: { value: 'qqqqzzzz' } });
+		expect(await screen.findByText(/ile eşleşen ayar yok/)).toBeInTheDocument();
+		await fireEvent.click(screen.getByRole('button', { name: 'Aramayı temizle' }));
+		expect(screen.queryByText(/ile eşleşen ayar yok/)).not.toBeInTheDocument();
+	});
 });
