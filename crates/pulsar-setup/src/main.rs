@@ -75,6 +75,21 @@ fn main() {
 	} else {
 		"Pulsar Kurulum"
 	};
+	// One setup window at a time: a second double-click (or a second copy of the installer)
+	// used to open another window that raced the first over the same files. The later one
+	// brings the open window forward and quits. Mock runs (UI walkthroughs) are exempt.
+	#[cfg(windows)]
+	let _single = if mock.is_none() {
+		match single_instance() {
+			Some(guard) => Some(guard),
+			None => {
+				focus_existing();
+				return;
+			}
+		}
+	} else {
+		None
+	};
 	let opts = eframe::NativeOptions {
 		viewport: egui::ViewportBuilder::default()
 			.with_title(title)
@@ -100,6 +115,54 @@ fn main() {
 			Ok(Box::new(app))
 		}),
 	);
+}
+
+/// Holds the "a setup window is open" mutex for the process lifetime. `None` = another setup
+/// window (install, uninstall or the update window) is already open in this session.
+#[cfg(windows)]
+struct SingleInstance(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl Drop for SingleInstance {
+	fn drop(&mut self) {
+		unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
+	}
+}
+
+#[cfg(windows)]
+fn single_instance() -> Option<SingleInstance> {
+	use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+	use windows_sys::Win32::System::Threading::CreateMutexW;
+	// Per session (`Local\\`): the install is per user, and another user's setup is not ours.
+	let name: Vec<u16> = "Local\\PulsarSetupWindow\0".encode_utf16().collect();
+	// SAFETY: plain Win32 call; the handle is closed by SingleInstance's Drop.
+	let h = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+	if h.is_null() {
+		return Some(SingleInstance(h)); // can't tell → don't block the user
+	}
+	if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+		unsafe { windows_sys::Win32::Foundation::CloseHandle(h) };
+		return None;
+	}
+	Some(SingleInstance(h))
+}
+
+/// Bring the already-open setup window to the front (whichever mode it is in).
+#[cfg(windows)]
+fn focus_existing() {
+	use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE};
+	for t in ["Pulsar Kurulum", "Pulsar Kaldırma", "Pulsar Güncelleme"] {
+		let w: Vec<u16> = t.encode_utf16().chain(std::iter::once(0)).collect();
+		// SAFETY: plain Win32 calls with a NUL-terminated title.
+		let hwnd = unsafe { FindWindowW(std::ptr::null(), w.as_ptr()) };
+		if !hwnd.is_null() {
+			unsafe {
+				ShowWindow(hwnd, SW_RESTORE);
+				SetForegroundWindow(hwnd);
+			}
+			return;
+		}
+	}
 }
 
 /// Windows 11: rounded corners (and the system shadow) for the frameless window. Windows 10
@@ -180,6 +243,8 @@ struct SetupApp {
 	wv2_rx: Option<Receiver<Result<(), String>>>,
 	/// The version a previous install registered: the welcome screen becomes an update.
 	update_from: Option<String>,
+	/// The folder the user picked with "Değiştir" can't be written (shown under the box).
+	dir_err: Option<String>,
 	/// Pulsar is running (an update closes it first — the welcome screen says so).
 	running: bool,
 	have_payload: bool,
@@ -197,6 +262,41 @@ struct SetupApp {
 }
 
 impl SetupApp {
+	/// "Değiştir": pick the install folder. A picked folder not named Pulsar gets a `Pulsar`
+	/// subfolder (installers install INTO a folder you choose the parent of). The choice must be
+	/// writable without admin rights — this installer is per user (no UAC); Program Files is not.
+	fn pick_dir(&mut self) {
+		#[cfg(windows)]
+		{
+			let start = self.dir.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| self.dir.clone());
+			let Some(picked) = rfd::FileDialog::new().set_title("Pulsar'ın kurulacağı klasörü seç").set_directory(&start).pick_folder()
+			else {
+				return;
+			};
+			let dir = if picked.file_name().is_some_and(|n| n.eq_ignore_ascii_case("Pulsar")) {
+				picked
+			} else {
+				picked.join("Pulsar")
+			};
+			if self.mock.is_some() {
+				self.dir = dir;
+				self.dir_err = None;
+				return;
+			}
+			match install::writable(&dir) {
+				Ok(()) => {
+					self.dir = dir;
+					self.dir_err = None;
+				}
+				Err(e) => {
+					self.dir_err = Some(format!(
+						"Bu klasöre yazılamıyor ({e}). Yönetici izni gerektirmeyen bir yer seç, örneğin kullanıcı klasörün."
+					));
+				}
+			}
+		}
+	}
+
 	fn new(uninstall: bool, mock: Option<mock::Mock>) -> Self {
 		let (update_from, running, have_payload) = match mock {
 			Some(m) => (m.update.then(|| "0.15.2".to_string()), m.running, !m.no_payload),
@@ -220,6 +320,7 @@ impl SetupApp {
 			wv2: None,
 			wv2_rx: None,
 			update_from,
+			dir_err: None,
 			running,
 			have_payload,
 			copied: false,
@@ -686,7 +787,26 @@ impl SetupApp {
 					}
 					y += ui::banner(&p, at(PAD, y), bw, t, Tone::Info, Icon::Info, None, &s) + gap;
 				}
-				y += ui::path_box(&p, at(PAD, y), bw, t, &self.dir.display().to_string()) + gap;
+				// A fresh install can go anywhere the user can write; an update stays put.
+				let editable = self.update_from.is_none() && self.mock.is_none_or(|m| !m.update);
+				let (h, change) = ui::path_box_edit(
+					ui,
+					at(PAD, y),
+					bw,
+					t,
+					&self.dir.display().to_string(),
+					editable,
+					ui.scope_id().with("dir"),
+				);
+				y += h;
+				if change {
+					self.pick_dir();
+				}
+				if let Some(e) = &self.dir_err {
+					y += 4.0;
+					y += ui::draw_job(&p, at(PAD, y), ui::text_job(e, ui::regular(11.5), t.warn_text, 15.0, bw, 2, true)).y;
+				}
+				y += gap;
 				let (_, clicked) =
 					ui::checkbox(ui, at(PAD, y), t, "Masaüstüne kısayol ekle", self.desktop_shortcut, ui.scope_id().with("desktop"));
 				if clicked {

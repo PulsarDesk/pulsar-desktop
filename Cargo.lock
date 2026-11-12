@@ -4924,7 +4924,6 @@ dependencies = [
 [[package]]
 name = "pulsar-core"
 version = "0.1.0-dev.27"
-source = "git+https://github.com/PulsarDesk/pulsar-core#af3ecb90120a305b57672c23aead27b7717fc742"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -5017,6 +5016,7 @@ version = "0.1.0-dev.27"
 dependencies = [
  "eframe",
  "raw-window-handle",
+ "rfd",
  "windows-sys 0.61.2",
  "winresource",
  "zip 9.0.5",
@@ -8776,3 +8776,11 @@ dependencies = [
  "syn 3.0.9",
  "winnow 1.0.4",
 ]
+
+[[patch.unused]]
+name = "reed-solomon-erasure"
+version = "6.0.0"
+
+[[patch.unused]]
+name = "vigem-client"
+version = "0.1.4"

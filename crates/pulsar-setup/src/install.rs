@@ -38,6 +38,21 @@ pub fn version() -> &'static str {
 	env!("CARGO_PKG_VERSION")
 }
 
+/// `dir` can be created and written by this (non-elevated) user: a probe file is written and
+/// removed. A folder created only for the probe is removed again.
+#[cfg_attr(not(windows), allow(dead_code))] // the picker is Windows-only, like the installer
+pub fn writable(dir: &Path) -> Result<(), String> {
+	let existed = dir.exists();
+	std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+	let probe = dir.join(".pulsar-write-test");
+	let res = std::fs::write(&probe, b"ok").map_err(|e| e.to_string());
+	let _ = std::fs::remove_file(&probe);
+	if !existed {
+		let _ = std::fs::remove_dir(dir);
+	}
+	res
+}
+
 /// Default per-user install dir: `%LOCALAPPDATA%\Programs\Pulsar` (the Discord /
 /// VS Code user-install convention — no UAC needed).
 pub fn default_install_dir() -> PathBuf {
@@ -566,5 +581,15 @@ fn registry_value(name: &str) -> Option<String> {
 	{
 		let _ = name;
 		None
+	}
+}
+
+#[cfg(test)]
+mod writable_tests {
+	#[test]
+	fn a_fresh_folder_is_probed_and_left_as_it_was() {
+		let dir = std::env::temp_dir().join(format!("pulsar-writable-{}", std::process::id())).join("Pulsar");
+		assert!(super::writable(&dir).is_ok());
+		assert!(!dir.exists(), "a folder created only for the probe is removed again");
 	}
 }

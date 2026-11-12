@@ -480,6 +480,41 @@ pub fn path_box(p: &Painter, top_left: Pos2, width: f32, t: &Tok, path: &str) ->
 	y0 + h - top_left.y
 }
 
+/// `path_box` with a "Değiştir" button at its right edge (fresh installs; an update keeps the
+/// registered folder, so it passes `editable = false` and the button is not drawn).
+/// Returns (height, change clicked).
+pub fn path_box_edit(ui: &mut Ui, top_left: Pos2, width: f32, t: &Tok, path: &str, editable: bool, id: egui::Id) -> (f32, bool) {
+	if !editable {
+		return (path_box(ui.painter(), top_left, width, t, path), false);
+	}
+	let p = ui.painter().clone();
+	let label = "Değiştir";
+	let bw = text_width(&p, label, semibold(12.5)) + 20.0;
+	let lh = draw_job(&p, top_left, text_job("Kurulum yeri", semibold(12.0), t.muted, 16.0, width, 1, false)).y;
+	let y0 = top_left.y + lh + 6.0;
+	let inner_w = width - 24.0 - 16.0 - 10.0 - bw - 8.0;
+	let job = text_job(path, mono(12.0), t.text, 17.0, inner_w, 2, true);
+	let g = p.layout_job(job);
+	let h = g.size().y.max(17.0) + 18.0;
+	let rect = Rect::from_min_size(Pos2::new(top_left.x, y0), Vec2::new(width, h));
+	p.rect_filled(rect, CornerRadius::same(8), t.sunken);
+	p.rect_stroke(rect, CornerRadius::same(8), Stroke::new(1.0, t.border), StrokeKind::Inside);
+	icon(&p, Icon::Folder, Pos2::new(rect.min.x + 12.0, rect.min.y + 9.5), 16.0, t.muted, 1.5);
+	p.galley(Pos2::new(rect.min.x + 12.0 + 16.0 + 10.0, rect.min.y + 9.0), g, Color32::PLACEHOLDER);
+	let b = Rect::from_min_size(Pos2::new(rect.max.x - 6.0 - bw, rect.center().y - 13.0), Vec2::new(bw, 26.0));
+	let r = ui.interact(b, id, Sense::click());
+	let fill = if r.hovered() { t.track } else { t.bg };
+	p.rect_filled(b, CornerRadius::same(6), fill);
+	p.rect_stroke(b, CornerRadius::same(6), Stroke::new(1.0, t.border_strong), StrokeKind::Inside);
+	if r.has_focus() {
+		p.rect_stroke(b.expand(2.0), CornerRadius::same(8), Stroke::new(2.0, t.accent), StrokeKind::Outside);
+	}
+	p.text(b.center(), Align2::CENTER_CENTER, label, semibold(12.5), t.text);
+	let clicked = r.clicked();
+	r.on_hover_cursor(egui::CursorIcon::PointingHand);
+	(y0 + h - top_left.y, clicked)
+}
+
 /// A checkbox row; returns (height, clicked).
 pub fn checkbox(ui: &mut Ui, top_left: Pos2, t: &Tok, label: &str, on: bool, id: egui::Id) -> (f32, bool) {
 	let tw = text_width(ui.painter(), label, regular(13.0));

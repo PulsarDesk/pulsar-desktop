@@ -37,10 +37,13 @@ zip = { version = "9", default-features = false, features = ["deflate"] }
 raw-window-handle = "0.6"
 
 [target.'cfg(windows)'.dependencies]
+# The "Değiştir" folder picker on the welcome screen (the same rfd the app uses).
+rfd = "0.17"
 windows-sys = { version = "0.61", features = [
 	"Win32_Foundation",
 	"Win32_Graphics_Dwm",
 	"Win32_System_Registry",
+	"Win32_System_Threading",
 	"Win32_Security",
 	"Win32_UI_Shell",
 	"Win32_UI_WindowsAndMessaging",
