@@ -35,6 +35,7 @@
 		onPeerName,
 		onChatMsg,
 		onPlayDims,
+		onHostPointer,
 		onPlayEnded
 	} from '#lib/api.js';
 	import { listenScope } from '#lib/api.events.js';
@@ -254,6 +255,31 @@
 					: t('session.streamStopped')
 				: joinPrompt;
 		api.renderBanner(playId, text).catch(() => {});
+	});
+
+	// The person at the host is on their own mouse (issue #7): the canvas path (Linux/macOS)
+	// shows the local cursor meanwhile, next to the host's marked one. Falls back to off if the
+	// idle message is lost.
+	let hostBusy = $state(false);
+	$effect(() => {
+		if (playId < 0 || mode !== 'remote') {
+			hostBusy = false;
+			return;
+		}
+		let idle: ReturnType<typeof setTimeout> | undefined;
+		const scope = listenScope();
+		scope.add(
+			onHostPointer((e) => {
+				if (e.id !== playId) return;
+				hostBusy = e.active && ui.hostCursor;
+				clearTimeout(idle);
+				if (hostBusy) idle = setTimeout(() => (hostBusy = false), 2000);
+			})
+		);
+		return () => {
+			clearTimeout(idle);
+			scope.dispose();
+		};
 	});
 
 	// Live engage state of the native capture (drives the status hint): a video click
@@ -800,6 +826,12 @@
 					}
 					break;
 				}
+				// Görüntü → "Karşı tarafın imlecini göster": the same switch as in Settings.
+				case 'hostptr': {
+					ui.hostCursor = val === 'on';
+					saveUi();
+					break;
+				}
 				// Görüntü → "Serbest imleç": the same switch as Settings → Görüntü.
 				case 'ptrfree': {
 					ui.pointerFree = val === 'on';
@@ -1007,7 +1039,7 @@
 		class="video {fitMode}"
 		class:on={media.hasVideo}
 		class:nativeinput={native}
-		class:control={input.controlling}
+		class:control={input.controlling && !hostBusy}
 		tabindex="0"
 		onpointerdown={input.onDown}
 		onpointermove={input.onMove}

@@ -598,6 +598,11 @@ pub fn run() {
 					}
 				}
 				Some("ptrfree") => crate::overlay::set_ptr_free(it.next() == Some("1")),
+				// Host pointer marker (issue #7): `hostptr 1 x y` / `hostptr 0`, the label name,
+				// and the user's switch.
+				Some("hostptr") => crate::overlay::host_ptr_line(&it.collect::<Vec<_>>().join(" ")),
+				Some("hostptrshow") => crate::overlay::set_host_ptr_show(it.next() == Some("1")),
+				Some("hostname") => crate::overlay::set_host_name(&it.collect::<Vec<_>>().join(" ")),
 				// Session audio truth from the app (atx/amute/mic 0|1) so the overlay's
 				// Ses toggles highlight the real state.
 				Some("audio") => {
@@ -1246,7 +1251,13 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 			println!("ov end");
 			let _ = std::io::stdout().flush();
 		}
-		let want_hidden = !standalone && !open && ENGAGED_R.load(Ordering::SeqCst) && !dbg_disengaged;
+		// While the person at the host is on their own mouse both pointers must show (issue #7).
+		let host_busy = crate::overlay::host_ptr_active(if MODE_REMOTE.load(Ordering::SeqCst) {
+			crate::overlay::Mode::Remote
+		} else {
+			crate::overlay::Mode::Game
+		});
+		let want_hidden = !standalone && !open && ENGAGED_R.load(Ordering::SeqCst) && !dbg_disengaged && !host_busy;
 		if want_hidden != cursor_hidden {
 			if want_hidden {
 				xlib::XDefineCursor(xd, win, invisible);
@@ -1575,6 +1586,19 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 		// Where to draw it (egui points, top-left origin): map the normalized host pointer into
 		// the video's letterbox rect. VIDEO_RECT is in framebuffer pixels with a BOTTOM-left GL
 		// origin → flip Y. `None`/no-video/empty-rect = nothing to draw this frame.
+		// Host pointer marker (issue #7): the host-screen point on the video's letterbox rect.
+		let host_draw = crate::overlay::host_ptr_visible(state.mode).map(|(p, a)| {
+			let at = p.and_then(|(nx, ny)| {
+				let r = *video::VIDEO_RECT.lock().unwrap();
+				let (vx, vyb, vw, vh) = (r[0] as f32, r[1] as f32, r[2] as f32, r[3] as f32);
+				if vw < 1.0 || vh < 1.0 || !have_video {
+					return None;
+				}
+				let vy_top = h as f32 - (vyb + vh);
+				Some(egui::pos2((vx + nx * vw) / ppp, (vy_top + ny * vh) / ppp))
+			});
+			(at, a)
+		});
 		let cursor_draw: Option<(egui::Pos2, egui::TextureId, egui::Vec2)> = (|| {
 			let (nx, ny) = (*CURSOR_POS.lock().unwrap())?;
 			let tex = cursor_tex.as_ref()?;
@@ -1698,6 +1722,7 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 				|| state.overlay_btn
 				|| hint_text.is_some()
 				|| cursor_draw.is_some()
+				|| host_draw.is_some()
 				|| local_ptr.is_some()
 				|| switching
 				|| stalled
@@ -1740,6 +1765,9 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 					paint_cursor(ctx);
 					if let Some(p) = local_ptr {
 						paint_local_cursor(ctx, p);
+					}
+					if let Some((p, a)) = host_draw {
+						overlay::draw_host_pointer(ctx, p, a);
 					}
 				});
 				let prims = egui_ctx.tessellate(full.shapes, full.pixels_per_point);
@@ -1907,6 +1935,7 @@ fn emit_cmd(state: &mut OverlayState, c: OverlayCmd) {
 				"fit" => video::set_fit(&val),
 				"msens" => crate::overlay::set_mouse_sens(&val),
 				"ptrfree" => crate::overlay::set_ptr_free(val == "on"),
+				"hostptr" => crate::overlay::set_host_ptr_show(val == "on"),
 				// Audio toggles apply optimistically; the app's `audio …` line
 				// re-syncs the truth after the host acknowledges.
 				"atx" => AUDIO_TX.store(val == "on", Ordering::SeqCst),

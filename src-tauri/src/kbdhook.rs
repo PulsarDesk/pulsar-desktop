@@ -53,6 +53,18 @@ pub fn set_session_remote(remote: bool) {
 	SESSION_REMOTE.store(remote, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// "Karşı tarafın imlecini göster" (Settings → Görüntü + session menu, default ON, remote
+/// mode only): the renderer marks the host's pointer while the person at the host uses it.
+static HOST_CURSOR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_host_cursor(on: bool) {
+	HOST_CURSOR.store(on, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn host_cursor() -> bool {
+	HOST_CURSOR.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// The free-cursor handover applies to the armed session (setting on + remote mode).
 #[allow(dead_code)] // only the Windows capture reads it
 pub(crate) fn free_pointer_session() -> bool {

@@ -108,6 +108,9 @@ export interface UiSettings {
 	 * this PC, coming back over the video takes control again (Parsec-style, issue #3). Off =
 	 * the cursor stays locked to the video until Ctrl+Alt+Z. Also in the session menu. */
 	pointerFree: boolean;
+	/** Remote mode: mark the host's pointer ("Host") while the person at the host uses their
+	 * own mouse, and show ours separately (issue #7). Default on; also in the session menu. */
+	hostCursor: boolean;
 	/** Session status bar under the video (issue #5). Off by default. */
 	statusBar: boolean;
 	/** Which facts the status bar shows (`StatusBar.svelte` STATUS_FIELDS). */
@@ -245,6 +248,7 @@ const DEFAULTS: UiSettings = {
 	audioQuality: 'auto',
 	mouseSens: 1,
 	pointerFree: false,
+	hostCursor: true,
 	statusBar: false,
 	// The always-on stats HUD's set (codec · fps · latency · decode · bitrate).
 	statusFields: ['codec', 'fps', 'latency', 'decode', 'bitrate'],

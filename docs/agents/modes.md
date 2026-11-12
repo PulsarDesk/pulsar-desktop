@@ -83,3 +83,25 @@ Parsec-style handover, issue #3. Settings → Görüntü + the session menu's G�
     take the pointer themselves, so there it stays click-to-engage.
   - macOS: the video is still mpv's own window, so the handover covers the Pulsar window's
     canvas only (the same limit as remote control there today).
+
+## Host pointer marker (remote mode, issue #7)
+
+While the person AT the host uses their own mouse (`host::takeover`, which holds remote
+pointer input back for 1.2 s), the client marks the host's pointer and shows its own.
+
+- **Host** (`host/handlers.rs` `spawn_host_pointer_watch`, remote sessions only): ~30 Hz
+  `DataMsg::HostPointer { active: true, x, y }` while `takeover::active()`, one `active: false`
+  when idle. Position = the pointer within the streamed monitor (Windows: GetCursorPos vs
+  `display_rect`); `-1` = unknown (Linux host — takeover reads evdev deltas only —, a window
+  capture, the pointer on another monitor). macOS hosts don't detect takeover → nothing.
+- **Desktop client**: `play/hold.rs` → renderer `hostptr 1 x y` / `hostptr 0`, `hostname <name>`
+  (from `PeerName`), `hostptrshow 0|1` (setting). `overlay.rs` `draw_host_pointer`: amber ring +
+  "Host · name" label at the mapped point (Windows `video_point`, Linux `VIDEO_RECT`, macOS the
+  whole viewport — its video is mpv's own window) and a top notice; fades 1.5 s after idle. The
+  local cursor is un-hidden meanwhile (Windows/Linux renderer `hide_local_cursor` / `want_hidden`;
+  the webview canvas path via the `host-pointer` event → `Session.svelte` `hostBusy`).
+- **Setting**: `ui.hostCursor` (default ON) → `set_host_cursor`; session menu Görüntü row
+  `ov set hostptr on|off`. Never in game mode (renderer `Mode::Remote` gate + no host send).
+- **Mobile client** (pulsar-mobile): `datachan.rs` emits `host-pointer`; `ui/js/app.js` draws the
+  same marker over the video rect (slot 0, not split, not game mode); Settings toggle
+  `hostCursor` (prefs, default on).

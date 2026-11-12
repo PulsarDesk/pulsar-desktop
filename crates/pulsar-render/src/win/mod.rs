@@ -103,6 +103,15 @@ static OVERLAY_BTN: AtomicBool = AtomicBool::new(true);
 static OVBTN_POS: Mutex<(f32, f32)> = Mutex::new(crate::overlay::BTN_POS_DEFAULT);
 /// Live engage state from the app (`engaged 0|1`) — drives cursor visibility.
 static ENGAGED_R: AtomicBool = AtomicBool::new(false);
+/// `--mode remote` (the host-pointer marker and its cursor un-hide are remote-only).
+static REMOTE_MODE: AtomicBool = AtomicBool::new(false);
+
+/// The local cursor stays hidden while engaged, except while the person at the host is on
+/// their own mouse (issue #7): then both pointers must be visible.
+fn hide_local_cursor() -> bool {
+	let mode = if REMOTE_MODE.load(Ordering::SeqCst) { crate::overlay::Mode::Remote } else { crate::overlay::Mode::Game };
+	ENGAGED_R.load(Ordering::SeqCst) && !OPEN.load(Ordering::SeqCst) && !crate::overlay::host_ptr_active(mode)
+}
 /// Session audio truth (app stdin `audio tx=1 mute=0 mic=0`) for the overlay's Ses
 /// section — same statics + defaults as linux.rs; synced into `ostate` each frame so
 /// the Ses toggles highlight the real state (the app re-seeds these on respawn).
@@ -418,6 +427,12 @@ fn stdin_control() {
 			crate::overlay::set_mouse_sens(rest);
 		} else if let Some(rest) = l.strip_prefix("ptrfree ") {
 			crate::overlay::set_ptr_free(rest.trim() == "1");
+		} else if let Some(rest) = l.strip_prefix("hostptr ") {
+			crate::overlay::host_ptr_line(rest);
+		} else if let Some(rest) = l.strip_prefix("hostptrshow ") {
+			crate::overlay::set_host_ptr_show(rest.trim() == "1");
+		} else if let Some(rest) = l.strip_prefix("hostname ") {
+			crate::overlay::set_host_name(rest);
 		} else if let Some(rest) = l.strip_prefix("fit ") {
 			// View-fit mode pushed by the frontend (persisted value / respawn re-seed).
 			present::set_fit(rest.trim());
@@ -873,7 +888,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
 	// webview hotspot is buried under this child on Windows) or click-to-engage.
 	if !OPEN.load(Ordering::SeqCst) {
 		use windows::Win32::UI::WindowsAndMessaging::{SetCursor, WM_SETCURSOR};
-		if msg == WM_SETCURSOR && ENGAGED_R.load(Ordering::SeqCst) {
+		if msg == WM_SETCURSOR && hide_local_cursor() {
 			unsafe { SetCursor(None) };
 			return LRESULT(1);
 		}
@@ -1342,6 +1357,19 @@ impl Renderer {
 	/// Side-channel cursor draw data: position in egui POINTS over the video's
 	/// aspect-fit letterbox rect (same math as present.rs::dest_rect), or `None`
 	/// when there is no side cursor / no video yet.
+	/// A host-screen point (normalized 0..1) on this window, in egui points — the same fit-mode
+	/// mapping the video Blt and the side cursor use.
+	fn video_point(&self, nx: f32, ny: f32) -> Option<egui::Pos2> {
+		if self.src_w == 0 || self.src_h == 0 {
+			return None;
+		}
+		let (vw, vh) = present::displayed_dims(self.src_w, self.src_h);
+		let (iw, ih) = (vw as f32, vh as f32);
+		let ((sx, sy, sw, sh), (dx, dy, dw, dh)) = present::fit_rects(iw, ih, self.width as f32, self.height as f32);
+		let (kx, ky) = (dw / sw.max(1.0), dh / sh.max(1.0));
+		Some(egui::pos2((dx + (nx * iw - sx) * kx) / overlay_ppp(), (dy + (ny * ih - sy) * ky) / overlay_ppp()))
+	}
+
 	fn cursor_draw(&self) -> Option<(egui::Pos2, egui::TextureId, egui::Vec2)> {
 		let (nx, ny) = (*CURSOR_POS.lock().unwrap())?;
 		let tex = self.cursor_tex.as_ref()?;
@@ -1426,6 +1454,8 @@ impl Renderer {
 		crate::overlay::mark_new_chat(&mut self.ov_ui, false, 0, 0);
 		self.sync_cursor_tex();
 		let cursor_draw = self.cursor_draw();
+		let host_draw = crate::overlay::host_ptr_visible(self.ostate.mode)
+			.map(|(p, a)| (p.and_then(|(x, y)| self.video_point(x, y)), a));
 		// Expire + fade the tooltip (alpha 1→0 over the last HINT_FADE seconds).
 		let hint_text: Option<(String, f32)> = {
 			let mut g = HINT.lock().unwrap();
@@ -1450,6 +1480,7 @@ impl Renderer {
 			&& !ovbtn
 			&& hint_text.is_none()
 			&& cursor_draw.is_none()
+			&& host_draw.is_none()
 			&& !stalled
 			&& !recovering
 			&& toasts.is_empty()
@@ -1512,6 +1543,9 @@ impl Renderer {
 			}
 			crate::overlay::draw_chat_bubbles(ctx, ostate);
 			paint_side_cursor(ctx, cursor_draw);
+			if let Some((p, a)) = host_draw {
+				crate::overlay::draw_host_pointer(ctx, p, a);
+			}
 		});
 		let _ = painter.update_textures(&self.device, &self.context, &mut out.textures_delta);
 		let prims = self
@@ -1930,6 +1964,7 @@ pub fn run() {
 					} else {
 						crate::overlay::Mode::Game
 					};
+					REMOTE_MODE.store(s == "remote", Ordering::SeqCst);
 					i += 1;
 				}
 			}
@@ -2228,7 +2263,7 @@ unsafe fn event_loop(
 		// frozen cursor; SetCursor from here is honored).
 		{
 			use windows::Win32::UI::WindowsAndMessaging::{LoadCursorW, SetCursor, IDC_ARROW};
-			let hide = ENGAGED_R.load(Ordering::SeqCst) && !OPEN.load(Ordering::SeqCst);
+			let hide = hide_local_cursor();
 			if hide {
 				SetCursor(None);
 				cursor_hidden = true;
@@ -2379,6 +2414,7 @@ fn apply_ov_cmd(ostate: &mut crate::overlay::OverlayState, c: crate::overlay::Ov
 				"fit" => present::set_fit(&val),
 				"msens" => crate::overlay::set_mouse_sens(&val),
 				"ptrfree" => crate::overlay::set_ptr_free(val == "on"),
+				"hostptr" => crate::overlay::set_host_ptr_show(val == "on"),
 				// Optimistic controller swap: the overlay row ▲/▼ was clicked.
 				// Swap the two entries in CONTROLLERS immediately so the list
 				// re-renders at the next frame without waiting for the gilrs

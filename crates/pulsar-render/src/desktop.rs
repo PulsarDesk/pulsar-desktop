@@ -165,6 +165,10 @@ fn stdin_control() {
 				}
 			}
 			Some("ptrfree") => crate::overlay::set_ptr_free(it.next() == Some("1")),
+			// Host pointer marker (issue #7).
+			Some("hostptr") => crate::overlay::host_ptr_line(&it.collect::<Vec<_>>().join(" ")),
+			Some("hostptrshow") => crate::overlay::set_host_ptr_show(it.next() == Some("1")),
+			Some("hostname") => crate::overlay::set_host_name(&it.collect::<Vec<_>>().join(" ")),
 			// The host's active encode summary (rest of the line, verbatim).
 			Some("hostenc") => {
 				*HOST_ENC.lock().unwrap() = line.splitn(2, ' ').nth(1).unwrap_or("").to_string();
@@ -526,6 +530,13 @@ impl eframe::App for Overlay {
 				overlay::draw_hint(ctx, &text, alpha);
 			}
 			overlay::draw_chat_bubbles(ctx, &self.state);
+			// Host pointer marker (issue #7). This overlay-only window covers the whole viewport
+			// (the video is mpv's own window), so the point maps over the full viewport.
+			if let Some((p, a)) = overlay::host_ptr_visible(self.state.mode) {
+				let r = ctx.viewport_rect();
+				let at = p.map(|(x, y)| egui::pos2(r.left() + x * r.width(), r.top() + y * r.height()));
+				overlay::draw_host_pointer(ctx, at, a);
+			}
 		}
 		// Repaint continuously while open (live menu) or whenever there is closed-state chrome to
 		// animate (HUD ticks, hint fade); otherwise a slow idle tick keeps stdin-driven state
@@ -535,6 +546,7 @@ impl eframe::App for Overlay {
 			|| self.state.overlay_btn
 			|| HINT.lock().unwrap().is_some()
 			|| !self.state.chat_toasts.is_empty()
+			|| overlay::host_ptr_visible(self.state.mode).is_some()
 		{
 			ctx.request_repaint();
 		} else {
@@ -602,6 +614,7 @@ impl Overlay {
 					}
 					"msens" => crate::overlay::set_mouse_sens(&val),
 					"ptrfree" => crate::overlay::set_ptr_free(val == "on"),
+					"hostptr" => crate::overlay::set_host_ptr_show(val == "on"),
 					"fit" => {
 						self.state.fit = val.clone();
 						*FIT.lock().unwrap() = val.clone();

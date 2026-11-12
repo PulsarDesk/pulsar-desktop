@@ -208,6 +208,9 @@ export const onPlayDecoder = (cb: (e: { id: number; name: string; hw: string }) 
 	listenTo<[number, string, string]>('play-decoder', (p) => cb({ id: p[0], name: p[1], hw: p[2] }));
 /** Client: the STREAM's pixel size (first frame / live res switch) — the session window
  * adopts the host's aspect ratio from this. Payload tuple (play id, width, height). */
+/** Client: the person at the host is on their own mouse (`active`), remote mode (issue #7). */
+export const onHostPointer = (cb: (e: { id: number; active: boolean }) => void) =>
+	listenTo<[number, boolean]>('host-pointer', (p) => cb({ id: p[0], active: p[1] }));
 export const onPlayDims = (cb: (e: { id: number; w: number; h: number }) => void) =>
 	listenTo<[number, number, number]>('play-dims', (p) => cb({ id: p[0], w: p[1], h: p[2] }));
 /** Client: real video stats from mpv (single-surface + native --wid renderer): fps,

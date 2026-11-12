@@ -201,6 +201,13 @@
 	</div>
 	<button class="toggle" aria-label={t('settings.pointerFree')} class:on={ui.pointerFree} aria-pressed={ui.pointerFree} onclick={() => { ui.pointerFree = !ui.pointerFree; saveUi(); }}><span class="knob"></span></button>
 </div>
+<div class="srow">
+	<div class="st">
+		<b>{t('settings.hostCursor')}</b>
+		<span>{t('settings.hostCursorDesc')}</span>
+	</div>
+	<button class="toggle" aria-label={t('settings.hostCursor')} class:on={ui.hostCursor} aria-pressed={ui.hostCursor} onclick={() => { ui.hostCursor = !ui.hostCursor; saveUi(); }}><span class="knob"></span></button>
+</div>
 {#if !clientOnly}
 <!-- HOST: what this device sends when it shares its screen. Resolution/fps/bitrate
      edit gameStore.host, which the +page effect pushes to the core via

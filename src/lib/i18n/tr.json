@@ -301,6 +301,8 @@
 	"settings.mouseSensDesc": "Oyun fareyi yakaladığında hareket bu katsayıyla gönderilir. 1× = farenin kendi hızı.",
 	"settings.pointerFree": "Serbest imleç",
 	"settings.pointerFreeDesc": "İmleç videodan çıkınca kontrol bu PC'ye döner, girince karşıya geçer. Sadece uzak masaüstü.",
+	"settings.hostCursor": "Karşı tarafın imlecini göster",
+	"settings.hostCursorDesc": "Karşıdaki kişi kendi faresini kullanırken onun imleci «Host» etiketiyle, seninki ayrı görünür. Sadece uzak masaüstü.",
 	"settings.framePacing": "Kare eşitleme (Moonlight)",
 	"settings.framePacingDesc": "1-2 kare tamponlayıp düzenli gösterir; titremeyi azaltır, biraz gecikme ekler. Linux.",
 	"settings.preOptimize": "Yayını açmadan önce optimize et",

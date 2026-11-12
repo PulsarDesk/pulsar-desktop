@@ -351,6 +351,68 @@ fn spawn_pointer_lock_watch(out: tokio::sync::mpsc::Sender<DataMsg>, epoch: crat
 	});
 }
 
+/// Remote-desktop sessions: tell the client while the person AT this host is using their own
+/// mouse (`takeover::active`, Windows + Linux detection), so it can show the host pointer
+/// labelled "Host" next to its own one (issue #7). ~30 Hz while active (only on movement, plus
+/// a 500 ms refresh), one `active: false` when it goes idle. Position = the host pointer within
+/// the streamed monitor, 0..1 — Windows only (GetCursorPos against the captured output); `-1`
+/// = unknown (Linux, a window capture, the pointer on another monitor): the client then shows
+/// only the "host is using the mouse" notice. Lives as long as this stream generation.
+fn spawn_host_pointer_watch(
+	out: tokio::sync::mpsc::Sender<DataMsg>,
+	epoch: crate::process::ProcEpoch,
+	#[cfg(windows)] display: Arc<std::sync::atomic::AtomicU32>,
+	window_capture: bool,
+) {
+	use std::sync::atomic::Ordering;
+	let born = epoch.load(Ordering::SeqCst);
+	let _ = std::thread::Builder::new().name("host-pointer".into()).spawn(move || {
+		let pos = || -> (f32, f32) {
+			#[cfg(windows)]
+			if !window_capture {
+				use windows_sys::Win32::Foundation::POINT;
+				use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+				let mut pt = POINT { x: 0, y: 0 };
+				// SAFETY: plain Win32 call into a local POINT.
+				if unsafe { GetCursorPos(&mut pt) } != 0 {
+					if let Some(r) = pulsar_capture::display_rect(display.load(Ordering::Relaxed)) {
+						let nx = (pt.x - r.mon_left) as f32 / r.mon_width.max(1) as f32;
+						let ny = (pt.y - r.mon_top) as f32 / r.mon_height.max(1) as f32;
+						if (0.0..=1.0).contains(&nx) && (0.0..=1.0).contains(&ny) {
+							return (nx, ny);
+						}
+					}
+				}
+			}
+			let _ = window_capture;
+			(-1.0, -1.0)
+		};
+		let mut was = false;
+		let mut last: (f32, f32) = (-2.0, -2.0);
+		let mut sent_at = std::time::Instant::now();
+		while epoch.load(Ordering::SeqCst) == born && !out.is_closed() {
+			let active = crate::host::takeover::active();
+			if active {
+				let p = pos();
+				let moved = (p.0 - last.0).abs() > 0.0005 || (p.1 - last.1).abs() > 0.0005;
+				if !was || moved || sent_at.elapsed() >= std::time::Duration::from_millis(500) {
+					let _ = out.try_send(DataMsg::HostPointer { active: true, x: p.0, y: p.1 });
+					last = p;
+					sent_at = std::time::Instant::now();
+				}
+			} else if was {
+				let _ = out.try_send(DataMsg::HostPointer { active: false, x: -1.0, y: -1.0 });
+				last = (-2.0, -2.0);
+			}
+			if active != was {
+				tracing::info!(active, "host user on their own mouse → client notice");
+			}
+			was = active;
+			std::thread::sleep(std::time::Duration::from_millis(33));
+		}
+	});
+}
+
 /// Run the process-loopback capture into `sink` on its own thread, until the sink stops taking
 /// data (ffmpeg's pipe broke / the in-process encoder's stream was retired) or WASAPI errors.
 /// Waits for the activation (milliseconds) so a failure falls back instead of leaving the
@@ -3380,6 +3442,15 @@ pub(super) fn make_on_stream(
 		start_audio_and_mute(&procs, &ffmpeg, &app_h, adest, &req, sid, audio_pid, &proc_epoch);
 		#[cfg(windows)]
 		spawn_pointer_lock_watch(stats_out.clone(), proc_epoch.clone());
+		if !req.game_mode {
+			spawn_host_pointer_watch(
+				stats_out.clone(),
+				proc_epoch.clone(),
+				#[cfg(windows)]
+				cur_display.clone(),
+				target_hwnd.is_some(),
+			);
+		}
 		let _ = app_h.emit(
 			"session",
 			SessionEvent {

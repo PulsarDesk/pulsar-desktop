@@ -313,6 +313,7 @@ export const api = {
 	/** Relative-mouse sensitivity multiplier (process-wide; 1 = unchanged). */
 	setMouseSensitivity: (value: number) => invoke<void>('set_mouse_sensitivity', { value }),
 	setPointerFree: (on: boolean) => invoke<void>('set_pointer_free', { on }),
+	setHostCursor: (on: boolean) => invoke<void>('set_host_cursor', { on }),
 	setDs4Headset: (on: boolean) => invoke<void>('set_ds4_headset', { on }),
 	/** Change the session's audio quality live (a re-stream): auto/standard/high/raw. */
 	setPlayAudioQuality: (id: number, quality: string) =>

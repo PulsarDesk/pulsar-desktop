@@ -1224,6 +1224,13 @@ pub(super) async fn hold_session(
 								// The host's display name — the UI updates the session target
 								// chip and the recents cache. Kept for the file toasts too.
 								host_name = name.clone();
+								// The renderer labels the host pointer with it (issue #7).
+								{
+									use std::io::Write as _;
+									if let Some(si) = render_stdin.lock().unwrap().as_mut() {
+										let _ = writeln!(si, "hostname {}", name.replace(char::is_control, " "));
+									}
+								}
 								let _ = app_ev.emit("peer-name", (id.to_string(), name));
 							}
 							DataMsg::CursorPos { x, y } => {
@@ -1252,6 +1259,22 @@ pub(super) async fn hold_session(
 								// motion while it lasts, absolute again once it shows.
 								tracing::info!(on, "host pointer lock");
 								crate::kbdhook::set_pointer_lock(id, on);
+							}
+							DataMsg::HostPointer { active, x, y } => {
+								// The person at the host is on their own mouse (remote mode): the
+								// renderer draws the host pointer labelled "Host" + a notice and
+								// shows the local cursor (issue #7). x/y < 0 = position unknown.
+								use std::io::Write as _;
+								if let Some(si) = render_stdin.lock().unwrap().as_mut() {
+									if active {
+										let _ = writeln!(si, "hostptr 1 {x:.5} {y:.5}");
+									} else {
+										let _ = writeln!(si, "hostptr 0");
+									}
+								}
+								// The webview's canvas path (Linux/macOS) un-hides the local
+								// cursor meanwhile.
+								let _ = app_ev.emit("host-pointer", (id, active));
 							}
 							DataMsg::CursorHidden => {
 								// The host pointer is hidden / left the screen — stop drawing it.

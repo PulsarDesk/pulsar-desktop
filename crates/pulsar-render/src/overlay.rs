@@ -298,6 +298,121 @@ pub fn ptr_free() -> bool {
 	PTR_FREE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Host pointer marker (issue #7, remote mode): while the person AT the host uses their own
+/// mouse the app sends `hostptr 1 <x> <y>` (normalized over the host screen; negative = the
+/// position is unknown) and `hostptr 0` when it goes idle; `hostname <name>` labels it. The
+/// backends map the position onto the video and call [`draw_host_pointer`], and show the
+/// local cursor meanwhile so both pointers are visible. `hostptrshow 0|1` = the user's switch
+/// ("Karşı tarafın imlecini göster", default on); the Görüntü row emits `ov set hostptr`.
+struct HostPtr {
+	pos: Option<(f32, f32)>,
+	active: bool,
+	at: std::time::Instant,
+}
+static HOST_PTR: std::sync::Mutex<Option<HostPtr>> = std::sync::Mutex::new(None);
+static HOST_NAME: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+static HOST_PTR_SHOW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+/// How long the marker fades out after the host mouse went idle.
+const HOST_PTR_FADE: f32 = 1.5;
+
+/// A `hostptr …` stdin line (the part after the keyword).
+pub fn host_ptr_line(rest: &str) {
+	let v: Vec<f32> = rest.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+	let mut g = HOST_PTR.lock().unwrap_or_else(|e| e.into_inner());
+	if v.first().copied().unwrap_or(0.0) >= 1.0 {
+		let pos = match (v.get(1), v.get(2)) {
+			(Some(&x), Some(&y)) if x >= 0.0 && y >= 0.0 => Some((x.min(1.0), y.min(1.0))),
+			_ => None,
+		};
+		*g = Some(HostPtr { pos, active: true, at: std::time::Instant::now() });
+	} else if let Some(h) = g.as_mut() {
+		if h.active {
+			h.active = false;
+			h.at = std::time::Instant::now();
+		}
+	}
+}
+
+pub fn set_host_name(name: &str) {
+	*HOST_NAME.lock().unwrap_or_else(|e| e.into_inner()) = name.trim().to_string();
+}
+
+pub fn set_host_ptr_show(on: bool) {
+	HOST_PTR_SHOW.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn host_ptr_show() -> bool {
+	HOST_PTR_SHOW.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The host user is on their mouse right now (the backends un-hide the local cursor).
+pub fn host_ptr_active(mode: Mode) -> bool {
+	mode == Mode::Remote
+		&& host_ptr_show()
+		&& HOST_PTR.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|h| h.active)
+}
+
+/// What to draw this frame: the host position (normalized, if known) and the opacity, or
+/// `None` (nothing: off, game mode, idle and faded out).
+pub fn host_ptr_visible(mode: Mode) -> Option<(Option<(f32, f32)>, f32)> {
+	if mode != Mode::Remote || !host_ptr_show() {
+		return None;
+	}
+	let g = HOST_PTR.lock().unwrap_or_else(|e| e.into_inner());
+	let h = g.as_ref()?;
+	let alpha = if h.active {
+		1.0
+	} else {
+		1.0 - h.at.elapsed().as_secs_f32() / HOST_PTR_FADE
+	};
+	(alpha > 0.0).then_some((h.pos, alpha))
+}
+
+/// Draw the host pointer marker at `at` (egui points; `None` = position unknown → the notice
+/// only) plus the "host is using the mouse" notice, at opacity `alpha`.
+pub fn draw_host_pointer(ctx: &egui::Context, at: Option<egui::Pos2>, alpha: f32) {
+	let a = alpha.clamp(0.0, 1.0);
+	const MARK: egui::Color32 = egui::Color32::from_rgb(255, 152, 48); // amber: not our indigo/cyan
+	if let Some(p) = at {
+		let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("pulsar_hostptr")));
+		painter.circle_stroke(p, 11.0, egui::Stroke::new(2.0, MARK.gamma_multiply(a)));
+		painter.circle_filled(p, 3.0, MARK.gamma_multiply(a));
+		let name = HOST_NAME.lock().unwrap_or_else(|e| e.into_inner()).clone();
+		let label = if name.is_empty() { t("hostptr.label").to_string() } else { format!("{} · {name}", t("hostptr.label")) };
+		let font = egui::FontId::proportional(12.0);
+		let galley = ctx.fonts_mut(|f| f.layout_no_wrap(label, font, egui::Color32::BLACK.gamma_multiply(a)));
+		let screen = ctx.viewport_rect();
+		let size = galley.size() + egui::vec2(14.0, 8.0);
+		// Below-right of the pointer, kept on screen.
+		let mut min = p + egui::vec2(14.0, 14.0);
+		min.x = min.x.min(screen.right() - size.x - 4.0).max(screen.left() + 4.0);
+		min.y = min.y.min(screen.bottom() - size.y - 4.0).max(screen.top() + 4.0);
+		let rect = egui::Rect::from_min_size(min, size);
+		painter.rect_filled(rect, 6.0, MARK.gamma_multiply(a));
+		painter.galley(rect.min + egui::vec2(7.0, 4.0), galley, egui::Color32::BLACK);
+	}
+	egui::Area::new(egui::Id::new("pulsar_hostptr_notice"))
+		.order(egui::Order::Foreground)
+		.anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 14.0))
+		.interactable(false)
+		.show(ctx, |ui| {
+			ui.set_opacity(a);
+			egui::Frame::NONE
+				.fill(egui::Color32::from_rgba_premultiplied(10, 11, 16, 215))
+				.stroke(egui::Stroke::new(1.0, MARK))
+				.corner_radius(8.0)
+				.inner_margin(egui::Margin::symmetric(12, 6))
+				.show(ui, |ui| {
+					ui.add(
+						egui::Label::new(
+							egui::RichText::new(t("hostptr.notice")).size(12.5).color(egui::Color32::from_rgb(235, 225, 210)),
+						)
+						.wrap_mode(egui::TextWrapMode::Extend),
+					);
+				});
+		});
+}
+
 /// Two-way clipboard sync switch (`audio clip=0|1` from the app; the Tools toggle flips it
 /// optimistically and emits `ov set clipsync on|off` so the app persists + applies it).
 static CLIP_SYNC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
@@ -1366,7 +1481,8 @@ fn draw_display(
 	let multi = st.displays.len() > 1;
 	// Remote mode adds the free-cursor row (game mode always keeps the cursor in the video).
 	let free_row = mode == Mode::Remote;
-	let rows = 3 + usize::from(multi) + usize::from(free_row);
+	// Remote mode also gets the host-pointer row (issue #7) right after it.
+	let rows = 3 + usize::from(multi) + 2 * usize::from(free_row);
 	if nav.down {
 		*sub_sel = (*sub_sel + 1).min(rows - 1);
 	}
@@ -1441,6 +1557,14 @@ fn draw_display(
 		{
 			set_ptr_free(v == "on");
 			cmds.push(OverlayCmd::Set("ptrfree", v));
+		}
+		row += 1;
+		let cur = if host_ptr_show() { "on" } else { "off" };
+		if let Some(v) =
+			choice_row_i(ui, s == row, nav, t("hostptr.show"), cur, &onoff, row, pending, Some(t("info.hostptr")))
+		{
+			set_host_ptr_show(v == "on");
+			cmds.push(OverlayCmd::Set("hostptr", v));
 		}
 	}
 	let _ = row;
@@ -2967,5 +3091,29 @@ mod stats_codec_tests {
 		st.codec = "auto".into();
 		assert_eq!(stream_codec(&st), "—");
 		assert_eq!(stream_encoder(&st), "");
+	}
+}
+
+#[cfg(test)]
+mod host_ptr_tests {
+	use super::*;
+
+	#[test]
+	fn host_pointer_lines_drive_the_marker() {
+		set_host_ptr_show(true);
+		host_ptr_line("1 0.25 0.5");
+		assert!(host_ptr_active(Mode::Remote));
+		assert!(!host_ptr_active(Mode::Game), "never in game mode");
+		assert_eq!(host_ptr_visible(Mode::Remote).map(|v| v.0), Some(Some((0.25, 0.5))));
+		host_ptr_line("1 -1 -1"); // position unknown → notice only
+		assert_eq!(host_ptr_visible(Mode::Remote).map(|v| v.0), Some(None));
+		host_ptr_line("0");
+		assert!(!host_ptr_active(Mode::Remote));
+		// Still fading right after the idle line.
+		assert!(host_ptr_visible(Mode::Remote).is_some_and(|v| v.1 > 0.5));
+		set_host_ptr_show(false);
+		host_ptr_line("1 0.5 0.5");
+		assert!(host_ptr_visible(Mode::Remote).is_none());
+		set_host_ptr_show(true);
 	}
 }

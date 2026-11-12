@@ -1024,6 +1024,12 @@
 		api.setPointerFree(ui.pointerFree).catch(() => {});
 	});
 
+	// Host pointer marker (remote mode) follows the setting.
+	$effect(() => {
+		if (isPopup) return;
+		api.setHostCursor(ui.hostCursor).catch(() => {});
+	});
+
 	// Experimental DS4 headset jack (Windows USB) follows the setting.
 	$effect(() => {
 		if (isPopup) return;

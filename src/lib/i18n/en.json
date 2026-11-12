@@ -301,6 +301,8 @@
 	"settings.mouseSensDesc": "When a game grabs the mouse, motion is scaled by this. 1× = the mouse's own speed.",
 	"settings.pointerFree": "Free cursor",
 	"settings.pointerFreeDesc": "Leaving the video gives control back to this PC; entering it takes control again. Remote desktop only.",
+	"settings.hostCursor": "Show the other side's cursor",
+	"settings.hostCursorDesc": "While the person at the host uses their own mouse, their pointer is marked «Host» and yours shows separately. Remote desktop only.",
 	"settings.framePacing": "Frame pacing (Moonlight)",
 	"settings.framePacingDesc": "Buffers 1-2 frames and shows them evenly; less judder, a bit more latency. Linux.",
 	"settings.preOptimize": "Optimize the stream before showing it",

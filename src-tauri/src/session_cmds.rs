@@ -397,6 +397,7 @@ async fn respawn_render_for_codec(
 					let _ = writeln!(si, "audio clip={}", if crate::clipboard_sync::enabled() { 1 } else { 0 });
 					let _ = writeln!(si, "msens {}", crate::kbdhook::mouse_sensitivity());
 					let _ = writeln!(si, "ptrfree {}", if crate::kbdhook::pointer_free() { 1 } else { 0 });
+					let _ = writeln!(si, "hostptrshow {}", if crate::kbdhook::host_cursor() { 1 } else { 0 });
 					if let Some((tx, mute, mic)) = seed.audio {
 						let _ = writeln!(
 							si,
@@ -1434,6 +1435,22 @@ pub(crate) async fn set_mouse_sensitivity(value: f32) -> Result<(), String> {
 #[tauri::command]
 pub(crate) async fn set_ds4_headset(on: bool) -> Result<(), String> {
 	crate::ds4_headset::set_enabled(on);
+	Ok(())
+}
+
+/// Client: "Karşı tarafın imlecini göster" (Settings / session menu). Process-wide; pushed to
+/// every running renderer at once.
+#[tauri::command]
+pub(crate) async fn set_host_cursor(state: State<'_, AppState>, on: bool) -> Result<(), String> {
+	crate::kbdhook::set_host_cursor(on);
+	let stdins: Vec<_> = state.plays.lock().unwrap().values().map(|p| p.render_stdin.clone()).collect();
+	for stdin in stdins {
+		use std::io::Write;
+		if let Some(si) = stdin.lock().unwrap().as_mut() {
+			let _ = writeln!(si, "hostptrshow {}", if on { 1 } else { 0 });
+			let _ = si.flush();
+		}
+	}
 	Ok(())
 }
 
