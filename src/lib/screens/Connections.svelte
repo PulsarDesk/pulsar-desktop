@@ -160,6 +160,42 @@
 	function pushMsg(peer: string, m: Msg) {
 		history = { ...history, [peer]: [...(history[peer] ?? []), m] };
 	}
+
+	// Keep the conversation at its newest line: a message arriving while the modal is open
+	// scrolls the log down — unless the user scrolled up to read older lines (then it stays
+	// put). Our own sent line always scrolls down. Opening lands on the "— New —" divider
+	// when there is one, else at the bottom.
+	let logEl = $state<HTMLDivElement | null>(null);
+	let stick = true;
+	let forceBottom = false;
+	const nearBottom = (el: HTMLElement) => el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+	function onLogScroll() {
+		if (logEl) stick = nearBottom(logEl);
+	}
+	let lastLen = -1;
+	$effect(() => {
+		const el = logEl;
+		const len = msgRow ? (history[msgRow.peer]?.length ?? 0) : -1;
+		if (!el || len < 0) {
+			lastLen = -1;
+			return;
+		}
+		const opened = lastLen < 0;
+		lastLen = len;
+		// After the DOM update for the new line.
+		queueMicrotask(() => {
+			if (opened) {
+				const divider = el.querySelector<HTMLElement>('.mnew');
+				if (divider) divider.scrollIntoView({ block: 'start' });
+				else el.scrollTop = el.scrollHeight;
+				stick = nearBottom(el);
+				return;
+			}
+			if (stick || forceBottom) el.scrollTop = el.scrollHeight;
+			forceBottom = false;
+			stick = nearBottom(el);
+		});
+	});
 	function openMsg(r: Row) {
 		msgRow = r;
 		msgText = '';
@@ -188,6 +224,7 @@
 		api
 			.hostSendChat(r.sid, text)
 			.then(() => {
+				forceBottom = true;
 				pushMsg(r.peer, { me: true, text });
 			})
 			.catch((e) => {
@@ -283,7 +320,7 @@
 						<Icon name="x" size={14} />
 					</button>
 				</header>
-				<div class="mlog">
+				<div class="mlog" bind:this={logEl} onscroll={onLogScroll}>
 					{#if (history[msgRow.peer] ?? []).length === 0}
 						<div class="mempty">{t('host.chatEmpty')}</div>
 					{:else}
