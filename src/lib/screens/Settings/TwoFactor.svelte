@@ -90,6 +90,31 @@
 {/if}
 
 <style>
+	/* Settings row — same as the other tabs' (their styles are scoped, this component's row
+	   rendered unstyled: browser-default bold, full-width description). */
+	.srow {
+		display: flex;
+		align-items: center;
+		gap: 20px;
+		padding: 16px 0;
+		border-bottom: 1px solid var(--border);
+	}
+	.st {
+		flex: 1;
+	}
+	.st b {
+		font-size: 14px;
+		font-weight: 600;
+		display: block;
+	}
+	.st span {
+		font-size: 12.5px;
+		color: var(--text-faint);
+		margin-top: 3px;
+		line-height: 1.45;
+		display: block;
+		max-width: 46ch;
+	}
 	.tfmodal {
 		position: fixed;
 		inset: 0;

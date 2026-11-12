@@ -22,11 +22,12 @@
 	const IS_WINDOWS = typeof navigator !== 'undefined' && /Windows/i.test(navigator.userAgent);
 </script>
 
+<div class="subgroup">{t('settings.subAccess')}</div>
+<div class="subdesc">{t('settings.subAccessDesc')}</div>
 <div class="srow">
 	<div class="st"><b>{t('settings.unattended')}</b><span>{t('settings.unattendedDesc')}</span></div>
 	<button class="toggle" aria-label={t('settings.unattended')} class:on={config?.unattended_access} aria-pressed={config?.unattended_access ?? false} onclick={() => toggleUnattended?.()}><span class="knob"></span></button>
 </div>
-<TwoFactor bind:config {saveConfig} />
 <div class="srow">
 	<div class="st">
 		<b>{t('settings.connectPw')}</b><span>{t('settings.connectPwDesc')}</span>
@@ -50,7 +51,12 @@
 		{/if}
 	</div>
 </div>
+<TwoFactor bind:config {saveConfig} />
+<div class="subgroup">{t('settings.subTrusted')}</div>
+<div class="subdesc">{t('settings.subTrustedDesc')}</div>
 <PairedDevices />
+<div class="subgroup">{t('settings.subControl')}</div>
+<div class="subdesc">{t('settings.subControlDesc')}</div>
 <div class="srow">
 	<div class="st"><b>{t('settings.remoteCursor')}</b><span>{t('settings.remoteCursorDesc')}</span></div>
 	<button class="toggle" aria-label={t('settings.remoteCursor')} class:on={config?.show_remote_cursor ?? true} aria-pressed={config?.show_remote_cursor ?? true} onclick={() => { if (config) { config.show_remote_cursor = !(config.show_remote_cursor ?? true); saveConfig?.(); } }}><span class="knob"></span></button>

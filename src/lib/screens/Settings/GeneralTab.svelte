@@ -128,6 +128,8 @@
 	}
 </script>
 
+<div class="subgroup">{t('settings.subProfile')}</div>
+<div class="subdesc">{t('settings.subProfileDesc')}</div>
 <div class="srow">
 	<div class="st"><b>{t('settings.language')}</b><span>{t('settings.languageDesc')}</span></div>
 	<div class="seg">
@@ -165,6 +167,8 @@
 		{/each}
 	</div>
 </div>
+<div class="subgroup">{t('settings.subApp')}</div>
+<div class="subdesc">{t('settings.subAppDesc')}</div>
 {#if shared?.supported}
 	<div class="srow">
 		<div class="st">
@@ -179,24 +183,12 @@
 	<button class="toggle" aria-label={t('settings.tray')} class:on={ui.tray} aria-pressed={ui.tray} onclick={() => { ui.tray = !ui.tray; saveUi(); api.setTray(ui.tray).catch(() => {}); }}><span class="knob"></span></button>
 </div>
 <div class="srow">
-	<div class="st"><b>{t('settings.padWake')}</b><span>{t('settings.padWakeDesc')}</span></div>
-	<button class="toggle" aria-label={t('settings.padWake')} class:on={ui.padWake} aria-pressed={ui.padWake} onclick={() => { ui.padWake = !ui.padWake; saveUi(); api.setPadWake(ui.padWake).catch(() => {}); }}><span class="knob"></span></button>
-</div>
-<div class="srow">
-	<div class="st"><b>{t('settings.padBackground')}</b><span>{t('settings.padBackgroundDesc')}</span></div>
-	<button class="toggle" aria-label={t('settings.padBackground')} class:on={ui.padBackground} aria-pressed={ui.padBackground} onclick={() => { ui.padBackground = !ui.padBackground; saveUi(); api.setPadBackground(ui.padBackground).catch(() => {}); }}><span class="knob"></span></button>
-</div>
-<div class="srow">
-	<div class="st"><b>{t('settings.clipboardSync')}</b><span>{t('settings.clipboardSyncDesc')}</span></div>
-	<button class="toggle" aria-label={t('settings.clipboardSync')} class:on={ui.clipboardSync} aria-pressed={ui.clipboardSync} onclick={() => { ui.clipboardSync = !ui.clipboardSync; saveUi(); api.setClipboardSync(ui.clipboardSync).catch(() => {}); }}><span class="knob"></span></button>
-</div>
-<div class="srow">
 	<div class="st"><b>{t('settings.autoUpdate')}</b><span>{t('settings.autoUpdateDesc')}</span></div>
 	<button class="toggle" aria-label={t('settings.autoUpdate')} class:on={ui.autoUpdate} aria-pressed={ui.autoUpdate} onclick={() => { ui.autoUpdate = !ui.autoUpdate; saveUi(); }}><span class="knob"></span></button>
 </div>
 <div class="srow">
-	<div class="st"><b>{t('settings.debug')}</b><span>{t('settings.debugDesc')}</span></div>
-	<button class="toggle" aria-label={t('settings.debug')} class:on={ui.debug} aria-pressed={ui.debug} onclick={() => { ui.debug = !ui.debug; saveUi(); }}><span class="knob"></span></button>
+	<div class="st"><b>{t('settings.clipboardSync')}</b><span>{t('settings.clipboardSyncDesc')}</span></div>
+	<button class="toggle" aria-label={t('settings.clipboardSync')} class:on={ui.clipboardSync} aria-pressed={ui.clipboardSync} onclick={() => { ui.clipboardSync = !ui.clipboardSync; saveUi(); api.setClipboardSync(ui.clipboardSync).catch(() => {}); }}><span class="knob"></span></button>
 </div>
 <div class="srow">
 	<div class="st">
@@ -204,6 +196,22 @@
 		<span>{t('settings.uiHwaccelDesc')}{#if hwaccelChanged} <strong class="restart">· {t('settings.restartRequired')}</strong>{/if}</span>
 	</div>
 	<button class="toggle" aria-label={t('settings.uiHwaccel')} class:on={hwaccelOn} aria-pressed={hwaccelOn} onclick={toggleHwaccel}><span class="knob"></span></button>
+</div>
+<div class="subgroup">{t('settings.subPad')}</div>
+<div class="subdesc">{t('settings.subPadDesc')}</div>
+<div class="srow">
+	<div class="st"><b>{t('settings.padWake')}</b><span>{t('settings.padWakeDesc')}</span></div>
+	<button class="toggle" aria-label={t('settings.padWake')} class:on={ui.padWake} aria-pressed={ui.padWake} onclick={() => { ui.padWake = !ui.padWake; saveUi(); api.setPadWake(ui.padWake).catch(() => {}); }}><span class="knob"></span></button>
+</div>
+<div class="srow">
+	<div class="st"><b>{t('settings.padBackground')}</b><span>{t('settings.padBackgroundDesc')}</span></div>
+	<button class="toggle" aria-label={t('settings.padBackground')} class:on={ui.padBackground} aria-pressed={ui.padBackground} onclick={() => { ui.padBackground = !ui.padBackground; saveUi(); api.setPadBackground(ui.padBackground).catch(() => {}); }}><span class="knob"></span></button>
+</div>
+<div class="subgroup">{t('settings.subDiag')}</div>
+<div class="subdesc">{t('settings.subDiagDesc')}</div>
+<div class="srow">
+	<div class="st"><b>{t('settings.debug')}</b><span>{t('settings.debugDesc')}</span></div>
+	<button class="toggle" aria-label={t('settings.debug')} class:on={ui.debug} aria-pressed={ui.debug} onclick={() => { ui.debug = !ui.debug; saveUi(); }}><span class="knob"></span></button>
 </div>
 <div class="srow">
 	<div class="st">

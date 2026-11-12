@@ -739,3 +739,24 @@ input:focus-visible {
 .field input:focus-visible {
 	outline: none;
 }
+
+/* Settings: category header inside a tab (title + one-line summary) — the same look as
+   the old section headers (mono, small caps). Global: every settings tab is its own
+   component with scoped styles. */
+.subgroup {
+	font-family: var(--font-mono);
+	font-size: 10.5px;
+	letter-spacing: 0.1em;
+	text-transform: uppercase;
+	color: var(--text-faint);
+	margin-top: 22px;
+}
+.subgroup:first-child {
+	margin-top: 0;
+}
+.subdesc {
+	font-size: 12.5px;
+	color: var(--text-faint);
+	margin-top: 5px;
+	line-height: 1.45;
+}

@@ -15,6 +15,14 @@
 	import { caps, decodeAvailable, encoderAvailable } from '#lib/caps.svelte.js';
 	import { gameStore, saveGames } from '#lib/games.svelte.js';
 	import { t } from '#lib/i18n.svelte.js';
+	import { STATUS_FIELDS } from '../Session/StatusBar.svelte';
+
+	// Status bar field picker: keep the canonical order whatever the click order was.
+	function toggleField(f: string) {
+		const on = ui.statusFields.includes(f);
+		ui.statusFields = STATUS_FIELDS.filter((x) => (x === f ? !on : ui.statusFields.includes(x)));
+		saveUi();
+	}
 	// Same-host co-op component (ProtoInput) status, refreshed when the tab opens.
 	let coop = $state<{ supported: boolean; installed: boolean; dir: string; missing: string[] } | null>(null);
 	onMount(() => {
@@ -83,8 +91,8 @@
 
 <!-- STREAMING (client): what this device receives when connecting to a host —
      decode, presentation and viewing prefs. -->
-<div class="group mono">{t('settings.sectionStreaming')}</div>
-<div class="groupdesc">{t('settings.sectionStreamingDesc')}</div>
+<div class="subgroup">{t('settings.subQuality')}</div>
+<div class="subdesc">{t('settings.subQualityDesc')}</div>
 <div class="srow">
 	<div class="st"><b>{t('settings.quality')}</b><span>{t('settings.qualityDesc')}</span></div>
 	<div class="seg">
@@ -109,6 +117,10 @@
 	</div>
 </div>
 <div class="srow">
+	<div class="st"><b>{t('settings.hdr')}</b><span>{t('settings.hdrDesc')}</span></div>
+	<button class="toggle" aria-label={t('settings.hdr')} class:on={ui.hdr} aria-pressed={ui.hdr} onclick={() => { ui.hdr = !ui.hdr; saveUi(); }}><span class="knob"></span></button>
+</div>
+<div class="srow">
 	<div class="st"><b>{t('settings.preOptimize')}</b><span>{t('settings.preOptimizeDesc')}</span></div>
 	<button class="toggle" aria-label={t('settings.preOptimize')} class:on={config?.pre_optimize_stream ?? true} aria-pressed={config?.pre_optimize_stream ?? true} onclick={() => { if (config) { config.pre_optimize_stream = !(config.pre_optimize_stream ?? true); saveConfig?.(); } }}><span class="knob"></span></button>
 </div>
@@ -116,19 +128,38 @@
 	<div class="st"><b>{t('settings.framePacing')}</b><span>{t('settings.framePacingDesc')}</span></div>
 	<button class="toggle" aria-label={t('settings.framePacing')} class:on={ui.framePacing} aria-pressed={ui.framePacing} onclick={() => { ui.framePacing = !ui.framePacing; saveUi(); }}><span class="knob"></span></button>
 </div>
+<div class="subgroup">{t('settings.subScreen')}</div>
+<div class="subdesc">{t('settings.subScreenDesc')}</div>
 <div class="srow">
 	<div class="st"><b>{t('settings.statsHud')}</b><span>{t('settings.statsHudDesc')}</span></div>
 	<button class="toggle" aria-label={t('settings.statsHud')} class:on={ui.statsHud} aria-pressed={ui.statsHud} onclick={() => { ui.statsHud = !ui.statsHud; saveUi(); }}><span class="knob"></span></button>
 </div>
 <div class="srow">
+	<div class="st"><b>{t('settings.statusBar')}</b><span>{t('settings.statusBarDesc')}</span></div>
+	<button class="toggle" aria-label={t('settings.statusBar')} class:on={ui.statusBar} aria-pressed={ui.statusBar} onclick={() => { ui.statusBar = !ui.statusBar; saveUi(); }}><span class="knob"></span></button>
+</div>
+{#if ui.statusBar}
+<div class="srow sub">
+	<div class="st"><b>{t('settings.statusFields')}</b>
+		<div class="chips" role="group" aria-label={t('settings.statusFields')}>
+			{#each STATUS_FIELDS as f (f)}
+				<button class="chip" class:on={ui.statusFields.includes(f)} aria-pressed={ui.statusFields.includes(f)} onclick={() => toggleField(f)}>{t(`status.${f}`)}</button>
+			{/each}
+		</div>
+	</div>
+</div>
+<div class="srow sub">
+	<div class="st"><b>{t('settings.statusBarMenu')}</b><span>{t('settings.statusBarMenuDesc')}</span></div>
+	<button class="toggle" aria-label={t('settings.statusBarMenu')} class:on={ui.statusBarMenu} aria-pressed={ui.statusBarMenu} onclick={() => { ui.statusBarMenu = !ui.statusBarMenu; saveUi(); }}><span class="knob"></span></button>
+</div>
+{/if}
+<div class="srow">
 	<div class="st"><b>{t('settings.overlayButton')}</b><span>{t('settings.overlayButtonDesc')}</span></div>
 	<button class="toggle" aria-label={t('settings.overlayButton')} class:on={ui.overlayButton} aria-pressed={ui.overlayButton} onclick={() => { ui.overlayButton = !ui.overlayButton; saveUi(); }}><span class="knob"></span></button>
 </div>
 
-<div class="srow">
-	<div class="st"><b>{t('settings.hdr')}</b><span>{t('settings.hdrDesc')}</span></div>
-	<button class="toggle" aria-label={t('settings.hdr')} class:on={ui.hdr} aria-pressed={ui.hdr} onclick={() => { ui.hdr = !ui.hdr; saveUi(); }}><span class="knob"></span></button>
-</div>
+<div class="subgroup">{t('settings.subAudio')}</div>
+<div class="subdesc">{t('settings.subAudioDesc')}</div>
 <div class="srow">
 	<div class="st">
 		<b>{t('settings.audioQuality')}</b>
@@ -145,6 +176,8 @@
 		{/each}
 	</select>
 </div>
+<div class="subgroup">{t('settings.subMouse')}</div>
+<div class="subdesc">{t('settings.subMouseDesc')}</div>
 <div class="srow">
 	<div class="st">
 		<b>{t('settings.mouseSens')}</b>
@@ -161,13 +194,22 @@
 		{/each}
 	</select>
 </div>
+{#if caps.v?.platform === 'windows'}
+<div class="srow">
+	<div class="st">
+		<b>{t('settings.pointerFree')}</b>
+		<span>{t('settings.pointerFreeDesc')}</span>
+	</div>
+	<button class="toggle" aria-label={t('settings.pointerFree')} class:on={ui.pointerFree} aria-pressed={ui.pointerFree} onclick={() => { ui.pointerFree = !ui.pointerFree; saveUi(); }}><span class="knob"></span></button>
+</div>
+{/if}
 {#if !clientOnly}
 <!-- HOST: what this device sends when it shares its screen. Resolution/fps/bitrate
      edit gameStore.host, which the +page effect pushes to the core via
      api.setStreamSettings (same wiring the Games card used); the rest are core
      Config fields the host applies per session. -->
-<div class="group mono">{t('settings.sectionHost')}</div>
-<div class="groupdesc">{t('settings.sectionHostDesc')}</div>
+<div class="subgroup">{t('settings.subHostVideo')}</div>
+<div class="subdesc">{t('settings.subHostVideoDesc')}</div>
 <div class="srow">
 	<div class="st"><b>{t('settings.resolution')}</b></div>
 	<div class="seg">
@@ -228,6 +270,8 @@
 		><span class="knob"></span></button>
 	</div>
 {/if}
+<div class="subgroup">{t('settings.subHostAudio')}</div>
+<div class="subdesc">{t('settings.subHostAudioDesc')}</div>
 <div class="srow">
 	<div class="st"><b>{t('settings.audioTransmit')}</b><span>{t('settings.audioTransmitDesc')}</span></div>
 	<button class="toggle" aria-label={t('settings.audioTransmit')} class:on={config?.transmit_audio} aria-pressed={config?.transmit_audio ?? false} onclick={toggleTransmit}><span class="knob"></span></button>
@@ -263,6 +307,34 @@
 {/if}
 
 <style>
+	.srow.sub {
+		padding-left: 18px;
+	}
+	.chips {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+		margin-top: 8px;
+	}
+	.chip {
+		font-family: var(--font-sans);
+		font-size: 12px;
+		padding: 5px 10px;
+		border-radius: 999px;
+		border: 1px solid var(--border-strong);
+		background: var(--surface);
+		color: var(--text-muted);
+		cursor: pointer;
+	}
+	.chip.on {
+		background: var(--accent);
+		border-color: var(--accent);
+		color: #fff;
+	}
+	.chip:focus-visible {
+		outline: 2px solid var(--accent);
+		outline-offset: 2px;
+	}
 	.srow {
 		display: flex;
 		align-items: center;
@@ -328,13 +400,6 @@
 	}
 	/* Section header ("Streaming" / "Host") — splits the tab into the client-side
 	   viewing prefs and the host-side encode/send knobs. */
-	.group {
-		font-size: 10.5px;
-		letter-spacing: 0.1em;
-		text-transform: uppercase;
-		color: var(--text-faint);
-		margin-top: 22px;
-	}
 	.coopst {
 		margin-top: 4px;
 		font-size: 11px;
@@ -355,16 +420,6 @@
 		cursor: pointer;
 		font: inherit;
 		text-decoration: underline;
-	}
-	/* the first section header opens the tab — no big top gap */
-	.group:first-child {
-		margin-top: 0;
-	}
-	.groupdesc {
-		font-size: 12.5px;
-		color: var(--text-faint);
-		margin-top: 5px;
-		line-height: 1.45;
 	}
 	/* the global .prange is width:100%; cap it so it sits as a right-hand control */
 	input.prange {

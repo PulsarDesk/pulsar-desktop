@@ -4,6 +4,7 @@
 	// makes it ask for a password again.
 	import { onMount } from 'svelte';
 	import Icon from '#lib/Icon.svelte';
+	import Modal from '#lib/Modal.svelte';
 	import { api, onPairedDevicesChanged, type PairedDevice } from '#lib/api.js';
 	import { t, i18n } from '#lib/i18n.svelte.js';
 
@@ -30,7 +31,13 @@
 		};
 	});
 
-	async function revoke(d: PairedDevice) {
+	// Removing asks first: the device then needs a password again, and a misclick on the
+	// list used to drop it at once.
+	let confirmDev = $state<PairedDevice | null>(null);
+	async function revoke() {
+		const d = confirmDev;
+		confirmDev = null;
+		if (!d) return;
 		await api.revokePairedDevice(d.key).catch(() => false);
 		await refresh();
 	}
@@ -55,7 +62,7 @@
 							{#if d.lastSeen}· {t('settings.pairedLastSeen', { d: fmt(d.lastSeen) })}{/if}
 						</span>
 					</div>
-					<button class="btn btn-ghost" aria-label={`${t('settings.pairedRevoke')}: ${d.name || d.id}`} onclick={() => revoke(d)}>
+					<button class="btn btn-ghost" aria-label={`${t('settings.pairedRevoke')}: ${d.name || d.id}`} onclick={() => (confirmDev = d)}>
 						{t('settings.pairedRevoke')}
 					</button>
 				</li>
@@ -64,7 +71,31 @@
 	{/if}
 </div>
 
+{#if confirmDev}
+	<Modal title={t('settings.pairedRevokeTitle')} onClose={() => (confirmDev = null)}>
+		<p class="confirm">{t('settings.pairedRevokeConfirm', { name: confirmDev.name || confirmDev.id })}</p>
+		<div class="cacts">
+			<button class="btn btn-ghost" onclick={() => (confirmDev = null)}>{t('pw.cancel')}</button>
+			<button class="btn btn-primary danger" onclick={revoke}>{t('settings.pairedRevoke')}</button>
+		</div>
+	</Modal>
+{/if}
+
 <style>
+	.confirm {
+		margin: 0 0 18px;
+		color: var(--text-muted);
+		line-height: 1.5;
+	}
+	.cacts {
+		display: flex;
+		justify-content: flex-end;
+		gap: 10px;
+	}
+	.danger {
+		background: var(--danger);
+		border-color: var(--danger);
+	}
 	.srow.col {
 		display: flex;
 		flex-direction: column;

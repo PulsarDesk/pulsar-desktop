@@ -133,9 +133,9 @@
 	}
 </script>
 
-<!-- Gaming mode (`padNav`) fills its box: the title and the tab rail stay put and only the
-     content card scrolls. The remote shell scrolls the whole page as before (rail sticky). -->
-<div class="settings" class:fill={padNav} use:navContainer={padNav}>
+<!-- Settings fills its box in both shells: the title and the tab rail stay put and only the
+     content card scrolls (the parent must not scroll — HomeView pins `.content`). -->
+<div class="settings fill" use:navContainer={padNav}>
 {#if padNav}
 	<div class="head gaming">
 		<div>
@@ -232,6 +232,7 @@
 	.settings.fill {
 		display: flex;
 		flex-direction: column;
+		flex: 1;
 		height: 100%;
 		min-height: 0;
 	}

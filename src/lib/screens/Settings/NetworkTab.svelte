@@ -75,6 +75,8 @@
 	}
 </script>
 
+<div class="subgroup">{t('settings.subPath')}</div>
+<div class="subdesc">{t('settings.subPathDesc')}</div>
 <div class="srow">
 	<div class="st">
 		<b>{t('settings.connMethod')}</b>
@@ -112,6 +114,39 @@
 </div>
 <!-- Run the relay in this app. On = no address to type; the app registers against
      itself and other devices on the LAN can point at the shown address. -->
+<div class="srow">
+	<div class="st">
+		<b>{t('settings.nodePort')}</b>
+		<span>{t('settings.nodePortDesc')}</span>
+	</div>
+	<div class="field" style="width:150px">
+		<Icon name="plug" size={15} />
+		{#if config}
+			<!-- Unset (0) renders EMPTY, with the port actually in use as the placeholder —
+			     a literal 0 in the box read like a (nonsense) port. Clearing the field
+			     returns to the random-port default. The placeholder never falls back to
+			     "Random" once a port is known (see `livePort`), so pressing go-online
+			     doesn't make the box flicker. -->
+			<input
+				type="number"
+				min="1"
+				max="65535"
+				value={config.node_port > 0 ? config.node_port : ''}
+				onchange={(e) => {
+					if (!config) return;
+					const v = parseInt((e.currentTarget as HTMLInputElement).value, 10);
+					config.node_port = Number.isFinite(v) && v > 0 && v <= 65535 ? v : 0;
+					saveConfig();
+				}}
+				aria-label={t('settings.nodePort')}
+				placeholder={livePort > 0 ? String(livePort) : t('settings.portRandom')}
+				style="font-family:var(--font-mono);font-size:12.5px;width:90px"
+			/>
+		{/if}
+	</div>
+</div>
+<div class="subgroup">{t('settings.subRelay')}</div>
+<div class="subdesc">{t('settings.subRelayDesc')}</div>
 <div class="srow">
 	<div class="st">
 		<b>{t('settings.localRelay')}</b>
@@ -158,37 +193,6 @@
 </div>
 
 <!-- Node UDP port -->
-<div class="srow">
-	<div class="st">
-		<b>{t('settings.nodePort')}</b>
-		<span>{t('settings.nodePortDesc')}</span>
-	</div>
-	<div class="field" style="width:150px">
-		<Icon name="plug" size={15} />
-		{#if config}
-			<!-- Unset (0) renders EMPTY, with the port actually in use as the placeholder —
-			     a literal 0 in the box read like a (nonsense) port. Clearing the field
-			     returns to the random-port default. The placeholder never falls back to
-			     "Random" once a port is known (see `livePort`), so pressing go-online
-			     doesn't make the box flicker. -->
-			<input
-				type="number"
-				min="1"
-				max="65535"
-				value={config.node_port > 0 ? config.node_port : ''}
-				onchange={(e) => {
-					if (!config) return;
-					const v = parseInt((e.currentTarget as HTMLInputElement).value, 10);
-					config.node_port = Number.isFinite(v) && v > 0 && v <= 65535 ? v : 0;
-					saveConfig();
-				}}
-				aria-label={t('settings.nodePort')}
-				placeholder={livePort > 0 ? String(livePort) : t('settings.portRandom')}
-				style="font-family:var(--font-mono);font-size:12.5px;width:90px"
-			/>
-		{/if}
-	</div>
-</div>
 
 <style>
 	.dimmed {

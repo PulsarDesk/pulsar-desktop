@@ -104,6 +104,16 @@ export interface UiSettings {
 	audioQuality: AudioQuality;
 	/** Relative-mouse sensitivity (games that grabbed the mouse); 1 = the mouse's own speed. */
 	mouseSens: number;
+	/** Remote mode: the cursor may leave the video — leaving hands mouse + keyboard back to
+	 * this PC, coming back over the video takes control again (Parsec-style, issue #3). Off =
+	 * the cursor stays locked to the video until Ctrl+Alt+Z. Also in the session menu. */
+	pointerFree: boolean;
+	/** Session status bar under the video (issue #5). Off by default. */
+	statusBar: boolean;
+	/** Which facts the status bar shows (`StatusBar.svelte` STATUS_FIELDS). */
+	statusFields: string[];
+	/** The Pulsar menu button lives in the status bar instead of on the video. */
+	statusBarMenu: boolean;
 	hdr: boolean;
 	unattended: boolean;
 	tray: boolean;
@@ -231,6 +241,11 @@ const DEFAULTS: UiSettings = {
 	encoder: 'auto',
 	audioQuality: 'auto',
 	mouseSens: 1,
+	pointerFree: false,
+	statusBar: false,
+	// The always-on stats HUD's set (codec · fps · latency · decode · bitrate).
+	statusFields: ['codec', 'fps', 'latency', 'decode', 'bitrate'],
+	statusBarMenu: false,
 	hdr: false,
 	unattended: true,
 	tray: true,

@@ -14,6 +14,7 @@
 
 <script lang="ts">
 	import VideoStatus from './Session/VideoStatus.svelte';
+	import StatusBar, { STATUS_BAR_H } from './Session/StatusBar.svelte';
 	import { SessionMedia } from './Session/media.svelte';
 	import {
 		api,
@@ -113,6 +114,25 @@
 	}
 
 	const connLabel = $derived(conn === 'relay' ? 'Relay' : 'P2P');
+
+	// Status bar under the video (Settings → Görüntü). Not in split panes or the Linux
+	// single-surface mode (the video there is not positioned over `.screen`).
+	const showBar = $derived(ui.statusBar && !split && !embedded);
+	// The menu button sits in the bar → hide the one the renderer draws on the video (the
+	// saved overlay-button setting itself is untouched). Pushed on change only; the initial
+	// state rides the renderer's one-shot seed in controls.svelte.ts.
+	const ovbtnShown = $derived(ui.overlayButton && !(showBar && ui.statusBarMenu));
+	let ovbtnSent: boolean | null = null;
+	$effect(() => {
+		const want = ovbtnShown;
+		if (!native || playId < 0) return;
+		if (ovbtnSent === null) {
+			ovbtnSent = ui.overlayButton; // what the seed applied
+		}
+		if (want === ovbtnSent) return;
+		ovbtnSent = want;
+		api.setOverlayButton(playId, want).catch(() => {});
+	});
 
 	let canvas: HTMLCanvasElement;
 	// The video + audio + live-stats engine (canvas WebSocket sink, mpv vstats, RTT/host
@@ -773,6 +793,12 @@
 					}
 					break;
 				}
+				// Görüntü → "Serbest imleç": the same switch as Settings → Görüntü.
+				case 'ptrfree': {
+					ui.pointerFree = val === 'on';
+					saveUi();
+					break;
+				}
 				case 'aquality':
 					if (['auto', 'standard', 'high', 'raw'].includes(val)) controls.setAudioQuality(val as AudioQuality);
 					break;
@@ -967,7 +993,7 @@
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="screen" class:embedded={useEmbedded} bind:this={screenEl} onpointerdowncapture={onScreenDown}>
+<div class="screen" class:embedded={useEmbedded} style:bottom={showBar ? `${STATUS_BAR_H}px` : null} bind:this={screenEl} onpointerdowncapture={onScreenDown}>
 	<!-- svelte-ignore a11y_no_static_element_interactions -->
 	<canvas
 		bind:this={canvas}
@@ -1009,7 +1035,7 @@
 	     exact same spot and receives the pointer (the video container is input
 	     pass-through on Linux). Click = open the overlay; drag = move the button
 	     (live-streamed to the renderer, persisted). Hidden while open / disabled. -->
-	{#if native && ui.overlayButton && !dock.overlayOpen}
+	{#if native && ovbtnShown && !dock.overlayOpen}
 		<button
 			class="ovbtn-hotspot"
 			aria-label={t('session.overlayBtn')}
@@ -1034,6 +1060,24 @@
 	<!-- hidden picker for "send file" -->
 	<input class="filepick" type="file" bind:this={sidechan.fileInput} onchange={sidechan.onFilePicked} />
 </div>
+
+{#if showBar}
+	<StatusBar
+		fields={ui.statusFields}
+		{conn}
+		res={media.hostRes}
+		fps={media.fps}
+		codec={media.hostCodec}
+		encoder={media.hostEncoder}
+		decoder={media.decoderCodec}
+		latencyMs={media.latencyMs}
+		decodeMs={media.decodeMs}
+		mbps={media.mbps}
+		lossPct={media.lossPct}
+		menu={native && ui.statusBarMenu}
+		onMenu={() => dock.toggleOverlay()}
+	/>
+{/if}
 
 <style>
 	.screen {

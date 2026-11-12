@@ -312,6 +312,7 @@ export const api = {
 		invoke<void>('set_play_audio', { id, transmit, mute }),
 	/** Relative-mouse sensitivity multiplier (process-wide; 1 = unchanged). */
 	setMouseSensitivity: (value: number) => invoke<void>('set_mouse_sensitivity', { value }),
+	setPointerFree: (on: boolean) => invoke<void>('set_pointer_free', { on }),
 	/** Change the session's audio quality live (a re-stream): auto/standard/high/raw. */
 	setPlayAudioQuality: (id: number, quality: string) =>
 		invoke<void>('set_play_audio_quality', { id, quality }),

@@ -103,7 +103,7 @@
 	<Sidebar {nav} {view} {online} {connecting} {connError} hostCount={hostSessions.length} {onView} {onGoOnline} />
 
 	<!-- content -->
-	<main class="content">
+	<main class="content" class:pinned={view === 'settings'}>
 		{#if connectErr}
 			<div class="flash" role="alert">
 				<Icon name="shield" size={16} />
@@ -141,6 +141,13 @@
 {/if}
 
 <style>
+	/* Settings scrolls its own content card (title + tab rail stay put), so the page itself
+	   must not scroll there. */
+	.content.pinned {
+		overflow: hidden;
+		display: flex;
+		flex-direction: column;
+	}
 	.body {
 		display: flex;
 		flex: 1;

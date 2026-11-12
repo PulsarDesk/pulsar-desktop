@@ -1018,6 +1018,12 @@
 		api.setMouseSensitivity(ui.mouseSens).catch(() => {});
 	});
 
+	// Free cursor (remote mode) follows the setting (startup + every change, Settings or menu).
+	$effect(() => {
+		if (isPopup) return;
+		api.setPointerFree(ui.pointerFree).catch(() => {});
+	});
+
 	// Keep the core's host stream settings in sync (resolution/fps/bitrate/encoder/hdr).
 	$effect(() => {
 		if (isPopup) return;
