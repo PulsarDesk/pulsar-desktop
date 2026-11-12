@@ -119,13 +119,16 @@ is still honored (mid-session muting is safe). Windows mute = endpoint **mute
 flag**, NOT volume-0. Un-muted on teardown.
 Mic/voice-call side-channel PCM lives in `src-tauri/src/audio_io.rs`.
 
-## DS4 headset jack (client, experimental, Windows USB)
+## DS4 headset jack (client, experimental, USB; Windows / Linux / macOS)
 
 `src-tauri/src/ds4_headset.rs`, Settings → Kumandalar → "DS4 kulaklık girişi (deneysel)"
 (`ui.ds4Headset`, default off, `set_ds4_headset`). A 2 Hz watcher finds a USB DS4
 (VID 054C, PID 09CC = v2 / 0BA0 = Sony USB adapter; the v1 05C4 has no USB audio), reads the jack bit from a second read-only HID handle
 (USB report 0x01 byte 30 bit 5, psdevwiki layout) and, while headphones are in, points
-`native_audio` at the pad's playback device (ContainerId match, `ds5::endpoint::find`);
+`native_audio` at the pad's playback device (`ds5::endpoint::find_family(…, Family::Ds4)`:
+Windows ContainerId; Linux sysfs sound card + a unique "Wireless Controller" SDL device;
+macOS only with one USB DS4 and one such device; Linux hidraw access from
+`70-pulsar-ds5.rules`);
 `native_audio` reopens its SDL stream when the target changes. **Not verified on
 hardware** (written without a DS4, 2026-11-12). The jack bit matches psdevwiki and ds4drv;
 the endpoint match and the default jack volume are unconfirmed (nothing is written to the

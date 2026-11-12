@@ -75,21 +75,64 @@ pub fn unique_exact<'a, T>(devs: &'a [(T, String)], want: &str) -> Option<&'a (T
 	it.next().is_none().then_some(first)
 }
 
-/// The one entry that looks like a DualSense; `None` for zero or many.
+/// Which Sony pad family the endpoint belongs to: the Linux sound-card check and the
+/// Linux/macOS name match are per family (Windows matches by container, family-blind).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Family {
+	DualSense,
+	/// DualShock 4 v2 (09cc) and Sony's USB wireless adapter (0ba0): the ones with USB audio.
+	Ds4,
+}
+
+impl Family {
+	/// USB product ids (lowercase hex, as sysfs `idProduct` has them).
+	#[allow(dead_code)]
+	pub fn pids(self) -> &'static [&'static str] {
+		match self {
+			Family::DualSense => &["0ce6", "0df2"],
+			Family::Ds4 => &["09cc", "0ba0"],
+		}
+	}
+
+	/// An audio device name that looks like this family's pad. DS4s call themselves
+	/// "Wireless Controller" (the adapter "DUALSHOCK®4 USB Wireless Adaptor"); a DualSense is
+	/// "DualSense Wireless Controller", so it is excluded explicitly.
+	pub fn is_name(self, name: &str) -> bool {
+		let n = name.to_ascii_lowercase();
+		match self {
+			Family::DualSense => n.contains("dualsense"),
+			Family::Ds4 => {
+				!n.contains("dualsense") && (n.contains("wireless controller") || n.contains("dualshock"))
+			}
+		}
+	}
+}
+
+/// The one entry whose name looks like `fam`'s pad; `None` for zero or many.
 #[cfg_attr(windows, allow(dead_code))]
-pub fn unique_dualsense<T>(devs: &[(T, String)]) -> Option<&(T, String)> {
-	let mut it = devs
-		.iter()
-		.filter(|(_, n)| n.to_ascii_lowercase().contains("dualsense"));
+pub fn unique_family<T>(devs: &[(T, String)], fam: Family) -> Option<&(T, String)> {
+	let mut it = devs.iter().filter(|(_, n)| fam.is_name(n));
 	let first = it.next()?;
 	it.next().is_none().then_some(first)
 }
 
-/// The SDL device of `kind` that belongs to the USB pad at HID `path`, if it can be told
-/// apart for sure (module docs). SDL's AUDIO subsystem must be initialized.
+/// The one entry that looks like a DualSense; `None` for zero or many (kept for callers and
+/// tests; the OS matchers use `unique_family`).
+#[allow(dead_code)]
+pub fn unique_dualsense<T>(devs: &[(T, String)]) -> Option<&(T, String)> {
+	unique_family(devs, Family::DualSense)
+}
+
+/// The SDL device of `kind` that belongs to the USB DualSense at HID `path`, if it can be
+/// told apart for sure (module docs). SDL's AUDIO subsystem must be initialized.
 pub fn find(hid_path: &CStr, kind: Kind) -> Option<Endpoint> {
+	find_family(hid_path, kind, Family::DualSense)
+}
+
+/// `find` for another pad family (the DS4 headset jack, `ds4_headset.rs`).
+pub fn find_family(hid_path: &CStr, kind: Kind, fam: Family) -> Option<Endpoint> {
 	let devs = sdl_devices(kind);
-	let hit = os::find(hid_path, kind, &devs);
+	let hit = os::find(hid_path, kind, &devs, fam);
 	match &hit {
 		Some(e) => tracing::info!(?kind, name = %e.name, "ds5 usb audio: pad endpoint found"),
 		None => tracing::warn!(
@@ -265,6 +308,7 @@ mod os {
 		hid_path: &CStr,
 		kind: Kind,
 		devs: &[(sdl3_sys::audio::SDL_AudioDeviceID, String)],
+		_fam: super::Family,
 	) -> Option<Endpoint> {
 		let iface = wide(&hid_path.to_string_lossy());
 		let c = container(iface_devnode(&iface)?)?;
@@ -292,7 +336,7 @@ mod os {
 
 #[cfg(target_os = "linux")]
 mod os {
-	use super::{unique_dualsense, Endpoint, Kind};
+	use super::{unique_family, Endpoint, Family, Kind};
 	use std::ffi::CStr;
 	use std::path::Path;
 
@@ -300,12 +344,13 @@ mod os {
 		hid_path: &CStr,
 		_kind: Kind,
 		devs: &[(sdl3_sys::audio::SDL_AudioDeviceID, String)],
+		fam: Family,
 	) -> Option<Endpoint> {
 		let node = hid_path.to_str().ok()?.rsplit('/').next()?.to_string(); // hidrawN
 		let dev = std::fs::canonicalize(format!("/sys/class/hidraw/{node}/device")).ok()?;
 		let usb = super::linux::usb_device_dir(&dev)?;
 		let mine = super::linux::sound_cards(&usb);
-		let all = super::linux::dualsense_cards(Path::new("/sys/class/sound"));
+		let all = super::linux::family_cards(Path::new("/sys/class/sound"), fam.pids());
 		if mine.len() != 1 || all.len() != 1 {
 			tracing::warn!(
 				?mine,
@@ -314,7 +359,7 @@ mod os {
 			);
 			return None;
 		}
-		unique_dualsense(devs).map(|(id, name)| Endpoint {
+		unique_family(devs, fam).map(|(id, name)| Endpoint {
 			id: *id,
 			name: name.clone(),
 		})
@@ -323,23 +368,27 @@ mod os {
 
 #[cfg(not(any(windows, target_os = "linux")))]
 mod os {
-	use super::{unique_dualsense, Endpoint, Kind};
+	use super::{unique_family, Endpoint, Family, Kind};
 	use std::ffi::CStr;
 
 	pub fn find(
 		_hid_path: &CStr,
 		_kind: Kind,
 		devs: &[(sdl3_sys::audio::SDL_AudioDeviceID, String)],
+		fam: Family,
 	) -> Option<Endpoint> {
 		use pulsar_core::input::ds5::wire::Ds5Transport;
-		let usb = super::super::hid::enumerate()
-			.into_iter()
-			.filter(|d| d.transport == Ds5Transport::Usb)
-			.count();
+		let usb = match fam {
+			Family::DualSense => super::super::hid::enumerate()
+				.into_iter()
+				.filter(|d| d.transport == Ds5Transport::Usb)
+				.count(),
+			Family::Ds4 => crate::ds4_headset::usb_ds4_paths().len(),
+		};
 		if usb != 1 {
 			return None;
 		}
-		unique_dualsense(devs).map(|(id, name)| Endpoint {
+		unique_family(devs, fam).map(|(id, name)| Endpoint {
 			id: *id,
 			name: name.clone(),
 		})
@@ -387,6 +436,11 @@ pub mod linux {
 	/// DualSense sound cards on the system: `cardK` entries of `/sys/class/sound` whose
 	/// USB device (`cardK/device/../idVendor` + `idProduct`) is Sony 0ce6 / 0df2.
 	pub fn dualsense_cards(class_sound: &Path) -> Vec<String> {
+		family_cards(class_sound, &["0ce6", "0df2"])
+	}
+
+	/// Sony sound cards with one of `pids` (lowercase hex) — the per-family form.
+	pub fn family_cards(class_sound: &Path, pids: &[&str]) -> Vec<String> {
 		let mut out = Vec::new();
 		let Ok(rd) = std::fs::read_dir(class_sound) else {
 			return out;
@@ -407,7 +461,7 @@ pub mod linux {
 					.map(|s| s.trim().to_ascii_lowercase())
 					.unwrap_or_default()
 			};
-			if read("idVendor") == "054c" && matches!(read("idProduct").as_str(), "0ce6" | "0df2") {
+			if read("idVendor") == "054c" && pids.contains(&read("idProduct").as_str()) {
 				out.push(n);
 			}
 		}
@@ -419,6 +473,18 @@ pub mod linux {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn ds4_names_exclude_the_dualsense() {
+		let devs = vec![
+			(1u32, "Speakers (DualSense Wireless Controller)".to_string()),
+			(2, "Wireless Controller Analog Stereo".to_string()),
+		];
+		assert_eq!(unique_family(&devs, Family::Ds4).map(|d| d.0), Some(2));
+		assert_eq!(unique_family(&devs, Family::DualSense).map(|d| d.0), Some(1));
+		assert!(Family::Ds4.is_name("DUALSHOCK®4 USB Wireless Adaptor"));
+		assert!(!Family::Ds4.is_name("Speakers (Realtek(R) Audio)"));
+	}
 
 	#[test]
 	fn exact_and_dualsense_picks_need_one_match() {

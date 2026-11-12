@@ -114,7 +114,7 @@ export interface UiSettings {
 	statusFields: string[];
 	/** The Pulsar menu button lives in the status bar instead of on the video. */
 	statusBarMenu: boolean;
-	/** Experimental (Windows, USB): session audio plays through a cabled DS4's headset jack
+	/** Experimental (USB; Windows, Linux, macOS): session audio plays through a cabled DS4's headset jack
 	 * while headphones are in. Off by default; untested on hardware. */
 	ds4Headset: boolean;
 	hdr: boolean;
