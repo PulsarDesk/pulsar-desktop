@@ -1430,6 +1430,13 @@ pub(crate) async fn set_mouse_sensitivity(value: f32) -> Result<(), String> {
 	Ok(())
 }
 
+/// Client: Settings → Kumandalar → "DS4 kulaklık girişi" (experimental, Windows USB).
+#[tauri::command]
+pub(crate) async fn set_ds4_headset(on: bool) -> Result<(), String> {
+	crate::ds4_headset::set_enabled(on);
+	Ok(())
+}
+
 /// Client: the "Serbest imleç" switch (Settings / session menu). Process-wide; a live
 /// engagement follows it at once.
 #[tauri::command]

@@ -5,6 +5,7 @@
 	// (`set_ds5_settings`), which applies it live to running pads.
 	import { api } from '#lib/api.js';
 	import { t } from '#lib/i18n.svelte.js';
+	import { caps } from '#lib/caps.svelte.js';
 	import { ui, saveUi, DS5_FEATURES, type Ds5Mode } from '#lib/settings.svelte.js';
 	import type { Action } from 'svelte/action';
 
@@ -124,6 +125,27 @@
 			</div>
 		{/if}
 	</div>
+
+	{#if caps.v?.platform === 'windows'}
+		<!-- Not a DualSense feature: a separate switch, outside the passthrough's disabled body. -->
+		<div class="row">
+			<div class="txt">
+				<b>{t('ds4.headset')}</b>
+				<span>{t('ds4.headsetDesc')}</span>
+			</div>
+			<button
+				class="toggle"
+				class:on={ui.ds4Headset}
+				use:navItem
+				aria-label={t('ds4.headset')}
+				aria-pressed={ui.ds4Headset}
+				onclick={() => {
+					ui.ds4Headset = !ui.ds4Headset;
+					saveUi();
+				}}><span class="knob"></span></button
+			>
+		</div>
+	{/if}
 </section>
 
 <style>

@@ -1024,6 +1024,12 @@
 		api.setPointerFree(ui.pointerFree).catch(() => {});
 	});
 
+	// Experimental DS4 headset jack (Windows USB) follows the setting.
+	$effect(() => {
+		if (isPopup) return;
+		api.setDs4Headset(ui.ds4Headset).catch(() => {});
+	});
+
 	// Keep the core's host stream settings in sync (resolution/fps/bitrate/encoder/hdr).
 	$effect(() => {
 		if (isPopup) return;

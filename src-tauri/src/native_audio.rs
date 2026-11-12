@@ -28,6 +28,9 @@
 //! headphones in but its route is shed, packets are dropped (no sound anywhere else). The
 //! switch fades the last local packet out, and the first one after the route ends back in;
 //! the device is re-buffered on return so the dry-queue logic doesn't count the pause.
+//!
+//! Headphones in a USB DualShock 4's jack (`ds4_headset.rs`, experimental): local playback
+//! moves to the pad's own audio device; the SDL stream is reopened on the switch.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -172,6 +175,8 @@ struct Route {
 	away: bool,
 	/// The next local packet fades in.
 	fade_in: bool,
+	/// The SDL device the open local stream plays on (0 = the default output).
+	dev: u32,
 }
 
 /// Fade length on a switch, frames (5 ms).
@@ -215,8 +220,20 @@ impl Route {
 					}
 					tracing::info!("audio: back on the client output");
 				}
+				// A DS4's headset jack took over (or gave back) the local output: reopen there.
+				let want = crate::ds4_headset::target().unwrap_or(0);
+				if out.is_some() && self.dev != want {
+					tracing::info!(device = want, "audio: local output moves (DS4 headset jack)");
+					*out = None;
+					self.fade_in = true;
+				}
 				if out.is_none() {
-					*out = SdlOut::open();
+					*out = SdlOut::open(want);
+					self.dev = want;
+					if out.is_none() && want != 0 {
+						*out = SdlOut::open(0); // the pad's device failed: default output
+						self.dev = 0;
+					}
 				}
 				if self.fade_in {
 					self.fade_in = false;
@@ -270,6 +287,7 @@ fn run(packets: mpsc::Receiver<Vec<u8>>, stop: Arc<AtomicBool>, play_id: u64) {
 		play_id,
 		away: false,
 		fade_in: false,
+		dev: 0,
 	};
 	// Counters kept while no local device is open (the stats live on the device).
 	let mut spare = Stats::default();
@@ -283,7 +301,12 @@ fn run(packets: mpsc::Receiver<Vec<u8>>, stop: Arc<AtomicBool>, play_id: u64) {
 			continue;
 		};
 		if out.is_none() && matches!(crate::ds5::headset::tap(play_id), crate::ds5::headset::Tap::Local) {
-			out = SdlOut::open();
+			route.dev = crate::ds4_headset::target().unwrap_or(0);
+			out = SdlOut::open(route.dev);
+			if out.is_none() && route.dev != 0 {
+				route.dev = 0;
+				out = SdlOut::open(0);
+			}
 			if out.is_none() {
 				return; // logged by open()
 			}
@@ -420,7 +443,8 @@ struct SdlOut {
 }
 
 impl SdlOut {
-	fn open() -> Option<SdlOut> {
+	/// Open on SDL playback device `dev` (0 = the default output).
+	fn open(dev: u32) -> Option<SdlOut> {
 		use sdl3_sys::audio::{
 			SDL_AudioSpec, SDL_OpenAudioDeviceStream, SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,
 			SDL_AUDIO_F32,
@@ -444,7 +468,7 @@ impl SdlOut {
 				freq: RATE as i32,
 			};
 			let stream = SDL_OpenAudioDeviceStream(
-				SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,
+				if dev == 0 { SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK } else { sdl3_sys::audio::SDL_AudioDeviceID(dev) },
 				&spec,
 				None,
 				std::ptr::null_mut(),

@@ -114,6 +114,9 @@ export interface UiSettings {
 	statusFields: string[];
 	/** The Pulsar menu button lives in the status bar instead of on the video. */
 	statusBarMenu: boolean;
+	/** Experimental (Windows, USB): session audio plays through a cabled DS4's headset jack
+	 * while headphones are in. Off by default; untested on hardware. */
+	ds4Headset: boolean;
 	hdr: boolean;
 	unattended: boolean;
 	tray: boolean;
@@ -246,6 +249,7 @@ const DEFAULTS: UiSettings = {
 	// The always-on stats HUD's set (codec · fps · latency · decode · bitrate).
 	statusFields: ['codec', 'fps', 'latency', 'decode', 'bitrate'],
 	statusBarMenu: false,
+	ds4Headset: false,
 	hdr: false,
 	unattended: true,
 	tray: true,
