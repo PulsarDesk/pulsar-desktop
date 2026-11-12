@@ -36,7 +36,7 @@ static TARGET: AtomicU32 = AtomicU32::new(0);
 /// The watcher thread runs.
 static WATCHING: AtomicBool = AtomicBool::new(false);
 
-/// Settings → Kumandalar → "DS4 kulaklık girişi". Starts/stops the jack watcher.
+/// Kumandalar panel (Games screen / game-mode dock) → "DS4 kulaklık girişi". Starts/stops the jack watcher.
 pub fn set_enabled(on: bool) {
 	ENABLED.store(on, Ordering::SeqCst);
 	if !on {

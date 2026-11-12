@@ -1430,7 +1430,7 @@ pub(crate) async fn set_mouse_sensitivity(value: f32) -> Result<(), String> {
 	Ok(())
 }
 
-/// Client: Settings → Kumandalar → "DS4 kulaklık girişi" (experimental, Windows USB).
+/// Client: Kumandalar panel → "DS4 kulaklık girişi" (experimental, USB).
 #[tauri::command]
 pub(crate) async fn set_ds4_headset(on: bool) -> Result<(), String> {
 	crate::ds4_headset::set_enabled(on);

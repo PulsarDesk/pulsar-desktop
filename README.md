@@ -87,6 +87,32 @@ helps, even when everything worked.
 
 ---
 
+## 🎮 Controllers
+Plug a controller into the computer you connect **from** (USB or Bluetooth). Pulsar reads it through SDL3, so any
+pad your system sees works: Xbox 360 / One / Series, PlayStation (DualShock 3, DualShock 4, DualSense), Switch Pro
+and generic pads. On the computer you connect **to**, games see a virtual controller:
+
+| Your controller | Windows host | Linux host | macOS host |
+|---|---|---|---|
+| Xbox, Switch Pro, generic | Xbox 360 pad: buttons, sticks, triggers (no rumble yet) | virtual pad: buttons, sticks, triggers (no rumble yet) | ❌ not supported |
+| DualShock 3 / 4 | DualShock 4: rumble, touchpad, PS button | virtual pad (no rumble yet) | ❌ not supported |
+| DualSense | **a real DualSense** (with "Use DualSense features" on): adaptive triggers, HD haptics, lightbar and LEDs, speaker, headset jack, microphone, gyro, touchpad, over USB or Bluetooth | **a real DualSense**, same as Windows | ❌ not supported |
+
+- **Which virtual pad:** *Automatic* picks DualShock 4 for PlayStation pads and Xbox 360 for the rest. You can pick
+  per controller in the Controllers panel (the Games screen, or the controller button in game mode) or in the
+  session menu.
+- **Drivers:** the Windows installer adds ViGEmBus (virtual Xbox / DualShock 4 pads) and usbip-win2 (the virtual
+  DualSense). Linux uses the kernel's own `uinput` and `vhci-hcd`.
+- **Headphones in the controller:** with headphones in a DualSense, the session sound plays there instead of on your
+  computer (like a PS5). The same for a USB DualShock 4 (v2 or Sony's USB adapter) is **experimental** and off by
+  default: Controllers panel -> "DS4 headset jack (experimental)".
+- **Background:** controllers only reach the host while Pulsar is the focused window, unless you turn on
+  Settings -> General -> "Controller input in the background".
+- **Not tested yet:** the DualSense microphone and a USB-cabled DualSense on the connecting side, and the DS4 headset
+  jack. Tried one? Tell us in an [issue](https://github.com/PulsarDesk/pulsar-desktop/issues).
+
+---
+
 ## 🐞 Reporting a bug
 [Open an issue](https://github.com/PulsarDesk/pulsar-desktop/issues/new/choose) and include:
 

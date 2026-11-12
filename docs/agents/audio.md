@@ -121,7 +121,7 @@ Mic/voice-call side-channel PCM lives in `src-tauri/src/audio_io.rs`.
 
 ## DS4 headset jack (client, experimental, USB; Windows / Linux / macOS)
 
-`src-tauri/src/ds4_headset.rs`, Settings → Kumandalar → "DS4 kulaklık girişi (deneysel)"
+`src-tauri/src/ds4_headset.rs`, Kumandalar panel (Games screen / game-mode dock) → "DS4 kulaklık girişi (deneysel)"
 (`ui.ds4Headset`, default off, `set_ds4_headset`). A 2 Hz watcher finds a USB DS4
 (VID 054C, PID 09CC = v2 / 0BA0 = Sony USB adapter; the v1 05C4 has no USB audio), reads the jack bit from a second read-only HID handle
 (USB report 0x01 byte 30 bit 5, psdevwiki layout) and, while headphones are in, points
