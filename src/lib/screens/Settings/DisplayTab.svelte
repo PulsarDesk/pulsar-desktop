@@ -194,7 +194,6 @@
 		{/each}
 	</select>
 </div>
-{#if caps.v?.platform === 'windows'}
 <div class="srow">
 	<div class="st">
 		<b>{t('settings.pointerFree')}</b>
@@ -202,7 +201,6 @@
 	</div>
 	<button class="toggle" aria-label={t('settings.pointerFree')} class:on={ui.pointerFree} aria-pressed={ui.pointerFree} onclick={() => { ui.pointerFree = !ui.pointerFree; saveUi(); }}><span class="knob"></span></button>
 </div>
-{/if}
 {#if !clientOnly}
 <!-- HOST: what this device sends when it shares its screen. Resolution/fps/bitrate
      edit gameStore.host, which the +page effect pushes to the core via

@@ -1365,7 +1365,7 @@ fn draw_display(
 	// then the "screen adaptation" toggle. up/down move the cursor; left/right change the row.
 	let multi = st.displays.len() > 1;
 	// Remote mode adds the free-cursor row (game mode always keeps the cursor in the video).
-	let free_row = mode == Mode::Remote && cfg!(windows); // the handover is Windows-only so far
+	let free_row = mode == Mode::Remote;
 	let rows = 3 + usize::from(multi) + usize::from(free_row);
 	if nav.down {
 		*sub_sel = (*sub_sel + 1).min(rows - 1);

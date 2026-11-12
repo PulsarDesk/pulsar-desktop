@@ -48,7 +48,7 @@ While another app is focused, Pulsar acts on NO input (maintainer rule, 2026-11-
   `kbdhook/imp.rs`; Linux's evdev grab is held only while focused anyway). On Windows a kiosk
   session now releases on focus loss too and re-engages on its own when focus returns.
 
-## Free cursor ("Serbest imleç", remote mode, Windows)
+## Free cursor ("Serbest imleç", remote mode, all desktop platforms)
 
 Parsec-style handover, issue #3. Settings → Görüntü + the session menu's Görüntü view
 (`ui.pointerFree`, default OFF; `set_pointer_free` command; renderer `ptrfree 0|1` /
@@ -70,4 +70,16 @@ Parsec-style handover, issue #3. Settings → Görüntü + the session menu's G�
   as outside the video, so the button stays clickable.
 - Handover edges skip the renderer tooltip (`kbdhook::hover_edge` in `render_hint`), except
   the first engage of a session.
-- Linux/macOS: not implemented (the Settings row and the menu row are Windows-only).
+- **Linux / macOS (and phone hosts): the canvas path**, `Session/input.svelte.ts`
+  (`pointerFree` input, off on Windows where the hook does it). No `confine_pointer`; a
+  `pointerenter`/move over the canvas with no button, Pulsar focused (`document.hasFocus`) and
+  nothing blocking (session menu open, stream stopped) → `startControl`; `pointerleave` with
+  no button → `stopControl` (keyboard grab released too). A drag holds pointer capture, so
+  the leave comes after the release. Explicit releases (Ctrl+Alt+Z, Ctrl+Shift+F12, the
+  native `kbd-detach`) wait for a leave. The in-control hint shows only on the first hover
+  engage (`quietHint`). Tests: `Session/input.svelte.test.ts`.
+  - Linux: works where the video container is input pass-through (the default embedded
+    renderer). The standalone render window (`--connect` kiosk) and the KMS-lease presenter
+    take the pointer themselves, so there it stays click-to-engage.
+  - macOS: the video is still mpv's own window, so the handover covers the Pulsar window's
+    canvas only (the same limit as remote control there today).

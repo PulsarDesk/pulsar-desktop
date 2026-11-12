@@ -42,6 +42,11 @@ type Inputs = {
 	streamW: () => number;
 	streamH: () => number;
 	fitMode: () => 'fit' | 'stretch' | 'original';
+	/** "Serbest imleç" applies (setting on + remote mode): no confine, hover in/out hands
+	 * control over (Linux/macOS canvas path; Windows does it in the native hook). */
+	pointerFree: () => boolean;
+	/** Hovering must not take control now (session menu open, stream stopped). */
+	hoverBlocked: () => boolean;
 };
 
 export class SessionInput {
@@ -80,6 +85,14 @@ export class SessionInput {
 	// key-up is suppressed (mirrors the Linux native hook's char_keys) and they're never put in
 	// #heldKeys — nothing to release on blur/disengage.
 	#charKeys = new Set<string>();
+	// Free cursor: a pass over the video may take control. Cleared by an explicit release
+	// (Ctrl+Alt+Z, Ctrl+Shift+F12, the native detach combos) until the pointer has left the
+	// video once — the user asked to let go, hovering must not grab it straight back.
+	#hoverArmed = true;
+	// Control came from hovering after the first time this session: the in-control hint stays
+	// quiet (it would flash on every pass over the video).
+	quietHint = $state(false);
+	#hoverEngaged = false;
 
 	constructor(inputs: Inputs) {
 		this.#in = inputs;
@@ -107,13 +120,17 @@ export class SessionInput {
 				// Don't keep the OS cursor confined while another window has focus.
 				grabCursor(false);
 			};
-			const onFocus = () => grabCursor(true);
+			// Free cursor: never confined (leaving the video is how control is handed back).
+			const free = this.#in.pointerFree();
+			const onFocus = () => {
+				if (!free) grabCursor(true);
+			};
 			window.addEventListener('keydown', kd, true);
 			window.addEventListener('keyup', ku, true);
 			window.addEventListener('blur', onBlur);
 			window.addEventListener('focus', onFocus);
 			// Confined to this session's video container (falls back to the app window).
-			grabCursor(true, this.#in.playId());
+			if (!free) grabCursor(true, this.#in.playId());
 			return () => {
 				cancelAnimationFrame(raf);
 				window.removeEventListener('keydown', kd, true);
@@ -209,6 +226,7 @@ export class SessionInput {
 	// this canvas). The capture thread stays armed — a detach only disengages it — so no
 	// kbdCaptureStop; the next video click re-engages via startControl as usual.
 	detach = () => {
+		this.#hoverArmed = false; // an explicit release (combo): no hover re-grab
 		if (this.controlling) {
 			this.controlling = false;
 			this.#releaseButtons();
@@ -217,14 +235,35 @@ export class SessionInput {
 	};
 	#hostButton = (b: number) => (b === 2 ? 1 : b === 1 ? 2 : 0);
 
-	onMove = (e: PointerEvent) => {
+	// Free cursor: the pointer is over the video with no button down, Pulsar is focused and
+	// nothing blocks it → take control without a click.
+	#tryHover(e: PointerEvent) {
+		if (this.controlling || !this.#in.pointerFree() || !this.#hoverArmed || e.buttons !== 0) return;
+		if (this.#in.hoverBlocked() || typeof document === 'undefined' || !document.hasFocus()) return;
+		this.startControl();
 		if (!this.controlling) return;
+		this.quietHint = this.#hoverEngaged; // the first hover engage keeps its hint
+		this.#hoverEngaged = true;
+		this.#norm(e);
+		this.#moveDirty = true;
+	}
+	onEnter = (e: PointerEvent) => this.#tryHover(e);
+	onMove = (e: PointerEvent) => {
+		if (!this.controlling) {
+			this.#tryHover(e);
+			return;
+		}
 		this.#norm(e);
 		this.#moveDirty = true;
 	};
-	// Pointer left the canvas → stop re-sending the last position.
-	clearMove = () => {
+	// Pointer left the canvas → stop re-sending the last position. Free cursor: leaving the
+	// video hands control back (a drag keeps it — the pointer is captured until the button is
+	// up, and the leave then arrives with no button held).
+	clearMove = (e?: PointerEvent) => {
 		this.#moveDirty = false;
+		if (!this.#in.pointerFree()) return;
+		this.#hoverArmed = true;
+		if (this.controlling && (e?.buttons ?? 0) === 0) this.stopControl();
 	};
 	// The click that takes control must not reach the host AT ALL — neither its down
 	// (swallowed below) nor its up (which would otherwise fire a stray button-up,
@@ -244,6 +283,15 @@ export class SessionInput {
 			return; // the focusing click's press/release isn't forwarded
 		}
 		e.preventDefault();
+		// Free cursor: keep a drag's events (and the remote's button) until release even if it
+		// leaves the video; pointerleave then comes after the up.
+		if (this.#in.pointerFree()) {
+			try {
+				this.#in.canvas().setPointerCapture(e.pointerId);
+			} catch {
+				/* no capture support — the leave just releases earlier */
+			}
+		}
 		this.#norm(e);
 		this.#moveDirty = true;
 		api.inputButton(this.#in.playId(), this.#hostButton(e.button), true).catch(() => {});
@@ -271,6 +319,7 @@ export class SessionInput {
 		// releases control. preventDefault also stops F12 from opening webview devtools.
 		if (down && (e.ctrlKey || e.metaKey) && e.shiftKey && e.code === 'F12') {
 			e.preventDefault();
+			this.#hoverArmed = false;
 			this.stopControl();
 			return;
 		}
@@ -281,6 +330,7 @@ export class SessionInput {
 		// never releases. stopControl() releases held keys/buttons (incl. this Ctrl+Alt).
 		if (down && e.ctrlKey && e.altKey && e.code === 'KeyZ') {
 			e.preventDefault();
+			this.#hoverArmed = false;
 			this.stopControl();
 			return;
 		}

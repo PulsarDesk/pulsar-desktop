@@ -15,6 +15,7 @@
 <script lang="ts">
 	import VideoStatus from './Session/VideoStatus.svelte';
 	import StatusBar, { STATUS_BAR_H } from './Session/StatusBar.svelte';
+	import { caps } from '#lib/caps.svelte.js';
 	import { SessionMedia } from './Session/media.svelte';
 	import {
 		api,
@@ -571,7 +572,11 @@
 		native: () => native,
 		streamW: () => streamW,
 		streamH: () => streamH,
-		fitMode: () => fitMode
+		fitMode: () => fitMode,
+		// Windows does the free cursor in the native hook (kbdhook/imp.rs); this is the canvas
+		// path (Linux, macOS, phone hosts) — remote mode only.
+		pointerFree: () => ui.pointerFree && mode === 'remote' && caps.v?.platform !== 'windows',
+		hoverBlocked: () => dock.overlayOpen || media.stalled
 	});
 	function stopControl() {
 		input.stopControl();
@@ -682,7 +687,9 @@
 			hintFade = false;
 			return;
 		}
-		hintFade = false;
+		// Free cursor: control taken by hovering again — no hint flash on every pass.
+		hintFade = input.quietHint;
+		if (hintFade) return;
 		const tmr = setTimeout(() => (hintFade = true), 2500);
 		return () => clearTimeout(tmr);
 	});
@@ -1006,6 +1013,7 @@
 		onpointermove={input.onMove}
 		onpointerup={input.onUp}
 		onwheel={input.onWheel}
+		onpointerenter={input.onEnter}
 		onpointerleave={input.clearMove}
 		onblur={stopControl}
 		oncontextmenu={(e) => e.preventDefault()}
