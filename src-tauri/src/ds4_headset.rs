@@ -7,9 +7,15 @@
 //!
 //! - **Jack state:** a second, read-only HID handle on the pad (SDL's gamepad driver keeps
 //!   its own); the USB input report 0x01 byte 30 carries battery (bits 0-3), cable (bit 4),
-//!   headphones (bit 5) and mic (bit 6) — psdevwiki's DS4 report layout, the same byte
-//!   `hid-sony` reads the battery from. **Not verified on hardware** (no DS4 at hand when
-//!   written, 2026-11-12).
+//!   headphones (bit 5) and mic (bit 6). Checked 2026-11-12 against psdevwiki's DS4-USB table
+//!   and ds4drv (both 0x20 = headphones); Linux `hid-playstation` and DS4Windows read the
+//!   same byte for battery/cable only. **Not verified on hardware** (no DS4 at hand).
+//! - **Which pads:** only the DS4 v2 (CUH-ZCT2) on a cable and Sony's USB wireless adapter
+//!   expose a USB audio device; the v1 (CUH-ZCT1) does not (DS4Windows docs), so it is not
+//!   watched.
+//! - **Volume:** nothing is written to the pad. DS4Windows dropped the volume flags from its
+//!   output report (0xF7 → 0x07) and the jack plays at the pad's own level, which Windows'
+//!   volume for that device controls.
 //! - **Endpoint:** the pad's playback device found by ContainerId from its HID path, the
 //!   DualSense matcher (`ds5::endpoint::find`); never by name.
 //! - **Playback:** `native_audio` asks [`target`] for each packet and reopens its SDL stream
@@ -52,9 +58,9 @@ pub fn target() -> Option<u32> {
 	}
 }
 
-/// Sony DS4 product ids: CUH-ZCT1, CUH-ZCT2, the USB wireless adapter.
-#[allow(dead_code)] // read by the Windows watcher and the tests
-pub(crate) const DS4_PIDS: [u16; 3] = [0x05c4, 0x09cc, 0x0ba0];
+/// DS4s with a USB audio device: CUH-ZCT2 and the USB wireless adapter (not the v1 0x05c4).
+#[allow(dead_code)] // read by the Windows watcher
+pub(crate) const DS4_PIDS: [u16; 2] = [0x09cc, 0x0ba0];
 
 /// Headphones plugged, from a USB input report as hidapi returns it (report id at [0]).
 /// `None` = not a full 0x01 report.

@@ -123,10 +123,11 @@ Mic/voice-call side-channel PCM lives in `src-tauri/src/audio_io.rs`.
 
 `src-tauri/src/ds4_headset.rs`, Settings → Kumandalar → "DS4 kulaklık girişi (deneysel)"
 (`ui.ds4Headset`, default off, `set_ds4_headset`). A 2 Hz watcher finds a USB DS4
-(VID 054C, PID 05C4/09CC/0BA0), reads the jack bit from a second read-only HID handle
+(VID 054C, PID 09CC = v2 / 0BA0 = Sony USB adapter; the v1 05C4 has no USB audio), reads the jack bit from a second read-only HID handle
 (USB report 0x01 byte 30 bit 5, psdevwiki layout) and, while headphones are in, points
 `native_audio` at the pad's playback device (ContainerId match, `ds5::endpoint::find`);
 `native_audio` reopens its SDL stream when the target changes. **Not verified on
-hardware** (written without a DS4, 2026-11-12): the report byte, the endpoint match and
-whether the pad's USB audio drives the jack are all unconfirmed. Bluetooth DS4s (SBC over
+hardware** (written without a DS4, 2026-11-12). The jack bit matches psdevwiki and ds4drv;
+the endpoint match and the default jack volume are unconfirmed (nothing is written to the
+pad — DS4Windows doesn't set volume either). Bluetooth DS4s (SBC over
 HID reports) are not covered.

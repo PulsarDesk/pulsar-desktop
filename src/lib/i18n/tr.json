@@ -681,7 +681,7 @@
 	"ds5.headset": "Kolun kulaklık girişi",
 	"ds5.headsetDesc": "Kola kulaklık takınca oturumun sesi yalnız kulaklıktan çalar (PS5 gibi); bu cihazdan ve kolun hoparlöründen ses çıkmaz. Kulaklığı çıkarınca ses bu cihaza döner.",
 	"ds4.headset": "DS4 kulaklık girişi (deneysel)",
-	"ds4.headsetDesc": "USB ile bağlı DualShock 4'e kulaklık takılınca oturumun sesi kulaklıktan çalar. Henüz gerçek kolla denenmedi.",
+	"ds4.headsetDesc": "USB ile bağlı DualShock 4'e (v2 ya da Sony USB adaptörü) kulaklık takılınca oturumun sesi kulaklıktan çalar. Henüz gerçek kolla denenmedi.",
 	"ds5.modeAuto": "Otomatik",
 	"ds5.modeOn": "Açık",
 	"ds5.modeOff": "Kapalı",

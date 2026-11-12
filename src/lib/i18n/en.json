@@ -681,7 +681,7 @@
 	"ds5.headset": "Controller headset jack",
 	"ds5.headsetDesc": "With headphones in the controller, the session audio plays only through them (like a PS5); nothing plays on this device or the controller speaker. Unplug them and audio returns to this device.",
 	"ds4.headset": "DS4 headset jack (experimental)",
-	"ds4.headsetDesc": "With headphones in a USB-connected DualShock 4, session audio plays through them. Not yet tried on a real pad.",
+	"ds4.headsetDesc": "With headphones in a USB-connected DualShock 4 (v2 or Sony's USB adapter), session audio plays through them. Not yet tried on a real pad.",
 	"ds5.modeAuto": "Auto",
 	"ds5.modeOn": "On",
 	"ds5.modeOff": "Off",
