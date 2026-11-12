@@ -545,6 +545,8 @@
 	"settings.statusFields": "Жолақта көрсетілетіндер",
 	"settings.statusBarMenu": "Мәзір түймесі жолақта",
 	"settings.statusBarMenuDesc": "Pulsar мәзірінің түймесі бейненің үстінде емес, күй жолағында тұрады.",
+	"settings.statusBarFullscreen": "Толық экранда да көрсету",
+	"settings.statusBarFullscreenDesc": "Өшірулі болса, толық экранда жолақ жасырылып, бейне бүкіл экранды алады.",
 	"settings.statusButtons": "Дыбыс түймелері",
 	"settings.statusButtonsDesc": "Жолақтағы бір басумен ауысатын дыбыс басқарулары; сеанс мәзіріндегідей.",
 	"status.btnName.speaker": "Қарсы жақтың дыбысы",

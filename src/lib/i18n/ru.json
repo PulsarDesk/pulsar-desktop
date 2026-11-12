@@ -545,6 +545,8 @@
 	"settings.statusFields": "Что показывать",
 	"settings.statusBarMenu": "Кнопка меню в строке",
 	"settings.statusBarMenuDesc": "Кнопка меню Pulsar находится в строке состояния, а не на видео.",
+	"settings.statusBarFullscreen": "Показывать и в полноэкранном режиме",
+	"settings.statusBarFullscreenDesc": "Выключено — в полноэкранном режиме строка скрыта, видео занимает весь экран.",
 	"settings.statusButtons": "Кнопки звука",
 	"settings.statusButtonsDesc": "Переключатели звука в строке в один клик; те же, что в меню сеанса.",
 	"status.btnName.speaker": "Звук другой стороны",

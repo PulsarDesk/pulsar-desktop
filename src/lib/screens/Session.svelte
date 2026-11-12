@@ -118,8 +118,10 @@
 	const connLabel = $derived(conn === 'relay' ? 'Relay' : 'P2P');
 
 	// Status bar under the video (Settings → Görüntü). Not in split panes or the Linux
-	// single-surface mode (the video there is not positioned over `.screen`).
-	const showBar = $derived(ui.statusBar && !split && !embedded);
+	// single-surface mode (the video there is not positioned over `.screen`), and in fullscreen
+	// only when asked to (fullscreen gives the video the whole screen, issue #10). Hidden there,
+	// its menu button goes back onto the video (`ovbtnShown`).
+	const showBar = $derived(ui.statusBar && !split && !embedded && (!fullscreen || ui.statusBarFullscreen));
 	// The menu button sits in the bar → hide the one the renderer draws on the video (the
 	// saved overlay-button setting itself is untouched). Pushed on change only; the initial
 	// state rides the renderer's one-shot seed in controls.svelte.ts.

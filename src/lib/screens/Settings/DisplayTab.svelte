@@ -163,6 +163,10 @@
 	</div>
 </div>
 <div class="srow sub">
+	<div class="st"><b>{t('settings.statusBarFullscreen')}</b><span>{t('settings.statusBarFullscreenDesc')}</span></div>
+	<button class="toggle" aria-label={t('settings.statusBarFullscreen')} class:on={ui.statusBarFullscreen} aria-pressed={ui.statusBarFullscreen} onclick={() => { ui.statusBarFullscreen = !ui.statusBarFullscreen; saveUi(); }}><span class="knob"></span></button>
+</div>
+<div class="srow sub">
 	<div class="st"><b>{t('settings.statusBarMenu')}</b><span>{t('settings.statusBarMenuDesc')}</span></div>
 	<button class="toggle" aria-label={t('settings.statusBarMenu')} class:on={ui.statusBarMenu} aria-pressed={ui.statusBarMenu} onclick={() => { ui.statusBarMenu = !ui.statusBarMenu; saveUi(); }}><span class="knob"></span></button>
 </div>

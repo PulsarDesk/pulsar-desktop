@@ -545,6 +545,8 @@
 	"settings.statusFields": "Shown in the bar",
 	"settings.statusBarMenu": "Menu button in the bar",
 	"settings.statusBarMenuDesc": "The Pulsar menu button sits in the status bar instead of on the video.",
+	"settings.statusBarFullscreen": "Show in fullscreen too",
+	"settings.statusBarFullscreenDesc": "When off, the bar hides in fullscreen and the video fills the whole screen.",
 	"settings.statusButtons": "Audio buttons",
 	"settings.statusButtonsDesc": "One-click audio toggles in the bar; the same switches as the session menu.",
 	"status.btnName.speaker": "Remote audio",

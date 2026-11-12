@@ -117,6 +117,9 @@ export interface UiSettings {
 	statusFields: string[];
 	/** The Pulsar menu button lives in the status bar instead of on the video. */
 	statusBarMenu: boolean;
+	/** Keep the status bar in fullscreen too (off: fullscreen gives the video the whole
+	 * screen, issue #10). */
+	statusBarFullscreen: boolean;
 	/** Quick audio toggles in the status bar (`StatusBar.svelte` STATUS_BUTTONS, issue #9). */
 	statusButtons: string[];
 	/** Experimental (USB; Windows, Linux, macOS): session audio plays through a cabled DS4's headset jack
@@ -256,6 +259,7 @@ const DEFAULTS: UiSettings = {
 	statusFields: ['codec', 'fps', 'latency', 'decode', 'bitrate'],
 	statusBarMenu: false,
 	statusButtons: ['speaker', 'mic'],
+	statusBarFullscreen: false,
 	ds4Headset: false,
 	hdr: false,
 	unattended: true,

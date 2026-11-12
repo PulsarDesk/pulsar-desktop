@@ -545,6 +545,8 @@
 	"settings.statusFields": "Çubukta gösterilecekler",
 	"settings.statusBarMenu": "Menü düğmesi çubukta",
 	"settings.statusBarMenuDesc": "Pulsar menüsünün düğmesi videonun üstü yerine durum çubuğunda durur.",
+	"settings.statusBarFullscreen": "Tam ekranda da göster",
+	"settings.statusBarFullscreenDesc": "Kapalıyken tam ekranda çubuk gizlenir, video tüm ekranı kaplar.",
 	"settings.statusButtons": "Ses butonları",
 	"settings.statusButtonsDesc": "Çubukta tek tıkla açılıp kapanan ses kontrolleri; oturum menüsüyle aynı ayarlar.",
 	"status.btnName.speaker": "Karşı tarafın sesi",
