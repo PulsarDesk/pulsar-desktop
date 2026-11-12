@@ -111,7 +111,12 @@ windows-sys = { version = "0.61", features = [
 	"Win32_Security_Authorization", # shared_mode: SDDL → protected ACL on %ProgramData%\Pulsar, owner check
 	"Win32_Storage_FileSystem", # shared_mode: CreateDirectoryW with a security descriptor, reparse-point check
 	"Win32_System_Com", # shared_mode: CoTaskMemFree for SHGetKnownFolderPath(FOLDERID_ProgramData)
+	"Win32_UI_HiDpi", # dpi_watch: GetDpiForWindow (the window's real DPI after a display change)
 ] }
+# dpi_watch.rs: re-sync WebView2's RasterizationScale after a display change (same versions
+# wry already pulls in — no new crates).
+webview2-com = "0.39"
+windows-core = "0.62"
 # Self-avatar resolution (avatar.rs): decode the account picture / wallpaper, center-crop
 # + downscale (same pipeline as the Linux block below).
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp"] }

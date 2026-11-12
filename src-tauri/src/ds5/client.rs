@@ -484,9 +484,11 @@ impl PadCtx {
 					break;
 				}
 			}
-			// Focus gate (focus_gate.rs): while another app is focused the host gets this
-			// pad as released (keepalive keeps repeating it); host output still plays.
-			let gated = (!crate::focus_gate::pad_forward_allowed()).then(|| latest.map(released)).flatten();
+			// Focus gate (focus_gate.rs): while another app is focused — or this session's menu
+			// is open (the pad drives the menu then, like the other pads in play.rs) — the host
+			// gets this pad as released (keepalive keeps repeating it); host output still plays.
+			let hold = !crate::focus_gate::pad_forward_allowed() || crate::focus_gate::overlay_open(self.play_id);
+			let gated = hold.then(|| latest.map(released)).flatten();
 			if let Some(r) = gated.or(latest) {
 				let due = match sent {
 					Some((last, at)) => {

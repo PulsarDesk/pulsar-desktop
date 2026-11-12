@@ -117,6 +117,12 @@ fn read_hint(app: &AppHandle) -> (bool, bool) {
 	(s.contains("dark"), s.contains("game"))
 }
 
+/// The app's surface colour in the theme it was last left in — a new window's background
+/// before its page paints (no white flash in dark mode).
+pub(crate) fn window_bg(app: &AppHandle) -> Color {
+	surface(read_hint(app).0)
+}
+
 /// The main window's `--surface` (app.css) as sRGB.
 fn surface(dark: bool) -> Color {
 	if dark {
@@ -126,9 +132,39 @@ fn surface(dark: bool) -> Color {
 	}
 }
 
+/// A `--background` start (Settings → start with the computer, in the background) whose
+/// window is being kept hidden: the tray brings it up. Cleared once it is shown.
+pub(crate) static BACKGROUND_HIDDEN: AtomicBool = AtomicBool::new(false);
+
+/// Is this launch a background start that may stay hidden? Only with a tray to bring the
+/// window back (`set_tray(false)` / a missing tray shows it — `show_hidden_background`).
+fn stay_hidden(app: &AppHandle) -> bool {
+	if !crate::autostart::is_background_launch() {
+		return false;
+	}
+	let st = app.state::<crate::state::AppState>();
+	!(st.tray_disabled.load(Ordering::Relaxed) || st.tray_missing.load(Ordering::Relaxed))
+}
+
+/// A background start's hidden window must come up after all (the tray went away).
+pub(crate) fn show_hidden_background(app: &AppHandle) {
+	if !BACKGROUND_HIDDEN.swap(false, Ordering::SeqCst) {
+		return;
+	}
+	tracing::info!("background start: no tray to bring the window back — showing it");
+	if let Some(w) = app.get_webview_window("main") {
+		let _ = w.show();
+		let _ = w.set_focus();
+	}
+}
+
 /// Show the splash window right away. Never fails the launch — on any error the main
 /// window simply appears when it is ready, as before.
 pub(crate) fn show(app: &AppHandle) {
+	// Background start: no splash (nothing pops up at sign-in).
+	if crate::autostart::is_background_launch() {
+		return;
+	}
 	// The splash text follows the UI's language (from the hint; the UI keeps its own choice,
 	// which can differ from config.json's).
 	let hint = std::fs::read_to_string(hint_path(app)).unwrap_or_default();
@@ -251,13 +287,19 @@ pub(crate) fn reveal(app: &AppHandle) {
 		return;
 	}
 	step(app, Step::Ready);
-	DONE.store(true, Ordering::SeqCst);
-	if let Some(w) = app.get_webview_window("main") {
-		if !w.is_visible().unwrap_or(true) {
-			let _ = w.show();
+	let first = !DONE.swap(true, Ordering::SeqCst);
+	if first && stay_hidden(app) {
+		// Started in the background: the window stays in the tray until opened from there.
+		BACKGROUND_HIDDEN.store(true, Ordering::SeqCst);
+		tracing::info!("background start: window kept hidden (tray)");
+	} else if !BACKGROUND_HIDDEN.load(Ordering::SeqCst) {
+		if let Some(w) = app.get_webview_window("main") {
+			if !w.is_visible().unwrap_or(true) {
+				let _ = w.show();
+			}
+			let _ = w.unminimize();
+			let _ = w.set_focus();
 		}
-		let _ = w.unminimize();
-		let _ = w.set_focus();
 	}
 	let h = app.clone();
 	std::thread::spawn(move || {

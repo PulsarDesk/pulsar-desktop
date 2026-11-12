@@ -54,6 +54,23 @@ child windows). Two consequences:
   enforces `minWidth`/`minHeight` (1200×780 = the default size). Linux-only; Windows/macOS are
   assumed to resize undecorated windows natively (not verified on hardware).
 
+## Session tabs: tear-off and merge (Chrome-style)
+
+A live session tab can be dragged along the strip (reorder), out of it (its own window,
+`tabwin-<n>`) or onto another Pulsar window's strip (moves there). The only tab of a tab
+window drags the whole window and merges when dropped on a strip. Closing a tab window ends
+its sessions. The session never restarts:
+
+- Frontend: `Tabs.svelte` (drag), `routes/page/tabWindows.svelte.ts` (detach / move / strip
+  rect / input owner), `SessionManager.release` / `adopt` / `moveTab`. A tab window is the
+  same `+page.svelte` with `window.__TABWIN__` set: no Home, no bootstrap (`isPopup`).
+- Rust: `src-tauri/src/tabwin.rs`. Play → window map (`window_for_play` — use it instead of
+  `get_webview_window("main")` for anything per-session: scale, confine, dialogs, respawn).
+  Video moves with `reparent 0x<hwnd>` on the Windows renderer's stdin / a GDK container
+  reparent on Linux; macOS plays in mpv's own window. Capture belongs to the session window
+  focused last (`input-window` event); `kbd_capture_stop(id)` only stops that session's.
+- Not movable: connecting tabs, local host-game tabs, split mode, Linux single-surface.
+
 ## Theming
 
 Tokens live in `src/app.css` (ported from `../design/project/assets/tokens.css`, which has **no

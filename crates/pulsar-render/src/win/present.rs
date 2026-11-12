@@ -113,6 +113,42 @@ pub fn fit_rects(
 	}
 }
 
+/// Picture upscaling (Settings → Görüntü → Görüntü iyileştirme), stdin `upscale <mode>`:
+/// 0 off · 1 auto (the GPU's AI upscaler if it has one, else FSR) · 2 FSR · 3 AI (NVIDIA RTX
+/// Video Super Resolution / Intel VSR; FSR where the GPU has none).
+static UPSCALE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn set_upscale(mode: &str) {
+	let v = match mode.trim() {
+		"auto" => 1,
+		"fsr" => 2,
+		"ai" => 3,
+		_ => 0,
+	};
+	UPSCALE.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+const VENDOR_NVIDIA: u32 = 0x10DE;
+const VENDOR_INTEL: u32 = 0x8086;
+
+/// The upscaler a frame uses, given the setting and the GPU.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Upscaler {
+	None,
+	Fsr,
+	/// The driver's own (VideoProcessor stream extension).
+	Vendor,
+}
+
+fn pick(mode: u8, vendor: u32) -> Upscaler {
+	let ai = vendor == VENDOR_NVIDIA || vendor == VENDOR_INTEL;
+	match mode {
+		1 | 3 if ai => Upscaler::Vendor,
+		1..=3 => Upscaler::Fsr,
+		_ => Upscaler::None,
+	}
+}
+
 /// GPU NV12→RGB scaler/letterboxer for the present path.
 pub struct Present {
 	vdevice: ID3D11VideoDevice,
@@ -123,6 +159,14 @@ pub struct Present {
 	in_h: u32,
 	out_w: u32,
 	out_h: u32,
+	device: ID3D11Device,
+	vendor: u32,
+	/// The vendor upscaler as last set on `vproc` (re-applied on a rebuild / mode change).
+	vendor_on: std::cell::Cell<bool>,
+	/// FSR passes (built on first use).
+	fsr: std::cell::RefCell<Option<super::fsr::Fsr>>,
+	fsr_failed: std::cell::Cell<bool>,
+	logged: std::cell::Cell<Option<Upscaler>>,
 }
 
 impl Present {
@@ -146,6 +190,12 @@ impl Present {
 			in_h,
 			out_w,
 			out_h,
+			device: device.clone(),
+			vendor: super::fsr::vendor(device),
+			vendor_on: std::cell::Cell::new(false),
+			fsr: std::cell::RefCell::new(None),
+			fsr_failed: std::cell::Cell::new(false),
+			logged: std::cell::Cell::new(None),
 		};
 		// Black bars for letterboxing.
 		s.set_black_background();
@@ -212,6 +262,8 @@ impl Present {
 		// which resets all state, so the letterbox bars would show swapchain garbage
 		// (FLIP_DISCARD = back buffer undefined) without this call.
 		self.set_black_background();
+		// A fresh processor has no stream extension set.
+		self.vendor_on.set(false);
 		self.in_w = in_w;
 		self.in_h = in_h;
 		self.out_w = out_w;
@@ -223,9 +275,16 @@ impl Present {
 	/// in the DISPLAYED (upright) space; the VideoProcessor's source rect is pre-rotation, so
 	/// map the (displayed-space) source crop back onto the decoded frame.
 	fn blt_rects(&self) -> (RECT, RECT) {
+		let (s, d, _) = self.blt_rects_crop();
+		(s, d)
+	}
+
+	/// `blt_rects` plus the source crop's DISPLAYED (upright) size — what an upscaler gets.
+	fn blt_rects_crop(&self) -> (RECT, RECT, (u32, u32)) {
 		let (iw, ih) = (self.in_w as f32, self.in_h as f32);
 		let (vw, vh) = displayed_dims(self.in_w, self.in_h);
 		let (s, d) = fit_rects(vw as f32, vh as f32, self.out_w as f32, self.out_h as f32);
+		let crop = (s.2.round().max(1.0) as u32, s.3.round().max(1.0) as u32);
 		let (x, y, w, h) = s;
 		// Inverse of the CW rotation, per corner: displayed (X,Y) → input
 		//   90:  (Y, ih − X)   180: (iw − X, ih − Y)   270: (iw − Y, X)
@@ -241,7 +300,60 @@ impl Present {
 			right: (x + w) as i32,
 			bottom: (y + h) as i32,
 		};
-		(to_rect(s), to_rect(d))
+		(to_rect(s), to_rect(d), crop)
+	}
+
+	/// NVIDIA RTX Video Super Resolution / Intel VSR on this processor's stream (on or off).
+	/// Driver extensions of the VideoProcessor (as Moonlight uses them): they only act when the
+	/// Blt scales UP. Ignored by drivers / GPUs without them.
+	unsafe fn set_vendor_upscale(&self, on: bool) {
+		use windows::core::GUID;
+		if self.vendor == VENDOR_NVIDIA {
+			const NV_PPE: GUID = GUID::from_u128(0xd43ce1b3_1f4b_48ac_baee_c3c25375e6f7);
+			// { version, method (2 = super resolution), enable }
+			let data: [u32; 3] = [1, 2, on as u32];
+			let _ = self.vctx.VideoProcessorSetStreamExtension(
+				&self.vproc,
+				0,
+				&NV_PPE,
+				std::mem::size_of_val(&data) as u32,
+				data.as_ptr() as *const _,
+			);
+		} else if self.vendor == VENDOR_INTEL {
+			const INTEL_VPE: GUID = GUID::from_u128(0xedd1d4b9_8659_4cbc_a4d6_9831a2163ac3);
+			#[repr(C)]
+			struct Ext {
+				function: u32,
+				param: *mut core::ffi::c_void,
+			}
+			let mut version: u32 = 3; // kIntelVpeVersion3
+			let mut mode: u32 = if on { 1 } else { 0 }; // kIntelVpeModePreproc / none
+			let mut scaling: u32 = if on { 2 } else { 0 }; // kIntelVpeScalingSuperResolution / default
+			let ext = |function: u32, param: *mut u32| Ext { function, param: param as *mut _ };
+			let v = ext(0x01, &mut version); // kIntelVpeFnVersion
+			let _ = self.vctx.VideoProcessorSetOutputExtension(
+				&self.vproc,
+				&INTEL_VPE,
+				std::mem::size_of::<Ext>() as u32,
+				&v as *const Ext as *const _,
+			);
+			let m = ext(0x20, &mut mode); // kIntelVpeFnMode
+			let _ = self.vctx.VideoProcessorSetOutputExtension(
+				&self.vproc,
+				&INTEL_VPE,
+				std::mem::size_of::<Ext>() as u32,
+				&m as *const Ext as *const _,
+			);
+			let sc = ext(0x37, &mut scaling); // kIntelVpeFnScaling
+			let _ = self.vctx.VideoProcessorSetStreamExtension(
+				&self.vproc,
+				0,
+				&INTEL_VPE,
+				std::mem::size_of::<Ext>() as u32,
+				&sc as *const Ext as *const _,
+			);
+		}
+		self.vendor_on.set(on);
 	}
 
 	/// Where the video lands in the window, as fractions of the client area
@@ -253,8 +365,63 @@ impl Present {
 		(d.left as f32 / w, d.top as f32 / h, d.right as f32 / w, d.bottom as f32 / h)
 	}
 
-	/// Convert+scale the NV12 `src` onto the swapchain `back` buffer (RGB). One GPU Blt.
+	/// Convert+scale the NV12 `src` onto the swapchain `back` buffer (RGB): one GPU Blt — with
+	/// the GPU's own upscaler on it, or into a source-sized texture that FSR scales up.
 	pub unsafe fn blt(&self, src: &ID3D11Texture2D, back: &ID3D11Texture2D) -> Result<()> {
+		let (_, dst, crop) = self.blt_rects_crop();
+		let up = (dst.right - dst.left) as u32 > crop.0 || (dst.bottom - dst.top) as u32 > crop.1;
+		let mut which = pick(UPSCALE.load(std::sync::atomic::Ordering::Relaxed), self.vendor);
+		if !up || (which == Upscaler::Fsr && self.fsr_failed.get()) {
+			which = Upscaler::None;
+		}
+		if self.logged.get() != Some(which) {
+			self.logged.set(Some(which));
+			eprintln!(
+				"pulsar-render(win): upscaler {which:?} (gpu vendor 0x{:04x}, {}x{} -> {}x{})",
+				self.vendor,
+				crop.0,
+				crop.1,
+				dst.right - dst.left,
+				dst.bottom - dst.top
+			);
+		}
+		let vendor_want = which == Upscaler::Vendor;
+		if vendor_want != self.vendor_on.get() {
+			self.set_vendor_upscale(vendor_want);
+		}
+		if which == Upscaler::Fsr {
+			let mut slot = self.fsr.borrow_mut();
+			if slot.is_none() {
+				match super::fsr::Fsr::new(&self.device) {
+					Ok(f) => *slot = Some(f),
+					Err(e) => {
+						eprintln!("pulsar-render(win): FSR unavailable ({e}) — plain scaling");
+						self.fsr_failed.set(true);
+						drop(slot);
+						return self.blt_to(src, back, None);
+					}
+				}
+			}
+			let fsr = slot.as_mut().unwrap();
+			let r = fsr
+				.source(crop.0, crop.1)
+				.and_then(|mid| self.blt_to(src, &mid, Some(crop)))
+				.and_then(|_| fsr.run(back, dst));
+			match r {
+				Ok(()) => return Ok(()),
+				Err(e) => {
+					// Never a black picture over an upscaler: plain scaling from now on.
+					eprintln!("pulsar-render(win): FSR pass failed ({e}) — plain scaling");
+					self.fsr_failed.set(true);
+				}
+			}
+		}
+		self.blt_to(src, back, None)
+	}
+
+	/// One VideoProcessor Blt of `src` onto `out`: the fit/letterbox placement on the window, or
+	/// (`crop` given) the source crop filling a crop-sized texture 1:1 (FSR's input).
+	unsafe fn blt_to(&self, src: &ID3D11Texture2D, back: &ID3D11Texture2D, crop: Option<(u32, u32)>) -> Result<()> {
 		// Input view onto the NV12 source.
 		let in_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
 			FourCC: 0,
@@ -288,7 +455,10 @@ impl Present {
 		let ov = ov.unwrap();
 
 		// Fit-mode rects: source crop (1:1 on a smaller window) + dest placement.
-		let (src_r, dst) = self.blt_rects();
+		let (src_r, mut dst) = self.blt_rects();
+		if let Some((w, h)) = crop {
+			dst = RECT { left: 0, top: 0, right: w as i32, bottom: h as i32 };
+		}
 		self.vctx
 			.VideoProcessorSetStreamSourceRect(&self.vproc, 0, true, Some(&src_r));
 		self.vctx

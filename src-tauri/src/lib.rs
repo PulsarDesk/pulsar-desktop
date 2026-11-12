@@ -20,6 +20,10 @@ mod auth;
 mod device_creds;
 mod avatar;
 mod caps;
+mod caps_guard;
+mod autostart;
+#[cfg(windows)]
+mod dpi_watch;
 mod clipboard_sync;
 mod commands;
 mod connections;
@@ -69,6 +73,7 @@ mod remote_cursor;
 mod splash;
 mod split_join;
 mod state;
+mod tabwin;
 mod toast;
 mod twofa;
 mod ui_start;
@@ -142,6 +147,23 @@ pub fn shared_mode_requires_admin() -> bool {
 
 pub fn selftest() -> i32 {
 	selftest::run()
+}
+
+/// `pulsar --probe-nvenc` (see `process::nvenc_codecs_isolated`): prints `nvenc <codecs>`.
+pub fn probe_nvenc_cli() -> i32 {
+	#[cfg(windows)]
+	{
+		let list: Vec<&str> = pulsar_capture::nvenc_codecs()
+			.iter()
+			.map(|c| match c {
+				pulsar_capture::Codec::H264 => "h264",
+				pulsar_capture::Codec::H265 => "h265",
+				pulsar_capture::Codec::Av1 => "av1",
+			})
+			.collect();
+		println!("nvenc {}", list.join(","));
+	}
+	0
 }
 
 /// Per-window focus map driving the global input-capture gate (`kbdhook::set_focused`),
@@ -425,6 +447,9 @@ pub fn run() {
 			// Startup capability probe (encode + decode), Moonlight-style: every launch,
 			// in the background; the frontend splash waits for the `local-caps` event.
 			crate::caps::spawn_startup_probe(app.handle().clone());
+			// WebView2 render scale follows the window's DPI after a display change.
+			#[cfg(windows)]
+			crate::dpi_watch::start(app.handle().clone());
 
 			// Always-on PS/Guide-button watcher: lets a controller toggle gaming mode (the
 			// `guide-toggle` event) even from remote mode, independent of the gaming-mode nav
@@ -537,7 +562,14 @@ pub fn run() {
 				// Only the MAIN window hides-to-tray; secondary windows (approval popup,
 				// connections manager) close NORMALLY so a host-side win.close() works
 				// (prevent_close + hide would otherwise leave them stuck hidden).
-				if window.label() == "main" {
+				if tabwin::is_tab_window(window.label()) {
+					// A detached session-tab window: its sessions end (like closing those tabs),
+					// their video moved out first — see tabwin::close_tab_window.
+					api.prevent_close();
+					if let Some(w) = window.app_handle().get_webview_window(window.label()) {
+						tabwin::close_tab_window(window.app_handle(), &w);
+					}
+				} else if window.label() == "main" {
 					let st = window.state::<AppState>();
 					let tray_off = st.tray_disabled.load(std::sync::atomic::Ordering::Relaxed)
 						|| st.tray_missing.load(std::sync::atomic::Ordering::Relaxed);
@@ -558,7 +590,7 @@ pub fn run() {
 			// frontend, which tracks the video AREA, not the whole window.
 			#[cfg(windows)]
 			WindowEvent::Resized(_) => {
-				if window.label() == "main" && window.is_fullscreen().unwrap_or(false) {
+				if tabwin::is_session_window(window.label()) && window.is_fullscreen().unwrap_or(false) {
 					if let Ok(h) = window.hwnd() {
 						unsafe { crate::io_cmds::fill_children_to_client(h.0 as _) };
 					}
@@ -567,6 +599,9 @@ pub fn run() {
 			// Native fullscreen (set_fullscreen) never marks the main window topmost, and
 			// set_window_fullscreen already clears any stray always-on-top on exit, so this
 			// arm no longer manages fullscreen z-order - it only tracks per-window focus below.
+			WindowEvent::Moved(_) if tabwin::is_tab_window(window.label()) => {
+				tabwin::note_moved(window.app_handle(), window.label());
+			}
 			WindowEvent::ScaleFactorChanged { scale_factor, .. } if window.label() == "main" => {
 				crate::process::set_ui_scale(*scale_factor);
 			}
@@ -579,6 +614,10 @@ pub fn run() {
 					let map = g.get_or_insert_with(Default::default);
 					map.insert(window.label().to_string(), *focused);
 					refresh_focus_gate(map);
+				}
+				// The session window focused last owns keyboard/mouse capture (tab windows).
+				if *focused {
+					tabwin::note_focus(window.app_handle(), window.label());
 				}
 				// Losing focus while the overlay is open would otherwise STRAND it: the combo is
 				// now focus-gated off, so it couldn't be closed. Auto-close it on blur so the
@@ -710,6 +749,7 @@ pub fn run() {
 			set_play_audio_quality,
 			set_mouse_sensitivity,
 			set_pointer_free,
+			crate::session_cmds::set_upscale,
 			set_ds4_headset,
 			set_host_cursor,
 			reverse_play,
@@ -731,6 +771,20 @@ pub fn run() {
 			list_connections,
 			show_connections,
 			open_files_window,
+			tabwin::tab_strip_rect,
+			tabwin::tab_drop_target,
+			autostart::set_autostart,
+			autostart::autostart_status,
+			tabwin::ui_log,
+			tabwin::tab_play_ready,
+			tabwin::tab_ghost_show,
+			tabwin::tab_ghost_move,
+			tabwin::tab_ghost_hide,
+			tabwin::tab_window_label,
+			tabwin::tab_input_window,
+			tabwin::tab_take_handoff,
+			tabwin::tab_detach,
+			tabwin::tab_move,
 			toast::toast_list,
 			toast::toast_open,
 			toast::toast_close,

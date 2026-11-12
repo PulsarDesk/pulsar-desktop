@@ -228,6 +228,8 @@ pub(crate) async fn start_remote_play(
 		(cfg.network_mode, cfg.relay.clone())
 	};
 	let (mut sess, peer_label) = connect_target(&app, &node, disc, &target, net_mode, &relay).await?;
+	// The host's E2E-verified key — "reverse direction" lets exactly this host back in.
+	let host_pubkey: Option<[u8; 32]> = sess.peer_pubkey().await.map(Into::into);
 	// Real connection phase: the transport is now actually established (direct P2P or
 	// relay). Tell the Connecting screen so it reflects the truth instead of guessing.
 	let transport = match sess.transport() {
@@ -526,6 +528,7 @@ pub(crate) async fn start_remote_play(
 									);
 									let _ = writeln!(si, "msens {}", crate::kbdhook::mouse_sensitivity());
 									let _ = writeln!(si, "ptrfree {}", if crate::kbdhook::pointer_free() { 1 } else { 0 });
+									let _ = writeln!(si, "upscale {}", crate::native_view::upscale_mode());
 									let _ = writeln!(si, "hostptrshow {}", if crate::kbdhook::host_cursor() { 1 } else { 0 });
 								}
 								*caps_line.lock().unwrap() = line;
@@ -773,6 +776,7 @@ pub(crate) async fn start_remote_play(
 										);
 										let _ = writeln!(si, "msens {}", crate::kbdhook::mouse_sensitivity());
 										let _ = writeln!(si, "ptrfree {}", if crate::kbdhook::pointer_free() { 1 } else { 0 });
+										let _ = writeln!(si, "upscale {}", crate::native_view::upscale_mode());
 										let _ = writeln!(si, "hostptrshow {}", if crate::kbdhook::host_cursor() { 1 } else { 0 });
 									}
 									*caps_line.lock().unwrap() = line;
@@ -921,6 +925,7 @@ pub(crate) async fn start_remote_play(
 										);
 										let _ = writeln!(si, "msens {}", crate::kbdhook::mouse_sensitivity());
 										let _ = writeln!(si, "ptrfree {}", if crate::kbdhook::pointer_free() { 1 } else { 0 });
+										let _ = writeln!(si, "upscale {}", crate::native_view::upscale_mode());
 										let _ = writeln!(si, "hostptrshow {}", if crate::kbdhook::host_cursor() { 1 } else { 0 });
 									}
 									*caps_line.lock().unwrap() = line;
@@ -1253,6 +1258,12 @@ pub(crate) async fn start_remote_play(
 		// the bottom rung: under its minimum only the bitrate drops.
 		acfg.min_fps = 60;
 		acfg.min_height = 720;
+		// Picture upscaling on (Windows renderer / mpv): a lower resolution comes back sharp, so
+		// each rung needs a quarter more bitrate before it is kept — the ladder gives up
+		// resolution before blockiness sets in, and the upscaler covers the difference.
+		if (cfg!(windows) || cfg!(target_os = "macos")) && crate::native_view::upscale_mode() != "off" {
+			acfg.min_kbps_scale = 1.25;
+		}
 	}
 	let mut ctl = pulsar_core::adapt::Controller::new(acfg);
 	// The user's saved picks: a bitrate limit is the controller's ceiling (it still adapts under
@@ -2180,6 +2191,7 @@ pub(crate) async fn start_remote_play(
 			render_live_id,
 			respawn_lock: Arc::new(tokio::sync::Mutex::new(())),
 			windows_query_tx,
+			host_pubkey,
 		},
 	);
 	Ok(PlayInfo {
@@ -2289,6 +2301,9 @@ pub(crate) async fn stop_stream(
 	// Remove from the map and DROP the guard before the blocking kill()/wait() below —
 	// otherwise every other state.plays user (forward() on each mouse-move/keystroke,
 	// the setters, mic/kbd commands) stalls until the closed session's children exit.
+	// Shown in a detached tab window: its video goes back under the main window first (a
+	// Linux resident container must outlive that window).
+	crate::tabwin::play_stopped(&app, id);
 	let play = state.plays.lock().unwrap().remove(&id);
 	// Drop this session's per-id monitor-picker debounce entry so the map doesn't
 	// accumulate stale entries across reconnects.
@@ -2314,6 +2329,7 @@ pub(crate) async fn stop_stream(
 	{
 		let mut set = state.overlay_open.lock().unwrap();
 		overlay_was_open = set.remove(&id);
+		crate::focus_gate::set_overlay_open(id, false);
 		if overlay_was_open {
 			crate::kbdhook::overlay_suspend(!set.is_empty());
 		}

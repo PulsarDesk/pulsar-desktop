@@ -382,6 +382,12 @@ pub fn spawn_render_win(
 #[cfg(not(windows))]
 pub fn spawn_mpv(sdp: &PathBuf, wid: Option<u64>, ipc: &Path) -> Option<Child> {
 	let mut cmd = std::process::Command::new("mpv");
+	// Picture upscaling (Settings): mpv runs AMD FSR 1 as a user shader.
+	if super::upscale_mode() != "off" {
+		if let Some(p) = super::mpv_fsr_shader() {
+			cmd.arg(format!("--glsl-shaders={}", p.display()));
+		}
+	}
 	cmd.args([
 		"--hwdec=auto", // RK3588 → rkmpp; otherwise vaapi/nvdec
 		"--vo=gpu",

@@ -379,6 +379,12 @@ pub(crate) fn shared_peers_set(json: String) {
 // Machine-wide host lease
 // ---------------------------------------------------------------------------
 
+/// Is this process elevated (admin token)? Windows only.
+#[cfg(windows)]
+pub(crate) fn is_elevated() -> bool {
+	imp::is_elevated()
+}
+
 pub(crate) mod lease {
 	use std::sync::atomic::{AtomicBool, Ordering};
 

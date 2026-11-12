@@ -43,7 +43,7 @@ struct Globals {
 	/// like Ctrl+Shift+M leaves Ctrl+Shift stuck on the host (their up-strokes arrive
 	/// after the gate closed and are never forwarded).
 	held: std::collections::HashSet<u32>,
-	/// Tracks which combo trigger keys (overlay/end/fullscreen/detach: evdev 50, 16, 88,
+	/// Tracks which combo trigger keys (overlay/end/fullscreen/detach: evdev 50, 16, 87,
 	/// 44) are currently physically held. Used to detect the DOWN EDGE so autorepeat
 	/// does not re-fire each action on every repeated key event while the chord is held.
 	/// insert() returns true only on the first press (false on subsequent autorepeats),
@@ -233,7 +233,7 @@ fn flush_held(g: &mut Globals) {
 		g.held.clear();
 		g.held_buttons.clear();
 	}
-	// Drop the LOCAL chord-modifier tracking too. The combos (Ctrl+Shift+M / Q / F12)
+	// Drop the LOCAL chord-modifier tracking too. The combos (Ctrl+Shift+M / Q / F11)
 	// and the Ctrl+Alt+Z / 3×RightCtrl release gate on these booleans, and unlike Linux
 	// (which re-queries the kernel via `chord_mods` at the trigger moment) Windows trusts
 	// them — so a modifier whose UP-stroke is never observed after a disengage edge (the
@@ -351,7 +351,6 @@ fn mouse_button_down_locally() -> bool {
 fn handle_hover() {
 	use windows_sys::Win32::Foundation::{HWND, POINT};
 	use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
-	use tauri::Manager as _;
 	HOVER_QUEUED.store(false, Ordering::SeqCst);
 	if !free_mode() || !ENABLED.load(Ordering::SeqCst) || !MOUSE_CAPTURE.load(Ordering::SeqCst) {
 		return;
@@ -367,7 +366,9 @@ fn handle_hover() {
 		return;
 	}
 	if VIDEO_MAIN.load(Ordering::SeqCst) == 0 {
-		if let Some(h) = app.get_webview_window("main").and_then(|w| w.hwnd().ok()) {
+		if let Some(h) = crate::tabwin::window_for_play(&app, LAST_PLAY.load(Ordering::SeqCst))
+			.and_then(|w| w.hwnd().ok())
+		{
 			VIDEO_MAIN.store(h.0 as HWND as isize, Ordering::SeqCst);
 		}
 	}
@@ -667,7 +668,6 @@ fn clear_confine() {
 /// the app's own tabs/chrome; Ctrl+Alt+Z / 3xRightCtrl release it. `on=false` frees it
 /// (ClipCursor(NULL)). The rect is re-measured by `reassert_confine` (events + 100 ms timer).
 fn confine_to_video(app: &AppHandle, on: bool) {
-	use tauri::Manager as _;
 	use windows_sys::Win32::Foundation::{HWND, RECT};
 	use windows_sys::Win32::UI::WindowsAndMessaging::ClipCursor;
 
@@ -679,8 +679,8 @@ fn confine_to_video(app: &AppHandle, on: bool) {
 		}
 		return;
 	}
-	let Some(main_hwnd) = app
-		.get_webview_window("main")
+	// The window showing the armed session (main, or a detached tab window).
+	let Some(main_hwnd) = crate::tabwin::window_for_play(app, LAST_PLAY.load(Ordering::SeqCst))
 		.and_then(|w| w.hwnd().ok())
 		.map(|h| h.0 as HWND)
 	else {
@@ -951,8 +951,8 @@ fn capture_thread() {
 }
 
 /// Shared key handling for both capture paths: track modifiers, fire the leave
-/// combo (Ctrl+Shift+F12 — Parsec-style Ctrl+Shift+key; F12 never occurs in
-/// gameplay and the chord doesn't collide with any Win11 shell shortcut), forward
+/// combos (Ctrl+Shift+Q leave, Ctrl+Shift+F11 fullscreen — Parsec-style Ctrl+Shift+key;
+/// the chords don't collide with any Win11 shell shortcut), forward
 /// to the active session. Returns true if the key should be SUPPRESSED locally (it
 /// then only acts on the remote).
 fn handle_key(evdev: u32, down: bool) -> bool {
@@ -971,7 +971,7 @@ fn handle_key(evdev: u32, down: bool) -> bool {
 	// avoids the dead-lock the combo branches would create: they return early BEFORE
 	// the g.held update at the bottom, so a combo_edge check on `held` would never see
 	// the first press (held lacks the key at combo-fire time for the same reason).
-	let combo_key = matches!(evdev, 50 | 16 | 88 | 44);
+	let combo_key = matches!(evdev, 50 | 16 | 87 | 44);
 
 	let combo_edge = if combo_key {
 		if down {
@@ -983,7 +983,7 @@ fn handle_key(evdev: u32, down: bool) -> bool {
 				// M/Q/Z repeat meant for the remote (bare press → chord=false → not
 				// recorded → its repeats forward). Mirrors linux.rs keeping the chord
 				// test so a bare m/q/z still repeats.
-				let chord = ((evdev == 50 || evdev == 16 || evdev == 88)
+				let chord = ((evdev == 50 || evdev == 16 || evdev == 87)
 					&& g.ctrl_down
 					&& g.shift_down)
 					|| (evdev == 44 && g.ctrl_down && g.alt_down);
@@ -1003,7 +1003,7 @@ fn handle_key(evdev: u32, down: bool) -> bool {
 	// Suppress autorepeat of a combo trigger key while its chord is still held.
 	// The down-edge already fired the action; subsequent OS autorepeat events have
 	// combo_edge=false (insert() found the key already in combo_held). Without this
-	// guard: F12 repeats forward to the host (ENGAGED stays true after fullscreen
+	// guard: F11 repeats forward to the host (ENGAGED stays true after fullscreen
 	// toggle), and M repeats leak to the local desktop after ENGAGED is cleared.
 	// Mirrors linux.rs:716-732 (ev.value()==2 while chord held → continue).
 	if combo_key && down && !combo_edge
@@ -1016,7 +1016,7 @@ fn handle_key(evdev: u32, down: bool) -> bool {
 		// booleans (ctrl_down && shift_down / ctrl_down && alt_down) but carried
 		// no ENGAGED||APP_FOCUSED ownership condition, so when Pulsar was
 		// disengaged AND another app had focus the hook still swallowed combo-key
-		// (M/Q/F12/Z) autorepeats that belonged to the other app.
+		// (M/Q/F11/Z) autorepeats that belonged to the other app.
 		// (r17-win-combo-autorepeat-leak) flush_held_wh (called synchronously in
 		// the overlay/detach combo blocks) resets ctrl_down/shift_down/alt_down
 		// to false; since modifier keys don't autorepeat, those booleans stayed
@@ -1100,10 +1100,10 @@ fn handle_key(evdev: u32, down: bool) -> bool {
 		}
 		return true; // never leak the Q locally
 	}
-	// Fullscreen combo: Ctrl+Shift+F12 — toggles the window's fullscreen state; the
+	// Fullscreen combo: Ctrl+Shift+F11 — toggles the window's fullscreen state; the
 	// session AND control state stay as they are (this is NOT the leave combo).
 	if combo_edge
-		&& evdev == 88
+		&& evdev == 87
 		&& g.ctrl_down
 		&& g.shift_down
 		&& (ENGAGED.load(Ordering::SeqCst) || APP_FOCUSED.load(Ordering::SeqCst))
@@ -1703,6 +1703,9 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, _sta
 	// the overlay floats over the live canvas — so it's unused here, kept for a shared
 	// signature.)
 	let same_session = LAST_PLAY.load(Ordering::SeqCst) == id;
+	// Re-resolved on the next hover / engage: the session may now live in another window
+	// (a dragged-out tab), and the renderer child is looked up under that one.
+	VIDEO_MAIN.store(0, Ordering::SeqCst);
 	// A different session starts unlocked: a stopped-stream lock must not outlive the session
 	// (its renderer reports the new stream's state itself).
 	if !same_session {
@@ -2196,7 +2199,7 @@ static RENDER_HOOK_KEYS: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomi
 static FWD_KEYS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// A key edge the WEBVIEW saw (its keydown/keyup), fed into the same `handle_key` the LL hook
-/// uses — combos (Ctrl+Alt+Z, Ctrl+Shift+M/Q/F12, 3×RightCtrl), held-key bookkeeping and
+/// uses — combos (Ctrl+Alt+Z, Ctrl+Shift+M/Q/F11, 3×RightCtrl), held-key bookkeeping and
 /// forwarding all behave identically.
 ///
 /// Why: on some machines WH_KEYBOARD_LL is never called while Pulsar's WebView2 window has
@@ -2291,12 +2294,12 @@ unsafe extern "system" fn ll_keyboard_proc(ncode: i32, wparam: WPARAM, lparam: L
 		_ => {}
 	}
 	// Same suppress rule handle_key applies: engaged → every key acts only on the remote;
-	// disengaged-but-app-focused → only the Ctrl+Shift+M/Q/F12 combo triggers are eaten
+	// disengaged-but-app-focused → only the Ctrl+Shift+M/Q/F11 combo triggers are eaten
 	// (their actions run on the worker), everything else types locally as normal.
 	let suppress = if ENGAGED.load(Ordering::SeqCst) {
 		true
 	} else {
-		matches!(evdev, 50 | 16 | 88)
+		matches!(evdev, 50 | 16 | 87)
 			&& HOOK_CTRL.load(Ordering::Relaxed)
 			&& HOOK_SHIFT.load(Ordering::Relaxed)
 			&& APP_FOCUSED.load(Ordering::SeqCst)

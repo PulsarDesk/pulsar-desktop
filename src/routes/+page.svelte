@@ -52,6 +52,7 @@
 	import ResizeEdges from './page/ResizeEdges.svelte';
 	import Icon from '#lib/Icon.svelte';
 	import Tabs from './page/Tabs.svelte';
+	import TabGhost from './page/TabGhost.svelte';
 	import HomeView from './page/HomeView.svelte';
 	import PasswordModal from './page/PasswordModal.svelte';
 	import UpdateModal from './page/UpdateModal.svelte';
@@ -60,6 +61,7 @@
 	import Settings from '#lib/screens/Settings.svelte';
 	import Controllers from '#lib/Controllers.svelte';
 	import { SessionManager } from './page/sessions.svelte';
+	import { TabWindows, isTabWin } from './page/tabWindows.svelte';
 	import { setLivePeers } from '#lib/presence.svelte.js';
 	import { setAuthDoneHandler } from '#lib/authDone.js';
 
@@ -91,11 +93,35 @@
 		return inj ? { id: Number(inj.id), peer: String(inj.peer ?? '') } : null;
 	})();
 
+	// A dragged tab's picture outside its window (tabwin.rs `tab_ghost_show`, label `tabghost`).
+	const ghostReq =
+		typeof window !== 'undefined' && '__TABGHOST__' in window
+			? String((window as unknown as { __TABGHOST__?: string }).__TABGHOST__ ?? '')
+			: null;
+	if (ghostReq !== null && typeof document !== 'undefined') {
+		document.documentElement.style.background = 'transparent';
+		document.body.style.background = 'transparent';
+	}
+
 	// The Pulsar toast window (toast.rs, label `toast`): render only the notice stack.
 	const toastReq = typeof window !== 'undefined' && '__TOAST__' in window;
 
 	// Any popup window short-circuits the main-app bootstrap (no relay re-register).
-	const isPopup = !!approveReq || connReq || !!filesReq || toastReq;
+	// A detached session-tab window (tabwin.rs) shows the session shell only — no Home and no
+	// app bootstrap either (the main window does that).
+	const isPopup = !!approveReq || connReq || !!filesReq || toastReq || isTabWin || ghostReq !== null;
+	// Every window's uncaught JS errors go to the app log (they were invisible: a listener that
+	// failed to register, a rejected connect, …).
+	if (typeof window !== 'undefined' && isTauri) {
+		window.addEventListener('error', (e) => {
+			api.uiLog(`js error: ${e.message} @ ${e.filename}:${e.lineno}`).catch(() => {});
+		});
+		window.addEventListener('unhandledrejection', (e) => {
+			api.uiLog(`js unhandled rejection: ${String(e.reason)}`).catch(() => {});
+		});
+	}
+	// The real popups (approval, connections, files, toasts): no sessions, no tab strip.
+	const isPopupOnly = isPopup && !isTabWin;
 
 	type View = 'home' | 'devices' | 'gaming' | 'settings';
 
@@ -158,6 +184,71 @@
 	// Multiple concurrent host connections (tabs), the active tab, fullscreen, and the
 	// connect/disconnect lifecycle live in the session manager.
 	const sm = new SessionManager({ getMode: () => mode, onAuthDone: (target) => closePwFor(target) });
+	// Chrome-style tabs: tear a session tab off into its own window, or merge it into another.
+	const tw = new TabWindows(sm);
+	// Drag-to-split (IntelliJ-style): a tab dragged over the session area highlights the half
+	// it would take (nearest edge); the middle just shows that tab. The native video is hidden
+	// meanwhile so the highlight is visible over it.
+	type Zone = 'left' | 'right' | 'top' | 'bottom' | 'center' | `pane${number}`;
+	let stageEl = $state<HTMLDivElement | null>(null);
+	let splitDrop = $state<Zone | null>(null);
+	function zoneAt(x: number, y: number): Zone {
+		const r = stageEl?.getBoundingClientRect();
+		if (!r || r.width <= 0 || r.height <= 0) return 'center';
+		const fx = (x - r.left) / r.width;
+		const fy = (y - r.top) / r.height;
+		// Already split: the pane under the pointer (grid order, row-major).
+		if (sm.splitMode !== 'off') {
+			const col = fx < 0.5 ? 0 : 1;
+			const row = fy < 0.5 ? 0 : 1;
+			const i = sm.splitMode === 'h2' ? col : sm.splitMode === 'v2' ? row : row * 2 + col;
+			return `pane${i}`;
+		}
+		const edges: [Zone, number][] = [
+			['left', fx],
+			['right', 1 - fx],
+			['top', fy],
+			['bottom', 1 - fy]
+		];
+		edges.sort((a, b) => a[1] - b[1]);
+		return edges[0][1] < 0.3 ? edges[0][0] : 'center';
+	}
+	function onStageDrag(tabId: number | null, x: number, y: number) {
+		splitDrop = tabId === null ? null : zoneAt(x, y);
+	}
+	function onStageDrop(tabId: number, x: number, y: number) {
+		splitDrop = null;
+		const z = zoneAt(x, y);
+		if (z.startsWith('pane')) sm.putInPane(tabId, Number(z.slice(4)));
+		else if (z === 'center') sm.activeTab = tabId;
+		else sm.splitWithTab(tabId, z as 'left' | 'right' | 'top' | 'bottom');
+	}
+	// The split shows as ONE group tab (its members inside). A member click focuses its pane;
+	// any other tab is shown alone with the group parked; dragging a member back onto the strip
+	// takes it out of the group.
+	function selectTab(tab: 'home' | number) {
+		sm.select(tab);
+	}
+	$effect(() => tw.watchEmpty(sm.sessions.length));
+	// Where this window's tab area is, for a tab dragged from another window to drop onto.
+	$effect(() => {
+		void sm.sessions.length;
+		void sm.splitMode;
+		const on = !sm.fullscreen && !isPopupOnly;
+		const report = () => tw.reportStrip(on);
+		const t1 = setTimeout(report, 50);
+		window.addEventListener('resize', report);
+		return () => {
+			clearTimeout(t1);
+			window.removeEventListener('resize', report);
+		};
+	});
+	// This window got the input (focused last): its visible session becomes the input target.
+	$effect(() => {
+		if (!tw.ownsInput || sm.splitMode !== 'off') return;
+		const s = sm.sessions.find((x) => x.tabId === sm.activeTab);
+		if (s && s.playId >= 0) api.setActiveSession(s.playId).catch(() => {});
+	});
 	// Hosts with a live session read as online in the recents / devices dots.
 	$effect(() => setLivePeers(sm.sessions.filter((s) => s.phase === 'active').map((s) => s.target.id)));
 	// The split panes that have a LIVE session, so each input device can be locked to one (couch
@@ -592,6 +683,13 @@
 	onMount(async () => {
 		initCaps();
 		boot();
+		if (!isPopupOnly) void tw.init();
+		if (isTabWin && isTauri) {
+			// The capture's fullscreen combo (Ctrl+Shift+F11) — for this window's session.
+			await onFullscreenToggle(() => {
+				if (tw.ownsInput) sm.toggleFullscreen();
+			});
+		}
 		if (isPopup) return; // approval popup: nothing else to bootstrap
 		// opi5: when GPU compositing is forced on, run the present-keepalive so WebKitGTK/Mali
 		// doesn't intermittently freeze the display when the page goes idle (see acKeepalive).
@@ -726,12 +824,18 @@
 		// A controlled client asked to reverse direction — connect back to it so the
 		// roles swap (it must be online/serving for this to land).
 		await onReverseRequest((e) => {
-			if (e.id) sm.startConnect({ name: t('home.remoteDevice'), id: e.id }, 'remote');
+			api.uiLog(`reverse request from ${e.id}: connecting back`).catch(() => {});
+			if (e.id)
+				sm.startConnect({ name: t('home.remoteDevice'), id: e.id }, 'remote').catch((err) =>
+					api.uiLog(`reverse connect-back failed: ${err}`).catch(() => {})
+				);
 		});
-		// Client (Linux native): Ctrl+Shift+F12 (evdev-captured, so it never reaches the
+		// Client (Linux native): Ctrl+Shift+F11 (evdev-captured, so it never reaches the
 		// webview as a keydown) — toggle fullscreen (SAME action as the button + F11). The
-		// shell F11/Ctrl+Shift+F12 (unengaged app) is a separate $effect window listener below.
-		await onFullscreenToggle(() => sm.toggleFullscreen());
+		// shell F11/Ctrl+Shift+F11 (unengaged app) is a separate $effect window listener below.
+		await onFullscreenToggle(() => {
+			if (tw.ownsInput) sm.toggleFullscreen(); // the combo was for a session in THIS window
+		});
 		// A host is asking us for a password — show the prompt (a re-fire means the
 		// previous password was wrong).
 		await onAuthPrompt((e) => {
@@ -817,7 +921,7 @@
 				holdConnecting: splashDone
 			});
 			// Kiosk / headless start (CLI --connect): begin fullscreen so the host fills
-			// the screen with no app chrome. Toggle off with Ctrl+Shift+F12. `--nofullscreen`
+			// the screen with no app chrome. Toggle off with Ctrl+Shift+F11. `--nofullscreen`
 			// (ac.nofullscreen) opts out — the session starts windowed (dev test loops / embedded).
 			if (!ac.nofullscreen) sm.enterFullscreenAuto();
 		}
@@ -878,7 +982,7 @@
 		// repaint live. Single-tab mode is unchanged.
 		const s = sm.sessions.find((x) => x.tabId === sm.activeTab);
 		const occluded =
-			sm.splitMode === 'off' && !!s && !!s.native && s.phase === 'active' && !!s.ready && !webModalUp;
+			sm.splitMode === 'off' && !!s && !!s.native && s.phase === 'active' && !!s.ready && !webModalUp && !splitDrop && !tw.dropHover;
 		// (A modal's entry animation starts at opacity 0 — paused, it would stay invisible.)
 		document.documentElement.toggleAttribute('data-occluded', occluded);
 	});
@@ -942,7 +1046,7 @@
 		return () => document.removeEventListener('contextmenu', onCtx);
 	});
 
-	// Shell shortcut: F11 or Ctrl+Shift+F12 toggles IMMERSIVE fullscreen (true-fullscreen that also
+	// Shell shortcut: F11 / Ctrl+Shift+F11 toggles IMMERSIVE fullscreen (true-fullscreen that also
 	// hides the top bar everywhere, incl. the home). Fires only when keys reach the webview — i.e.
 	// the unengaged app shell; an engaged session's keys are evdev/hook-captured (handled by
 	// onFullscreenToggle). Ignored while typing in a field.
@@ -950,7 +1054,7 @@
 		const onKey = (e: KeyboardEvent) => {
 			const el = e.target as HTMLElement | null;
 			if (el && (el.isContentEditable || /^(input|textarea|select)$/i.test(el.tagName))) return;
-			if (e.key === 'F11' || (e.key === 'F12' && e.ctrlKey && e.shiftKey)) {
+			if (e.key === 'F11') {
 				// Guard auto-repeat: holding F11 fired a keydown EVERY frame → toggled fullscreen
 				// over and over ("sürekli fullscreen"). One toggle per physical press. Also stop the
 				// event so WebKitGTK/the WM never ALSO acts on F11 (its own fullscreen binding fought
@@ -972,7 +1076,7 @@
 	$effect(() => {
 		const onKey = (e: KeyboardEvent) => {
 			if (!e.ctrlKey || e.altKey || e.metaKey) return;
-			const order: ('home' | number)[] = ['home', ...sm.sessions.map((s) => s.tabId)];
+			const order: ('home' | number)[] = [...(isTabWin ? [] : ['home' as const]), ...sm.sessions.map((s) => s.tabId)];
 			let next: 'home' | number | undefined;
 			if (e.key === 'Tab') {
 				const i = Math.max(0, order.indexOf(sm.activeTab));
@@ -1024,6 +1128,12 @@
 		api.setPointerFree(ui.pointerFree).catch(() => {});
 	});
 
+	// Picture upscaling (Settings → Görüntü) follows the setting.
+	$effect(() => {
+		if (isPopup) return;
+		api.setUpscale(ui.upscale).catch(() => {});
+	});
+
 	// Host pointer marker (remote mode) follows the setting.
 	$effect(() => {
 		if (isPopup) return;
@@ -1060,10 +1170,14 @@
 	<Connections />
 {:else if filesReq}
 	<FilesWindow playId={filesReq.id} peer={filesReq.peer} />
+{:else if ghostReq !== null}
+	<TabGhost title={ghostReq} />
 {:else if toastReq}
 	<ToastWindow />
 {:else}
-	<HostChat />
+	{#if !isTabWin}
+		<HostChat />
+	{/if}
 	{#if padToast}
 		<div class="pad-toast" role="status">
 			<span class="pt-dot"></span>
@@ -1074,6 +1188,10 @@
 	<div class="desktop">
 	<div class="window" class:fullscreen={sm.fullscreen}>
 		<ResizeEdges fullscreen={sm.fullscreen} />
+		{#if tw.dropHover}
+			<!-- A tab dragged from another Pulsar window is over this one's tab area. -->
+			<div class="tab-drop-hover" aria-hidden="true"><span>{t('tab.dropHere')}</span></div>
+		{/if}
 		{#if splashOn}
 			<div class="splash" class:gone={!booting} aria-hidden="true">
 				<div class="splash-mark"><PulsarMark size={76} /></div>
@@ -1088,8 +1206,9 @@
 				gaming={mode === 'game'}
 				onToggleMode={toggleMode}
 				{modeLocked}
+				showMode={!isTabWin}
 				splitMode={sm.splitMode}
-				onSplit={openSplit}
+				onSplit={isTabWin ? undefined : openSplit}
 				fullscreen={sm.fullscreen}
 				onToggleFullscreen={sm.toggleFullscreen}
 				onUpdate={openUpdate}
@@ -1099,20 +1218,37 @@
 						? (showInputAssign = true)
 						: (splitPadsOpen = true)}
 			/>
-			{#if sm.sessions.length && sm.splitMode === 'off'}
+			{#if sm.sessions.length}
 				<Tabs
 					sessions={sm.sessions}
-					activeTab={sm.activeTab}
-					onSelect={(tab) => (sm.activeTab = tab)}
+					activeTab={sm.splitMode === 'off' ? sm.activeTab : (sm.panes[sm.focusedPane] ?? -1)}
+					onSelect={selectTab}
+					onStripDrop={sm.ungroup}
+					group={sm.group ? { members: sm.group.members, shown: sm.group.shown } : null}
+					onGroupSelect={sm.showGroup}
+					onGroupDragOut={tw.dragGroupOut}
 					onEnd={sm.endSession}
 					onRename={sm.renameTab}
+					showHome={!isTabWin}
+					onReorder={sm.moveTab}
+					canMove={sm.canMove}
+					onDragOut={tw.dragOut}
+					canSplit={isTabWin ? undefined : sm.canSplitWith}
+					{onStageDrag}
+					{onStageDrop}
 				/>
 			{/if}
 		{/if}
 
-		<div class="stage" class:split={sm.splitMode !== 'off'} data-layout={sm.splitMode}>
+		<div class="stage" class:split={sm.splitMode !== 'off'} data-layout={sm.splitMode} bind:this={stageEl}>
+		{#if splitDrop}
+			<div class="split-drop" data-zone={splitDrop} aria-hidden="true">
+				<span>{splitDrop === 'center' ? t('tab.dropShow') : splitDrop.startsWith('pane') ? t('tab.dropPane') : t('tab.dropSplit')}</span>
+			</div>
+		{/if}
 		<!-- Home is hidden whenever a session tab is active OR split mode is on (split has
 		     no "home" pane). Single-tab flow is unchanged when splitMode==='off'. -->
+		{#if !isTabWin}
 		<div class="layer" class:hidden={sm.activeTab !== 'home' || sm.splitMode !== 'off'}>
 			<HomeView
 				nav={NAV}
@@ -1144,6 +1280,7 @@
 				onSplit={openSplit}
 			/>
 		</div>
+		{/if}
 
 		{#each sm.sessions as s (s.tabId)}
 			{@const paneIdx = sm.splitMode === 'off' ? -1 : sm.panes.indexOf(s.tabId)}
@@ -1179,15 +1316,15 @@
 						hostEncoders={s.hostEncoders ?? []}
 						hostDisplays={s.hostDisplays ?? []}
 						{selfId}
-						active={sm.splitMode === 'off'
-							? sm.activeTab === s.tabId
-							: paneIdx === sm.focusedPane}
+						active={tw.ownsInput &&
+							(sm.splitMode === 'off' ? sm.activeTab === s.tabId : paneIdx === sm.focusedPane)}
+						adopted={!!s.adopted}
 						split={sm.splitMode !== 'off'}
 						windowCapture={s.windowHwnd !== undefined}
 						fullscreen={sm.fullscreen}
 						onToggleFullscreen={sm.toggleFullscreen}
 						onPaneFocus={paneIdx >= 0 ? () => sm.focusPane(paneIdx) : undefined}
-						occludeNative={webModalUp}
+						occludeNative={webModalUp || splitDrop !== null || tw.dropHover}
 						joinPrompt={joinPromptFor(s.playId, paneIdx)}
 						onEnd={() => sm.endSession(s.tabId)}
 					/>
@@ -1357,6 +1494,98 @@
 		position: relative;
 		flex: 1;
 		min-height: 0;
+	}
+	/* "Drop the tab here": over the whole window while another window's tab hovers it (the
+	   native video is hidden meanwhile so this shows). */
+	.tab-drop-hover {
+		position: absolute;
+		z-index: 50;
+		inset: 6px;
+		display: grid;
+		place-items: center;
+		pointer-events: none;
+		border: 2px dashed var(--accent);
+		border-radius: 10px;
+		background: color-mix(in srgb, var(--accent) 16%, transparent);
+		color: var(--accent-ink);
+		font-size: 14px;
+		font-weight: 600;
+		animation: drop-pulse 1s ease-in-out infinite alternate;
+	}
+	.tab-drop-hover span {
+		padding: 5px 12px;
+		border-radius: 8px;
+		background: var(--surface);
+		box-shadow: 0 2px 10px rgb(0 0 0 / 0.2);
+	}
+	@keyframes drop-pulse {
+		from {
+			background: color-mix(in srgb, var(--accent) 10%, transparent);
+		}
+		to {
+			background: color-mix(in srgb, var(--accent) 24%, transparent);
+		}
+	}
+	/* Drag-to-split preview: the part of the session area the dragged tab would take. */
+	.split-drop {
+		position: absolute;
+		z-index: 20;
+		display: grid;
+		place-items: center;
+		pointer-events: none;
+		border: 2px solid var(--accent);
+		border-radius: var(--r-md, 10px);
+		background: color-mix(in srgb, var(--accent) 18%, transparent);
+		color: var(--accent-ink);
+		font-size: 14px;
+		font-weight: 600;
+		transition:
+			inset 0.12s var(--ease),
+			opacity 0.12s;
+		inset: 8px;
+	}
+	.split-drop[data-zone='left'] {
+		inset: 8px 50% 8px 8px;
+	}
+	.split-drop[data-zone='right'] {
+		inset: 8px 8px 8px 50%;
+	}
+	.split-drop[data-zone='top'] {
+		inset: 8px 8px 50% 8px;
+	}
+	.split-drop[data-zone='bottom'] {
+		inset: 50% 8px 8px 8px;
+	}
+	/* Split: the pane under the pointer (h2 = columns, v2 = rows, grid4 = quarters). */
+	.stage[data-layout='h2'] .split-drop[data-zone='pane0'] {
+		inset: 8px 50% 8px 8px;
+	}
+	.stage[data-layout='h2'] .split-drop[data-zone='pane1'] {
+		inset: 8px 8px 8px 50%;
+	}
+	.stage[data-layout='v2'] .split-drop[data-zone='pane0'] {
+		inset: 8px 8px 50% 8px;
+	}
+	.stage[data-layout='v2'] .split-drop[data-zone='pane1'] {
+		inset: 50% 8px 8px 8px;
+	}
+	.stage[data-layout='grid4'] .split-drop[data-zone='pane0'] {
+		inset: 8px 50% 50% 8px;
+	}
+	.stage[data-layout='grid4'] .split-drop[data-zone='pane1'] {
+		inset: 8px 8px 50% 50%;
+	}
+	.stage[data-layout='grid4'] .split-drop[data-zone='pane2'] {
+		inset: 50% 50% 8px 8px;
+	}
+	.stage[data-layout='grid4'] .split-drop[data-zone='pane3'] {
+		inset: 50% 8px 8px 50%;
+	}
+	.split-drop span {
+		padding: 6px 12px;
+		border-radius: 8px;
+		background: var(--surface);
+		box-shadow: 0 2px 10px rgb(0 0 0 / 0.2);
 	}
 	.layer {
 		position: absolute;

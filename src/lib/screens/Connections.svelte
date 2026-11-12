@@ -278,7 +278,7 @@
 								title={r.viewOnly ? t('host.viewOnlyOn') : t('host.viewOnly')}
 								aria-label={t('host.viewOnly')}
 							>
-								<Icon name="shield" size={14} />
+								<Icon name={r.viewOnly ? 'pointerOff' : 'pointer'} size={14} />
 							</button>
 							<button
 								class="act"

@@ -192,6 +192,7 @@ pub(crate) fn start_render_reader(
 						let _ = app.emit("play-optimizing", cur_id);
 					} else {
 						tracing::info!(id = cur_id, fps, "first presented frames, play-ready");
+						crate::tabwin::mark_ready(cur_id);
 						let _ = app.emit("play-ready", cur_id);
 					}
 				}
@@ -312,7 +313,7 @@ pub(crate) fn start_render_reader(
 											.get(&cur_id)
 											.map(|p| p.data_tx.clone());
 										if let Some(tx) = tx {
-											let owner = app.get_webview_window("main");
+											let owner = crate::tabwin::window_for_play(&app, cur_id);
 											std::thread::spawn(move || {
 												// rfd::FileDialog::pick_file() is synchronous (fine
 												// on a dedicated thread) and opens a real native

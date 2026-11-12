@@ -416,6 +416,9 @@ pub(crate) struct PlaySession {
 	pub(crate) windows_query_tx: tokio::sync::mpsc::Sender<
 		tokio::sync::oneshot::Sender<Vec<pulsar_core::service::WindowInfo>>,
 	>,
+	/// The host's static X25519 key (E2E-verified): "reverse direction" pre-authorizes that
+	/// host's connect back to us (`auth::preauth::expect_reverse`).
+	pub(crate) host_pubkey: Option<[u8; 32]>,
 }
 
 /// Host-side stream settings pushed from the UI.

@@ -17,6 +17,8 @@
 		/** A connection is open (a client session or one this machine hosts): the mode can't
 		 *  change, since the open session belongs to the current personality. */
 		modeLocked?: boolean;
+		/** Show the gaming-mode toggle (not in a detached tab window). */
+		showMode?: boolean;
 		/** Current split layout ('off' = normal single-tab flow) — lights up the button. */
 		splitMode?: 'off' | 'h2' | 'v2' | 'grid4';
 		/** Open the split-layout chooser (SplitPicker). */
@@ -40,6 +42,7 @@
 		gaming,
 		onToggleMode,
 		modeLocked = false,
+		showMode = true,
 		splitMode = 'off',
 		onSplit,
 		fullscreen = false,
@@ -215,7 +218,8 @@
 				<Icon name="expand" size={16} />
 			</button>
 		{/if}
-		<button
+		{#if showMode}
+			<button
 			class="game-btn"
 			class:on={gaming}
 			use:navItem={gaming}
@@ -229,6 +233,7 @@
 		>
 			<Icon name="gaming" size={16} />
 		</button>
+		{/if}
 		<button
 			class="icon-btn"
 			use:navItem={gaming}

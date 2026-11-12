@@ -1573,6 +1573,7 @@ pub(super) async fn hold_session(
 								let _ = si.flush();
 							}
 						}
+						crate::tabwin::mark_ready(id);
 						let _ = app_ev.emit("play-ready", id);
 						tracing::info!(
 							settled,
@@ -1683,6 +1684,8 @@ pub(super) async fn hold_session(
 						media_silent_ms = last_media.elapsed().as_millis() as u64,
 						"host silent → ending play session"
 					);
+					// Say why (the frontend shows it): the tab would otherwise just vanish.
+					let _ = app_ev.emit("play-error", (id, "hostSilent"));
 					break;
 				}
 				let stopped = video_stopped(first_video_logged, last_video.elapsed(), last_inbound.elapsed());

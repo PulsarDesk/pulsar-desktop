@@ -794,10 +794,14 @@ pub(crate) fn self_update_possible() -> bool {
 /// closing the main window hides Pulsar to the tray (existing behavior). When false,
 /// closing quits the app. The flag is read by the `CloseRequested` handler in lib.rs.
 #[tauri::command]
-pub(crate) fn set_tray(state: State<'_, AppState>, enabled: bool) {
+pub(crate) fn set_tray(app: AppHandle, state: State<'_, AppState>, enabled: bool) {
 	state
 		.tray_disabled
 		.store(!enabled, std::sync::atomic::Ordering::Relaxed);
+	// A background start hid the window expecting the tray: without one it must show.
+	if !enabled {
+		crate::splash::show_hidden_background(&app);
+	}
 }
 
 /// Sync the "wake on controller" preference (Settings → General): the Guide/PS button

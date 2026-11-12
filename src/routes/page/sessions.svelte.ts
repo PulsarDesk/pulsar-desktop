@@ -4,7 +4,7 @@
 // markup stays small; behavior is identical to the inline version it replaced.
 
 import { savedStreamPicks } from '#lib/streamPicks.js';
-import { api, isTauri, onPeerAvatar, onPeerName, onPlayEnded, onPlayOptimizing, onPlayReady, setFullscreen } from '#lib/api.js';
+import { api, isTauri, onPeerAvatar, onPeerName, onPlayEnded, onPlayError, onPlayStats, onPlayOptimizing, onPlayReady, setFullscreen } from '#lib/api.js';
 import { recordConnection, setPeerIdentity } from '#lib/peers.svelte.js';
 import { ui, saveUi } from '#lib/settings.svelte.js';
 import { t } from '#lib/i18n.svelte.js';
@@ -50,6 +50,20 @@ export type Session = {
 	// For a local host-game tab: the game's stop command, run when this tab closes.
 	// Per-session (not a shared global) so closing one tab never stops another game.
 	stopCmd?: string;
+	/** Moved here from another window (a dragged tab) — already running there. */
+	adopted?: boolean;
+};
+
+/** A whole split group handed between windows (tab_detach / tab_move payload). */
+export type GroupMove = {
+	group: {
+		layout: 'h2' | 'v2' | 'grid4';
+		sessionMode: 'game' | 'remote';
+		focusedPane: number;
+		/** Pane order, by PLAY id (tab ids are per window); null = empty pane. */
+		panes: (number | null)[];
+	};
+	sessions: Session[];
 };
 
 const STREAM_PORT = 9000;
@@ -188,10 +202,22 @@ export class SessionManager {
 	 * of EVERY pane (the mode the app was in when split was entered); omit it to inherit the
 	 * app's current `ui.appMode`. */
 	enterSplit(layout: 'h2' | 'v2' | 'grid4', mode: 'game' | 'remote' = ui.appMode) {
+		// A parked group becomes ordinary tabs (one split group per window).
+		this.parked = null;
 		const size = this.#layoutSize(layout);
 		const seed = typeof this.activeTab === 'number' ? this.activeTab : null;
 		const next: (number | null)[] = new Array(size).fill(null);
 		next[0] = seed;
+		// The other panes take the tabs already open (that mode, live, most recent first) —
+		// an empty connect pane only when there are not enough of them.
+		const seedMode = seed !== null ? this.sessions.find((s) => s.tabId === seed)?.mode : undefined;
+		if (seedMode !== undefined) mode = seedMode;
+		const rest = this.sessions
+			.filter((s) => s.tabId !== seed && s.mode === mode && s.phase === 'active' && s.playId >= 0)
+			.reverse();
+		for (let i = 0; i < size; i++) {
+			if (next[i] === null) next[i] = rest.shift()?.tabId ?? null;
+		}
 		this.splitSessionMode = mode;
 		this.panes = next;
 		this.splitMode = layout;
@@ -409,6 +435,20 @@ export class SessionManager {
 			const s = this.sessions.find((x) => x.playId === playId);
 			if (s) this.endSession(s.tabId);
 		});
+		// Why a session ended / can't start, shown on Home instead of the tab just vanishing:
+		// the host stopped answering, or (still connecting) the host reports a stream error
+		// ("!…" stats, e.g. it can't capture its screen).
+		onPlayError(([playId, reason]) => {
+			if (!this.sessions.some((x) => x.playId === playId)) return;
+			if (reason === 'hostSilent') this.connectErr = t('connErr.hostSilent');
+		});
+		onPlayStats((e) => {
+			if (!e.label.startsWith('!')) return;
+			const s = this.sessions.find((x) => x.playId === e.id);
+			if (!s || s.phase !== 'connecting') return;
+			this.connectErr = e.label.slice(1);
+			this.endSession(s.tabId);
+		});
 	}
 
 	#activateByPlayId(playId: number) {
@@ -491,7 +531,8 @@ export class SessionManager {
 		// explicit `windowHwnd` (the "Pencere" picker) opts out of de-dup the same way — a
 		// pane capturing a specific host window is its own session even on a shared monitor.
 		const want = target.id.replace(/\s/g, '');
-		if (want && !opts.newSession && opts.displayIdx === undefined && opts.windowHwnd === undefined) {
+		// Settings → "Aynı cihaza birden fazla oturum": every connect is a new session.
+		if (want && !ui.duplicateSessions && !opts.newSession && opts.displayIdx === undefined && opts.windowHwnd === undefined) {
 			const existing = this.sessions.find(
 				(s) =>
 					s.target.id.replace(/\s/g, '') === want &&
@@ -666,6 +707,248 @@ export class SessionManager {
 			this.#syncPaneCount();
 			this.#applyPaneResolutions();
 		}
+		// A session of the PARKED split group left: the group loses it; one member left = no
+		// group any more (that one is an ordinary tab).
+		if (this.parked && this.parked.panes.includes(tabId)) {
+			const panes = this.parked.panes.map((p) => (p === tabId ? null : p));
+			this.parked = panes.filter((p) => p !== null).length >= 2 ? { ...this.parked, panes } : null;
+		}
+	};
+
+	/** A tab that can move to another window (Chrome-style tear-off / merge): a live remote
+	 * session. Not a connecting one (its connect is in flight here), not a local host-game tab
+	 * (no stream), not the Linux single-surface mode (its video is part of this window). */
+	canMove = (tabId: number): boolean => {
+		const s = this.sessions.find((x) => x.tabId === tabId);
+		// Connecting tabs move once the host answered (play id known, e.g. "preparing
+		// stream"): what's left is the stream coming up, which every window hears.
+		return !!s && s.playId >= 0 && !s.embedded;
+	};
+
+	// ── Split group (the split's sessions shown as ONE tab, like a browser tab group) ──────
+	// The live split (`splitMode` / `panes`) can be PARKED while another tab is shown alone —
+	// the group keeps its layout and comes back with one click (`showGroup`).
+	parked = $state<{
+		layout: 'h2' | 'v2' | 'grid4';
+		panes: (number | null)[];
+		focusedPane: number;
+		sessionMode: 'game' | 'remote';
+	} | null>(null);
+
+	/** The split group, shown or parked: its layout, panes (tab ids) and whether it's on screen. */
+	get group(): { layout: 'h2' | 'v2' | 'grid4'; panes: (number | null)[]; members: number[]; shown: boolean } | null {
+		if (this.splitMode !== 'off') {
+			const members = this.panes.filter((p): p is number => p !== null);
+			return { layout: this.splitMode, panes: this.panes, members, shown: true };
+		}
+		if (this.parked) {
+			const members = this.parked.panes.filter((p): p is number => p !== null);
+			return { layout: this.parked.layout, panes: this.parked.panes, members, shown: false };
+		}
+		return null;
+	}
+
+	/** Is tab `tabId` a member of the split group (shown or parked)? */
+	inGroup = (tabId: number): boolean => !!this.group?.members.includes(tabId);
+
+	/** Put the shown split aside (another tab is shown alone); `showGroup` brings it back. */
+	#park() {
+		if (this.splitMode === 'off') return;
+		this.parked = {
+			layout: this.splitMode,
+			panes: [...this.panes],
+			focusedPane: this.focusedPane,
+			sessionMode: this.splitSessionMode
+		};
+		this.splitMode = 'off';
+		this.panes = [];
+		this.focusedPane = 0;
+		this.#syncPaneCount();
+	}
+
+	/** Show the split group again (its tab was clicked). */
+	showGroup = () => {
+		const p = this.parked;
+		if (!p) return;
+		this.parked = null;
+		const panes = p.panes.map((t) => (t !== null && this.sessions.some((s) => s.tabId === t) ? t : null));
+		this.splitSessionMode = p.sessionMode;
+		this.panes = panes;
+		this.splitMode = p.layout;
+		this.#syncPaneCount();
+		this.#applyPaneResolutions();
+		this.focusPane(Math.min(p.focusedPane, panes.length - 1));
+	};
+
+	/** A tab of the strip was clicked: a group member focuses its pane (bringing the group
+	 * back if parked); any other tab (or Home) is shown alone, the group parked. */
+	select = (tab: 'home' | number) => {
+		if (typeof tab === 'number' && this.inGroup(tab)) {
+			if (this.splitMode === 'off') this.showGroup();
+			const i = this.panes.indexOf(tab);
+			if (i >= 0) this.focusPane(i);
+			return;
+		}
+		this.#park();
+		this.activeTab = tab;
+	};
+
+	/** Take tab `tabId` out of the split group (it becomes an ordinary tab). */
+	ungroup = (tabId: number) => {
+		if (this.panes.includes(tabId)) this.unpane(tabId);
+		else if (this.parked?.panes.includes(tabId)) {
+			const panes = this.parked.panes.map((p) => (p === tabId ? null : p));
+			this.parked = panes.filter((p) => p !== null).length >= 2 ? { ...this.parked, panes } : null;
+		}
+	};
+
+	/** Hand the whole split group to another window: its layout + sessions (pane order, by play
+	 * id), dropped HERE without stopping anything. */
+	exportGroup = (): GroupMove | null => {
+		const g = this.group;
+		if (!g) return null;
+		const focusedPane = g.shown ? this.focusedPane : (this.parked?.focusedPane ?? 0);
+		const sessionMode = g.shown ? this.splitSessionMode : (this.parked?.sessionMode ?? 'remote');
+		const panes = g.panes.map((t) => (t === null ? null : (this.sessions.find((s) => s.tabId === t)?.playId ?? null)));
+		this.splitMode = 'off';
+		this.panes = [];
+		this.parked = null;
+		this.focusedPane = 0;
+		this.#syncPaneCount();
+		const sessions: Session[] = [];
+		for (const t of g.members) {
+			const rec = this.release(t);
+			if (rec) sessions.push(rec);
+		}
+		return { group: { layout: g.layout, sessionMode, focusedPane, panes }, sessions };
+	};
+
+	/** A split group moved in from another window: its sessions become this window's split
+	 * (or plain tabs when this window already has a group — one group per window). */
+	adoptGroup = (m: GroupMove) => {
+		const plays = m.sessions.map((s) => s.playId);
+		this.adopt(m.sessions);
+		if (this.group) return; // already has a split group: they stay ordinary tabs
+		const panes = m.group.panes.map((pid) =>
+			pid === null ? null : (this.sessions.find((s) => s.playId === pid && plays.includes(pid))?.tabId ?? null)
+		);
+		if (panes.filter((p) => p !== null).length < 2) return;
+		this.splitSessionMode = m.group.sessionMode;
+		this.panes = panes;
+		this.splitMode = m.group.layout;
+		this.#syncPaneCount();
+		this.#applyPaneResolutions();
+		this.focusPane(Math.min(m.group.focusedPane, panes.length - 1));
+	};
+
+	/** Hand a tab over to another window: its record (as that window adopts it) — and drop it
+	 * HERE without stopping anything (the stream keeps running for the new window). */
+	release = (tabId: number): Session | null => {
+		const s = this.sessions.find((x) => x.tabId === tabId);
+		if (!s) return null;
+		this.removeTab(tabId);
+		return $state.snapshot(s) as Session;
+	};
+
+	/** Tabs moved in from another window: add them (fresh tab ids here) and show the last. */
+	adopt = (list: unknown[]) => {
+		let last: number | null = null;
+		for (const raw of list) {
+			const s = raw as Session;
+			if (!s || typeof s.playId !== 'number' || this.sessions.some((x) => x.playId === s.playId)) continue;
+			this.#noteSessionStart();
+			const tabId = this.#nextTab++;
+			this.sessions = [...this.sessions, { ...s, tabId, adopted: true }];
+			last = tabId;
+			// Moved while still preparing: the source window's fallback reveal timer stayed
+			// behind, so arm one here (a no-op once play-ready activated it).
+			if (s.phase === 'connecting') {
+				const pid = s.playId;
+				// Its play-ready may already have gone out while this window was loading.
+				if (isTauri)
+					api.tabPlayReady(pid)
+						.then((up) => up && this.#activateByPlayId(pid))
+						.catch(() => {});
+				setTimeout(() => this.#activateByPlayId(pid), 14_000);
+			}
+		}
+		// Shown at once — over a shown split too (the group parks; its tab brings it back).
+		if (last !== null) this.select(last);
+	};
+
+	/** A tab dragged onto the session area can split it there (live sessions only). */
+	canSplitWith = (tabId: number): boolean => {
+		const s = this.sessions.find((x) => x.tabId === tabId);
+		if (!s || s.phase !== 'active' || s.playId < 0) return false;
+		// One split group per window: with one parked, a new split would make a second.
+		if (this.parked) return false;
+		// Already split: it can go into a pane of the split's mode.
+		return this.splitMode === 'off' || s.mode === this.splitSessionMode;
+	};
+
+	/** Split mode: show tab `tabId` in pane `i` (that pane's session goes back to being a
+	 * background tab; if the tab sat in another pane, the two swap). */
+	putInPane = (tabId: number, i: number) => {
+		if (this.splitMode === 'off' || i < 0 || i >= this.panes.length || !this.canSplitWith(tabId)) return;
+		const from = this.panes.indexOf(tabId);
+		const next = [...this.panes];
+		if (from >= 0) next[from] = next[i];
+		next[i] = tabId;
+		this.panes = next;
+		this.#syncPaneCount();
+		this.#applyPaneResolutions();
+		this.focusPane(i);
+	};
+
+	/** Split mode: tab `tabId` was dragged back onto the tab strip — it leaves its pane. With
+	 * one session (or none) left on screen the split ends (back to the single view). */
+	unpane = (tabId: number) => {
+		if (this.splitMode === 'off') return;
+		const i = this.panes.indexOf(tabId);
+		if (i < 0) return;
+		this.panes = this.panes.map((p) => (p === tabId ? null : p));
+		if (this.panes.filter((p) => p !== null).length <= 1) {
+			const rest = this.panes.find((p) => p !== null);
+			if (rest != null) this.focusedPane = this.panes.indexOf(rest);
+			this.exitSplit();
+			return;
+		}
+		this.#syncPaneCount();
+		this.#applyPaneResolutions();
+	};
+
+	/** Drag-to-split (IntelliJ-style): tab `tabId` dropped on edge `zone` of the session area.
+	 * The window splits in two — the dragged session on that side, the session that was on
+	 * screen on the other (an empty connect pane when that was Home, the same tab, or a
+	 * session of the other mode: a split is all gaming or all remote). */
+	splitWithTab = (tabId: number, zone: 'left' | 'right' | 'top' | 'bottom') => {
+		const s = this.sessions.find((x) => x.tabId === tabId);
+		if (!s || !this.canSplitWith(tabId)) return;
+		const cur = typeof this.activeTab === 'number' ? this.sessions.find((x) => x.tabId === this.activeTab) : undefined;
+		// The other side: the session that was on screen — or, when that IS the dragged one (or
+		// Home was showing), the most recent other live session of the same mode, so a split
+		// made from two tabs always holds both.
+		const fallback = this.sessions.filter((x) => x.tabId !== tabId && x.mode === s.mode && x.phase === 'active').at(-1);
+		const other = cur && cur.tabId !== tabId && cur.mode === s.mode ? cur.tabId : (fallback?.tabId ?? null);
+		const layout = zone === 'left' || zone === 'right' ? 'h2' : 'v2';
+		const first = zone === 'left' || zone === 'top';
+		this.splitSessionMode = s.mode;
+		this.panes = first ? [tabId, other] : [other, tabId];
+		this.splitMode = layout;
+		this.#syncPaneCount();
+		this.#applyPaneResolutions();
+		this.focusPane(first ? 0 : 1);
+	};
+
+	/** Reorder: move tab `tabId` right before tab `before` (null = to the end). */
+	moveTab = (tabId: number, before: number | null) => {
+		const from = this.sessions.findIndex((x) => x.tabId === tabId);
+		if (from < 0 || before === tabId) return;
+		const next = [...this.sessions];
+		const [s] = next.splice(from, 1);
+		const at = before === null ? -1 : next.findIndex((x) => x.tabId === before);
+		next.splice(at < 0 ? next.length : at, 0, s);
+		this.sessions = next;
 	};
 
 	// Close a tab: stop its stream (host sees a disconnect) and drop it.
@@ -698,7 +981,7 @@ export class SessionManager {
 		}
 	};
 
-	// ONE fullscreen toggle for the button, F11, and Ctrl+Shift+F12 — they must behave identically.
+	// ONE fullscreen toggle for the button, F11, and Ctrl+Shift+F11 — they must behave identically.
 	// `dragFrom`: only from Chrome's title-bar drag-out. Guarded with Array.isArray because this
 	// is also bound straight to `onclick` handlers, which pass a MouseEvent.
 	toggleFullscreen = (dragFrom?: unknown) => {

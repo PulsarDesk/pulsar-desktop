@@ -86,6 +86,9 @@
 		joinPrompt?: string;
 		onToggleFullscreen: () => void;
 		onEnd?: () => void;
+		/** The session moved here from another window (a dragged tab): it's already running,
+		 * so the connect-time auto-engage must not fire again. */
+		adopted?: boolean;
 	};
 	let {
 		playId,
@@ -107,12 +110,31 @@
 		occludeNative = false,
 		joinPrompt = '',
 		onToggleFullscreen,
-		onEnd = () => {}
+		onEnd = () => {},
+		adopted = false
 	}: Props = $props();
 
 	// Reverse direction: ask the host to connect back to us so roles swap.
+	// The host connects back to us and the roles swap — so THIS session ends: left running, the
+	// new host (us) streams a screen that shows the old stream (a picture-in-picture loop the
+	// bitrate never settles on). A beat later, so the request reaches the host first.
 	function reverse() {
-		if (playId >= 0 && selfId) api.reversePlay(playId, selfId.replace(/\s/g, '')).catch(() => {});
+		if (playId < 0 || !selfId) return;
+		api.reversePlay(playId, selfId.replace(/\s/g, ''))
+			.then(() =>
+				setTimeout(() => {
+					onEnd();
+					// We are the host now: get Pulsar out of the way so the other side sees this
+					// screen, not our app (to the tray, or the taskbar without one).
+					void import('@tauri-apps/api/window')
+						.then(({ getCurrentWindow }) => {
+							const w = getCurrentWindow();
+							return ui.tray ? w.hide() : w.minimize();
+						})
+						.catch(() => {});
+				}, 1000)
+			)
+			.catch(() => {});
 	}
 
 	const connLabel = $derived(conn === 'relay' ? 'Relay' : 'P2P');
@@ -121,7 +143,9 @@
 	// single-surface mode (the video there is not positioned over `.screen`), and in fullscreen
 	// only when asked to (fullscreen gives the video the whole screen, issue #10). Hidden there,
 	// its menu button goes back onto the video (`ovbtnShown`).
-	const showBar = $derived(ui.statusBar && !split && !embedded && (!fullscreen || ui.statusBarFullscreen));
+	// Split panes get one each (under their own video). Only the Linux single-surface mode has
+	// none (its video isn't positioned over `.screen`; split never uses it).
+	const showBar = $derived(ui.statusBar && !(embedded && !split) && (!fullscreen || ui.statusBarFullscreen));
 	// The menu button sits in the bar → hide the one the renderer draws on the video (the
 	// saved overlay-button setting itself is untouched). Pushed on change only; the initial
 	// state rides the renderer's one-shot seed in controls.svelte.ts.
@@ -183,7 +207,8 @@
 	// Gated on `active`: kbdhook::enable is GLOBAL (last call wins), so only the visible
 	// tab may own it — capture re-arms on tab activation and stops on deactivation.
 	// Game mode's connect-time auto-engage already happened (plain let: not reactive).
-	let autoEngaged = false;
+	// svelte-ignore state_referenced_locally
+	let autoEngaged = adopted;
 	// Whether this tab was the visible one when its stream came up (null = not up yet). A
 	// session that connected in the background (another tab was in front) must NOT grab
 	// input the first time the user switches to its tab — switching tabs never engages.
@@ -210,7 +235,8 @@
 		return () => {
 			if (captureOwner !== playId) return; // another tab re-armed it for itself
 			captureOwner = -1;
-			api.kbdCaptureStop().catch(() => {});
+			// With this session's id: another window may own the capture by now.
+			api.kbdCaptureStop(playId).catch(() => {});
 		};
 	});
 
@@ -649,7 +675,7 @@
 			const code = evdevCode(e.code);
 			if (!code) return;
 			const combo =
-				(e.ctrlKey && e.shiftKey && /^(KeyM|KeyQ|F12)$/.test(e.code)) ||
+				(e.ctrlKey && e.shiftKey && /^(KeyM|KeyQ|F11)$/.test(e.code)) ||
 				(e.ctrlKey && e.altKey && e.code === 'KeyZ');
 			if (nativeEngaged || combo) {
 				// The key acts on the host (or is a Pulsar combo) — not on this webview.
@@ -755,7 +781,7 @@
 				// drop the active tab's grab.
 				if (captureOwner === playId) {
 					captureOwner = -1;
-					api.kbdCaptureStop().catch(() => {});
+					api.kbdCaptureStop(playId).catch(() => {});
 				}
 				nativeEngaged = false;
 				onEnd();

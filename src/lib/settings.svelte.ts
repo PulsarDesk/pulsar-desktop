@@ -111,6 +111,12 @@ export interface UiSettings {
 	/** Remote mode: mark the host's pointer ("Host") while the person at the host uses their
 	 * own mouse, and show ours separately (issue #7). Default on; also in the session menu. */
 	hostCursor: boolean;
+	/** Picture upscaling (client): 'off' | 'auto' (the GPU's AI upscaler, else FSR) | 'fsr' |
+	 * 'ai' (NVIDIA RTX / Intel Video Super Resolution). Off by default. */
+	upscale: 'off' | 'auto' | 'fsr' | 'ai';
+	/** Allow more than one session to the same device (same host, mode and game): a repeat
+	 * connect opens another session instead of switching to the open one. Off by default. */
+	duplicateSessions: boolean;
 	/** Session status bar under the video (issue #5). Off by default. */
 	statusBar: boolean;
 	/** Which facts the status bar shows (`StatusBar.svelte` STATUS_FIELDS). */
@@ -254,6 +260,8 @@ const DEFAULTS: UiSettings = {
 	mouseSens: 1,
 	pointerFree: false,
 	hostCursor: true,
+	duplicateSessions: false,
+	upscale: 'off',
 	statusBar: false,
 	// The always-on stats HUD's set (codec · fps · latency · decode · bitrate).
 	statusFields: ['codec', 'fps', 'latency', 'decode', 'bitrate'],

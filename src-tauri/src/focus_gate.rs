@@ -66,6 +66,23 @@ pub fn pad_forward_allowed() -> bool {
 	background_input() || app_focused()
 }
 
+/// Plays whose session menu (overlay) is open: the pad drives the menu then, never the host.
+/// Mirrors `AppState::overlay_open` for threads without the app state (the DualSense raw-HID
+/// threads, ds5/client.rs).
+static OVERLAY_PLAYS: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
+
+pub fn set_overlay_open(play: u64, open: bool) {
+	let mut g = OVERLAY_PLAYS.lock().unwrap_or_else(|e| e.into_inner());
+	g.retain(|p| *p != play);
+	if open {
+		g.push(play);
+	}
+}
+
+pub fn overlay_open(play: u64) -> bool {
+	OVERLAY_PLAYS.lock().unwrap_or_else(|e| e.into_inner()).contains(&play)
+}
+
 /// One reading of the foreground window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)] // built from user32 readings on Windows only; the tests use it everywhere

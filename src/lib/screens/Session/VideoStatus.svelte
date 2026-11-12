@@ -71,7 +71,7 @@
 	<button class="focushint" onpointerdown={onStartControl}>{t('session.clickToControl')}</button>
 {:else}
 	<div class="focushint locked" class:faded={hintFade}>
-		{t('session.controllingPre')}<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F12</kbd>{t(
+		{t('session.controllingPre')}<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F11</kbd>{t(
 			'session.controllingSuf'
 		)}
 	</div>

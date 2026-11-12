@@ -219,9 +219,9 @@ const KEY_LEFTCTRL: u16 = 29;
 const KEY_RIGHTCTRL: u16 = 97;
 const KEY_LEFTSHIFT: u16 = 42;
 const KEY_RIGHTSHIFT: u16 = 54;
-const KEY_F12: u16 = 88;
-const KEY_Q: u16 = 16; // reliable leave key (media-mode keyboards don't emit KEY_F12)
-const KEY_M: u16 = 50; // overlay-toggle combo Ctrl+Shift+M (distinct from leave Q/F12)
+const KEY_F11: u16 = 87; // fullscreen combo Ctrl+Shift+F11
+const KEY_Q: u16 = 16; // reliable leave key (media-mode keyboards may not emit the F-keys)
+const KEY_M: u16 = 50; // overlay-toggle combo Ctrl+Shift+M (distinct from leave Q / fullscreen F11)
 const KEY_LEFTALT: u16 = 56; // chord modifier for the release combo (AltGr=100 excluded)
 const KEY_Z: u16 = 44; // release combo Ctrl+Alt+Z (Parsec's detach shortcut)
 
@@ -347,7 +347,7 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, star
 	let gen = GEN.fetch_add(1, Ordering::SeqCst) + 1;
 	// A re-arm of the SAME live play session must PRESERVE the user's engagement:
 	// resetting it mid-control silently dropped the grab semantics ("keys stopped
-	// working after Ctrl+Shift+F12", seen live Pi→PC) with no UI cue. The real
+	// working after Ctrl+Shift+F11", seen live Pi→PC) with no UI cue. The real
 	// trigger (Session.svelte tab switch) is a disable()→enable() pair, so RUNNING is
 	// already FALSE here — same-session must therefore key off LAST_PLAY (which
 	// survives disable()), NOT off RUNNING. A genuinely new session (different id)
@@ -747,7 +747,7 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, star
 								}
 							}
 							// Chord combos on the trigger keys only — overlay-toggle Ctrl+Shift+M
-							// (50) and leave Ctrl+Shift+F12 (88) / Ctrl+Shift+Q (16). Gate on
+							// (50) and leave Ctrl+Shift+F11 (88) / Ctrl+Shift+Q (16). Gate on
 							// the LIVE kernel key state (`chord_mods` over every grabbed device),
 							// falling back to the tracked booleans only if that ioctl ever
 							// fails — the tracked state alone was the source of the "doesn't
@@ -755,7 +755,7 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, star
 							// `want_suspend` gate so the overlay can also be CLOSED (and the
 							// session left) by combo while the grab is suspended.
 							if ev.value() == 1
-								&& matches!(code, KEY_M | KEY_F12 | KEY_Q | KEY_Z)
+								&& matches!(code, KEY_M | KEY_F11 | KEY_Q | KEY_Z)
 								&& is_focused()
 							{
 								let (lc, ls, la) = chord_mods(&grabbed);
@@ -766,7 +766,7 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, star
 								// re-engages.
 								// Keyboard combos (unchanged from the original Pulsar scheme — Moonlight
 								// parity was only for the CONTROLLER nav): Ctrl+Shift+M overlay,
-								// Ctrl+Shift+F12 fullscreen, Ctrl+Shift+Q leave, Ctrl+Alt+Z detach.
+								// Ctrl+Shift+F11 fullscreen, Ctrl+Shift+Q leave, Ctrl+Alt+Z detach.
 								if code == KEY_Z {
 									if cmod && amod {
 										// Ctrl+Alt+Z detach: release every held key/button to the
@@ -790,15 +790,15 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, star
 										// while the grab suspends + their key-up is swallowed.
 										flush_held(&app, &default_tx, &grabbed, &mut held_buttons);
 										let _ = app.emit("overlay-toggle", ());
-									} else if code == KEY_F12 {
-										// Fullscreen toggle (Ctrl+Shift+F12) -- does NOT end the
+									} else if code == KEY_F11 {
+										// Fullscreen toggle (Ctrl+Shift+F11) -- does NOT end the
 										// session; the frontend listens for `fullscreen-toggle`
 										// and flips the Tauri window fullscreen state.
 										let _ = app.emit("fullscreen-toggle", ());
 									} else {
 										// Leave (Ctrl+Shift+Q). Q is the reliable leave key --
-										// media-mode keyboards (e.g. Logitech MX Keys) do not
-										// emit KEY_F12, and F12 is fullscreen now. The UI ENDS
+										// media-mode keyboards (e.g. Logitech MX Keys) may not
+										// emit the F-keys (F11 is fullscreen). The UI ENDS
 										// the session on kbd-leave; drop the grab right away so
 										// the user's input is free during the teardown. Flush the
 										// held chord FIRST (Windows imp.rs does the same before
@@ -811,7 +811,7 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, star
 									continue;
 								}
 							}
-							// A combo trigger key (M/F12/Q/Z) AUTOREPEATING while its chord is
+							// A combo trigger key (M/F11/Q/Z) AUTOREPEATING while its chord is
 							// still held is the user holding the LOCAL combo — its value==1 already
 							// fired the action above. Never leak the repeat to the host: the overlay
 							// combo (Ctrl+Shift+M) does NOT disengage synchronously (it waits for the
@@ -819,10 +819,10 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, star
 							// fall through and the ctrl+shift shortcut path would forward M-down → a
 							// phantom 'm' typed on the host. Only suppress when the chord is ACTUALLY
 							// held (kernel-sourced, like the combo gate) — a BARE m/q/z still repeats.
-							if ev.value() == 2 && matches!(code, KEY_M | KEY_F12 | KEY_Q | KEY_Z) {
+							if ev.value() == 2 && matches!(code, KEY_M | KEY_F11 | KEY_Q | KEY_Z) {
 								let (lc, ls, la) = chord_mods(&grabbed);
 								let (cmod, smod, amod) = (ctrl || lc, shift || ls, lalt || la);
-								if (matches!(code, KEY_M | KEY_F12 | KEY_Q) && cmod && smod)
+								if (matches!(code, KEY_M | KEY_F11 | KEY_Q) && cmod && smod)
 									|| (code == KEY_Z && cmod && amod)
 																	{
 									continue;

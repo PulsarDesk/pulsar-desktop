@@ -2,6 +2,15 @@
 <html lang="tr" data-theme="light" data-density="regular">
 	<head>
 		<meta charset="utf-8" />
+		<script>
+			// The saved theme on <html> BEFORE the first paint: every window (connections,
+			// approval, files…) would otherwise paint light for a moment, then switch to dark
+			// once the app's JS loaded (theme.svelte.ts keeps it in sync from then on).
+			try {
+				if (localStorage.getItem('pulsar.theme.v1') === 'dark')
+					document.documentElement.setAttribute('data-theme', 'dark');
+			} catch (e) {}
+		</script>
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<link rel="icon" href="%sveltekit.assets%/favicon.svg" />
 		<link rel="preconnect" href="https://fonts.googleapis.com" />

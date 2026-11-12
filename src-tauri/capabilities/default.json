@@ -1,12 +1,13 @@
 {
 	"identifier": "default",
 	"description": "Core capability for the main window, the approval popups, the connections window and the per-session file windows.",
-	"windows": ["main", "approve-*", "connections", "files-*", "toast"],
+	"windows": ["main", "tabwin-*", "tabghost", "approve-*", "connections", "files-*", "toast"],
 	"permissions": [
 		"core:default",
 		"core:window:allow-start-dragging",
 		"core:window:allow-start-resize-dragging",
 		"core:window:allow-minimize",
+		"core:window:allow-hide",
 		"core:window:allow-maximize",
 		"core:window:allow-unmaximize",
 		"core:window:allow-toggle-maximize",

@@ -29,6 +29,7 @@ pub(crate) async fn open_files_window(app: AppHandle, id: u64, peer: String) -> 
 		let title = format!("{} — {}", crate::i18n::t("title.files"), peer);
 		match WebviewWindowBuilder::new(&handle, &lbl, WebviewUrl::App("index.html".into()))
 			.initialization_script(format!("window.__FILES__={{id:{id},peer:{peer_js}}};"))
+			.background_color(crate::splash::window_bg(&handle))
 			.title(&title)
 			.inner_size(780.0, 540.0)
 			.min_inner_size(520.0, 360.0)

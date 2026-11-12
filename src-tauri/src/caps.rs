@@ -74,7 +74,13 @@ pub(crate) fn probe_all(app: &AppHandle) -> LocalCaps {
 		.unwrap()
 		.vaapi_device
 		.clone();
-	let mut encoders: Vec<EncoderCap> = crate::process::validated_encoders(&ffmpeg, &vaapi)
+	// Each phase timed in the log: a probe that never finishes shows WHERE (2026-11-12: a
+	// host's startup probe never logged "local caps probed" and the host never answered).
+	let t_enc = std::time::Instant::now();
+	tracing::info!(ffmpeg = %ffmpeg, "caps probe: encoders");
+	let validated = crate::process::validated_encoders(&ffmpeg, &vaapi);
+	tracing::info!(ms = t_enc.elapsed().as_millis() as u64, ?validated, "caps probe: encoders validated");
+	let mut encoders: Vec<EncoderCap> = validated
 		.into_iter()
 		.map(|e| {
 			#[allow(unused_mut)]
@@ -96,7 +102,7 @@ pub(crate) fn probe_all(app: &AppHandle) -> LocalCaps {
 			// the client's SDP while the host degrades the wire to H.264 → permanent black.
 			#[cfg(windows)]
 			if e == pulsar_core::pipeline::HwEncoder::Nvenc {
-				codecs = pulsar_capture::nvenc_codecs()
+				codecs = crate::process::nvenc_codecs_isolated()
 					.iter()
 					.map(|c| match c {
 						pulsar_capture::Codec::H264 => "h264".to_string(),
@@ -148,7 +154,10 @@ pub(crate) fn probe_all(app: &AppHandle) -> LocalCaps {
 	}
 
 	// --- Decode: the renderer's own tiered probe (real canned-frame decodes). ---
+	let t_dec = std::time::Instant::now();
+	tracing::info!("caps probe: decoders");
 	let decoders = probe_decoders(app, &platform);
+	tracing::info!(ms = t_dec.elapsed().as_millis() as u64, n = decoders.len(), "caps probe: decoders done");
 
 	LocalCaps {
 		platform,
@@ -208,7 +217,9 @@ fn probe_decoders(app: &AppHandle, platform: &str) -> Vec<DecoderCap> {
 		crate::process::apply_render_lib_env(&mut cmd);
 		// Windows: the probe must never flash a console window (GUI host).
 		crate::process::no_window(&mut cmd);
-		let out = cmd.output();
+		// Bounded: a renderer probe that hangs (a wedged decoder init) must not hold the
+		// whole caps probe forever.
+		let out = output_within(cmd, std::time::Duration::from_secs(15));
 		let Ok(out) = out else {
 			// Renderer missing: software ffmpeg decode still exists inside it when present;
 			// report nothing rather than guessing.
@@ -260,9 +271,22 @@ fn probe_decoders(app: &AppHandle, platform: &str) -> Vec<DecoderCap> {
 /// pushes it to the webview (`local-caps`). The splash waits for that event (with a
 /// safety cap) so the UI never shows un-gated options.
 pub(crate) fn spawn_startup_probe(app: AppHandle) {
-	std::thread::spawn(move || {
+	static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+	// Watchdog: say so in the log when the probe is still running after 20 s (normal: < 8 s).
+	std::thread::spawn(|| {
+		for secs in [20u64, 60, 180] {
+			std::thread::sleep(std::time::Duration::from_secs(if secs == 20 { 20 } else { secs - 20 }));
+			if DONE.load(std::sync::atomic::Ordering::SeqCst) {
+				return;
+			}
+			tracing::error!(secs, "caps probe: still not done (stuck?) — see the last 'caps probe:' line");
+		}
+	});
+	let spawned = std::thread::Builder::new().name("caps-probe".into()).spawn(move || {
 		let t0 = std::time::Instant::now();
+		tracing::info!("caps probe: started");
 		let caps = probe_all(&app);
+		DONE.store(true, std::sync::atomic::Ordering::SeqCst);
 		tracing::info!(
 			elapsed_ms = t0.elapsed().as_millis() as u64,
 			encoders = caps.encoders.len(),
@@ -275,6 +299,42 @@ pub(crate) fn spawn_startup_probe(app: AppHandle) {
 			.unwrap() = Some(caps.clone());
 		let _ = app.emit("local-caps", caps);
 	});
+	if let Err(e) = spawned {
+		tracing::error!(%e, "caps probe: thread failed to start");
+	}
+}
+
+/// `Command::output` with a deadline (the child is killed past it → Err TimedOut).
+#[cfg(not(target_os = "macos"))]
+fn output_within(mut cmd: std::process::Command, limit: std::time::Duration) -> std::io::Result<std::process::Output> {
+	use std::io::Read as _;
+	cmd.stdout(std::process::Stdio::piped());
+	let mut child = cmd.spawn()?;
+	#[cfg(windows)]
+	crate::job::assign(&child);
+	let mut so = child.stdout.take();
+	let reader = std::thread::spawn(move || {
+		let mut buf = Vec::new();
+		if let Some(s) = so.as_mut() {
+			let _ = s.read_to_end(&mut buf);
+		}
+		buf
+	});
+	let t0 = std::time::Instant::now();
+	let status = loop {
+		if let Some(st) = child.try_wait()? {
+			break st;
+		}
+		if t0.elapsed() >= limit {
+			let _ = child.kill();
+			let _ = child.wait();
+			tracing::error!(ms = t0.elapsed().as_millis() as u64, "caps probe: renderer probe did not finish — killed");
+			return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "probe timed out"));
+		}
+		std::thread::sleep(std::time::Duration::from_millis(50));
+	};
+	let stdout = reader.join().unwrap_or_default();
+	Ok(std::process::Output { status, stdout, stderr: Vec::new() })
 }
 
 /// Tauri command: the probed caps (None while the startup probe is still running —

@@ -852,11 +852,6 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 	};
 	// Embedded: the GTK toplevel that ultimately owns us (see toplevel_of) — the refocus
 	// target for overlay clicks. The container parent itself must NOT take input focus.
-	let focus_top = if standalone {
-		0
-	} else {
-		toplevel_of(xd, parent)
-	};
 	let (mut w, mut h) = if standalone {
 		(1280u32, 720u32)
 	} else {
@@ -1377,7 +1372,10 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 							),
 						)
 						.contains(pos);
-					if !standalone && focus_top != 0 {
+					// Looked up per click: the container may have moved to another app window
+					// (a session tab dragged out), so the toplevel can change.
+					let focus_top = if standalone { 0 } else { toplevel_of(xd, parent) };
+					if focus_top != 0 {
 						// The Tauri toplevel must hold focus for the capture's focus gate.
 						xlib::XSetInputFocus(xd, focus_top, xlib::RevertToParent, xlib::CurrentTime);
 					}
@@ -1407,8 +1405,11 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 			// parent (Tauri GTK toplevel) on press so Focused(true) fires; SUSPENDED keeps
 			// the grab released while the overlay is open, so this is safe. Embedded only —
 			// standalone has no embedding parent (root), and IS the focused window already.
-			if pressed && wid != 0 && focus_top != 0 {
-				xlib::XSetInputFocus(xd, focus_top, xlib::RevertToParent, xlib::CurrentTime);
+			if pressed && wid != 0 {
+				let focus_top = toplevel_of(xd, parent);
+				if focus_top != 0 {
+					xlib::XSetInputFocus(xd, focus_top, xlib::RevertToParent, xlib::CurrentTime);
+				}
 			}
 			pointer = pos;
 			let button = match bn {

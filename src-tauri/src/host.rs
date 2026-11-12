@@ -834,11 +834,17 @@ pub(crate) async fn bring_online(
 				// rotates on consume, so a 2nd pane could never present a valid code. Keyed on
 				// the no-MITM-safe pubkey (a relay can't substitute a peer behind an id).
 				// Unattended hosts never reach here (require_auth=false → auto-allow below).
+				// The host we asked to connect back (reverse direction) — we started it.
+				let reverse_back = require_auth
+					&& peer_pubkey.as_ref().is_some_and(crate::auth::preauth::take_reverse);
 				let preauthorized = require_auth
-					&& peer_pubkey
-						.as_ref()
-						.is_some_and(crate::auth::preauth::is_authorized);
-				if preauthorized {
+					&& (reverse_back
+						|| peer_pubkey
+							.as_ref()
+							.is_some_and(crate::auth::preauth::is_authorized));
+				if reverse_back {
+					tracing::info!(%peer, "reverse direction: the host we asked to connect back — skipping OTP + popup");
+				} else if preauthorized {
 					tracing::info!(%peer, "same-device session pre-authorized (existing authorized session) — skipping OTP + popup");
 				}
 				// Set to true only when the operator picks "Allow view-only" in the popup —
@@ -2000,7 +2006,10 @@ pub(crate) async fn bring_online(
 					let app_h = app_h.clone();
 					move |id: String| {
 						// The controlling peer asked us to reverse roles: surface it so the
-						// host UI can connect back to `id` (it must be online/serving).
+						// host UI can connect back to `id` (it must be online/serving). We become
+						// the client, so Pulsar comes to the front (it may be minimized / in the tray).
+						tracing::info!(%id, "reverse request — connecting back, bringing Pulsar forward");
+						crate::pad_wake::bring_forward(&app_h);
 						let _ = app_h.emit("reverse-request", ReverseReq { id });
 					}
 				};
@@ -2319,7 +2328,7 @@ pub(crate) async fn bring_online(
 					on_file: Box::new(on_file),
 					on_audio: Box::new(on_audio),
 					on_reverse: Box::new(on_reverse),
-					stream_caps: Box::new(stream_caps),
+					stream_caps: Box::new(crate::caps_guard::guarded(app_h.clone(), media_features, stream_caps)),
 					// The host's visible top-level windows the client can pick as a per-window
 					// (WGC) capture target (Phase 2b co-op) — answers the client's QueryWindows.
 					// Cheap (one EnumWindows pass), called on demand when the client opens its

@@ -7,6 +7,31 @@
 	import type { SharedModeStatus } from '#lib/api.types.js';
 	import pkg from '../../../../package.json';
 
+	// Start with the computer (+ in the background): read from the OS (it is the source of
+	// truth — an installer or another Pulsar may have changed it), written on toggle.
+	let autostart = $state(false);
+	let autostartBg = $state(false);
+	let autostartErr = $state('');
+	$effect(() => {
+		if (!isTauri) return;
+		api.autostartStatus()
+			.then(([on, bg]) => {
+				autostart = on;
+				autostartBg = bg;
+			})
+			.catch(() => {});
+	});
+	function applyAutostart(on: boolean, bg: boolean) {
+		autostartErr = '';
+		const prev = [autostart, autostartBg];
+		autostart = on;
+		autostartBg = bg;
+		api.setAutostart(on, bg).catch((e) => {
+			[autostart, autostartBg] = prev;
+			autostartErr = String(e);
+		});
+	}
+
 	let {
 		config = $bindable(),
 		saveConfig,
@@ -196,6 +221,27 @@
 		<span>{t('settings.uiHwaccelDesc')}{#if hwaccelChanged} <strong class="restart">· {t('settings.restartRequired')}</strong>{/if}</span>
 	</div>
 	<button class="toggle" aria-label={t('settings.uiHwaccel')} class:on={hwaccelOn} aria-pressed={hwaccelOn} onclick={toggleHwaccel}><span class="knob"></span></button>
+</div>
+<div class="srow">
+	<div class="st">
+		<b>{t('settings.autostart')}</b>
+		<span>{autostartErr || t('settings.autostartDesc')}</span>
+	</div>
+	<button class="toggle" aria-label={t('settings.autostart')} class:on={autostart} aria-pressed={autostart} onclick={() => applyAutostart(!autostart, autostartBg)}><span class="knob"></span></button>
+</div>
+<div class="srow" class:dim={!autostart}>
+	<div class="st">
+		<b>{t('settings.autostartBg')}</b>
+		<span>{t('settings.autostartBgDesc')}</span>
+	</div>
+	<button class="toggle" aria-label={t('settings.autostartBg')} class:on={autostartBg} aria-pressed={autostartBg} disabled={!autostart} onclick={() => applyAutostart(autostart, !autostartBg)}><span class="knob"></span></button>
+</div>
+<div class="srow">
+	<div class="st">
+		<b>{t('settings.duplicateSessions')}</b>
+		<span>{t('settings.duplicateSessionsDesc')}</span>
+	</div>
+	<button class="toggle" aria-label={t('settings.duplicateSessions')} class:on={ui.duplicateSessions} aria-pressed={ui.duplicateSessions} onclick={() => { ui.duplicateSessions = !ui.duplicateSessions; saveUi(); }}><span class="knob"></span></button>
 </div>
 <div class="subgroup">{t('settings.subPad')}</div>
 <div class="subdesc">{t('settings.subPadDesc')}</div>

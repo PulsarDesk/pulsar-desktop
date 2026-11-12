@@ -86,7 +86,7 @@ export class SessionInput {
 	// #heldKeys — nothing to release on blur/disengage.
 	#charKeys = new Set<string>();
 	// Free cursor: a pass over the video may take control. Cleared by an explicit release
-	// (Ctrl+Alt+Z, Ctrl+Shift+F12, the native detach combos) until the pointer has left the
+	// (Ctrl+Alt+Z, Ctrl+Shift+F11, the native detach combos) until the pointer has left the
 	// video once — the user asked to let go, hovering must not grab it straight back.
 	#hoverArmed = true;
 	// Control came from hovering after the first time this session: the in-control hint stays
@@ -315,9 +315,9 @@ export class SessionInput {
 	};
 	onKey(e: KeyboardEvent, down: boolean) {
 		if (!this.controlling) return;
-		// Parsec-style leave combo: Ctrl+Shift+F12 (or Cmd+Shift+F12 for mac users)
-		// releases control. preventDefault also stops F12 from opening webview devtools.
-		if (down && (e.ctrlKey || e.metaKey) && e.shiftKey && e.code === 'F12') {
+		// Parsec-style leave combo: Ctrl+Shift+F11 (or Cmd+Shift+F11 for mac users)
+		// releases control. preventDefault also keeps F11 from the webview.
+		if (down && (e.ctrlKey || e.metaKey) && e.shiftKey && e.code === 'F11') {
 			e.preventDefault();
 			this.#hoverArmed = false;
 			this.stopControl();

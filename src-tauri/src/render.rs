@@ -166,6 +166,34 @@ pub(crate) fn set_container_pass_through(app: &AppHandle, id: u64, pass: bool) {
 	});
 }
 
+/// Move play `id`'s container (and the renderer embedded in it) under window `label` — a
+/// session tab dragged into another window (`tabwin`). Hidden until that window's session
+/// screen reports where the video goes (`native_container_rect`).
+pub(crate) fn reparent_native_container(app: &AppHandle, id: u64, label: String) {
+	let app2 = app.clone();
+	let _ = app.run_on_main_thread(move || {
+		use gtk::prelude::WidgetExt;
+		let Some(parent) = app2
+			.get_webview_window(&label)
+			.and_then(|w| w.gtk_window().ok())
+			.and_then(|gw| {
+				if !gw.is_realized() {
+					gw.realize();
+				}
+				gw.window()
+			})
+		else {
+			return;
+		};
+		NATIVE_CONTAINERS.with(|m| {
+			if let Some(win) = m.borrow().get(&id) {
+				win.hide();
+				win.reparent(&parent, 0, 0);
+			}
+		});
+	});
+}
+
 /// Drop play `id`'s container (session teardown; the renderer child is already dead).
 pub(crate) fn destroy_native_container(app: &AppHandle, id: u64) {
 	let _ = app.run_on_main_thread(move || {
@@ -447,6 +475,7 @@ fn start_mpv_stats(app: &AppHandle, id: u64) {
 			);
 			if !ready_sent && (fps > 0.0 || mbps > 0.0) {
 				ready_sent = true;
+				crate::tabwin::mark_ready(id);
 				let _ = app.emit("play-ready", id);
 			}
 			true
@@ -571,6 +600,7 @@ pub(crate) fn start_mpv_ipc_stats(
 			);
 			if !ready_sent && (fps > 0.0 || mbps > 0.0) {
 				ready_sent = true;
+				crate::tabwin::mark_ready(id);
 				let _ = app.emit("play-ready", id);
 			}
 		}

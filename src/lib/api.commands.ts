@@ -138,6 +138,40 @@ export const api = {
 	/** Client: open (or focus) the per-session file-manager window for play `id`;
 	 * `peer` decorates the title/header so multi-session windows stay tellable apart. */
 	openFilesWindow: (id: number, peer: string) => invoke<void>('open_files_window', { id, peer }),
+	/** Detachable session tabs (tabwin.rs). Where this window's tab strip is (client CSS px;
+	 * 0×0 = no strip, nothing can be dropped here). */
+	tabStripRect: (x: number, y: number, w: number, h: number) =>
+		invoke<void>('tab_strip_rect', { x, y, w, h }),
+	/** The OTHER window whose tab strip is under the cursor (null = none). sx/sy: screen-px
+	 * estimate, used only when the OS can't report the cursor. */
+	tabDropTarget: (sx: number, sy: number) => invoke<string | null>('tab_drop_target', { sx, sy }),
+	tabWindowLabel: () => invoke<string>('tab_window_label'),
+	/** Picture upscaling for the session renderer (off | auto | fsr | ai). */
+	setUpscale: (mode: string) => invoke<void>('set_upscale', { mode }),
+	/** Start with the computer (optionally in the background, to the tray). */
+	setAutostart: (enabled: boolean, background: boolean) =>
+		invoke<void>('set_autostart', { enabled, background }),
+	/** [registered, background] — what the OS has, for the settings toggles. */
+	autostartStatus: () => invoke<[boolean, boolean]>('autostart_status'),
+	/** A line into the app log (frontend steps of multi-window flows). */
+	uiLog: (msg: string) => invoke<void>('ui_log', { msg }),
+	/** Is play `id`'s stream already up (its `play-ready` may have gone out before this window
+	 * adopted the tab)? */
+	tabPlayReady: (id: number) => invoke<boolean>('tab_play_ready', { id }),
+	/** The dragged tab's picture under the cursor while it is outside the window. */
+	tabGhostShow: (title: string) => invoke<void>('tab_ghost_show', { title }),
+	tabGhostMove: () => invoke<void>('tab_ghost_move'),
+	tabGhostHide: () => invoke<void>('tab_ghost_hide'),
+	/** The window keyboard/mouse capture belongs to (the session window focused last). */
+	tabInputWindow: () => invoke<string>('tab_input_window'),
+	/** A new tab window's sessions (once). */
+	tabTakeHandoff: () => invoke<unknown>('tab_take_handoff'),
+	/** Tear tabs off into a new window under the cursor; `grab` = where on the tab it's held. */
+	tabDetach: (sessions: unknown, plays: number[], grab: [number, number], sx: number, sy: number) =>
+		invoke<string>('tab_detach', { sessions, plays, grab, sx, sy }),
+	/** Move tabs into window `to` (it adds them and comes to the front). */
+	tabMove: (to: string, sessions: unknown, plays: number[]) =>
+		invoke<void>('tab_move', { to, sessions, plays }),
 	/** Toast window: the current Pulsar notices / click one (opens its folder) / dismiss one. */
 	toastList: () => invoke<PulsarToast[]>('toast_list'),
 	toastOpen: (id: number) => invoke<void>('toast_open', { id }),
@@ -371,7 +405,8 @@ export const api = {
 	kbdCaptureStart: (id: number, mouse = false) =>
 		kbdSerial(() => invoke<void>('kbd_capture_start', { id, mouse })),
 	/** Control: disarm the low-level keyboard hook (release / blur / leave combo). */
-	kbdCaptureStop: () => kbdSerial(() => invoke<void>('kbd_capture_stop')),
+	kbdCaptureStop: (id?: number) =>
+		kbdSerial(() => invoke<void>('kbd_capture_stop', id === undefined ? {} : { id })),
 	/** Control (Linux native): explicit click-to-engage — the user clicked the session
 	 * video (the pass-through container let the click reach the webview). `auto` = not a
 	 * click (game mode's connect-time engage): engages only while Pulsar is the focused app,

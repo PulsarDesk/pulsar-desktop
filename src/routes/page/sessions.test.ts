@@ -41,6 +41,8 @@ vi.mock('#lib/api.js', async () => {
 		onPlayReady: _vi.fn(),
 		onPlayOptimizing: _vi.fn(),
 		onPlayEnded: _vi.fn(),
+		onPlayError: _vi.fn(),
+		onPlayStats: _vi.fn(),
 		onPeerAvatar: _vi.fn(),
 		onPeerName: _vi.fn(),
 		setFullscreen: _vi.fn().mockResolvedValue(undefined),
@@ -263,5 +265,208 @@ describe('SessionManager — window fullscreen after the last session ends', () 
 		mgr.toggleFullscreen();
 		mgr.endSession(mgr.sessions[0].tabId);
 		expect(mgr.fullscreen).toBe(true);
+	});
+});
+
+describe('detachable tabs (release / adopt / reorder)', () => {
+	beforeEach(() => {
+		vi.mocked(api.stopStream).mockClear();
+	});
+
+	it('release hands the record over without stopping the stream', async () => {
+		const mgr = makeManager('remote');
+		await mgr.startConnect(target, 'remote');
+		const s = mgr.sessions[0];
+		const rec = mgr.release(s.tabId);
+		expect(rec?.playId).toBe(s.playId);
+		expect(mgr.sessions).toHaveLength(0);
+		expect(mgr.activeTab).toBe('home');
+		expect(api.stopStream).not.toHaveBeenCalled();
+	});
+
+	it('adopt adds the tabs as adopted, shows the last, skips duplicates', async () => {
+		const src = makeManager('remote');
+		await src.startConnect(target, 'remote');
+		await src.startConnect({ name: 'B', id: '222 222 222' }, 'remote');
+		const a = src.release(src.sessions[0].tabId)!;
+		const b = src.release(src.sessions[0].tabId)!;
+		const dst = makeManager('remote');
+		dst.adopt([a, b, a]);
+		expect(dst.sessions.map((x) => x.playId)).toEqual([a.playId, b.playId]);
+		expect(dst.sessions.every((x) => x.adopted)).toBe(true);
+		expect(dst.activeTab).toBe(dst.sessions[1].tabId);
+	});
+
+	it('only a live session can move', async () => {
+		const mgr = makeManager('remote');
+		await mgr.startConnect(target, 'remote');
+		const s = mgr.sessions[0];
+		// Mock api activates at once (not Tauri) — live.
+		expect(mgr.canMove(s.tabId)).toBe(s.phase === 'active');
+		// A split member can leave too (it is taken out of the group first).
+		mgr.enterSplit('h2');
+		expect(mgr.canMove(s.tabId)).toBe(true);
+	});
+
+	it('moveTab reorders the strip', async () => {
+		const mgr = makeManager('remote');
+		await mgr.startConnect(target, 'remote');
+		await mgr.startConnect({ name: 'B', id: '222 222 222' }, 'remote');
+		await mgr.startConnect({ name: 'C', id: '333 333 333' }, 'remote');
+		const [a, b, c] = mgr.sessions.map((x) => x.tabId);
+		mgr.moveTab(a, null);
+		expect(mgr.sessions.map((x) => x.tabId)).toEqual([b, c, a]);
+		mgr.moveTab(a, b);
+		expect(mgr.sessions.map((x) => x.tabId)).toEqual([a, b, c]);
+	});
+});
+
+describe('drag-to-split', () => {
+	it('dropping a tab on the right edge splits left/right with the shown session', async () => {
+		const mgr = makeManager('remote');
+		await mgr.startConnect(target, 'remote');
+		await mgr.startConnect({ name: 'B', id: '222 222 222' }, 'remote');
+		const [a, b] = mgr.sessions.map((x) => x.tabId);
+		mgr.activeTab = a;
+		mgr.splitWithTab(b, 'right');
+		expect(mgr.splitMode).toBe('h2');
+		expect(mgr.panes).toEqual([a, b]);
+		expect(mgr.focusedPane).toBe(1);
+	});
+
+	it('top edge splits top/bottom; the other pane is empty when Home was shown', async () => {
+		const mgr = makeManager('remote');
+		await mgr.startConnect(target, 'remote');
+		const [a] = mgr.sessions.map((x) => x.tabId);
+		mgr.activeTab = 'home';
+		mgr.splitWithTab(a, 'top');
+		expect(mgr.splitMode).toBe('v2');
+		expect(mgr.panes).toEqual([a, null]);
+	});
+
+	it('never mixes gaming and remote sessions in one split', async () => {
+		const mgr = makeManager('remote');
+		await mgr.startConnect(target, 'remote');
+		await mgr.startConnect(target, 'game');
+		const [r, g] = mgr.sessions.map((x) => x.tabId);
+		mgr.activeTab = r;
+		mgr.splitWithTab(g, 'left');
+		expect(mgr.splitSessionMode).toBe('game');
+		expect(mgr.panes).toEqual([g, null]);
+	});
+});
+
+describe('split: put back / swap', () => {
+	it('dragging a paned tab back onto the strip ends a 2-pane split', async () => {
+		const mgr = makeManager('remote');
+		await mgr.startConnect(target, 'remote');
+		await mgr.startConnect({ name: 'B', id: '222 222 222' }, 'remote');
+		const [a, b] = mgr.sessions.map((x) => x.tabId);
+		mgr.activeTab = a;
+		mgr.splitWithTab(b, 'right');
+		mgr.unpane(b);
+		expect(mgr.splitMode).toBe('off');
+		expect(mgr.activeTab).toBe(a);
+		expect(mgr.sessions).toHaveLength(2);
+	});
+
+	it('putInPane swaps two paned tabs', async () => {
+		const mgr = makeManager('remote');
+		await mgr.startConnect(target, 'remote');
+		await mgr.startConnect({ name: 'B', id: '222 222 222' }, 'remote');
+		const [a, b] = mgr.sessions.map((x) => x.tabId);
+		mgr.activeTab = a;
+		mgr.splitWithTab(b, 'right');
+		mgr.putInPane(b, 0);
+		expect(mgr.panes).toEqual([b, a]);
+	});
+});
+
+describe('split group tab', () => {
+	async function twoInSplit() {
+		const mgr = makeManager('remote');
+		await mgr.startConnect(target, 'remote');
+		await mgr.startConnect({ name: 'B', id: '222 222 222' }, 'remote');
+		await mgr.startConnect({ name: 'C', id: '333 333 333' }, 'remote');
+		const [a, b, c] = mgr.sessions.map((x) => x.tabId);
+		mgr.activeTab = a;
+		mgr.splitWithTab(b, 'right');
+		return { mgr, a, b, c };
+	}
+
+	it('clicking another tab parks the group; clicking a member brings it back', async () => {
+		const { mgr, a, b, c } = await twoInSplit();
+		mgr.select(c);
+		expect(mgr.splitMode).toBe('off');
+		expect(mgr.activeTab).toBe(c);
+		expect(mgr.group?.shown).toBe(false);
+		expect(mgr.group?.members).toEqual([a, b]);
+		mgr.select(b);
+		expect(mgr.splitMode).toBe('h2');
+		expect(mgr.panes).toEqual([a, b]);
+		expect(mgr.focusedPane).toBe(1);
+	});
+
+	it('a parked group with one member left dissolves', async () => {
+		const { mgr, a, c } = await twoInSplit();
+		mgr.select(c);
+		mgr.ungroup(a);
+		expect(mgr.group).toBe(null);
+	});
+
+	it('export + adopt moves the group with its layout', async () => {
+		const { mgr } = await twoInSplit();
+		const m = mgr.exportGroup()!;
+		expect(m.group.layout).toBe('h2');
+		expect(m.sessions).toHaveLength(2);
+		expect(mgr.splitMode).toBe('off');
+		expect(mgr.sessions).toHaveLength(1);
+		const dst = makeManager('remote');
+		dst.adoptGroup(m);
+		expect(dst.splitMode).toBe('h2');
+		expect(dst.panes.map((t) => dst.sessions.find((s) => s.tabId === t)?.playId)).toEqual(m.group.panes);
+	});
+});
+
+describe('drag-to-split picks the other side', () => {
+	it('dragging the shown tab itself still pairs it with another session', async () => {
+		const mgr = makeManager('remote');
+		await mgr.startConnect(target, 'remote');
+		await mgr.startConnect({ name: 'B', id: '222 222 222' }, 'remote');
+		const [a, b] = mgr.sessions.map((x) => x.tabId);
+		mgr.activeTab = b;
+		mgr.splitWithTab(b, 'left');
+		expect(mgr.panes).toEqual([b, a]);
+	});
+});
+
+describe('several sessions to one device (setting)', () => {
+	it('off (default): a repeat connect switches to the open session', async () => {
+		ui.duplicateSessions = false;
+		const mgr = makeManager('remote');
+		await mgr.startConnect(target, 'remote');
+		await mgr.startConnect(target, 'remote');
+		expect(mgr.sessions).toHaveLength(1);
+	});
+	it('on: a repeat connect opens a second session', async () => {
+		ui.duplicateSessions = true;
+		const mgr = makeManager('remote');
+		await mgr.startConnect(target, 'remote');
+		await mgr.startConnect(target, 'remote');
+		expect(mgr.sessions).toHaveLength(2);
+		ui.duplicateSessions = false;
+	});
+});
+
+describe('entering split uses the open tabs', () => {
+	it('fills the other panes with the open sessions of that mode', async () => {
+		const mgr = makeManager('remote');
+		await mgr.startConnect(target, 'remote');
+		await mgr.startConnect({ name: 'B', id: '222 222 222' }, 'remote');
+		await mgr.startConnect({ name: 'C', id: '333 333 333' }, 'remote');
+		const [a, b, c] = mgr.sessions.map((x) => x.tabId);
+		mgr.activeTab = a;
+		mgr.enterSplit('grid4', 'remote');
+		expect(mgr.panes).toEqual([a, c, b, null]);
 	});
 });

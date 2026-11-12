@@ -283,7 +283,11 @@ async fn respawn_render_for_codec(
 	#[cfg(windows)]
 	let mut rc = {
 		let _ = wid; // X11 container XID — Linux-only; the HWND is re-resolved fresh
-		crate::process::window_hwnd(app).and_then(|h| {
+		// The window showing this session (a detached tab window, or main).
+		crate::tabwin::window_for_play(app, id)
+			.and_then(|w| w.hwnd().ok())
+			.map(|h| h.0 as u64)
+			.and_then(|h| {
 			crate::native_view::spawn_render_win(
 				&rbin,
 				&sdp,
@@ -397,6 +401,7 @@ async fn respawn_render_for_codec(
 					let _ = writeln!(si, "audio clip={}", if crate::clipboard_sync::enabled() { 1 } else { 0 });
 					let _ = writeln!(si, "msens {}", crate::kbdhook::mouse_sensitivity());
 					let _ = writeln!(si, "ptrfree {}", if crate::kbdhook::pointer_free() { 1 } else { 0 });
+					let _ = writeln!(si, "upscale {}", crate::native_view::upscale_mode());
 					let _ = writeln!(si, "hostptrshow {}", if crate::kbdhook::host_cursor() { 1 } else { 0 });
 					if let Some((tx, mute, mic)) = seed.audio {
 						let _ = writeln!(
@@ -1288,6 +1293,7 @@ pub(crate) async fn set_overlay(
 		} else {
 			set.remove(&id);
 		}
+		crate::focus_gate::set_overlay_open(id, open);
 		kbdhook::overlay_suspend(!set.is_empty());
 	}
 	// Opening the overlay DISENGAGES control (Parsec model): closing leaves the user
@@ -1462,6 +1468,22 @@ pub(crate) async fn set_pointer_free(on: bool) -> Result<(), String> {
 	Ok(())
 }
 
+/// Picture upscaling mode (Settings → Görüntü): stored for new renderers and pushed live to
+/// every open session's renderer (`upscale <mode>`).
+#[tauri::command]
+pub(crate) async fn set_upscale(state: State<'_, AppState>, mode: String) -> Result<(), String> {
+	crate::native_view::set_upscale_mode(&mode);
+	let m = crate::native_view::upscale_mode();
+	let stdins: Vec<_> = state.plays.lock().unwrap().values().map(|p| p.render_stdin.clone()).collect();
+	for si in stdins {
+		use std::io::Write as _;
+		if let Some(si) = si.lock().unwrap().as_mut() {
+			let _ = writeln!(si, "upscale {m}");
+		}
+	}
+	Ok(())
+}
+
 /// Client: change the audio quality of a running session (`auto`/`standard`/`high`/`raw` —
 /// the session menu's "Ses kalitesi"). A re-stream: the host restarts its encoders with it.
 #[tauri::command]
@@ -1492,6 +1514,11 @@ pub(crate) async fn reverse_play(
 	my_id: String,
 ) -> Result<(), String> {
 	let tx = data_sender(&state, id)?;
+	// We start the role swap ourselves, so the host's connect back needs no password or
+	// Allow/Deny prompt here (consumed once, 60 s): pre-authorize its key before asking.
+	if let Some(k) = state.plays.lock().unwrap().get(&id).and_then(|p| p.host_pubkey) {
+		crate::auth::preauth::expect_reverse(k);
+	}
 	tx.send(DataMsg::ReverseRequest(my_id))
 		.await
 		.map_err(|e| e.to_string())

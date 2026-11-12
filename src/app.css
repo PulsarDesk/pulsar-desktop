@@ -700,6 +700,13 @@ h4 {
 :root[data-occluded] *::after {
 	animation-play-state: paused !important;
 }
+/* …except UI the user is acting on right now: a paused one-shot animation freezes at its first
+   frame (an arriving dragged-in tab stayed invisible at opacity 0), and the "drop the tab
+   here" overlay only shows while the video is hidden anyway. */
+:root[data-occluded] .tab.arrived,
+:root[data-occluded] .tab-drop-hover {
+	animation-play-state: running !important;
+}
 /* range slider */
 .prange {
 	-webkit-appearance: none;
@@ -759,4 +766,9 @@ input:focus-visible {
 	color: var(--text-faint);
 	margin-top: 5px;
 	line-height: 1.45;
+}
+
+/* A settings row that only applies when the one above is on. */
+.srow.dim {
+	opacity: 0.55;
 }

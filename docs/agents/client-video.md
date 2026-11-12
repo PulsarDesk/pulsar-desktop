@@ -55,8 +55,7 @@ reaches the webview. Don't resurrect a webview video path.
   - `PULSAR_LINUX_DEMUX=ffmpeg` (app env, inherited by the renderer) restores the old
     path: loopback UDP and libavformat's SDP/RTP demux with its jitter buffer.
 - **Control on Linux** = `kbdhook/linux.rs`: grabs local keyboard+mouse via
-  **evdev (EVIOCGRAB)**, hotplug-aware. **Leave combo: Ctrl+Shift+Q** (F12
-  unreliable on media-mode keyboards).
+  **evdev (EVIOCGRAB)**, hotplug-aware. **Leave combo: Ctrl+Shift+Q**; fullscreen **Ctrl+Shift+F11**.
 - **Rendezvous gotcha:** a host serving LAN clients must register with its
   **LAN IP**, not `127.0.0.1`, or the relay hands clients a loopback addr.
 - **Auto-update → the appliance runs the AppImage** (`$APPIMAGE` self-replace;
@@ -153,3 +152,19 @@ showed ~600 ms head-of-line holds, "stream stopped" over a live session and a lo
   fallback): `ctl.path_changed` with `path_cap_kbps` (relay cap only while relayed).
   `adapt_memory.rs` keys the per-peer hint by path class `lan`/`wan`/`relay` (100.64/10 = wan;
   old peer-only entries dropped) — a LAN rate seeding the mobile session started the collapse.
+
+## Picture upscaling (Settings → Görüntü → Görüntü iyileştirme)
+
+`ui.upscale` = off (default) | auto | fsr | ai → `set_upscale` → renderer stdin `upscale <mode>`
+(seeded with the other renderer lines at spawn / respawn).
+
+- **Windows** (`crates/pulsar-render/src/win/present.rs`, `fsr.rs`): only when the Blt scales
+  UP. `ai` / `auto` on NVIDIA or Intel = the driver's own super resolution through the
+  VideoProcessor stream extension (NVIDIA RTX VSR, Intel VSR — the Moonlight technique);
+  `fsr` or any other GPU = AMD FSR 1: the VideoProcessor converts into a source-sized texture,
+  EASU scales it, RCAS sharpens into the back buffer. Shader failure → plain scaling, never
+  black. `cargo test -p pulsar-render fsr` compiles the HLSL.
+- **mpv** (macOS, the Linux mpv fallback): `--glsl-shaders=<temp>/pulsar-fsr.glsl`
+  (`native_view/FSR.glsl`, AMD FSR 1.0.2 MIT, agyild's port) for any mode but off.
+- **Linux pulsar-render**: not yet (GLES2 paths; needs an FBO pass per path).
+- ABR: with an upscaler on, game mode uses `min_kbps_scale = 1.25` (gives resolution up earlier).

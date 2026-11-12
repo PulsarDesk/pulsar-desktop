@@ -332,7 +332,19 @@ pub fn validated_encoders(ffmpeg: &str, vaapi_device: &str) -> Vec<HwEncoder> {
 	let mut out: Vec<HwEncoder> = detect_encoders(ffmpeg)
 		.into_iter()
 		.filter(|&e| e != HwEncoder::Software)
-		.filter(|&e| !validated_codecs(ffmpeg, e, vaapi_device).is_empty())
+		.filter(|&e| {
+			// Each step timed in the log, so a probe that hangs shows WHERE.
+			let t0 = std::time::Instant::now();
+			tracing::debug!(encoder = encoder_wire_id(e), "encoder probe started");
+			let ok = !validated_codecs(ffmpeg, e, vaapi_device).is_empty();
+			let ms = t0.elapsed().as_millis() as u64;
+			if ms > 2000 {
+				tracing::warn!(encoder = encoder_wire_id(e), ms, ok, "encoder probe slow");
+			} else {
+				tracing::debug!(encoder = encoder_wire_id(e), ms, ok, "encoder probe done");
+			}
+			ok
+		})
 		.collect();
 	out.push(HwEncoder::Software);
 	out
@@ -638,7 +650,7 @@ pub fn validated_codecs(ffmpeg: &str, encoder: HwEncoder, vaapi_device: &str) ->
 	if encoder == HwEncoder::Nvenc {
 		let _ = vaapi_device;
 		let listed = encoder.available_codecs(&encoders_text(ffmpeg));
-		return pulsar_capture::nvenc_codecs()
+		return nvenc_codecs_isolated()
 			.iter()
 			.map(|c| match c {
 				pulsar_capture::Codec::H264 => VCodec::H264,
@@ -655,6 +667,75 @@ pub fn validated_codecs(ffmpeg: &str, encoder: HwEncoder, vaapi_device: &str) ->
 		.into_iter()
 		.filter(|&c| probe_encoder_codec(ffmpeg, encoder, c, vaapi_device))
 		.collect()
+}
+
+/// The NVENC SDK's codec list (`pulsar_capture::nvenc_codecs`), asked in a CHILD process
+/// (`pulsar --probe-nvenc`) with a deadline: opening an NVENC session needs a D3D device, and a
+/// wedged GPU path hangs that call forever (2026-11-12: a host's probe never returned, so it
+/// never answered a client). A child that overruns is killed and NVENC counts as unavailable
+/// (the other encoders still serve). Cached for the process life.
+#[cfg(windows)]
+pub fn nvenc_codecs_isolated() -> &'static [pulsar_capture::Codec] {
+	use std::sync::OnceLock;
+	static CACHE: OnceLock<Vec<pulsar_capture::Codec>> = OnceLock::new();
+	CACHE.get_or_init(|| {
+		const DEADLINE: std::time::Duration = std::time::Duration::from_secs(8);
+		let t0 = std::time::Instant::now();
+		tracing::info!("encoder probe: nvenc (child process) started");
+		let Ok(exe) = std::env::current_exe() else {
+			return pulsar_capture::nvenc_codecs().to_vec();
+		};
+		let mut cmd = std::process::Command::new(exe);
+		cmd.arg("--probe-nvenc");
+		no_window(&mut cmd);
+		cmd.stdin(std::process::Stdio::null());
+		cmd.stdout(std::process::Stdio::piped());
+		cmd.stderr(std::process::Stdio::null());
+		let mut child = match cmd.spawn() {
+			Ok(c) => c,
+			Err(e) => {
+				tracing::warn!(%e, "encoder probe: nvenc child failed to start — probing in-process");
+				return pulsar_capture::nvenc_codecs().to_vec();
+			}
+		};
+		crate::job::assign(&child);
+		loop {
+			match child.try_wait() {
+				Ok(Some(_)) => break,
+				Ok(None) if t0.elapsed() < DEADLINE => std::thread::sleep(std::time::Duration::from_millis(50)),
+				_ => {
+					let _ = child.kill();
+					let _ = child.wait();
+					tracing::error!(
+						ms = t0.elapsed().as_millis() as u64,
+						"encoder probe: nvenc did not answer in time (GPU stuck?) — NVENC treated as unavailable"
+					);
+					return Vec::new();
+				}
+			}
+		}
+		let mut out = String::new();
+		if let Some(mut so) = child.stdout.take() {
+			use std::io::Read as _;
+			let _ = so.read_to_string(&mut out);
+		}
+		let codecs: Vec<pulsar_capture::Codec> = out
+			.lines()
+			.find_map(|l| l.strip_prefix("nvenc "))
+			.map(|list| {
+				list.split(',')
+					.filter_map(|c| match c.trim() {
+						"h264" => Some(pulsar_capture::Codec::H264),
+						"h265" => Some(pulsar_capture::Codec::H265),
+						"av1" => Some(pulsar_capture::Codec::Av1),
+						_ => None,
+					})
+					.collect()
+			})
+			.unwrap_or_default();
+		tracing::info!(ms = t0.elapsed().as_millis() as u64, ?codecs, "encoder probe: nvenc done");
+		codecs
+	})
 }
 
 /// Resolve the requested codec against the VALIDATED codec set for `encoder` (probe-backed):

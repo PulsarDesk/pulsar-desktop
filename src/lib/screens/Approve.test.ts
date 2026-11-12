@@ -7,7 +7,7 @@ describe('Approve popup', () => {
 		render(Approve, { props: { id: 1, peer: '482913056', pw: 'wait' } });
 		expect(screen.getByText('Bağlantı isteği')).toBeInTheDocument();
 		expect(screen.getByRole('button', { name: 'İzin Ver' })).toBeInTheDocument();
-		expect(screen.getByRole('button', { name: 'Sadece izleme olarak izin ver' })).toBeInTheDocument();
+		expect(screen.getByRole('button', { name: 'İzin ver, kontrol edemesin' })).toBeInTheDocument();
 	});
 
 	it('a pairing request says it is permanent and has no view-only', () => {
@@ -17,6 +17,6 @@ describe('Approve popup', () => {
 		expect(screen.getByText('482 913 056')).toBeInTheDocument();
 		expect(screen.getByRole('button', { name: 'Eşleştir' })).toBeInTheDocument();
 		expect(screen.getByRole('button', { name: /Reddet/ })).toBeInTheDocument();
-		expect(screen.queryByRole('button', { name: 'Sadece izleme olarak izin ver' })).not.toBeInTheDocument();
+		expect(screen.queryByRole('button', { name: 'İzin ver, kontrol edemesin' })).not.toBeInTheDocument();
 	});
 });

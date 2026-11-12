@@ -95,6 +95,9 @@ pub struct CaptureStats {
 	/// Cumulative for the capture's life.
 	pub rfi_recovered: u32,
 	pub rfi_declined: u32,
+	/// Access units encoded for the capture's life (wraps). 0 a few seconds into a stream =
+	/// the source never delivered a frame (see the no-frame watchdog in `start`).
+	pub encoded: u32,
 }
 
 /// The atomics behind [`CaptureStats`], written by the capture thread.
@@ -160,6 +163,7 @@ impl LiveStats {
 			fresh_per_s: self.fresh_per_s.load(Relaxed),
 			rfi_recovered: self.rfi_ok.load(Relaxed),
 			rfi_declined: self.rfi_no.load(Relaxed),
+			encoded: self.encoded.load(Relaxed),
 		}
 	}
 }
@@ -665,6 +669,11 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 			let mut next_source: Option<path::MonSource> = None;
 			// Set by the probe to rebuild on the same output (the run loop returns Switch).
 			let rebuild = AtomicBool::new(false);
+			// No-frame watchdog (2026-11-12: a host's WGC monitor capture built fine but never
+			// delivered a frame — "preparing stream" forever). A build that gets no frame within
+			// NO_FRAME_SWITCH rebuilds on the other source, once per output; if that one is dry
+			// too it stays (the host tells the client — CaptureStats::encoded stays 0).
+			let mut dry_switched_on: Option<u32> = None;
 			let qpc = dxgi::platform::Qpc::new();
 			loop {
 				// Another monitor → plan again; a probe step / fallback may have picked the source.
@@ -872,6 +881,29 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 				let mut frames_sent: u64 = 0;
 				let mut meter = path::Meter::new();
 				let mut pixel = bench::PixelProbe::enabled().then(bench::PixelProbe::new);
+				let build_frames = std::sync::atomic::AtomicU32::new(0);
+				let run_done = AtomicBool::new(false);
+				let went_dry = AtomicBool::new(false);
+				let watch = cfg.window_hwnd.is_none()
+					&& forced_source.is_none()
+					&& dry_switched_on != Some(output_idx);
+				let exit = std::thread::scope(|sc| {
+				if watch {
+					sc.spawn(|| {
+						let t0 = std::time::Instant::now();
+						while !run_done.load(Ordering::Relaxed) && !stop_t.load(Ordering::Relaxed) {
+							if build_frames.load(Ordering::Relaxed) > 0 {
+								return;
+							}
+							if t0.elapsed() >= NO_FRAME_SWITCH {
+								went_dry.store(true, Ordering::Relaxed);
+								rebuild.store(true, Ordering::Relaxed);
+								return;
+							}
+							std::thread::sleep(std::time::Duration::from_millis(50));
+						}
+					});
+				}
 				let exit = cap.run(
 					cfg.fps.max(1),
 					cfg.draw_mouse,
@@ -879,6 +911,7 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 					&rebuild,
 					&stop_t,
 					|frame: &Frame| {
+						build_frames.fetch_add(1, Ordering::Relaxed);
 						// Stage-3 adaptive bitrate: apply any pending target BEFORE encoding this
 						// tick — a cheap live nvEncReconfigureEncoder (no re-init). Lock-free poll;
 						// on a reconfigure error keep the old bitrate so the stream never stalls.
@@ -946,6 +979,22 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 pts += 1;
 					},
 				);
+				run_done.store(true, Ordering::Relaxed);
+				exit
+				});
+				if went_dry.load(Ordering::Relaxed) {
+					let alt = source.other();
+					encode_log(&format!(
+						"capture source {} gave no frame on output {output_idx} in {} ms — rebuilding on {}",
+						source.name(),
+						NO_FRAME_SWITCH.as_millis(),
+						alt.name()
+					));
+					dry_switched_on = Some(output_idx);
+					next_source = Some(alt);
+					plan.probe = false;
+					probe_results.clear();
+				}
 				cap_log(&format!(
 					"build #{build_no} run exited ({}) frames_sent={frames_sent} submit_errs={submit_errs}",
 					match exit { dxgi::RunExit::Stop => "stop".to_string(), dxgi::RunExit::Switch(i) => format!("switch->{i}") },
@@ -1064,6 +1113,11 @@ pub fn start_capture_encode(_cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 // ===========================================================================
 // Windows helpers (thread priority, display keep-alive, debug logging)
 // ===========================================================================
+
+/// How long a fresh capture build may go without a single frame before the no-frame watchdog
+/// rebuilds it on the other source (DXGI ↔ WGC). A healthy build delivers its first frame in
+/// well under 100 ms; DXGI's initial retry budget for a mode change stays far below this.
+const NO_FRAME_SWITCH: std::time::Duration = std::time::Duration::from_millis(2500);
 
 /// Capture-thread rebuild lifecycle log. Debug-builds only (no-op in release).
 /// Previously wrote to `C:\Users\Public\pulsar-capture-dbg.txt` unconditionally;

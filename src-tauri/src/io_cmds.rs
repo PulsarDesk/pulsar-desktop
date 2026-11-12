@@ -431,6 +431,7 @@ pub(crate) async fn kbd_capture_start(
 			// clearing SUSPENDED was the desync bug. (Per-id, not "any tab" — another
 			// tab's open overlay must not suspend this one.)
 			let start_suspended = state.overlay_open.lock().unwrap().contains(&id);
+			ARMED_PLAY.store(id, std::sync::atomic::Ordering::SeqCst);
 			kbdhook::enable(app, tx, mouse, id, start_suspended);
 			Ok(())
 		}
@@ -441,10 +442,22 @@ pub(crate) async fn kbd_capture_start(
 /// Client: disarm the keyboard hook (control released / canvas blurred / leave
 /// combo). Local keys behave normally again. No-op on non-Windows.
 #[tauri::command]
-pub(crate) async fn kbd_capture_stop() -> Result<(), String> {
+pub(crate) async fn kbd_capture_stop(id: Option<u64>) -> Result<(), String> {
+	use std::sync::atomic::Ordering;
+	// `id`: stop only if THAT session holds the capture — with tab windows, the window
+	// losing input may disarm after the newly focused one already armed its own session.
+	if let Some(id) = id {
+		if ARMED_PLAY.load(Ordering::SeqCst) != id {
+			return Ok(());
+		}
+	}
+	ARMED_PLAY.store(u64::MAX, Ordering::SeqCst);
 	kbdhook::disable();
 	Ok(())
 }
+
+/// The session `kbd_capture_start` armed last (u64::MAX = none) — see `kbd_capture_stop`.
+static ARMED_PLAY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
 
 /// Client (native renderer): explicit click-to-engage. The in-app video container is
 /// input pass-through, so a click on the video lands on the webview underneath — the
@@ -491,10 +504,8 @@ pub(crate) fn native_view_rect(
 	}
 	#[cfg(windows)]
 	{
-		use tauri::Manager as _;
 		// CSS px → physical px (the Win32 child lives in physical client coords).
-		let scale = app
-			.get_webview_window("main")
+		let scale = crate::tabwin::window_for_play(&app, id)
 			.and_then(|w| w.scale_factor().ok())
 			.unwrap_or(1.0);
 		let px = |v: i32| (v as f64 * scale).round() as i32;
@@ -589,7 +600,7 @@ pub(crate) fn set_window_fullscreen(
 		tracing::info!(on, was_fullscreen = fs, "set_window_fullscreen applied");
 		// Keep input focus on the toplevel after the toggle — otherwise (Linux) X moves focus to
 		// the embedded native-renderer child window, which flips kbdhook's FOCUSED to false and
-		// silently kills the evdev combos (F12/M/Q) until the user clicks back in.
+		// silently kills the evdev combos (F11/M/Q) until the user clicks back in.
 		// (Not during a drag-out: the modal move loop already owns the window.)
 		if on || drag_from.is_none() {
 			let _ = w.set_focus();
@@ -813,8 +824,12 @@ pub(crate) async fn confine_pointer(app: AppHandle, on: bool, id: Option<u64>) -
 	#[cfg(any(not(unix), target_os = "macos"))]
 	{
 		use tauri::Manager;
-		let _ = id; // window-level grab only here
-		if let Some(w) = app.get_webview_window("main") {
+		// Window-level grab only here — on the window showing that session.
+		let win = match id {
+			Some(id) => crate::tabwin::window_for_play(&app, id),
+			None => app.get_webview_window("main"),
+		};
+		if let Some(w) = win {
 			let _ = w.set_cursor_grab(on);
 		}
 	}
@@ -844,8 +859,9 @@ unsafe fn x11_confine(target: Option<(&AppHandle, Option<u64>)>) -> i32 {
 		xlib::XFlush(dpy);
 		return xlib::GrabSuccess;
 	};
-	let xid = app
-		.get_webview_window("main")
+	let xid = play
+		.and_then(|id| crate::tabwin::window_for_play(app, id))
+		.or_else(|| app.get_webview_window("main"))
 		.and_then(|w| w.gtk_window().ok())
 		.and_then(|gw| gw.window())
 		.and_then(|gdkw| gdkw.downcast::<gdkx11::X11Window>().ok())

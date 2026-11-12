@@ -22,6 +22,7 @@ use std::sync::Mutex;
 pub mod decode; // Media Foundation DXVA decode (Annex-B AU → NV12 ID3D11Texture2D)
 pub mod egui_paint; // minimal D3D11 painter for the egui overlay
 pub mod present; // NV12 → swapchain RGB via ID3D11VideoProcessor (letterbox)
+mod fsr; // FSR 1 upscale (EASU + RCAS) after the VideoProcessor (present.rs)
 
 // Shared (cross-backend) streaming types + RTP depacketizer.
 use crate::stream::{self, parse_sdp, AccessUnit, Codec};
@@ -55,6 +56,9 @@ static ROT_DIRTY: AtomicBool = AtomicBool::new(false);
 static STATS: Mutex<[f32; 4]> = Mutex::new([0.0; 4]); // fps, latency_ms, decode_ms, mbps
 /// Parent (Tauri) HWND passed via `--wid`; the child window is created under it.
 static PARENT: AtomicU64 = AtomicU64::new(0);
+/// A new parent window to move into (stdin `reparent 0x<hwnd>`: the session tab was dragged
+/// into another Pulsar window). 0 = none pending. Applied on the render thread.
+static NEW_PARENT: AtomicU64 = AtomicU64::new(0);
 /// In-app embed rect (stdin `viewrect <x> <y> <w> <h>`, PHYSICAL px in the parent's
 /// client space): the frontend reports the session tab's content area so the video
 /// renders INSIDE the app — chrome/tabs stay visible, like the Linux native container.
@@ -507,6 +511,16 @@ fn stdin_control() {
 			// The app's verdict that the stream really stopped (`stopped 1`) or is back
 			// (`stopped 0`): the "stream stopped" card + input-capture release (see STALLED).
 			STALLED.store(rest.trim() == "1", Ordering::SeqCst);
+		} else if let Some(rest) = l.strip_prefix("upscale ") {
+			// Picture upscaling mode (off|auto|fsr|ai) — see present::set_upscale.
+			present::set_upscale(rest);
+		} else if let Some(rest) = l.strip_prefix("reparent ") {
+			// The session moved to another app window: hide until its screen reports a rect.
+			let h = parse_handle(rest);
+			if h != 0 {
+				*VIEW_RECT.lock().unwrap() = Some((0, 0, 0, 0));
+				NEW_PARENT.store(h, Ordering::SeqCst);
+			}
 		} else if let Some(rest) = l.strip_prefix("viewrect ") {
 			// In-app embed rect (physical px) — see VIEW_RECT above.
 			let v: Vec<i32> = rest
@@ -2015,6 +2029,8 @@ unsafe fn event_loop(
 	codec: Codec,
 	mode: crate::overlay::Mode,
 ) -> Result<()> {
+	// Changes when the session tab moves to another app window (`reparent`).
+	let mut parent = parent;
 	let hinstance = GetModuleHandleW(None)?;
 	let class_name = w!("PulsarRenderChild");
 	let wc = WNDCLASSW {
@@ -2272,6 +2288,22 @@ unsafe fn event_loop(
 					SetCursor(Some(arrow));
 				}
 				cursor_hidden = false;
+			}
+		}
+		let np = NEW_PARENT.swap(0, Ordering::SeqCst);
+		if np != 0 {
+			use windows::Win32::UI::WindowsAndMessaging::SetParent;
+			let to = HWND(np as *mut _);
+			match SetParent(hwnd, Some(to)) {
+				Ok(_) => {
+					parent = to;
+					r.parent = to;
+					PARENT.store(np, Ordering::SeqCst);
+					// Force the next track_parent to re-apply position + z-order in the new window.
+					r.x = i32::MIN;
+					eprintln!("pulsar-render(win): moved to window 0x{np:x}");
+				}
+				Err(e) => eprintln!("pulsar-render(win): reparent to 0x{np:x} failed: {e}"),
 			}
 		}
 		r.track_parent();

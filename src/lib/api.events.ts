@@ -67,6 +67,16 @@ export const onGuideToggle = (cb: () => void) => listenTo<null>('guide-toggle', 
 export const onPadJoined = (cb: (e: { uuid: string; name: string; play_id: number; pane: number }) => void) =>
 	listenTo<{ uuid: string; name: string; play_id: number; pane: number }>('pad-joined', cb);
 export const onPadWake = (cb: () => void) => listenTo<null>('pad-wake', () => cb());
+/** Detachable tabs: sessions moved INTO this window (tab_move) — the tab records. */
+export const onTabAdopt = (cb: (e: [string, unknown]) => void) => listenTo<[string, unknown]>('tab-adopt', cb);
+/** The session window that now owns keyboard/mouse capture (focused last). */
+/** This tab window was dropped on another window's tab area: merge into it (label). */
+export const onTabMergeInto = (cb: (e: [string, string]) => void) => listenTo<[string, string]>('tab-merge-into', cb);
+/** A session ended for a known reason (before its `play-ended`): [play id, reason key]. */
+export const onPlayError = (cb: (e: [number, string]) => void) => listenTo<[number, string]>('play-error', cb);
+/** A tab dragged from another window is over this window's tab area (true) / left it. */
+export const onTabDropHover = (cb: (e: [string, boolean]) => void) => listenTo<[string, boolean]>('tab-drop-hover', cb);
+export const onInputWindow = (cb: (label: string) => void) => listenTo<string>('input-window', cb);
 /** A controller was just connected (always-on watcher). Carries its name + battery (0..100
  * or null). The shell shows a toast when idle (not in a session). */
 export const onControllerConnected = (cb: (e: { name: string; battery: number | null }) => void) =>
@@ -142,7 +152,7 @@ export const onKbdDetach = (cb: () => void) => listenTo<null>('kbd-detach', () =
 /** Client (game mode): the user pressed the Ctrl+Shift+M overlay combo — toggle the
  * in-session gaming overlay. Payload-less; the session stays alive (unlike kbd-leave). */
 export const onOverlayToggle = (cb: () => void) => listenTo<null>('overlay-toggle', () => cb());
-/** Client (Linux native): the user pressed the Ctrl+Shift+F12 combo — toggle the Tauri
+/** Client (Linux native): the user pressed the Ctrl+Shift+F11 combo — toggle the Tauri
  * window's fullscreen state. Payload-less; the session stays alive (unlike kbd-leave). */
 export const onFullscreenToggle = (cb: () => void) => listenTo<null>('fullscreen-toggle', () => cb());
 /** Client (Linux native overlay): the user changed a setting in the native egui overlay

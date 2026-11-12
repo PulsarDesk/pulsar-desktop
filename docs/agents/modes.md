@@ -75,7 +75,7 @@ Parsec-style handover, issue #3. Settings → Görüntü + the session menu's G�
   `pointerenter`/move over the canvas with no button, Pulsar focused (`document.hasFocus`) and
   nothing blocking (session menu open, stream stopped) → `startControl`; `pointerleave` with
   no button → `stopControl` (keyboard grab released too). A drag holds pointer capture, so
-  the leave comes after the release. Explicit releases (Ctrl+Alt+Z, Ctrl+Shift+F12, the
+  the leave comes after the release. Explicit releases (Ctrl+Alt+Z, Ctrl+Shift+F11, the
   native `kbd-detach`) wait for a leave. The in-control hint shows only on the first hover
   engage (`quietHint`). Tests: `Session/input.svelte.test.ts`.
   - Linux: works where the video container is input pass-through (the default embedded
@@ -105,3 +105,24 @@ pointer input back for 1.2 s), the client marks the host's pointer and shows its
 - **Mobile client** (pulsar-mobile): `datachan.rs` emits `host-pointer`; `ui/js/app.js` draws the
   same marker over the video rect (slot 0, not split, not game mode); Settings toggle
   `hostCursor` (prefs, default on).
+
+## Start with the computer / in the background (Settings → Genel)
+
+`src-tauri/src/autostart.rs`: Windows = a logon task "Pulsar autostart (<user>)" at highest
+privileges when Pulsar is elevated (a Run-key start would ask UAC at every sign-in), else the
+HKCU Run key; Linux = `~/.config/autostart/pulsar.desktop`; macOS =
+`~/Library/LaunchAgents/com.pulsardesk.pulsar.plist`. "In the background" adds `--background`:
+no splash, the window stays hidden (tray) — shown anyway when there is no tray (`splash.rs`
+`stay_hidden` / `show_hidden_background`).
+
+## Several sessions to one device (Settings → Genel, default off)
+
+`ui.duplicateSessions`: a repeat connect to the same host/mode/game opens another session
+instead of focusing the open one (`SessionManager.startConnect` de-dup).
+
+## Reverse direction
+
+The requesting client pre-authorizes the host's E2E key for its connect back (one use, 60 s:
+`auth::preauth::expect_reverse` / `take_reverse`) — no password or Allow/Deny; it ends its own
+session and hides Pulsar. The other side brings Pulsar forward (`pad_wake::bring_forward`,
+AttachThreadInput — never a synthetic Alt: that opened the window menu loop and froze the UI).

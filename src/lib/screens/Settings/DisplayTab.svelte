@@ -221,6 +221,26 @@
 </div>
 <div class="srow">
 	<div class="st">
+		<b>{t('settings.upscale')}</b>
+		<span>{t('settings.upscaleDesc')}</span>
+	</div>
+	<select
+		class="select"
+		aria-label={t('settings.upscale')}
+		value={ui.upscale}
+		onchange={(e) => {
+			ui.upscale = (e.currentTarget as HTMLSelectElement).value as typeof ui.upscale;
+			saveUi();
+		}}
+	>
+		<option value="off">{t('settings.upscaleOff')}</option>
+		<option value="auto">{t('settings.upscaleAuto')}</option>
+		<option value="fsr">FSR</option>
+		<option value="ai">{t('settings.upscaleAi')}</option>
+	</select>
+</div>
+<div class="srow">
+	<div class="st">
 		<b>{t('settings.hostCursor')}</b>
 		<span>{t('settings.hostCursorDesc')}</span>
 	</div>

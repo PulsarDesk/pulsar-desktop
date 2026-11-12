@@ -3183,6 +3183,18 @@ pub(super) fn make_on_stream(
 					{
 						ticks = ticks.wrapping_add(1);
 					}
+					// 7 s in and not one frame encoded (both capture sources dry — the capture
+					// thread's no-frame watchdog already tried the other one): tell the client
+					// ("!" = stream error) instead of leaving it on "preparing stream".
+					#[cfg(windows)]
+					if let Some(cs) = cap_stats.as_ref().filter(|_| ticks == 14) {
+						let c = cs.snapshot();
+						if c.encoded == 0 {
+							tracing::error!(source = c.source, "native capture delivered no frame in 7 s");
+							let msg = crate::i18n::t("host.captureNoFrames").to_string();
+							let _ = stats_enc.try_send(DataMsg::Stats(format!("!{msg}")));
+						}
+					}
 					#[cfg(windows)]
 					if let Some(cs) = cap_stats.as_ref().filter(|_| ticks % 60 == 4) {
 						let c = cs.snapshot();

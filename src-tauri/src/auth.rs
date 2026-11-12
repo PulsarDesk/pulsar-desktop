@@ -285,6 +285,25 @@ pub(crate) mod preauth {
 		}
 	}
 
+	/// Hosts this client asked to connect BACK (the session menu's "reverse direction"), by their
+	/// static pubkey → when asked. The client started the role swap itself, so that host's
+	/// connect within [`REVERSE_TTL`] is let in without a password or an Allow/Deny popup — once.
+	static REVERSE: LazyLock<Mutex<HashMap<[u8; 32], Instant>>> =
+		LazyLock::new(|| Mutex::new(HashMap::new()));
+	const REVERSE_TTL: Duration = Duration::from_secs(60);
+
+	/// We asked the host with this key to connect back to us (reverse direction).
+	pub(crate) fn expect_reverse(pubkey: [u8; 32]) {
+		REVERSE.lock().unwrap().insert(pubkey, Instant::now());
+	}
+
+	/// Is this incoming device the host we asked to connect back? Consumes the expectation.
+	pub(crate) fn take_reverse(pubkey: &[u8; 32]) -> bool {
+		let mut g = REVERSE.lock().unwrap();
+		g.retain(|_, t| t.elapsed() < REVERSE_TTL);
+		g.remove(pubkey).is_some()
+	}
+
 	/// Drop the recent-auth grace for this device (its pairing was revoked or removed): a
 	/// reconnect within [`RECENT_TTL`] must authenticate again. Live sessions keep their
 	/// refcount — kicking them is the Connections window's job.
@@ -389,6 +408,7 @@ pub(crate) fn open_approval_window(
 		WebviewUrl::App("index.html".into()),
 	)
 	.initialization_script(&init)
+	.background_color(crate::splash::window_bg(app))
 	.title(crate::i18n::t("title.approve"))
 	.inner_size(400.0, 300.0)
 	.resizable(false)
