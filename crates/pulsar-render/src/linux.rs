@@ -597,6 +597,7 @@ pub fn run() {
 						crate::overlay::set_mouse_sens(v);
 					}
 				}
+				Some("ptrfree") => crate::overlay::set_ptr_free(it.next() == Some("1")),
 				// Session audio truth from the app (atx/amute/mic 0|1) so the overlay's
 				// Ses toggles highlight the real state.
 				Some("audio") => {
@@ -1905,6 +1906,7 @@ fn emit_cmd(state: &mut OverlayState, c: OverlayCmd) {
 				// mirrors it (its own canvas path / persistence).
 				"fit" => video::set_fit(&val),
 				"msens" => crate::overlay::set_mouse_sens(&val),
+				"ptrfree" => crate::overlay::set_ptr_free(val == "on"),
 				// Audio toggles apply optimistically; the app's `audio …` line
 				// re-syncs the truth after the host acknowledges.
 				"atx" => AUDIO_TX.store(val == "on", Ordering::SeqCst),

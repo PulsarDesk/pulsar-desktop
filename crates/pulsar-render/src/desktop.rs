@@ -164,6 +164,7 @@ fn stdin_control() {
 					crate::overlay::set_mouse_sens(v);
 				}
 			}
+			Some("ptrfree") => crate::overlay::set_ptr_free(it.next() == Some("1")),
 			// The host's active encode summary (rest of the line, verbatim).
 			Some("hostenc") => {
 				*HOST_ENC.lock().unwrap() = line.splitn(2, ' ').nth(1).unwrap_or("").to_string();
@@ -600,6 +601,7 @@ impl Overlay {
 						OVERLAY_BTN.store(val == "on", Ordering::SeqCst);
 					}
 					"msens" => crate::overlay::set_mouse_sens(&val),
+					"ptrfree" => crate::overlay::set_ptr_free(val == "on"),
 					"fit" => {
 						self.state.fit = val.clone();
 						*FIT.lock().unwrap() = val.clone();

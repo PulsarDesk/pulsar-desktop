@@ -262,6 +262,26 @@ const OVERLAY_PPP_BASE: f32 = 1.25;
 /// a 200 % laptop panel (and 4K/8K screens) they came out half the size of the app UI.
 static OVERLAY_PPP_BITS: AtomicU32 = AtomicU32::new(0x3FA0_0000); // 1.25f32
 
+/// The closed-state overlay-open button as client fractions (same clamp as the click
+/// hit-test in the window proc); None while it is hidden or the overlay is open.
+fn ovbtn_frac(hwnd: HWND) -> Option<(f32, f32, f32, f32)> {
+	if !OVERLAY_BTN.load(Ordering::SeqCst) || OPEN.load(Ordering::SeqCst) {
+		return None;
+	}
+	let mut rc = RECT::default();
+	let _ = unsafe { GetClientRect(hwnd, &mut rc) };
+	let ppp = overlay_ppp();
+	let (sw, sh) = ((rc.right - rc.left) as f32 / ppp, (rc.bottom - rc.top) as f32 / ppp);
+	if sw <= 0.0 || sh <= 0.0 {
+		return None;
+	}
+	let bs = crate::overlay::BTN_SIZE;
+	let (bx, by) = *OVBTN_POS.lock().unwrap();
+	let bx = bx.clamp(0.0, (sw - bs).max(0.0));
+	let by = by.clamp(0.0, (sh - bs).max(0.0));
+	Some((bx / sw, by / sh, ((bx + bs) / sw).min(1.0), ((by + bs) / sh).min(1.0)))
+}
+
 fn overlay_ppp() -> f32 {
 	f32::from_bits(OVERLAY_PPP_BITS.load(Ordering::Relaxed))
 }
@@ -396,6 +416,8 @@ fn stdin_control() {
 			}
 		} else if let Some(rest) = l.strip_prefix("msens ") {
 			crate::overlay::set_mouse_sens(rest);
+		} else if let Some(rest) = l.strip_prefix("ptrfree ") {
+			crate::overlay::set_ptr_free(rest.trim() == "1");
 		} else if let Some(rest) = l.strip_prefix("fit ") {
 			// View-fit mode pushed by the frontend (persisted value / respawn re-seed).
 			present::set_fit(rest.trim());
@@ -1028,6 +1050,9 @@ struct Renderer {
 	shown: bool,
 	// Last `vidsink-vrect` reported to the app (video area as client fractions).
 	last_vrect: (f32, f32, f32, f32),
+	// Last `vidsink-ovbtn` reported (the closed-state open button, client fractions; None =
+	// not on screen). The app's free-cursor handover treats it as outside the video.
+	last_ovbtn: Option<(f32, f32, f32, f32)>,
 	// When the first frame was drawn (the `--hold-reveal` fallback clock).
 	first_drawn: Option<std::time::Instant>,
 	// Compositor clock boost state (see `boost_compositor`) + seconds at ≤ 60 fps.
@@ -1136,6 +1161,7 @@ impl Renderer {
 			dec_rebuilt: false,
 			shown: false,
 			last_vrect: (-1.0, -1.0, -1.0, -1.0),
+			last_ovbtn: None,
 			first_drawn: None,
 			compositor_boosted: false,
 			low_fps_secs: 0,
@@ -1663,6 +1689,16 @@ impl Renderer {
 					println!("vidsink-vrect {:.5} {:.5} {:.5} {:.5}", f.0, f.1, f.2, f.3);
 					let _ = std::io::stdout().flush();
 				}
+			}
+			let b = ovbtn_frac(self.hwnd);
+			if b != self.last_ovbtn {
+				self.last_ovbtn = b;
+				use std::io::Write as _;
+				match b {
+					Some(b) => println!("vidsink-ovbtn {:.5} {:.5} {:.5} {:.5}", b.0, b.1, b.2, b.3),
+					None => println!("vidsink-ovbtn -"),
+				}
+				let _ = std::io::stdout().flush();
 			}
 			// Retain this frame so a later video STALL can re-present it under the overlay
 			// instead of freezing (see repaint_idle). Cheap COM refcount bump on an owned
@@ -2342,6 +2378,7 @@ fn apply_ov_cmd(ostate: &mut crate::overlay::OverlayState, c: crate::overlay::Ov
 				// so the frontend mirrors/persists it — Linux-parity (linux.rs).
 				"fit" => present::set_fit(&val),
 				"msens" => crate::overlay::set_mouse_sens(&val),
+				"ptrfree" => crate::overlay::set_ptr_free(val == "on"),
 				// Optimistic controller swap: the overlay row ▲/▼ was clicked.
 				// Swap the two entries in CONTROLLERS immediately so the list
 				// re-renders at the next frame without waiting for the gilrs

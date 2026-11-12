@@ -418,9 +418,11 @@ pub(crate) async fn kbd_capture_start(
 		.lock()
 		.unwrap()
 		.get(&id)
-		.map(|p| p.input_tx.clone());
+		.map(|p| (p.input_tx.clone(), p.game_mode));
 	match tx {
-		Some(tx) => {
+		Some((tx, game_mode)) => {
+			// Free cursor (Settings → Görüntü) applies to remote-mode sessions only.
+			kbdhook::set_session_remote(!game_mode);
 			// `mouse` = also capture the mouse (native-renderer mode, no canvas).
 			// Compute the desired suspend state from the authoritative overlay set (the
 			// source of truth, owned here in the Tauri layer — the kbdhook static can't

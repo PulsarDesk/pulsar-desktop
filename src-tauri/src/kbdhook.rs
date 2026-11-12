@@ -29,6 +29,48 @@ pub fn mouse_sensitivity() -> f32 {
 	f32::from_bits(MOUSE_SENS.load(std::sync::atomic::Ordering::Relaxed))
 }
 
+/// "Serbest imleç" (Settings → Görüntü + the session menu's Görüntü view, default OFF): in a
+/// REMOTE-mode session the cursor is not trapped in the video. Leaving the video hands the
+/// mouse and keyboard back to this PC, coming back over it takes control again (Parsec's
+/// handover, issue #3). Game mode always keeps the confine, and so does a host pointer lock.
+static POINTER_FREE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The armed capture belongs to a remote-mode session (set by `kbd_capture_start`).
+static SESSION_REMOTE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_pointer_free(on: bool) {
+	let was = POINTER_FREE.swap(on, std::sync::atomic::Ordering::SeqCst);
+	if was != on {
+		#[cfg(windows)]
+		imp::pointer_free_changed();
+	}
+}
+
+pub fn pointer_free() -> bool {
+	POINTER_FREE.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+pub fn set_session_remote(remote: bool) {
+	SESSION_REMOTE.store(remote, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The free-cursor handover applies to the armed session (setting on + remote mode).
+#[allow(dead_code)] // only the Windows capture reads it
+pub(crate) fn free_pointer_session() -> bool {
+	pointer_free() && SESSION_REMOTE.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// The last engage/release edge came from the free-cursor handover (pointer entering or
+/// leaving the video), not a click, a combo or focus: the renderer skips its helper tooltip
+/// for it (it would flash on every pass over the video).
+#[cfg(windows)]
+pub fn hover_edge() -> bool {
+	imp::hover_edge()
+}
+#[cfg(not(windows))]
+pub fn hover_edge() -> bool {
+	false
+}
+
 /// Scale a relative delta by the sensitivity. The host injects whole counts, so the fraction
 /// is carried per capture thread — slow moves at 0.25× still add up instead of vanishing.
 #[allow(dead_code)] // not every platform's capture sends relative motion
@@ -142,6 +184,13 @@ pub fn set_video_frac(x0: f32, y0: f32, x1: f32, y1: f32) {
 }
 #[cfg(not(windows))]
 pub fn set_video_frac(_x0: f32, _y0: f32, _x1: f32, _y1: f32) {}
+/// Where the renderer's overlay-open button sits (client fractions; None = hidden).
+#[cfg(windows)]
+pub fn set_ovbtn_frac(f: Option<(f32, f32, f32, f32)>) {
+	imp::set_ovbtn_frac(f)
+}
+#[cfg(not(windows))]
+pub fn set_ovbtn_frac(_f: Option<(f32, f32, f32, f32)>) {}
 /// The host hid its cursor (a game grabbed the mouse): send relative motion meanwhile.
 #[cfg(windows)]
 pub fn set_pointer_lock(id: u64, on: bool) {

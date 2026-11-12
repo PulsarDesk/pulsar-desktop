@@ -50,6 +50,8 @@
 	"audio.quality": "Audio quality",
 	"mouse.sens": "Mouse sensitivity",
 	"info.msens": "While a game has grabbed the mouse (cursor hidden), mouse motion is sent scaled by this factor. 1× = the mouse's own speed.",
+	"mouse.free": "Free cursor",
+	"info.mfree": "When on, moving the cursor out of the video hands the mouse and keyboard back to this computer, and moving it back over the video takes control again without a click (like Parsec). When off, the cursor stays locked to the video; Ctrl+Alt+Z releases it. Remote desktop mode only.",
 	"aq.auto": "Auto",
 	"aq.standard": "Standard",
 	"aq.high": "High",

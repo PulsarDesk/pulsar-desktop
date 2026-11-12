@@ -396,6 +396,7 @@ async fn respawn_render_for_codec(
 					}
 					let _ = writeln!(si, "audio clip={}", if crate::clipboard_sync::enabled() { 1 } else { 0 });
 					let _ = writeln!(si, "msens {}", crate::kbdhook::mouse_sensitivity());
+					let _ = writeln!(si, "ptrfree {}", if crate::kbdhook::pointer_free() { 1 } else { 0 });
 					if let Some((tx, mute, mic)) = seed.audio {
 						let _ = writeln!(
 							si,
@@ -1092,7 +1093,11 @@ pub(crate) fn render_hint(
 		if let Some(si) = stdin.lock().unwrap().as_mut() {
 			let engage = kind == "engage";
 			let _ = writeln!(si, "engaged {}", if engage { 1 } else { 0 });
-			let _ = writeln!(si, "hint {}", if engage { "engage" } else { "click" });
+			// Free-cursor handover edges (pointer in/out of the video) change only the cursor
+			// state: a tooltip on every pass over the video would be noise.
+			if !crate::kbdhook::hover_edge() {
+				let _ = writeln!(si, "hint {}", if engage { "engage" } else { "click" });
+			}
 			let _ = si.flush();
 		}
 	}
@@ -1422,6 +1427,14 @@ pub(crate) async fn set_play_audio(
 #[tauri::command]
 pub(crate) async fn set_mouse_sensitivity(value: f32) -> Result<(), String> {
 	crate::kbdhook::set_mouse_sensitivity(value);
+	Ok(())
+}
+
+/// Client: the "Serbest imleç" switch (Settings / session menu). Process-wide; a live
+/// engagement follows it at once.
+#[tauri::command]
+pub(crate) async fn set_pointer_free(on: bool) -> Result<(), String> {
+	crate::kbdhook::set_pointer_free(on);
 	Ok(())
 }
 

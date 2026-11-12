@@ -291,6 +291,147 @@ pub(super) fn arm_kiosk() {
 	KIOSK_ENGAGE.store(true, Ordering::SeqCst);
 }
 
+// ─────────────────────── Free cursor (remote mode, issue #3) ───────────────────────
+// With `kbdhook::free_pointer_session()` the engaged cursor is NOT clipped to the video: a
+// move that leaves the video (no button held) releases control and passes through, and a
+// move back over the video (Pulsar focused) engages again without a click. CONFINE keeps
+// the video rect (the pointer normalization needs it) but no ClipCursor is applied. Only on
+// the WH_MOUSE_LL path: the Interception path sends relative deltas and keeps the local
+// cursor still, so it has no local position to hand over.
+
+/// The handover is live for the armed session: setting on + remote mode, no host pointer lock
+/// (a game that hid the cursor needs the confine), WH_MOUSE_LL mechanism.
+fn free_mode() -> bool {
+	super::free_pointer_session() && !POINTER_LOCK.load(Ordering::SeqCst) && MECHANISM.load(Ordering::SeqCst) == 2
+}
+
+/// A pass over the video may engage. Cleared by an explicit release (Ctrl+Alt+Z, 3×RightCtrl,
+/// the overlay combo): the user asked to let go, so hovering must not grab it straight back
+/// — the pointer has to leave the video first (or click it). Set again on leaving the video,
+/// on a new session and when the session menu closes.
+static HOVER_ARMED: AtomicBool = AtomicBool::new(true);
+/// The session menu (overlay) is open: hovering the video must not take control from it.
+static OVERLAY_OPEN: AtomicBool = AtomicBool::new(false);
+/// The last engage/release edge came from the handover (see `kbdhook::hover_edge`).
+static HOVER_EDGE: AtomicBool = AtomicBool::new(false);
+/// The play id whose first handover engage already showed the "how to release" tooltip.
+static HOVER_HINTED: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// `release_engage_why` reason of the handover's release.
+const HOVER_LEAVE: &str = "pointer left the video";
+
+pub(super) fn hover_edge() -> bool {
+	HOVER_EDGE.load(Ordering::SeqCst)
+}
+
+/// Thread message: re-evaluate the handover (cursor in/out of the video) on hook_thread.
+const WM_HOVER: u32 = windows_sys::Win32::UI::WindowsAndMessaging::WM_APP + 0x32;
+static HOVER_QUEUED: AtomicBool = AtomicBool::new(false);
+
+/// Ask hook_thread to run `handle_hover` after the current hook callback (posts only — safe
+/// inside the LL callback, which must not touch window state or block).
+fn request_hover() {
+	let tid = HOOK_TID.load(Ordering::SeqCst);
+	if tid != 0
+		&& !HOVER_QUEUED.swap(true, Ordering::SeqCst)
+		&& unsafe { PostThreadMessageW(tid, WM_HOVER, 0, 0) } == 0
+	{
+		HOVER_QUEUED.store(false, Ordering::SeqCst);
+	}
+}
+
+fn mouse_button_down_locally() -> bool {
+	use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+	// VK_LBUTTON 0x01, VK_RBUTTON 0x02, VK_MBUTTON 0x04.
+	[0x01, 0x02, 0x04].iter().any(|vk| unsafe { GetAsyncKeyState(*vk) } as u16 & 0x8000 != 0)
+}
+
+/// hook_thread's WM_HOVER handler: engaged + cursor outside the video + no button held →
+/// release; disengaged + cursor over the video + Pulsar focused → engage.
+fn handle_hover() {
+	use windows_sys::Win32::Foundation::{HWND, POINT};
+	use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+	use tauri::Manager as _;
+	HOVER_QUEUED.store(false, Ordering::SeqCst);
+	if !free_mode() || !ENABLED.load(Ordering::SeqCst) || !MOUSE_CAPTURE.load(Ordering::SeqCst) {
+		return;
+	}
+	let (app, held) = {
+		let g = globals().lock().unwrap_or_else(|e| e.into_inner());
+		(g.app.clone(), !g.held_buttons.is_empty())
+	};
+	let Some(app) = app else { return };
+	// Disengaged while another app is in front: nothing to engage (cheap exit — this runs on
+	// every mouse move system-wide while a session is armed).
+	if !ENGAGED.load(Ordering::SeqCst) && !APP_FOCUSED.load(Ordering::SeqCst) {
+		return;
+	}
+	if VIDEO_MAIN.load(Ordering::SeqCst) == 0 {
+		if let Some(h) = app.get_webview_window("main").and_then(|w| w.hwnd().ok()) {
+			VIDEO_MAIN.store(h.0 as HWND as isize, Ordering::SeqCst);
+		}
+	}
+	let mut pt = POINT { x: 0, y: 0 };
+	if unsafe { GetCursorPos(&mut pt) } == 0 {
+		return;
+	}
+	let inside =
+		content_rect().is_some_and(|r| super::confine::contains(r, pt.x, pt.y)) && !over_ovbtn(pt.x, pt.y);
+	if ENGAGED.load(Ordering::SeqCst) {
+		if !inside && !held {
+			HOVER_ARMED.store(true, Ordering::SeqCst);
+			release_engage_why(&app, HOVER_LEAVE);
+		}
+		return;
+	}
+	if !inside {
+		HOVER_ARMED.store(true, Ordering::SeqCst);
+		return;
+	}
+	if !HOVER_ARMED.load(Ordering::SeqCst)
+		|| OVERLAY_OPEN.load(Ordering::SeqCst)
+		|| STREAM_STALLED.load(Ordering::SeqCst)
+		|| mouse_button_down_locally()
+		|| !matches!(foreground_owner(), FgOwner::Ours)
+	{
+		return;
+	}
+	// The first handover engage of a session keeps its tooltip (it says how to let go).
+	let id = LAST_PLAY.load(Ordering::SeqCst);
+	HOVER_EDGE.store(HOVER_HINTED.swap(id, Ordering::SeqCst) == id, Ordering::SeqCst);
+	tracing::info!("pointer entered the video → engage (free cursor)");
+	engage_edge(&app);
+}
+
+/// The renderer's overlay-open button (client fractions of the renderer window; None =
+/// hidden). Over it the handover counts the pointer as outside the video, so the button
+/// stays clickable instead of the click going to the remote.
+static OVBTN_FRAC: Mutex<Option<(f32, f32, f32, f32)>> = Mutex::new(None);
+/// The renderer window's screen rect as last measured by `content_rect` (LTRB).
+static RENDER_RECT: Mutex<Option<(i32, i32, i32, i32)>> = Mutex::new(None);
+
+pub(super) fn set_ovbtn_frac(f: Option<(f32, f32, f32, f32)>) {
+	*OVBTN_FRAC.lock().unwrap_or_else(|e| e.into_inner()) = f;
+}
+
+/// The screen point lies on the overlay-open button. try_lock only: also called from the LL
+/// mouse callback (a busy lock = "not on it", the next move re-checks).
+fn over_ovbtn(x: i32, y: i32) -> bool {
+	let Some(f) = OVBTN_FRAC.try_lock().ok().and_then(|g| *g) else { return false };
+	let Some((l, t, r, b)) = RENDER_RECT.try_lock().ok().and_then(|g| *g) else { return false };
+	let (w, h) = ((r - l) as f32, (b - t) as f32);
+	let fx = (x - l) as f32 / w;
+	let fy = (y - t) as f32 / h;
+	fx >= f.0 && fx < f.2 && fy >= f.1 && fy < f.3
+}
+
+/// The setting flipped: apply it to a live engagement right away (clip on / clip off).
+pub(super) fn pointer_free_changed() {
+	if ENGAGED.load(Ordering::SeqCst) {
+		request_reclip(None);
+	}
+}
+
 /// Cursor-confine rectangle (screen px, LTRB) re-asserted on every mouse event while
 /// engaged — the OS clears ClipCursor on focus changes / display events, so a one-shot
 /// clip wouldn't survive. `None` = not confined (released). Set by `confine_to_video`.
@@ -362,6 +503,7 @@ fn content_rect() -> Option<(i32, i32, i32, i32)> {
 	}
 	let mut rc: RECT = unsafe { std::mem::zeroed() };
 	let (l, t, r, b, frac) = if let Some((r, _, _)) = best {
+		*RENDER_RECT.lock().unwrap_or_else(|e| e.into_inner()) = Some((r.left, r.top, r.right, r.bottom));
 		let frac = *VIDEO_FRAC.lock().unwrap_or_else(|e| e.into_inner());
 		(r.left, r.top, r.right, r.bottom, frac)
 	} else {
@@ -421,6 +563,14 @@ fn reassert_confine() {
 	}
 	let mut cur: RECT = unsafe { std::mem::zeroed() };
 	let have = unsafe { GetClipCursor(&mut cur) } != 0;
+	if free_mode() {
+		// Free cursor: the rect is kept for the pointer normalization only. Drop a clip of
+		// ours still in force (the setting was just switched on, a pointer lock ended).
+		if have && (cur.left, cur.top, cur.right, cur.bottom) == (l, t, r, b) {
+			unsafe { ClipCursor(std::ptr::null()) };
+		}
+		return;
+	}
 	if have && (cur.left, cur.top, cur.right, cur.bottom) == (l, t, r, b) {
 		return;
 	}
@@ -490,7 +640,7 @@ fn handle_reclip() {
 		return;
 	}
 	reassert_confine();
-	if has_pos && !POINTER_LOCK.load(Ordering::SeqCst) {
+	if has_pos && !POINTER_LOCK.load(Ordering::SeqCst) && !free_mode() {
 		let rect = *CONFINE.lock().unwrap_or_else(|e| e.into_inner());
 		if let Some(rect) = rect {
 			let (x, y) = super::confine::unpack_pos(pos);
@@ -543,6 +693,9 @@ fn confine_to_video(app: &AppHandle, on: bool) {
 		return;
 	};
 	*CONFINE.lock().unwrap() = Some((l, t, r, b));
+	if free_mode() {
+		return; // free cursor: rect for the normalization only, no clip
+	}
 	let rc = RECT {
 		left: l,
 		top: t,
@@ -569,6 +722,12 @@ pub(super) fn set_stream_stalled(app: &AppHandle, stalled: bool) {
 }
 
 pub(super) fn engage(app: &AppHandle) {
+	HOVER_EDGE.store(false, Ordering::SeqCst);
+	engage_edge(app);
+}
+
+/// `engage` without resetting HOVER_EDGE (the handover sets it first).
+fn engage_edge(app: &AppHandle) {
 	PENDING_ENGAGE.store(u64::MAX, Ordering::SeqCst);
 	if STREAM_STALLED.load(Ordering::SeqCst) {
 		tracing::info!("engage refused: the stream is stopped");
@@ -620,6 +779,10 @@ pub(super) fn release_engage(app: &AppHandle) {
 
 /// `release_engage` with the caller named in the log line (focus loss vs overlay vs API).
 pub(super) fn release_engage_why(app: &AppHandle, why: &str) {
+	HOVER_EDGE.store(why == HOVER_LEAVE, Ordering::SeqCst);
+	if why == "overlay" {
+		HOVER_ARMED.store(false, Ordering::SeqCst); // the menu is opening over the video
+	}
 	pinch_end(true);
 	// Already disengaged (e.g. by a combo) but a clip is still in force: free it anyway.
 	if !ENGAGED.load(Ordering::SeqCst) && CONFINE.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
@@ -888,6 +1051,8 @@ fn handle_key(evdev: u32, down: bool) -> bool {
 		// (blocks disable()/set_focused() during recovery).
 		let (flush_tx, flush_evs, was_engaged, app_handle) = if ENGAGED.swap(false, Ordering::SeqCst) {
 			tracing::info!("kbd capture RELEASED (overlay combo, immediate)");
+			HOVER_EDGE.store(false, Ordering::SeqCst);
+			HOVER_ARMED.store(false, Ordering::SeqCst);
 			// Free the cursor too (the other release combos do): the menu must be usable and
 			// the pointer able to leave the window; without this the clip stayed until an
 			// Alt+Tab made Windows drop it.
@@ -981,6 +1146,8 @@ fn handle_key(evdev: u32, down: bool) -> bool {
 			let (flush_tx, flush_evs) = flush_held_wh(&mut g);
 			ENGAGED.store(false, Ordering::SeqCst);
 			tracing::info!("kbd capture RELEASED (3xRightCtrl)");
+			HOVER_EDGE.store(false, Ordering::SeqCst);
+			HOVER_ARMED.store(false, Ordering::SeqCst); // explicit let-go: no hover re-grab
 			clear_confine();
 			let app_handle = g.app.clone();
 			drop(g);
@@ -998,6 +1165,8 @@ fn handle_key(evdev: u32, down: bool) -> bool {
 	if combo_edge && evdev == 44 && g.ctrl_down && g.alt_down {
 		ENGAGED.store(false, Ordering::SeqCst);
 		tracing::info!("kbd capture RELEASED (Ctrl+Alt+Z)");
+		HOVER_EDGE.store(false, Ordering::SeqCst);
+		HOVER_ARMED.store(false, Ordering::SeqCst); // explicit let-go: no hover re-grab
 		clear_confine();
 		// Un-stick everything held on the host (the chord's up-strokes won't be forwarded).
 		// C16 fix: collect flush events + app handle under lock, drop guard BEFORE sending.
@@ -1189,7 +1358,11 @@ static POINTER_LOCK_REPORTED: AtomicBool = AtomicBool::new(false);
 pub fn set_pointer_lock(id: u64, on: bool) {
 	POINTER_LOCK_ID.store(id, Ordering::SeqCst);
 	POINTER_LOCK_REPORTED.store(on, Ordering::SeqCst);
-	POINTER_LOCK.store(on, Ordering::SeqCst);
+	let was = POINTER_LOCK.swap(on, Ordering::SeqCst);
+	// Free cursor: a pointer lock switches the confine on/off — apply it now, not on the tick.
+	if was != on && ENGAGED.load(Ordering::SeqCst) && super::free_pointer_session() {
+		request_reclip(None);
+	}
 }
 
 /// The pointer-lock state a session starting capture should use: its own last report.
@@ -1317,6 +1490,10 @@ fn handle_mouse_wh(msg: u32, x: i32, y: i32, data: u32) -> bool {
 		return false;
 	}
 	if !ENGAGED.load(Ordering::SeqCst) {
+		// Free cursor: a move may bring the pointer over the video → engage (on hook_thread).
+		if msg == WM_MOUSEMOVE && free_mode() {
+			request_hover();
+		}
 		return false; // disengaged → local mouse untouched (click-to-engage gate)
 	}
 	// Pointer lock: the raw-input deltas drive the host; keep the local cursor still (a
@@ -1348,10 +1525,30 @@ fn handle_mouse_wh(msg: u32, x: i32, y: i32, data: u32) -> bool {
 			// pointer. try_lock: never block in the hook callback.
 			let video = CONFINE.try_lock().ok().and_then(|c| *c);
 			if let Some(rect) = video.filter(|(l, t, r, b)| r - l > 1 && b - t > 1) {
+				let dragging = !g.held_buttons.is_empty();
 				drop(g);
+				let inside = super::confine::contains(rect, x, y);
+				if free_mode() && !dragging && inside && over_ovbtn(x, y) {
+					// Free cursor onto the overlay-open button: hand control back so the
+					// button takes the click (it sits on the video).
+					request_hover();
+					return false;
+				}
+				if !inside && free_mode() {
+					// Free cursor: the pointer is leaving the video. A drag that started inside
+					// keeps driving the remote (pinned to the edge) until its button is up;
+					// otherwise nothing is forwarded and hook_thread hands control back.
+					if dragging {
+						let (nx, ny) = super::confine::normalize(rect, x, y);
+						fwd(&tx, InputEvent::PointerMotion { x: nx, y: ny });
+					} else {
+						request_hover();
+					}
+					return false; // the cursor moves on locally
+				}
 				let (nx, ny) = super::confine::normalize(rect, x, y);
 				fwd(&tx, InputEvent::PointerMotion { x: nx, y: ny });
-				if !super::confine::contains(rect, x, y) {
+				if !inside {
 					// The move would leave the video: Windows dropped our clip (focus flap,
 					// another app's ClipCursor, display change) and the safety-net timer has
 					// not caught it yet. Suppress it — the cursor stays inside — and have
@@ -1415,8 +1612,12 @@ fn handle_mouse_wh(msg: u32, x: i32, y: i32, data: u32) -> bool {
 				drop(g);
 				return false;
 			}
+			let released_all = !down && g.held_buttons.is_empty();
 			drop(g);
 			fwd(&tx, InputEvent::PointerButton { button, down });
+			if released_all && free_mode() {
+				request_hover(); // a drag may have ended outside the video
+			}
 		}
 		WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
 			// High word of mouseData = signed wheel delta (120 per notch; precision touchpads
@@ -1510,6 +1711,7 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, _sta
 			PENDING_ENGAGE.store(u64::MAX, Ordering::SeqCst);
 		}
 		STREAM_STALLED.store(false, Ordering::SeqCst);
+		HOVER_ARMED.store(true, Ordering::SeqCst);
 		// Same for a host pointer lock: a stopped session's lock must not leak into this one,
 		// but this session's own report may already be here (it is sent only on change).
 		POINTER_LOCK.store(pointer_lock_for(id), Ordering::SeqCst);
@@ -1641,8 +1843,16 @@ pub fn disable() {
 
 /// Overlay open/close. On Windows the webview HW-decodes and the overlay floats
 /// over the still-live canvas, so there's no grab to release — capture stays ON
-/// (Ctrl+Shift+M only opens the menu; see `handle_key`). No-op for grab state.
-pub fn overlay_suspend(_suspend: bool) {}
+/// (Ctrl+Shift+M only opens the menu; see `handle_key`). Only the free-cursor handover
+/// reads it.
+pub fn overlay_suspend(suspend: bool) {
+	// Free cursor: no hover engage while the session menu is open; closing it re-arms the
+	// handover (the pointer is usually still over the video, so it engages on the next move).
+	OVERLAY_OPEN.store(suspend, Ordering::SeqCst);
+	if !suspend {
+		HOVER_ARMED.store(true, Ordering::SeqCst);
+	}
+}
 
 /// Window focus changed. Losing ALL app focus while engaged must DISENGAGE the
 /// capture (Linux parity): a global LL/Interception hook otherwise keeps eating the
@@ -1758,6 +1968,7 @@ fn hook_thread() {
 		globals().lock().unwrap().hook_thread_id = my_tid;
 		HOOK_TID.store(my_tid, Ordering::SeqCst);
 		RECLIP_QUEUED.store(false, Ordering::SeqCst);
+		HOVER_QUEUED.store(false, Ordering::SeqCst);
 		// Event-driven re-clip: our windows moving/resizing/minimizing/restoring (DPI and
 		// display changes move them too) and a desktop switch (UAC / secure desktop / lock
 		// screen drop every clip). The foreground case is in foreground_event.
@@ -1793,6 +2004,10 @@ fn hook_thread() {
 		while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
 			if msg.message == WM_RECLIP && msg.hwnd.is_null() {
 				handle_reclip();
+				continue;
+			}
+			if msg.message == WM_HOVER && msg.hwnd.is_null() {
+				handle_hover();
 				continue;
 			}
 			if msg.message == WM_TIMER && pinch_timer != 0 && msg.wParam == pinch_timer {

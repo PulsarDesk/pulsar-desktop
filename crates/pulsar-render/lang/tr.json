@@ -50,6 +50,8 @@
 	"audio.quality": "Ses kalitesi",
 	"mouse.sens": "Fare hassasiyeti",
 	"info.msens": "Oyun fareyi yakaladığında (imleç gizliyken) farenin hareketi bu katsayıyla gönderilir. 1× = farenin kendi hızı.",
+	"mouse.free": "Serbest imleç",
+	"info.mfree": "Açıkken imleç videodan çıkınca fare ve klavye bu bilgisayara döner, videoya geri gelince tıklamadan yeniden karşı tarafa geçer (Parsec gibi). Kapalıyken imleç videoya kilitli kalır; bırakmak için Ctrl+Alt+Z. Sadece uzak masaüstü modu.",
 	"aq.auto": "Otomatik",
 	"aq.standard": "Standart",
 	"aq.high": "Yüksek",

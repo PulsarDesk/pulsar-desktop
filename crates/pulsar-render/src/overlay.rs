@@ -286,6 +286,18 @@ pub fn mouse_sens() -> &'static str {
 	MOUSE_SENSES[(MOUSE_SENS.load(std::sync::atomic::Ordering::Relaxed) as usize).min(MOUSE_SENSES.len() - 1)]
 }
 
+/// "Serbest imleç" (remote mode, `ptrfree 0|1` from the app; the Görüntü toggle flips it
+/// optimistically and emits `ov set ptrfree on|off`, which the app persists + applies).
+static PTR_FREE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_ptr_free(on: bool) {
+	PTR_FREE.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn ptr_free() -> bool {
+	PTR_FREE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Two-way clipboard sync switch (`audio clip=0|1` from the app; the Tools toggle flips it
 /// optimistically and emits `ov set clipsync on|off` so the app persists + applies it).
 static CLIP_SYNC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
@@ -1342,7 +1354,7 @@ fn draw_stream(
 fn draw_display(
 	ui: &mut egui::Ui,
 	st: &OverlayState,
-	_mode: Mode,
+	mode: Mode,
 	deferred: &[(&'static str, String)],
 	sub_sel: &mut usize,
 	nav: Nav,
@@ -1352,7 +1364,9 @@ fn draw_display(
 	// Rows: the host monitor picker (only when the host exposes >1 display), the view-fit mode,
 	// then the "screen adaptation" toggle. up/down move the cursor; left/right change the row.
 	let multi = st.displays.len() > 1;
-	let rows = if multi { 4 } else { 3 };
+	// Remote mode adds the free-cursor row (game mode always keeps the cursor in the video).
+	let free_row = mode == Mode::Remote && cfg!(windows); // the handover is Windows-only so far
+	let rows = 3 + usize::from(multi) + usize::from(free_row);
 	if nav.down {
 		*sub_sel = (*sub_sel + 1).min(rows - 1);
 	}
@@ -1419,6 +1433,17 @@ fn draw_display(
 	{
 		cmds.push(OverlayCmd::Set("msens", v));
 	}
+	row += 1;
+	if free_row {
+		let cur = if ptr_free() { "on" } else { "off" };
+		if let Some(v) =
+			choice_row_i(ui, s == row, nav, t("mouse.free"), cur, &onoff, row, pending, Some(t("info.mfree")))
+		{
+			set_ptr_free(v == "on");
+			cmds.push(OverlayCmd::Set("ptrfree", v));
+		}
+	}
+	let _ = row;
 	pending_note(ui, deferred);
 	ui.add_space(6.0);
 	ui.label(

@@ -525,6 +525,7 @@ pub(crate) async fn start_remote_play(
 										aq_pref
 									);
 									let _ = writeln!(si, "msens {}", crate::kbdhook::mouse_sensitivity());
+									let _ = writeln!(si, "ptrfree {}", if crate::kbdhook::pointer_free() { 1 } else { 0 });
 								}
 								*caps_line.lock().unwrap() = line;
 								render_seed.lock().unwrap().audio = Some((true, game_mode, false));
@@ -770,6 +771,7 @@ pub(crate) async fn start_remote_play(
 											aq_pref
 										);
 										let _ = writeln!(si, "msens {}", crate::kbdhook::mouse_sensitivity());
+										let _ = writeln!(si, "ptrfree {}", if crate::kbdhook::pointer_free() { 1 } else { 0 });
 									}
 									*caps_line.lock().unwrap() = line;
 									render_seed.lock().unwrap().audio =
@@ -916,6 +918,7 @@ pub(crate) async fn start_remote_play(
 											aq_pref
 										);
 										let _ = writeln!(si, "msens {}", crate::kbdhook::mouse_sensitivity());
+										let _ = writeln!(si, "ptrfree {}", if crate::kbdhook::pointer_free() { 1 } else { 0 });
 									}
 									*caps_line.lock().unwrap() = line;
 									render_seed.lock().unwrap().audio = Some((true, game_mode, false));

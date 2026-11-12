@@ -47,3 +47,27 @@ While another app is focused, Pulsar acts on NO input (maintainer rule, 2026-11-
   otherwise they wait and engage when Pulsar gets the focus (Windows `PENDING_ENGAGE` in
   `kbdhook/imp.rs`; Linux's evdev grab is held only while focused anyway). On Windows a kiosk
   session now releases on focus loss too and re-engages on its own when focus returns.
+
+## Free cursor ("Serbest imleç", remote mode, Windows)
+
+Parsec-style handover, issue #3. Settings → Görüntü + the session menu's Görüntü view
+(`ui.pointerFree`, default OFF; `set_pointer_free` command; renderer `ptrfree 0|1` /
+`ov set ptrfree on|off`). Only remote-mode sessions (`kbdhook::set_session_remote` from
+`kbd_capture_start`); game mode always keeps the cursor clipped to the video.
+
+- `kbdhook/imp.rs` `free_mode()`: setting on + remote session + no host pointer lock + the
+  WH_MOUSE_LL mechanism (the Interception path sends relative deltas and freezes the local
+  cursor, so it keeps the clip). `CONFINE` still holds the video rect (pointer
+  normalization), but no `ClipCursor` is applied.
+- Engaged + the pointer leaves the video (no button held) → the move passes through, nothing
+  is forwarded, and `handle_hover` on hook_thread releases (`HOVER_LEAVE`). A drag that
+  started inside keeps driving the remote, pinned to the edge, until the button is up.
+- Disengaged + the pointer is over the video + Pulsar is the foreground app + no button
+  down → engage, no click. Not while the session menu is open (`overlay_suspend`), not while
+  the stream is stopped, and not after an explicit release (Ctrl+Alt+Z, 3×RightCtrl, the
+  overlay combo): `HOVER_ARMED` waits until the pointer has left the video once.
+- The renderer reports its overlay-open button (`vidsink-ovbtn`); over it the pointer counts
+  as outside the video, so the button stays clickable.
+- Handover edges skip the renderer tooltip (`kbdhook::hover_edge` in `render_hint`), except
+  the first engage of a session.
+- Linux/macOS: not implemented (the Settings row and the menu row are Windows-only).

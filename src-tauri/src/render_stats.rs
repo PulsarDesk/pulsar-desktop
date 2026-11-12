@@ -215,6 +215,11 @@ pub(crate) fn start_render_reader(
 				if v.len() == 4 {
 					crate::kbdhook::set_video_frac(v[0], v[1], v[2], v[3]);
 				}
+			} else if let Some(rest) = line.strip_prefix("vidsink-ovbtn ") {
+				// The overlay-open button (client fractions, `-` = hidden): the free-cursor
+				// handover keeps it clickable by counting it as outside the video.
+				let v: Vec<f32> = rest.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+				crate::kbdhook::set_ovbtn_frac((v.len() == 4).then(|| (v[0], v[1], v[2], v[3])));
 			} else if let Some((rest, from_hook)) = line
 				.strip_prefix("hkey ")
 				.map(|r| (r, true))
