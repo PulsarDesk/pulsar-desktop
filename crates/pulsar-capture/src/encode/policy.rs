@@ -25,9 +25,24 @@ pub(crate) const REF_LOG_LEN: usize = 64;
 /// Bits per pixel per frame below which the stream counts as low-budget. A 1080p120 stream
 /// crosses it at ~25 Mbit/s, 1080p60 at ~12 Mbit/s, 720p60 at ~5.5 Mbit/s — LAN rates sit
 /// above it, the mobile / WAN rates the field test ran at (0.3-15 Mbit/s) far below. A
-/// low-budget stream gets the rate-control settings that keep it near its target (two-pass,
-/// keyframe scale 1) and only one keyframe per fresh encoder (see `scheduled_idr`).
+/// low-budget stream gets the keyframe settings that keep it near its target (keyframe scale
+/// 1, only one keyframe per fresh encoder — see `scheduled_idr`). The two-pass rate control
+/// has its own, lower line: [`TWO_PASS_BPP`].
 pub(crate) const LOW_BUDGET_BPP: f64 = 0.1;
+
+/// Bits per pixel per frame below which the quarter-resolution first pass is worth what it
+/// costs: 1080p120 / 1200p120 under ~10-11 Mbit/s, 1080p60 under ~5, 720p60 under ~2.2.
+///
+/// It used to follow [`LOW_BUDGET_BPP`]. But the remote-desktop bitrate ceiling sits at
+/// ~0.06 bpp (16.8 Mbit/s at 1200p120), so every remote session on a LAN ran two-pass for
+/// good — and the first pass is not free: measured on an RTX 3080 Laptop at 1200p120 HEVC
+/// (2026-11-13) it kept the host process on 84 % of the GPU's 3D engine (0.7 % single-pass:
+/// the driver downscales each frame there) and 18 % of a CPU core (5 %). That engine is the
+/// one a game renders on. With the band of [`BUDGET_HYSTERESIS`] a stream that started thin
+/// leaves the first pass at 0.05 bpp (13.8 Mbit/s at 1200p120) — under every ceiling the
+/// client sets (≥ 0.060) with room to spare, so a session that hovers below its ceiling is
+/// not left paying for it.
+pub(crate) const TWO_PASS_BPP: f64 = 0.04;
 
 /// Highest pixel rate (pixels/s) the two-pass rate control is used at: 1920×1200 at 120 fps.
 /// The quarter-resolution first pass adds roughly a quarter of the motion search per frame;
@@ -64,24 +79,73 @@ pub(crate) fn low_budget_live(was_low: bool, bps: u32, w: u32, h: u32, fps: u32)
 	}
 }
 
+/// The frame budget is thin enough for the first pass (see [`TWO_PASS_BPP`]), judged for a
+/// fresh encoder.
+pub(crate) fn thin_budget(bps: u32, w: u32, h: u32, fps: u32) -> bool {
+	bits_per_pixel(bps, w, h, fps) < TWO_PASS_BPP
+}
+
+/// [`thin_budget`] after a live bitrate change, from the class the encoder runs in — the same
+/// band as [`low_budget_live`], so a rate near the line does not toggle the first pass.
+pub(crate) fn thin_budget_live(was_thin: bool, bps: u32, w: u32, h: u32, fps: u32) -> bool {
+	let bpp = bits_per_pixel(bps, w, h, fps);
+	if was_thin {
+		bpp < TWO_PASS_BPP * BUDGET_HYSTERESIS
+	} else {
+		bpp < TWO_PASS_BPP / BUDGET_HYSTERESIS
+	}
+}
+
 /// Use NVENC's quarter-resolution two-pass rate control (`NV_ENC_TWO_PASS_QUARTER_RESOLUTION`,
 /// Sunshine's default) for this stream. The first pass measures the frame's complexity before
 /// QPs are chosen, so a scene change does not blow through the one-frame VBV and the next
 /// frames do not starve to pay it back — what matters when the frame budget is a few KB. It
-/// adds no frame of delay (no lookahead) but costs encode time, so a LAN-rate stream keeps the
-/// single pass it has today. `env` = `PULSAR_NVENC_MULTIPASS` ("0" never, "1" always).
+/// adds no frame of delay (no lookahead) but costs encode time and GPU ([`TWO_PASS_BPP`]), so
+/// only a thin stream gets it. `env` = `PULSAR_NVENC_MULTIPASS` ("0" never, "1" always).
 pub(crate) fn use_two_pass(bps: u32, w: u32, h: u32, fps: u32, env: Option<&str>) -> bool {
-	two_pass_for(low_budget(bps, w, h, fps), w, h, fps, env)
+	two_pass_for(thin_budget(bps, w, h, fps), w, h, fps, env)
 }
 
-/// `use_two_pass` for a stream whose budget class is already known (`low`).
-pub(crate) fn two_pass_for(low: bool, w: u32, h: u32, fps: u32, env: Option<&str>) -> bool {
+/// `use_two_pass` for a stream whose budget is already judged (`thin`).
+pub(crate) fn two_pass_for(thin: bool, w: u32, h: u32, fps: u32, env: Option<&str>) -> bool {
 	match env.map(str::trim) {
 		Some("0") => false,
 		Some("1") => true,
-		_ => low && w as f64 * h as f64 * fps.max(1) as f64 <= TWO_PASS_MAX_PIXEL_RATE,
+		_ => thin && w as f64 * h as f64 * fps.max(1) as f64 <= TWO_PASS_MAX_PIXEL_RATE,
 	}
 }
+
+/// The NVENC preset level (1 = fastest … 7 = slowest) for a stream. `env` =
+/// `PULSAR_NVENC_PRESET` ("1".."7" forces one).
+///
+/// Game mode (`low_latency`): P1 — the picture changes every frame and the GPU belongs to the
+/// game. Remote desktop leans on quality (text, a picture that sits still): P4 — while that
+/// is cheap. The encode time grows with the pixels per second, the quality gain does not, so
+/// above [`QUALITY_PRESET_MAX_PIXEL_RATE`] the remote stream takes [`REMOTE_FAST_PRESET`].
+///
+/// Measured on an RTX 3080 Laptop (2026-11-14, HEVC, CBR, single pass, `testsrc2`): the
+/// encoder's utilisation at 1200p120 is 55 % with P4, 47 % P3, 39 % P2, 20 % P1 (26 / 23 /
+/// 18 / 11 % at 1200p60; the tuning makes no difference), while P4 is ahead of P1 by 0.03 dB
+/// PSNR at 16.8 Mbit/s and 0.04 dB at 8 Mbit/s there — and by a little more where it stays
+/// (SSIM 0.9706 vs 0.9686 at 1080p30 / 2 Mbit/s).
+pub(crate) fn preset_level(low_latency: bool, w: u32, h: u32, fps: u32, env: Option<&str>) -> u8 {
+	if let Some(n) = env.and_then(|v| v.trim().parse::<u8>().ok()).filter(|n| (1..=7).contains(n)) {
+		return n;
+	}
+	if low_latency {
+		1
+	} else if w as f64 * h as f64 * fps.max(1) as f64 <= QUALITY_PRESET_MAX_PIXEL_RATE {
+		4
+	} else {
+		REMOTE_FAST_PRESET
+	}
+}
+
+/// Highest pixel rate (pixels/s) a remote-desktop stream keeps the quality preset (P4) at:
+/// 1920×1200 at 60 fps. See [`preset_level`].
+pub(crate) const QUALITY_PRESET_MAX_PIXEL_RATE: f64 = 1920.0 * 1200.0 * 60.0;
+/// The preset of a remote-desktop stream above that rate.
+pub(crate) const REMOTE_FAST_PRESET: u8 = 1;
 
 /// Reference-buffer depth for an RFI stream at `w`×`h`: as deep as level 5.1 allows at this
 /// size (so the encoder does not have to raise the level — a level-6 stream is one a hardware
@@ -479,16 +543,60 @@ mod tests {
 		assert!(!low_budget(50_000_000, 1920, 1080, 120));
 		assert!(!low_budget(20_000_000, 1920, 1080, 60));
 		assert!(!use_two_pass(50_000_000, 1920, 1080, 120, None));
-		// Field test: 1080p120 at 4 Mbit/s and 15 Mbit/s — low-budget, two-pass.
+		// Field test: 1080p120 at 4 Mbit/s and 15 Mbit/s — low-budget (keyframe settings)…
 		assert!(low_budget(4_000_000, 1920, 1080, 120));
-		assert!(use_two_pass(15_000_000, 1920, 1080, 120, None));
+		assert!(low_budget(15_000_000, 1920, 1080, 120));
+		// …and the first pass only where the frame budget is really thin.
+		assert!(use_two_pass(4_000_000, 1920, 1080, 120, None));
+		assert!(use_two_pass(3_000_000, 1920, 1080, 60, None));
+		assert!(use_two_pass(2_000_000, 1280, 720, 60, None));
+		assert!(!use_two_pass(15_000_000, 1920, 1080, 120, None));
+		// The remote-desktop ceilings (2026-11-13: 16.8 Mbit at 1200p120 ran two-pass for good
+		// and kept the host on 84 % of the GPU's 3D engine).
+		assert!(!use_two_pass(16_817_000, 1920, 1200, 120, None));
+		assert!(!use_two_pass(15_136_000, 1920, 1080, 120, None));
+		assert!(!use_two_pass(15_000_000, 1920, 1080, 60, None));
 		// 4K120 at 40 Mbit/s is low-budget but too many pixels for the extra pass.
 		assert!(low_budget(40_000_000, 3840, 2160, 120));
-		assert!(!use_two_pass(40_000_000, 3840, 2160, 120, None));
+		assert!(!use_two_pass(8_000_000, 3840, 2160, 120, None));
 		// The env knob wins both ways.
 		assert!(!use_two_pass(4_000_000, 1920, 1080, 120, Some("0")));
 		assert!(use_two_pass(50_000_000, 1920, 1080, 120, Some("1")));
 		assert!(use_two_pass(4_000_000, 1920, 1080, 120, Some("auto")));
+	}
+
+	/// A stream that started thin (a cautious start, a bad probe) leaves the first pass on its
+	/// way up — below the ceiling, or it would keep paying for it all session.
+	#[test]
+	fn the_first_pass_ends_under_every_ceiling() {
+		let (w, h, fps) = (1920, 1200, 120);
+		assert!(thin_budget(8_857_000, w, h, fps), "a thin start");
+		assert!(thin_budget_live(true, 12_000_000, w, h, fps), "inside the band: stays");
+		assert!(!thin_budget_live(true, 16_817_000, w, h, fps), "the remote ceiling: off");
+		assert!(!thin_budget_live(false, 11_000_000, w, h, fps), "inside the band: stays off");
+		assert!(thin_budget_live(false, 8_000_000, w, h, fps), "a thin link: on again");
+		// Game mode's ceiling at the same size is far above.
+		assert!(!thin_budget_live(true, 28_000_000, w, h, fps));
+	}
+
+	#[test]
+	fn the_preset_follows_the_mode_and_the_pixel_rate() {
+		// Game: the fastest, whatever the size.
+		assert_eq!(preset_level(true, 1920, 1080, 60, None), 1);
+		assert_eq!(preset_level(true, 3840, 2160, 120, None), 1);
+		// Remote: the quality preset while it is cheap…
+		assert_eq!(preset_level(false, 1920, 1080, 30, None), 4);
+		assert_eq!(preset_level(false, 1920, 1200, 60, None), 4);
+		assert_eq!(preset_level(false, 2560, 1440, 30, None), 4);
+		// …a fast one where every frame costs the most.
+		assert_eq!(preset_level(false, 1920, 1200, 120, None), REMOTE_FAST_PRESET);
+		assert_eq!(preset_level(false, 1920, 1080, 90, None), REMOTE_FAST_PRESET);
+		assert_eq!(preset_level(false, 3840, 2160, 60, None), REMOTE_FAST_PRESET);
+		// The env knob.
+		assert_eq!(preset_level(false, 1920, 1200, 120, Some("4")), 4);
+		assert_eq!(preset_level(true, 1920, 1080, 60, Some(" 3 ")), 3);
+		assert_eq!(preset_level(true, 1920, 1080, 60, Some("9")), 1, "out of range: ignored");
+		assert_eq!(preset_level(false, 1920, 1080, 60, Some("auto")), 4);
 	}
 
 	/// A live bitrate change re-judges the class with hysteresis: the cautious-start build

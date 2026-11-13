@@ -200,18 +200,29 @@ impl Encoder {
 		};
 
 		// -- 6. Get the preset config as a baseline. `low_latency` picks the tradeoff,
-		//    mirroring the old ffmpeg path: P1 + ULTRA_LOW_LATENCY for the gaming/
-		//    low-latency profile, P4 + LOW_LATENCY for the quality-leaning profile. ------
-		let (preset_guid, tuning) = if p.low_latency {
-			(
-				nvenc::NV_ENC_PRESET_P1_GUID,
-				nvenc::NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY,
-			)
+		//    mirroring the old ffmpeg path: ULTRA_LOW_LATENCY tuning for the gaming profile,
+		//    LOW_LATENCY for the quality-leaning one; the preset level comes from
+		//    `policy::preset_level` (game P1; remote P4 while that is cheap, a faster one at
+		//    high pixel rates). The presets above P4 are not offered (too slow for a live
+		//    stream): a forced 5-7 runs as P4. ------
+		let preset_n = policy::preset_level(
+			p.low_latency,
+			w,
+			h,
+			fps,
+			std::env::var("PULSAR_NVENC_PRESET").ok().as_deref(),
+		)
+		.min(4);
+		let preset_guid = match preset_n {
+			1 => nvenc::NV_ENC_PRESET_P1_GUID,
+			2 => nvenc::NV_ENC_PRESET_P2_GUID,
+			3 => nvenc::NV_ENC_PRESET_P3_GUID,
+			_ => nvenc::NV_ENC_PRESET_P4_GUID,
+		};
+		let tuning = if p.low_latency {
+			nvenc::NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY
 		} else {
-			(
-				nvenc::NV_ENC_PRESET_P4_GUID,
-				nvenc::NV_ENC_TUNING_INFO_LOW_LATENCY,
-			)
+			nvenc::NV_ENC_TUNING_INFO_LOW_LATENCY
 		};
 		// Codec GUID + matching profile GUID for the requested codec. H.264 keeps its exact
 		// previous values (byte-for-byte unchanged); HEVC/AV1 use their Main profile.
@@ -333,6 +344,7 @@ impl Encoder {
 		// cautious low start that climbs to a LAN rate leaves it. PULSAR_NVENC_MULTIPASS=0/1
 		// overrides the pass choice.
 		let low_budget = policy::low_budget(br, w, h, fps);
+		let thin_budget = policy::thin_budget(br, w, h, fps);
 		let two_pass = policy::use_two_pass(
 			br,
 			w,
@@ -452,8 +464,8 @@ impl Encoder {
 			.map_err(|e| format!("nvEncInitializeEncoder: {e}"))?;
 		let init_params = ip; // retained on the Encoder for live bitrate reconfigure
 		cap_dbg(&format!(
-			"nvenc rc {w}x{h}@{fps} {} kbps: bpp={:.3} low_budget={low_budget} two_pass={two_pass} \
-			 rfi={rfi} (caps {rfi_caps}) dpb={dpb}",
+			"nvenc rc {w}x{h}@{fps} {} kbps: bpp={:.3} preset=P{preset_n} low_budget={low_budget} \
+			 two_pass={two_pass} rfi={rfi} (caps {rfi_caps}) dpb={dpb}",
 			br / 1000,
 			policy::bits_per_pixel(br, w, h, fps),
 		));
@@ -543,6 +555,7 @@ impl Encoder {
 			win: policy::EncWindow::default(),
 			mark_recovery: false,
 			low_budget,
+			thin_budget,
 			two_pass,
 			preset_kf_scale,
 			// B3: VideoProcessor view caches start empty; `blt_bgra_to_nv12` fills them lazily

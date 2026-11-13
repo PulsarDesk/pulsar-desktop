@@ -86,9 +86,16 @@ All paths emit **RTP/H.264(+HEVC/AV1) over UDP**.
 - **NVENC** (`encode/policy.rs`, `encoder.rs`, `nvenc.rs`): RFI DPB per level 5.1 (16/12/8),
   `numRefL0 = 1`, RFI off if caps 28/47 report 0; `RefTracker` decides invalidate vs decline
   (never forces an IDR; the client's keyframe request heals). Low-budget (< 0.1 bpp/frame):
-  quarter-res two-pass (≤ 1920×1200×120 px/s) + `lowDelayKeyFrameScale = 1`, one IDR per fresh
-  encoder; re-judged live on bitrate changes (×/÷1.25 hysteresis); `PULSAR_NVENC_MULTIPASS=0/1`.
-  LAN rates unchanged. Fixed binding layout bugs vs SDK 12.2 (VUI pad, AV1 flag bits,
+  `lowDelayKeyFrameScale = 1`, one IDR per fresh encoder. Quarter-res two-pass only on a THIN
+  stream (< 0.04 bpp/frame, ≤ 1920×1200×120 px/s; `TWO_PASS_BPP`): it used to follow the
+  low-budget line, and the remote-desktop ceiling (~0.06 bpp) kept every LAN remote session on
+  it — the first pass held the host on 84 % of the GPU's 3D engine at 1200p120 (0.7 % without;
+  measured 2026-11-13, LOCAL, unpushed). Both classes re-judged live on bitrate changes
+  (×/÷1.25 hysteresis); `PULSAR_NVENC_MULTIPASS=0/1`. Preset (`policy::preset_level`,
+  `PULSAR_NVENC_PRESET=1..4`): game P1 + ULTRA_LOW_LATENCY; remote LOW_LATENCY with P4 up to
+  1920×1200×60 px/s and P1 above (encoder utilisation at 1200p120: P4 55 %, P3 47 %, P2 39 %,
+  P1 20 %; P4 is 0.03 dB PSNR ahead of P1 there).
+  Fixed binding layout bugs vs SDK 12.2 (VUI pad, AV1 flag bits,
   `NV_ENC_CONFIG` = 3584 B, offset asserts). `mf.rs` answers RFI with Err. Rate/IDR log:
   `C:\Users\Public\pulsar-capture-dbg.txt`.
 

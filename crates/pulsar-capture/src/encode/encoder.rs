@@ -131,10 +131,11 @@ pub struct Encoder {
 	pub(super) win: EncWindow,
 	/// The next access unit is an RFI recovery frame: prefix it with `recovery_sei`.
 	pub(super) mark_recovery: bool,
-	/// The rate-control class the encoder runs in (`policy::low_budget` / `use_two_pass`) and
-	/// the preset's keyframe scale to restore when it leaves the low-budget class — re-judged
-	/// on each live bitrate change (`reconfigure_bitrate`).
+	/// The rate-control class the encoder runs in (`policy::low_budget` / `thin_budget` /
+	/// `use_two_pass`) and the preset's keyframe scale to restore when it leaves the low-budget
+	/// class — re-judged on each live bitrate change (`reconfigure_bitrate`).
 	pub(super) low_budget: bool,
+	pub(super) thin_budget: bool,
 	pub(super) two_pass: bool,
 	pub(super) preset_kf_scale: u8,
 }
@@ -208,9 +209,11 @@ impl Encoder {
 		}
 		let bps = kbps.saturating_mul(1000).max(1);
 		let low = super::policy::low_budget_live(self.low_budget, bps, self.width, self.height, self.fps);
+		let thin = super::policy::thin_budget_live(self.thin_budget, bps, self.width, self.height, self.fps);
 		let env = std::env::var("PULSAR_NVENC_MULTIPASS").ok();
-		let two_pass = super::policy::two_pass_for(low, self.width, self.height, self.fps, env.as_deref());
+		let two_pass = super::policy::two_pass_for(thin, self.width, self.height, self.fps, env.as_deref());
 		let mut class_change = low != self.low_budget || two_pass != self.two_pass;
+		let mut refused = false;
 		if class_change {
 			self.set_rc_class(low, two_pass);
 		}
@@ -242,6 +245,7 @@ impl Encoder {
 			// and change the bitrate alone (the next resolution / fps rebuild re-judges it).
 			self.set_rc_class(self.low_budget, self.two_pass);
 			class_change = false;
+			refused = true;
 			res = super::d3d::chk(f(self.enc, &mut rc), &self.fns, self.enc);
 		}
 		res.map_err(|e| format!("nvEncReconfigureEncoder({kbps} kbps): {e}"))?;
@@ -252,6 +256,10 @@ impl Encoder {
 			));
 			self.low_budget = low;
 			self.two_pass = two_pass;
+		}
+		// (A refused change keeps the judgement the running class was built from.)
+		if !refused {
+			self.thin_budget = thin;
 		}
 		// Pacing (Stage 1) reads this for packets_per_ms; keep it in lockstep with the encoder.
 		self.bitrate_kbps

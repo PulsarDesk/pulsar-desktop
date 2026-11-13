@@ -168,6 +168,20 @@ pub const NV_ENC_PRESET_P1_GUID: GUID = GUID::from_values(
 	0x4CF8,
 	[0x80, 0xC7, 0x29, 0x88, 0x71, 0x59, 0x0E, 0xBF],
 );
+// Preset P2 = F581CFB8-88D6-4381-93F0-DF13F9C27DAB
+pub const NV_ENC_PRESET_P2_GUID: GUID = GUID::from_values(
+	0xF581CFB8,
+	0x88D6,
+	0x4381,
+	[0x93, 0xF0, 0xDF, 0x13, 0xF9, 0xC2, 0x7D, 0xAB],
+);
+// Preset P3 = 36850110-3A07-441F-94D5-3670631F91F6
+pub const NV_ENC_PRESET_P3_GUID: GUID = GUID::from_values(
+	0x36850110,
+	0x3A07,
+	0x441F,
+	[0x94, 0xD5, 0x36, 0x70, 0x63, 0x1F, 0x91, 0xF6],
+);
 // Preset P4 (balanced) = 90A7B826-DF06-4862-B9D2-CD6D73A08681
 pub const NV_ENC_PRESET_P4_GUID: GUID = GUID::from_values(
 	0x90A7B826,
