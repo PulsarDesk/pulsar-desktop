@@ -153,6 +153,29 @@ pub(super) unsafe fn device_vendor_id(device: &ID3D11Device) -> Option<u32> {
 	Some(desc.VendorId)
 }
 
+/// PCI vendor ids of the hardware GPUs in this machine (0x10DE NVIDIA, 0x1002 AMD, 0x8086
+/// Intel), in adapter order; the software (WARP) adapter is left out. Enumeration only — no
+/// device is created, so it answers at once even while a driver is not responding.
+pub(crate) fn hardware_gpu_vendors() -> Vec<u32> {
+	let mut out = Vec::new();
+	// SAFETY: plain DXGI enumeration on a factory owned by this function.
+	unsafe {
+		let Ok(factory) = CreateDXGIFactory1::<IDXGIFactory1>() else { return out };
+		let mut i = 0u32;
+		while let Ok(adapter) = factory.EnumAdapters1(i) {
+			i += 1;
+			let Ok(desc) = adapter.GetDesc1() else { continue };
+			if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0 {
+				continue;
+			}
+			if !out.contains(&desc.VendorId) {
+				out.push(desc.VendorId);
+			}
+		}
+	}
+	out
+}
+
 /// Enumerate adapters and create a D3D11 device on the FIRST hardware NVIDIA adapter
 /// (VendorId 0x10DE), with `BGRA_SUPPORT | VIDEO_SUPPORT` (the VideoProcessor needs
 /// VIDEO_SUPPORT — the AMD capture device in dxgi.rs does NOT set it). This is the

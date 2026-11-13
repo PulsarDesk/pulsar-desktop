@@ -129,6 +129,11 @@ pub fn nvenc_supported() -> bool {
 	!nvenc_codecs().is_empty()
 }
 
+/// PCI vendor ids of this machine's hardware GPUs (see `d3d::hardware_gpu_vendors`).
+pub fn gpu_vendors() -> Vec<u32> {
+	d3d::hardware_gpu_vendors()
+}
+
 /// Open one NVENC session on a fresh NVIDIA D3D11 device, enumerate the encode GUIDs it
 /// supports, close it. Err = no usable NVENC (no NVIDIA adapter, no driver DLL, or no
 /// encode silicon).

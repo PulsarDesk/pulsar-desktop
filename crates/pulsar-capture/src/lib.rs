@@ -383,7 +383,7 @@ pub(crate) mod dxgi;
 #[cfg(windows)]
 mod encode;
 #[cfg(windows)]
-pub use encode::{nvenc_codecs, nvenc_supported};
+pub use encode::{gpu_vendors, nvenc_codecs, nvenc_supported};
 /// Rare diagnostic lines (capture source picks, probe verdicts) — the encoder's init log file.
 #[cfg(windows)]
 pub(crate) use encode::cap_dbg as encode_log;
@@ -404,6 +404,11 @@ pub fn nvenc_supported() -> bool {
 #[cfg(not(windows))]
 pub fn nvenc_codecs() -> &'static [Codec] {
 	&[]
+}
+/// Off Windows nothing asks (the GPU vendor gate is for the Windows encoder probes).
+#[cfg(not(windows))]
+pub fn gpu_vendors() -> Vec<u32> {
+	Vec::new()
 }
 // Per-window Windows Graphics Capture source (Phase 2b) — an alternative to `dxgi` that
 // produces the same per-frame BGRA ID3D11Texture2D the encoder consumes (see wgc.rs).
@@ -830,6 +835,16 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 						return;
 					}
 				};
+				// Asked to stop while this build sat inside a driver call (2026-11-13: device
+				// creation on a wedged NVIDIA driver returned after 75 min): the host gave up on
+				// it long ago and streams another way — leave without sending a single packet.
+				if stop_t.load(Ordering::Relaxed) {
+					cap_log(&format!("build #{build_no} finished after stop — discarded"));
+					enc.flush_and_close();
+					drop(enc);
+					drop(cap);
+					break;
+				}
 				prev_good_output = output_idx;
 				stats_t.source.store(
 					if cfg.window_hwnd.is_some() { 3 } else { source.code() },
@@ -1042,10 +1057,19 @@ pts += 1;
 			Err(io::Error::new(io::ErrorKind::Other, msg))
 		}
 		Err(_) => {
-			// Timed out (or the sender was dropped without a value): tell the thread to stop,
-			// join it, and report so the host falls back to ffmpeg.
+			// Timed out (or the sender was dropped without a value): tell the thread to stop and
+			// report so the host falls back to ffmpeg. The thread is joined only if it exits
+			// soon: one stuck inside a driver call (device creation on a wedged NVIDIA driver
+			// blocks for hours, uninterruptibly) would hold the caller — the host's stream
+			// handler — just as long. Detached, it sees the stop flag when the call returns.
 			stop.store(true, std::sync::atomic::Ordering::SeqCst);
-			let _ = thread.join();
+			let t0 = std::time::Instant::now();
+			while alive.load(std::sync::atomic::Ordering::SeqCst) && t0.elapsed() < INIT_STOP_WAIT {
+				std::thread::sleep(std::time::Duration::from_millis(10));
+			}
+			if !alive.load(std::sync::atomic::Ordering::SeqCst) {
+				let _ = thread.join();
+			}
 			Err(io::Error::new(
 				io::ErrorKind::TimedOut,
 				"capture init timed out",
@@ -1125,6 +1149,9 @@ pub fn start_capture_encode(_cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 /// rebuilds it on the other source (DXGI ↔ WGC). A healthy build delivers its first frame in
 /// well under 100 ms; DXGI's initial retry budget for a mode change stays far below this.
 const NO_FRAME_SWITCH: std::time::Duration = std::time::Duration::from_millis(2500);
+/// How long a capture thread that missed its init deadline gets to exit before it is detached.
+#[cfg(windows)]
+const INIT_STOP_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Capture-thread rebuild lifecycle log. Debug-builds only (no-op in release).
 /// Previously wrote to `C:\Users\Public\pulsar-capture-dbg.txt` unconditionally;
