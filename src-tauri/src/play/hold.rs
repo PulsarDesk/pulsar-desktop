@@ -540,7 +540,7 @@ pub(super) async fn hold_session(
 	// Every host monitor `(idx, width, height, refresh Hz)` and the client's own fps target:
 	// a monitor switch rebuilds the adaptive ladder for the new monitor (its size, and the fps
 	// it can capture at, capped by what this display shows).
-	host_displays: Vec<(u32, u32, u32, u32)>,
+	mut host_displays: Vec<(u32, u32, u32, u32)>,
 	client_fps: u32,
 	// The adaptive cap for a DIRECT path (the user's configured bitrate, else the auto cap):
 	// a relayed session that upgrades to direct mid-stream drops the relay's cap for this.
@@ -1259,6 +1259,36 @@ pub(super) async fn hold_session(
 								// motion while it lasts, absolute again once it shows.
 								tracing::info!(on, "host pointer lock");
 								crate::kbdhook::set_pointer_lock(id, on);
+							}
+							DataMsg::Displays(list) => {
+								// The host's monitors changed mid-session: refresh the monitor
+								// picker everywhere — the adaptive ladder's monitor table, the
+								// renderer overlay (its caps line `displays=` token, re-sent) and
+								// the webview session menu (`host-displays`).
+								tracing::info!(count = list.len(), "host monitors changed");
+								host_displays = list.iter().map(|d| (d.idx, d.width, d.height, d.refresh_hz)).collect();
+								let caps_line = tauri::Manager::state::<crate::state::AppState>(&app_ev)
+									.plays
+									.lock()
+									.unwrap()
+									.get(&id)
+									.map(|p| p.caps_line.clone());
+								if let Some(caps_line) = caps_line {
+									let token = format!("displays={}", super::fmt_displays(&list));
+									let mut line = caps_line.lock().unwrap();
+									if !line.is_empty() {
+										*line = line
+											.split_whitespace()
+											.map(|kv| if kv.starts_with("displays=") { token.clone() } else { kv.to_string() })
+											.collect::<Vec<_>>()
+											.join(" ");
+										use std::io::Write as _;
+										if let Some(si) = render_stdin.lock().unwrap().as_mut() {
+											let _ = writeln!(si, "{line}");
+										}
+									}
+								}
+								let _ = app_ev.emit("host-displays", (id, list));
 							}
 							DataMsg::HostPointer { active, x, y } => {
 								// The person at the host is on their own mouse (remote mode): the

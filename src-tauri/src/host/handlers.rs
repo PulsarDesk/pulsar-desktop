@@ -351,6 +351,44 @@ fn spawn_pointer_lock_watch(out: tokio::sync::mpsc::Sender<DataMsg>, epoch: crat
 	});
 }
 
+/// Tell the client when this host's monitor list changes mid-stream (a monitor plugged in or
+/// removed, a resolution / refresh / primary change): `DataMsg::Displays` with the fresh list,
+/// so its monitor picker matches without a reconnect. Windows: woken by `WM_DISPLAYCHANGE`
+/// (display_watch.rs), then the list is read again after a short settle (the new layout
+/// lands over a moment); elsewhere: compared every 3 s. Sends only when the list really
+/// differs. Lives as long as this stream generation.
+fn spawn_display_list_watch(out: tokio::sync::mpsc::Sender<DataMsg>, epoch: crate::process::ProcEpoch) {
+	use std::sync::atomic::Ordering;
+	let born = epoch.load(Ordering::SeqCst);
+	let _ = std::thread::Builder::new().name("display-list".into()).spawn(move || {
+		let mut seen = crate::display_watch::generation();
+		let mut last = crate::process::host_displays();
+		// The epoch / channel checks run at least this often even with no display event.
+		let tick = if crate::display_watch::EVENT_DRIVEN {
+			std::time::Duration::from_secs(1)
+		} else {
+			std::time::Duration::from_secs(3)
+		};
+		while epoch.load(Ordering::SeqCst) == born && !out.is_closed() {
+			let g = crate::display_watch::wait_change(seen, tick);
+			if crate::display_watch::EVENT_DRIVEN {
+				if g == seen {
+					continue;
+				}
+				// Several broadcasts come per change; let them and the layout settle.
+				std::thread::sleep(std::time::Duration::from_millis(800));
+				seen = crate::display_watch::generation();
+			}
+			let now = crate::process::host_displays();
+			if now != last {
+				tracing::info!(count = now.len(), "host monitors changed → client");
+				let _ = out.try_send(DataMsg::Displays(now.clone()));
+				last = now;
+			}
+		}
+	});
+}
+
 /// Remote-desktop sessions: tell the client while the person AT this host is using their own
 /// mouse (`takeover::active`, Windows + Linux detection), so it can show the host pointer
 /// labelled "Host" next to its own one (issue #7). ~30 Hz while active (only on movement, plus
@@ -3454,6 +3492,7 @@ pub(super) fn make_on_stream(
 		start_audio_and_mute(&procs, &ffmpeg, &app_h, adest, &req, sid, audio_pid, &proc_epoch);
 		#[cfg(windows)]
 		spawn_pointer_lock_watch(stats_out.clone(), proc_epoch.clone());
+		spawn_display_list_watch(stats_out.clone(), proc_epoch.clone());
 		if !req.game_mode {
 			spawn_host_pointer_watch(
 				stats_out.clone(),

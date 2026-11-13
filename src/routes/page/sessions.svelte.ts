@@ -4,7 +4,7 @@
 // markup stays small; behavior is identical to the inline version it replaced.
 
 import { savedStreamPicks } from '#lib/streamPicks.js';
-import { api, isTauri, onPeerAvatar, onPeerName, onPlayEnded, onPlayError, onPlayStats, onPlayOptimizing, onPlayReady, setFullscreen } from '#lib/api.js';
+import { api, isTauri, onHostDisplays, onPeerAvatar, onPeerName, onPlayEnded, onPlayError, onPlayStats, onPlayOptimizing, onPlayReady, setFullscreen } from '#lib/api.js';
 import { recordConnection, setPeerIdentity } from '#lib/peers.svelte.js';
 import { ui, saveUi } from '#lib/settings.svelte.js';
 import { t } from '#lib/i18n.svelte.js';
@@ -427,6 +427,10 @@ export class SessionManager {
 		// the session's target id; a push that beats the play id is parked until #patch sets it.
 		onPeerAvatar((e) => this.#identity(e.peer, { avatar: e.dataUrl }));
 		onPeerName((e) => this.#identity(e.peer, { name: e.name }));
+		// The host's monitors changed mid-session → the session menu's monitor picker follows.
+		onHostDisplays((e) => {
+			this.sessions = this.sessions.map((s) => (s.playId === e.id ? { ...s, hostDisplays: e.displays } : s));
+		});
 		// A session can die during the connecting-hold window (after start_remote_play
 		// resolves but before play-ready) — Session.svelte isn't mounted yet to see
 		// `play-ended` then, so close the tab here regardless of phase. (Local host-game

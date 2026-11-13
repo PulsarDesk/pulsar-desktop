@@ -2,7 +2,7 @@
 // prompts, and the client-side play telemetry stream. Re-exported by `api.ts`.
 
 import { isTauri } from './api.invoke';
-import type { AuthPrompt, DataText, FileBegin, FileRecv, FsEntries, LocalCaps, SessionEvent } from './api.types';
+import type { AuthPrompt, DataText, FileBegin, FileRecv, FsEntries, HostDisplay, LocalCaps, SessionEvent } from './api.types';
 import type { PulsarToast } from './types';
 
 async function listenTo<T>(event: string, cb: (e: T) => void): Promise<() => void> {
@@ -218,6 +218,10 @@ export const onPlayDecoder = (cb: (e: { id: number; name: string; hw: string }) 
 	listenTo<[number, string, string]>('play-decoder', (p) => cb({ id: p[0], name: p[1], hw: p[2] }));
 /** Client: the STREAM's pixel size (first frame / live res switch) — the session window
  * adopts the host's aspect ratio from this. Payload tuple (play id, width, height). */
+/** Client: the host's monitor list changed mid-session (a monitor plugged in / removed, a
+ * mode change) — payload tuple (play id, fresh list). Refreshes the monitor picker. */
+export const onHostDisplays = (cb: (e: { id: number; displays: HostDisplay[] }) => void) =>
+	listenTo<[number, HostDisplay[]]>('host-displays', (p) => cb({ id: p[0], displays: p[1] }));
 /** Client: the person at the host is on their own mouse (`active`), remote mode (issue #7). */
 export const onHostPointer = (cb: (e: { id: number; active: boolean }) => void) =>
 	listenTo<[number, boolean]>('host-pointer', (p) => cb({ id: p[0], active: p[1] }));

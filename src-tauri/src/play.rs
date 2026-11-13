@@ -100,7 +100,7 @@ fn cursor_external_enabled() -> bool {
 /// `idx:name:w:h:primary` comma-joined — NO spaces (the caps line is whitespace-tokenized,
 /// and session_cmds patches it token-wise, so a spaced value would corrupt both). The
 /// egui overlay parses this back into its Display-section monitor picker.
-fn fmt_displays(displays: &[pulsar_core::service::DisplayInfo]) -> String {
+pub(super) fn fmt_displays(displays: &[pulsar_core::service::DisplayInfo]) -> String {
 	displays
 		.iter()
 		.map(|d| {

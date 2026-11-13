@@ -26,6 +26,7 @@ mod firewall;
 mod autostart;
 #[cfg(windows)]
 mod dpi_watch;
+mod display_watch;
 mod clipboard_sync;
 mod commands;
 mod connections;
