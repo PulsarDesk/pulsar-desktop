@@ -1133,14 +1133,14 @@ fn draw_root(
 		);
 		stat_tile(ui, &bw, icon::CELL_SIGNAL_HIGH, t("stat.band"));
 	});
-	// The codec (and host encoder) actually on the wire.
-	let enc = stream_encoder(st);
+	// The codec, host encoder and stream resolution actually on the wire ("H.265 · NVENC · 1080p").
+	let line = [stream_codec(st), stream_encoder(st), stream_res_label()]
+		.into_iter()
+		.filter(|p| !p.is_empty())
+		.collect::<Vec<_>>()
+		.join(" · ");
 	ui.label(
-		egui::RichText::new(if enc.is_empty() {
-			format!("Codec · {}", stream_codec(st))
-		} else {
-			format!("Codec · {} · {enc}", stream_codec(st))
-		})
+		egui::RichText::new(line)
 		.size(11.0)
 		.color(egui::Color32::from_gray(150)),
 	);
@@ -2192,6 +2192,28 @@ fn draw_controllers(
 
 /// Parse the host's Stats label parts we surface as tiles: encode pace (optional
 /// 6th part) and the TARGET bitrate ("15 Mbit hedef" → 15.0).
+/// The stream's decoded size (width << 32 | height; 0 = no frame yet), set by each presenter
+/// on the first frame and on a live resolution switch — shown next to the codec.
+pub static STREAM_DIMS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn set_stream_dims(w: u32, h: u32) {
+	STREAM_DIMS.store((w as u64) << 32 | h as u64, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// "1080p" for the streamed height. A decoder surface can be padded to its macroblock grid
+/// (1080 → 1088), so a height just above a common one reads as that one.
+fn stream_res_label() -> String {
+	let v = STREAM_DIMS.load(std::sync::atomic::Ordering::Relaxed);
+	// The short side: a rotated (portrait) host still reads as "1080p".
+	let h = ((v & 0xffff_ffff) as u32).min((v >> 32) as u32);
+	if h == 0 {
+		return String::new();
+	}
+	const COMMON: [u32; 10] = [2160, 1600, 1440, 1200, 1080, 900, 768, 720, 540, 360];
+	let h = COMMON.iter().copied().find(|&c| h >= c && h < c + 16).unwrap_or(h);
+	format!("{h}p")
+}
+
 /// The codec actually streaming: the host's stats label leads with it ("H.265 · NVENC · …");
 /// before the first label arrives, the user's explicit pick, else a dash.
 fn stream_codec(st: &OverlayState) -> String {

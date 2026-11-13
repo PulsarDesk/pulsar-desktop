@@ -1954,6 +1954,7 @@ impl Presenter {
 			self.vid_dims = (vw, vh);
 			VID_W.store(vw, Ordering::Relaxed);
 			VID_H.store(vh, Ordering::Relaxed);
+			crate::overlay::set_stream_dims(vw as u32, vh as u32);
 			println!("vidsink-dims {vw}x{vh}");
 			use std::io::Write as _;
 			let _ = std::io::stdout().flush();

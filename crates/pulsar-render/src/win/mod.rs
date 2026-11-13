@@ -1679,6 +1679,7 @@ impl Renderer {
 			if sw > 0 && sh > 0 {
 				// DISPLAYED (upright) dims: a 90/270 host rotation swaps the axes.
 				let (vw, vh) = present::displayed_dims(sw, sh);
+				crate::overlay::set_stream_dims(vw, vh);
 				println!("vidsink-dims {vw}x{vh}");
 				use std::io::Write as _;
 				let _ = std::io::stdout().flush();
