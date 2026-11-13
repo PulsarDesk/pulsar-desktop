@@ -1295,9 +1295,11 @@ pub(crate) async fn start_remote_play(
 			let p = ctl.point();
 			(p.width, p.height, p.fps)
 		}
-		// A pinned dimension is always requested explicitly (never "host default").
+		// A pinned dimension is always requested explicitly (never "host default") — as the
+		// controller fitted it to this monitor (a 2560x1440 pick on a 1920x1200 monitor asks for
+		// 1920x1200; the raw pick made the ffmpeg path stretch the picture to 16:9).
 		_ => {
-			let (w, h) = pin_res.unwrap_or((req_w, req_h));
+			let (w, h) = if pin_res.is_some() { (ctl.point().width, ctl.point().height) } else { (req_w, req_h) };
 			(w, h, pin_fps.unwrap_or(req_fps))
 		}
 	};
