@@ -1009,6 +1009,18 @@ pub(super) async fn hold_session(
 								// First copy of this seq? Duplicates (and stale reorders of a seq
 								// already seen) clear it below; they carry no new payload.
 								let mut fresh = true;
+								// The ORIGINAL of a packet FEC already rebuilt (Wi-Fi reordering: the
+								// parity beat the late original): it was never lost — take it back out
+								// of the repairs, which the controller reads as pre-repair loss. On a
+								// busy LAN Wi-Fi 15-17 % "loss" was this alone (2026-11-13), and the
+								// controller cut 16.8 → 5.3 Mbit for it.
+								if !missing.contains_key(&seq) {
+									if let Some(i) = fec_rebuilt.iter().position(|&r| r == seq) {
+										fec_rebuilt.remove(i);
+										win_fec_ok = win_fec_ok.saturating_sub(1);
+										win_reordered += 1;
+									}
+								}
 								if let Some(e) = missing.remove(&seq) {
 									// A requested retransmit or a late reorder arrived — not lost. Only the
 									// retransmit counts as a repair (the controller reads repairs as
