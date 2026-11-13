@@ -75,6 +75,8 @@ const HINT_FADE: f32 = 0.5;
 /// Network RTT in tenths of ms (app stdin `rtt <ms>` from the keepalive ping/pong) —
 /// the overlay's "Gecikme" tile shows THIS, not the local present-gap.
 static RTT_DMS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// That RTT's jitter in tenths of ms (the second number of the `rtt` line).
+static JITTER_DMS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(overlay::JITTER_UNKNOWN);
 /// When the last `rtt` stdin line arrived (video::mono_ms clock; 0 = never). The session
 /// keepalive delivers one every ~2 s while the peer is alive, so this doubles as a
 /// session-liveness signal: a STATIC host screen legitimately produces no video frames
@@ -532,6 +534,9 @@ pub fn run() {
 						RTT_AT_MS.store(video::mono_ms_pub(), Ordering::Relaxed);
 						// Sizes the reorder buffer's early give-up on an unrepairable hole.
 						crate::stream::rtp::set_rtt_ms(ms);
+						if let Some(j) = it.next().and_then(|v| v.parse::<f32>().ok()) {
+							JITTER_DMS.store((j.max(0.0) * 10.0) as u32, Ordering::Relaxed);
+						}
 					}
 				}
 				// Adaptive streaming Phase 0.5: the RTT-derived RTP reorder wait (µs) and a
@@ -1471,6 +1476,7 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 			// first pong (it used to show render jitter and read as fake "lag").
 			let rtt = RTT_DMS.load(Ordering::Relaxed) as f32 / 10.0;
 			state.latency_ms = if rtt > 0.0 { rtt } else { s[2] };
+			state.jitter_ms = overlay::jitter_from_dms(JITTER_DMS.load(Ordering::Relaxed));
 			// Decode: measured per-frame decode time (µs → ms).
 			state.decode_ms = video::DEC_US.load(Ordering::Relaxed) as f32 / 1000.0;
 		}

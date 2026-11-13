@@ -1182,6 +1182,7 @@
 		encoder={media.hostEncoder}
 		decoder={media.decoderCodec}
 		latencyMs={media.latencyMs}
+		jitterMs={media.jitterMs}
 		decodeMs={media.decodeMs}
 		mbps={media.mbps}
 		lossPct={media.lossPct}

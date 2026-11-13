@@ -84,3 +84,16 @@ accent sinks into the dark surfaces.
 `bun run dev` serves the UI at `localhost:5173` against a deterministic mock (`api.invoke.ts`).
 Headless checks can drive it with Playwright; the Tauri-only parts (window controls, resize
 grips) render only inside the real app.
+
+## Latency and its jitter
+
+The session shows the latency with how much it varies after it — "4 ms (±0.6 ms)" — in the
+status bar (`StatusBar.svelte`, one-way = RTT / 2, so the jitter is halved too) and in the
+native renderer (hub tile and HUD, full RTT). One source: `play/hold.rs` `rtt_jitter_ms` (mean
+absolute deviation of the last 8 RTT samples around their median — the same number the repair
+window is sized with), sent as `play-rtt { rtt, jitter }` and `rtt <ms> <jitter>`.
+
+## Theme
+
+Light / dark is a switch in Settings → Genel ("Koyu tema", `theme.svelte.ts` `setDark`). It
+used to be a button in the window title bar; the title bar keeps window and mode controls only.

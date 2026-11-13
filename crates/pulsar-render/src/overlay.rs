@@ -24,6 +24,9 @@ pub struct OverlayState {
 	// live stats
 	pub fps: f32,
 	pub latency_ms: f32,
+	/// How much that latency varies (ms; second number of the app's `rtt <ms> <jitter>` line),
+	/// `None` until the app sent one.
+	pub jitter_ms: Option<f32>,
 	pub decode_ms: f32,
 	pub mbps: f32,
 	// selector current values (string keys matching the frontend setters)
@@ -522,6 +525,7 @@ impl Default for OverlayState {
 			conn_label: String::new(),
 			fps: 0.0,
 			latency_ms: 0.0,
+			jitter_ms: None,
 			decode_ms: 0.0,
 			mbps: 0.0,
 			codec: "auto".into(),
@@ -1272,7 +1276,13 @@ fn draw_root(
 	// Two compact tile rows: RTT · fps · encode / decode · BITRATE target · bandwidth.
 	ui.spacing_mut().item_spacing = egui::vec2(GRID_GAP, GRID_GAP);
 	ui.horizontal(|ui| {
-		stat_tile(ui, &format!("{:.0}", st.latency_ms), icon::PULSE, t("stat.latency"));
+		stat_tile_sub(
+			ui,
+			&format!("{:.0}", st.latency_ms),
+			jitter_text(st).as_deref(),
+			icon::PULSE,
+			t("stat.latency"),
+		);
 		stat_tile(ui, &format!("{:.0}", st.fps), icon::FILM_STRIP, "FPS");
 		stat_tile(
 			ui,
@@ -3125,7 +3135,25 @@ fn paint_tri_v(painter: &egui::Painter, center: egui::Pos2, half: f32, up: bool,
 	painter.add(egui::Shape::convex_polygon(pts, color, egui::Stroke::NONE));
 }
 
+/// The backends keep the jitter in tenths of a ms in an atomic; this value = none sent yet.
+pub const JITTER_UNKNOWN: u32 = u32::MAX;
+
+/// `OverlayState::jitter_ms` from a backend's atomic (tenths of a ms, [`JITTER_UNKNOWN`]).
+pub fn jitter_from_dms(dms: u32) -> Option<f32> {
+	(dms != JITTER_UNKNOWN).then(|| dms as f32 / 10.0)
+}
+
+/// The latency's jitter as shown next to it — "(±0.6)" — once both are known.
+fn jitter_text(st: &OverlayState) -> Option<String> {
+	st.jitter_ms.filter(|_| st.latency_ms > 0.0).map(|j| format!("(±{j:.1})"))
+}
+
 fn stat_tile(ui: &mut egui::Ui, value: &str, icon: &str, label: &str) {
+	stat_tile_sub(ui, value, None, icon, label);
+}
+
+/// A stat tile whose value carries a small note after it (the latency's jitter).
+fn stat_tile_sub(ui: &mut egui::Ui, value: &str, sub: Option<&str>, icon: &str, label: &str) {
 	// Three equal tiles per row across the panel: the value large on top, icon + label under it.
 	let w = ((PANEL_W - GRID_GAP * 2.0) / 3.0).floor();
 	let h = if short_surface(ui.ctx()) { 50.0 } else { 58.0 };
@@ -3140,6 +3168,18 @@ fn stat_tile(ui: &mut egui::Ui, value: &str, icon: &str, label: &str) {
 		egui::FontId::proportional(19.0),
 		CYAN,
 	);
+	if let Some(sub) = sub {
+		p.text(
+			egui::pos2(
+				rect.left() + 12.0 + text_w(ui, value, 19.0) + 6.0,
+				rect.top() + if h < 58.0 { 18.5 } else { 20.5 },
+			),
+			egui::Align2::LEFT_CENTER,
+			sub,
+			egui::FontId::proportional(12.0),
+			egui::Color32::from_gray(160),
+		);
+	}
 	p.text(
 		egui::pos2(rect.left() + 12.0, rect.bottom() - if h < 58.0 { 13.0 } else { 15.0 }),
 		egui::Align2::LEFT_CENTER,
@@ -3163,6 +3203,10 @@ fn stat_tile(ui: &mut egui::Ui, value: &str, icon: &str, label: &str) {
 pub fn draw_hud(ctx: &egui::Context, st: &OverlayState) {
 	let bw = fmt_mbps(st.mbps);
 	let codec = stream_codec(st);
+	let latency = match jitter_text(st) {
+		Some(j) => format!("{:.0} ms {j}", st.latency_ms),
+		None => format!("{:.0} ms", st.latency_ms),
+	};
 	egui::Area::new(egui::Id::unique("pulsar_hud"))
 		.order(egui::Order::Foreground)
 		.anchor(egui::Align2::RIGHT_TOP, egui::vec2(-10.0, 10.0))
@@ -3175,9 +3219,8 @@ pub fn draw_hud(ctx: &egui::Context, st: &OverlayState) {
 					ui.add(
 						egui::Label::new(
 							egui::RichText::new(format!(
-								"{codec} · {:.0} fps · {:.0} ms · {} {:.1} ms · {bw} Mbps",
+								"{codec} · {:.0} fps · {latency} · {} {:.1} ms · {bw} Mbps",
 								st.fps,
-								st.latency_ms,
 								t("hud.decode"),
 								st.decode_ms
 							))
@@ -3965,6 +4008,21 @@ mod rows_tests {
 		let out = run(&ctx, &st, &mut ui, vec![key(egui::Key::Escape)]);
 		assert!(out.iter().any(|c| matches!(c, OverlayCmd::Close)));
 		assert!(!out.iter().any(|c| matches!(c, OverlayCmd::TakeControl)));
+	}
+
+	#[test]
+	fn the_latency_shows_its_jitter_once_both_are_known() {
+		let mut st = open_state();
+		assert_eq!(jitter_text(&st), None);
+		st.jitter_ms = jitter_from_dms(6);
+		assert_eq!(jitter_text(&st), None, "no latency yet");
+		st.latency_ms = 4.0;
+		assert_eq!(jitter_text(&st).as_deref(), Some("(±0.6)"));
+		assert_eq!(jitter_from_dms(JITTER_UNKNOWN), None);
+		// It draws (the hub, with the tile's note).
+		let ctx = egui::Context::default();
+		let mut ui = UiState::default();
+		run(&ctx, &st, &mut ui, vec![]);
 	}
 
 	#[test]

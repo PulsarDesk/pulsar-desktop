@@ -28,6 +28,8 @@ static STATS: Mutex<[f32; 4]> = Mutex::new([0.0; 4]); // fps, latency_ms, decode
 /// Network RTT in tenths of ms (app stdin `rtt <ms>` from the keepalive ping/pong) — the
 /// overlay's "Gecikme" tile shows THIS rather than the local present-gap when it is fed.
 static RTT_DMS: AtomicU32 = AtomicU32::new(0);
+/// That RTT's jitter in tenths of ms (the second number of the `rtt` line).
+static JITTER_DMS: AtomicU32 = AtomicU32::new(overlay::JITTER_UNKNOWN);
 /// Frame-pacing toggle state (mirrored for the overlay's segmented control). This backend has no
 /// local video pipeline to pace — the value is purely reflected to the UI and emitted on change
 /// so the frontend persists it; the real pacing happens in the separate video renderer/mpv.
@@ -135,6 +137,9 @@ fn stdin_control() {
 					RTT_DMS.store((ms * 10.0) as u32, Ordering::Relaxed);
 					// Sizes the reorder buffer's early give-up on an unrepairable hole.
 					crate::stream::rtp::set_rtt_ms(ms);
+					if let Some(j) = it.next().and_then(|v| v.parse::<f32>().ok()) {
+						JITTER_DMS.store((j.max(0.0) * 10.0) as u32, Ordering::Relaxed);
+					}
 				}
 			}
 			// Adaptive streaming Phase 0.5: the RTT-derived RTP reorder wait (µs) for the
@@ -372,6 +377,7 @@ impl Overlay {
 		}
 		let rtt = RTT_DMS.load(Ordering::Relaxed) as f32 / 10.0;
 		self.state.latency_ms = if rtt > 0.0 { rtt } else { s[1] };
+		self.state.jitter_ms = overlay::jitter_from_dms(JITTER_DMS.load(Ordering::Relaxed));
 
 		// Host caps + active selections (take(), seeded once per `caps` line).
 		if let Some((codecs, encoders, codec, encoder)) = CAPS.lock().unwrap().take() {

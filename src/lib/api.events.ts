@@ -207,9 +207,10 @@ export const onConnPhase = (cb: (e: { target: string; transport: string }) => vo
  * train kept up, the path carries at least that) — for the Connecting screen, keyed by target. */
 export const onConnProbe = (cb: (e: { target: string; kbps: number; at_least: boolean }) => void) =>
 	listenTo<{ target: string; kbps: number; at_least: boolean }>('conn-probe', cb);
-/** Client: round-trip time (ms) for a play session, from keepalive ping/pong. */
-export const onPlayRtt = (cb: (e: { id: number; rtt: number }) => void) =>
-	listenTo<{ id: number; rtt: number }>('play-rtt', cb);
+/** Client: round-trip time (ms) for a play session, from keepalive ping/pong, and how much
+ * the recent round trips vary (`jitter`, ms). */
+export const onPlayRtt = (cb: (e: { id: number; rtt: number; jitter?: number }) => void) =>
+	listenTo<{ id: number; rtt: number; jitter?: number }>('play-rtt', cb);
 /** Client: a short stream notice for a session WITHOUT the native renderer (which shows it as
  * its own toast) — e.g. "the link can't carry the picked resolution/fps, a lighter one is used". */
 export const onPlayNotice = (cb: (e: { id: number; text: string }) => void) =>

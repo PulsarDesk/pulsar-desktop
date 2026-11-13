@@ -16,6 +16,16 @@ const base = {
 	lossPct: 0
 };
 
+describe('StatusBar latency', () => {
+	it('shows the jitter after the latency once it is measured', () => {
+		const { unmount } = render(StatusBar, { ...base, fields: ['latency'] });
+		expect(screen.getByText('12 ms')).toBeTruthy();
+		unmount();
+		render(StatusBar, { ...base, fields: ['latency'], jitterMs: 0.6 });
+		expect(screen.getByText('12 ms (±0.6 ms)')).toBeTruthy();
+	});
+});
+
 describe('StatusBar audio buttons (issue #9)', () => {
 	it('shows the picked buttons with their state and toggles them', async () => {
 		const onSpeaker = vi.fn();

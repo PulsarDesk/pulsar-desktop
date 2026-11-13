@@ -184,6 +184,8 @@ pub(crate) struct ConnProbe {
 pub(crate) struct PlayRtt {
 	pub(crate) id: u64,
 	pub(crate) rtt: f64,
+	/// How much the recent round trips vary (ms, mean absolute deviation around the median).
+	pub(crate) jitter: f64,
 }
 
 /// The host's encode summary for a session, emitted as the `host-stats` event.

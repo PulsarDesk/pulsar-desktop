@@ -116,8 +116,19 @@ fn repair_window_ms(rtt_recent: &std::collections::VecDeque<f32>, fec_hold_ms: f
 		return REPAIR_MAX_MS;
 	}
 	let med = median_ms(rtt_recent, 0.0);
-	let jitter = rtt_recent.iter().map(|r| (r - med).abs()).sum::<f32>() / rtt_recent.len() as f32;
+	let jitter = rtt_jitter_ms(rtt_recent);
 	(med + 2.0 * jitter + REPAIR_SLACK_MS + fec_hold_ms.max(0.0)).clamp(REPAIR_MIN_MS, REPAIR_MAX_MS)
+}
+
+/// How much the round trip varies (ms): the mean absolute deviation of the recent RTT samples
+/// around their median. Sizes the repair window, and is what the UI shows next to the latency
+/// ("4 ms (±0.6 ms)"). No samples = 0.
+fn rtt_jitter_ms(rtt_recent: &std::collections::VecDeque<f32>) -> f32 {
+	if rtt_recent.is_empty() {
+		return 0.0;
+	}
+	let med = median_ms(rtt_recent, 0.0);
+	rtt_recent.iter().map(|r| (r - med).abs()).sum::<f32>() / rtt_recent.len() as f32
 }
 
 /// Which unanswered Ping a Pong answers (`ages` = time since each was sent, oldest first;
@@ -1150,13 +1161,16 @@ pub(super) async fn hold_session(
 						if pulsar_core::service::is_pong(&bytes) {
 						if let Some(rtt) = pings.on_pong(std::time::Instant::now()) {
 							let rtt = rtt as f64;
-							let _ = app_ev.emit("play-rtt", PlayRtt { id, rtt });
 							rtt_samples.push(rtt as f32);
 							rtt_ema = if rtt_ema <= 0.0 { rtt as f32 } else { rtt_ema * 0.7 + rtt as f32 * 0.3 };
 							if rtt_recent.len() >= RTT_RECENT {
 								rtt_recent.pop_front();
 							}
 							rtt_recent.push_back(rtt as f32);
+							// The latency and how much it varies, for the status bar and (below)
+							// the renderer's tile and HUD.
+							let jitter = rtt_jitter_ms(&rtt_recent) as f64;
+							let _ = app_ev.emit("play-rtt", PlayRtt { id, rtt, jitter });
 							// Feed the native overlay's "Gecikme" tile the real NETWORK
 							// latency (it used to show the render present-gap), and size the
 							// renderer's RTP reorder wait from it (Phase 0.5): a NACK retransmit
@@ -1172,7 +1186,7 @@ pub(super) async fn hold_session(
 								let want = repair_window_ms(&rtt_recent, fec_hold_ms) + REPAIR_SWEEP_MS as f32;
 								let changed = (want - sent_repair_ms).abs() > sent_repair_ms * 0.15 + 5.0;
 								if let Some(si) = render_stdin.lock().unwrap().as_mut() {
-									let _ = writeln!(si, "rtt {rtt:.1}");
+									let _ = writeln!(si, "rtt {rtt:.1} {jitter:.1}");
 									if changed {
 										let _ = writeln!(si, "maxdelay {}", (want * 1000.0) as u32);
 									}

@@ -55,7 +55,7 @@ export class SessionMedia {
 	lossPct = $state(0);
 	rttMs = $state(0); // network round-trip (keepalive ping/pong)
 	decodeMs = $state(0); // client decoder latency (submit→frame-out)
-	jitterMs = $state(0); // network inter-arrival jitter
+	rttJitterMs = $state(-1); // how much the round trip varies; -1 = not measured yet
 	mbps = $state(0); // incoming video bitrate
 	// WebCodecs decoder codec string (e.g. avc1.640028), shown in the stats panel.
 	decoderCodec = $state('');
@@ -72,6 +72,9 @@ export class SessionMedia {
 	// One-way network latency estimate (half the round-trip), the headline "connection
 	// latency" number — like Moonlight's network latency readout.
 	latencyMs = $derived(this.rttMs > 0 ? Math.round(this.rttMs / 2) : 0);
+	// Its jitter on the same one-way scale, to a tenth of a ms (-1 = none yet): shown after
+	// the latency as "4 ms (±0.6 ms)".
+	jitterMs = $derived(this.rttMs > 0 && this.rttJitterMs >= 0 ? Math.round(this.rttJitterMs * 5) / 10 : -1);
 
 	netClass = $derived(
 		!this.hasVideo || this.stalled ? 'bad' : this.fps >= 24 ? 'ok' : this.fps >= 12 ? 'mid' : 'bad'
@@ -134,7 +137,9 @@ export class SessionMedia {
 			const scope = listenScope();
 			scope.add(
 				onPlayRtt((e) => {
-					if (e.id === playId) this.rttMs = Math.round(e.rtt);
+					if (e.id !== playId) return;
+					this.rttMs = Math.round(e.rtt);
+					this.rttJitterMs = e.jitter ?? -1;
 				}),
 				onPlayStats((e) => {
 					if (e.id !== playId) return;

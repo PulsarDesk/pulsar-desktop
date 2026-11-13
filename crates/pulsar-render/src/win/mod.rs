@@ -94,6 +94,9 @@ static ENTER_IN: AtomicBool = AtomicBool::new(false);
 /// Network RTT in tenths of ms (app stdin `rtt <ms>`, from the keepalive ping/pong) —
 /// the overlay's "Gecikme" tile (same as linux.rs RTT_DMS).
 static RTT_DMS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// That RTT's jitter in tenths of ms (the second number of the `rtt` line).
+static JITTER_DMS: std::sync::atomic::AtomicU32 =
+	std::sync::atomic::AtomicU32::new(crate::overlay::JITTER_UNKNOWN);
 // ---- closed-state chrome (Linux parity: linux.rs statics of the same names) ----
 /// Always-on mini stats HUD while the overlay is closed (`statshud 0|1` / caps seed).
 static STATS_HUD: AtomicBool = AtomicBool::new(false);
@@ -502,10 +505,15 @@ fn stdin_control() {
 			// Keepalive RTT from the app — overrides the latency tile (linux.rs parity), sizes
 			// the reorder buffer's early give-up on an unrepairable hole, and proves the
 			// session is alive (RTT_AT).
-			if let Ok(ms) = rest.trim().parse::<f32>() {
+			// `rtt <ms> [<jitter ms>]`.
+			let mut it = rest.split_whitespace();
+			if let Some(ms) = it.next().and_then(|v| v.parse::<f32>().ok()) {
 				RTT_DMS.store((ms * 10.0) as u32, Ordering::Relaxed);
 				crate::stream::rtp::set_rtt_ms(ms);
 				*RTT_AT.lock().unwrap() = Some(std::time::Instant::now());
+				if let Some(j) = it.next().and_then(|v| v.parse::<f32>().ok()) {
+					JITTER_DMS.store((j.max(0.0) * 10.0) as u32, Ordering::Relaxed);
+				}
 			}
 		} else if let Some(rest) = l.strip_prefix("stopped ") {
 			// The app's verdict that the stream really stopped (`stopped 1`) or is back
@@ -1258,6 +1266,7 @@ impl Renderer {
 		if rtt > 0.0 {
 			self.ostate.latency_ms = rtt;
 		}
+		self.ostate.jitter_ms = crate::overlay::jitter_from_dms(JITTER_DMS.load(Ordering::Relaxed));
 		self.ostate.host_active = HOST_ENC.lock().unwrap().clone();
 		self.ostate.open = true;
 		self.ostate.pace = PACE.load(Ordering::SeqCst);
@@ -1515,6 +1524,7 @@ impl Renderer {
 		if rtt > 0.0 {
 			self.ostate.latency_ms = rtt;
 		}
+		self.ostate.jitter_ms = crate::overlay::jitter_from_dms(JITTER_DMS.load(Ordering::Relaxed));
 		self.ostate.host_active = HOST_ENC.lock().unwrap().clone();
 		self.apply_caps_seed();
 		self.ostate.open = false;

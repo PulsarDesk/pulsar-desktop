@@ -174,7 +174,8 @@ showed ~600 ms head-of-line holds, "stream stopped" over a live session and a lo
   deviation + 20 ms host slack + the FEC hold, 60–200 ms; sweep every 50 ms. The renderer's reorder wait is
   that + one sweep, capped at 250 ms (`pulsar-render/src/stream/rtp.rs` `MAX_DELAY_CAP_US`;
   `PULSAR_MAXDELAY` pin uncapped). Under >= 10 % pre-repair loss a hole with a whole frame
-  behind it is given up after max(2 × RTT, 60 ms) (`rtt <ms>` stdin feeds it).
+  behind it is given up after max(2 × RTT, 60 ms) (`rtt <ms> [<jitter ms>]` stdin feeds it; the
+  second number is only shown: the hub's latency tile and the HUD read "4 (±0.6)").
 - **NACK waits for FEC** while parity flows (`fec_wait_ms`: 2 frame intervals + 8 ms), sent
   early once the block's parity can't cover it (`fec_block_gave_up`); one NACK re-send.
 - **Ping/RTT**: Pings never wait for a Pong (lost after 2 s), go out at uneven 350–650 ms gaps

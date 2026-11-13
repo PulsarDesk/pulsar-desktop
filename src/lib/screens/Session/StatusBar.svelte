@@ -28,6 +28,7 @@
 		encoder,
 		decoder,
 		latencyMs,
+		jitterMs = -1,
 		decodeMs,
 		mbps,
 		lossPct,
@@ -50,6 +51,8 @@
 		encoder: string;
 		decoder: string;
 		latencyMs: number;
+		/** Jitter of that latency (ms), shown after it; -1 = not measured. */
+		jitterMs?: number;
 		decodeMs: number;
 		mbps: number;
 		lossPct: number;
@@ -94,7 +97,9 @@
 				case 'codec': text = codec; break;
 				case 'encoder': text = encoder; break;
 				case 'decoder': text = decoder; break;
-				case 'latency': text = latencyMs > 0 ? `${latencyMs} ms` : ''; break;
+				case 'latency':
+					text = latencyMs > 0 ? `${latencyMs} ms` + (jitterMs >= 0 ? ` (±${jitterMs.toFixed(1)} ms)` : '') : '';
+					break;
 				case 'decode': text = decodeMs > 0 ? `${decodeMs.toFixed(1)} ms` : ''; break;
 				case 'bitrate': text = mbps > 0 ? `${mbps.toFixed(1)} Mbps` : ''; break;
 				case 'loss': text = `%${lossPct.toFixed(1)}`; break;
