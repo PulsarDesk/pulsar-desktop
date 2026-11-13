@@ -645,6 +645,8 @@ impl Overlay {
 				OPEN.store(false, Ordering::SeqCst);
 				println!("ov close");
 			}
+			// The click that closed the menu takes control too (follows `ov close`).
+			OverlayCmd::TakeControl => println!("ov control"),
 			// Native Chat / Files traffic — rest-of-line payloads the app parses (render_stats).
 			OverlayCmd::Chat(t) => println!("ov chat {}", t.replace('\n', " ")),
 			OverlayCmd::FsLs(p) => println!("ov fsls {p}"),

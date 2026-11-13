@@ -127,6 +127,11 @@ acceptable; priority is Moonlight-class latency during play.
   A / Enter confirms; A / Enter opens an options page and picks in it; B / Escape goes back
   one level (page → rows → hub → closed). A mouse click hides the cursor ring until the next
   key. Stream-restarting choices still wait for the menu to close (`UiState::deferred`).
+- **A click beside the menu** (the scrim) closes it AND takes control: `OverlayCmd::Close` +
+  `TakeControl` → `ov close`, `ov control`. The app engages on Windows right in
+  `render_stats.rs` (as for `ov engage`) and emits `overlay-control`; the session screen
+  takes control there the way its platform's video click does. Escape, the combo and the
+  pad close without taking control (the click-to-control hint follows).
 - Covered by `overlay::rows_tests` (key-driven, headless). To LOOK at it without a session:
   run the renderer in a test window fed by `ffmpeg testsrc2` and drive it over stdin /
   posted mouse messages (the renderer draws no overlay before its first decoded frame).

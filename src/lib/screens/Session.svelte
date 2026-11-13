@@ -27,6 +27,7 @@
 		onOverlayCmd,
 		onOverlayEnd,
 		onOverlayClose,
+		onOverlayControl,
 		onOverlayChat,
 		onOverlayFs,
 		onOverlayFiles,
@@ -1074,6 +1075,17 @@
 		}));
 		scope.add(onOverlayClose((id) => {
 			if (id === playId) dock.closeOverlay();
+		}));
+		// The click that closed the overlay landed on the video beside the menu: it takes
+		// control as well, the way a click on the video does (see onScreenDown) — one click
+		// instead of two. Windows already engaged in Rust (kbdEngage is a no-op then).
+		scope.add(onOverlayControl((id) => {
+			if (id !== playId || !active) return;
+			if (native && (isWindows || mode === 'game')) {
+				if (!nativeEngaged) api.kbdEngage().catch(() => {});
+			} else {
+				input.startControl();
+			}
 		}));
 		// NOTE: focus loss must NOT close the overlay (alt-tabbing away and back kept
 		// losing it). It can't strand either: a click on the overlay refocuses the

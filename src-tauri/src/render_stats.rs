@@ -369,6 +369,17 @@ pub(crate) fn start_render_reader(
 						tracing::info!(id = cur_id, "overlay closed by the renderer");
 						let _ = app.emit("overlay-close", cur_id);
 					}
+					// The click that closed the menu landed on the picture beside it: that
+					// click takes control too (it used to take a second one). Windows engages
+					// right here, as on a video click (`ov engage`) — the webview round trip can
+					// lag while the video occludes it. The other platforms take control the way
+					// their video click does, in the session screen (`overlay-control`).
+					(Some("ov"), Some("control")) => {
+						tracing::info!(id = cur_id, "the click that closed the overlay takes control");
+						#[cfg(windows)]
+						crate::kbdhook::engage(&app);
+						let _ = app.emit("overlay-control", cur_id);
+					}
 					// The renderer's own overlay-open button was clicked (platforms where
 					// the closed-state renderer receives pointer events).
 					(Some("ov"), Some("toggle")) => {

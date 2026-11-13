@@ -2537,6 +2537,8 @@ fn apply_ov_cmd(ostate: &mut crate::overlay::OverlayState, c: crate::overlay::Ov
 			OPEN.store(false, Ordering::SeqCst);
 			println!("ov close");
 		}
+		// The click that closed the menu takes control too (follows `ov close`).
+		crate::overlay::OverlayCmd::TakeControl => println!("ov control"),
 		// Same wire lines as the Linux backend (render_stats.rs parses them).
 		crate::overlay::OverlayCmd::Chat(t) => println!("ov chat {t}"),
 		crate::overlay::OverlayCmd::FsLs(p) => println!("ov fsls {p}"),

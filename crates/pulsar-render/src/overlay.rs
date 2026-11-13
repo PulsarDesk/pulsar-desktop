@@ -564,6 +564,9 @@ pub enum OverlayCmd {
 	Set(&'static str, String),
 	End,
 	Close,
+	/// After a `Close`: the click that closed the menu landed on the picture beside it, so it
+	/// takes control as well (`ov control`) — as a click on the video does without the menu.
+	TakeControl,
 	/// Send a chat line to the host (`ov chat <text>` — rest-of-line payload).
 	Chat(String),
 	/// Remote file-pane ops, HOME-relative paths (rest-of-line):
@@ -910,7 +913,10 @@ pub fn draw(ctx: &egui::Context, st: &OverlayState, ui_state: &mut UiState) -> V
 				.interact(r, egui::Id::unique("scrim_click"), egui::Sense::click())
 				.clicked()
 			{
+				// One click on the picture: the menu closes and control is taken. It used to
+				// take two — this one only closed the menu, the next one took control.
 				cmds.push(OverlayCmd::Close);
+				cmds.push(OverlayCmd::TakeControl);
 			}
 		});
 
@@ -1171,10 +1177,12 @@ pub fn draw(ctx: &egui::Context, st: &OverlayState, ui_state: &mut UiState) -> V
 	// here; a Close from inside the overlay applies them right before closing, End drops them.
 	let mut out = Vec::with_capacity(cmds.len());
 	let mut closing = false;
+	let mut take_control = false;
 	for c in cmds {
 		match c {
 			OverlayCmd::Set(f, v) if RESTART_FIELDS.contains(&f) => stage(ui_state, f, v),
 			OverlayCmd::Close => closing = true,
+			OverlayCmd::TakeControl => take_control = true,
 			OverlayCmd::End => {
 				ui_state.deferred.clear();
 				out.push(OverlayCmd::End);
@@ -1185,6 +1193,9 @@ pub fn draw(ctx: &egui::Context, st: &OverlayState, ui_state: &mut UiState) -> V
 	if closing {
 		out.extend(take_deferred(ui_state));
 		out.push(OverlayCmd::Close);
+		if take_control {
+			out.push(OverlayCmd::TakeControl);
+		}
 	}
 	out
 }
@@ -3926,6 +3937,34 @@ mod rows_tests {
 		assert!(ui.back_focus && ui.picker.is_some());
 		assert!(press(&ctx, &st, &mut ui, egui::Key::Enter).is_empty());
 		assert!(ui.picker.is_none() && ui.view == View::Stream && !ui.tab_focus && ui.sub_sel == 1);
+	}
+
+	#[test]
+	fn a_click_beside_the_menu_closes_it_and_takes_control() {
+		let st = open_state();
+		let ctx = egui::Context::default();
+		let mut ui = UiState::default();
+		run(&ctx, &st, &mut ui, vec![]);
+		run(&ctx, &st, &mut ui, vec![]);
+		let at = egui::pos2(40.0, 40.0); // the picture, far from the panel
+		let button = |pressed| egui::Event::PointerButton {
+			pos: at,
+			button: egui::PointerButton::Primary,
+			pressed,
+			modifiers: egui::Modifiers::default(),
+		};
+		run(&ctx, &st, &mut ui, vec![egui::Event::PointerMoved(at)]);
+		run(&ctx, &st, &mut ui, vec![button(true)]);
+		let out = run(&ctx, &st, &mut ui, vec![button(false)]);
+		let close = out.iter().position(|c| matches!(c, OverlayCmd::Close));
+		let take = out.iter().position(|c| matches!(c, OverlayCmd::TakeControl));
+		assert!(close.is_some() && take > close, "Close, then TakeControl");
+		// Escape closes too, and takes nothing.
+		let mut ui = UiState::default();
+		run(&ctx, &st, &mut ui, vec![]);
+		let out = run(&ctx, &st, &mut ui, vec![key(egui::Key::Escape)]);
+		assert!(out.iter().any(|c| matches!(c, OverlayCmd::Close)));
+		assert!(!out.iter().any(|c| matches!(c, OverlayCmd::TakeControl)));
 	}
 
 	#[test]

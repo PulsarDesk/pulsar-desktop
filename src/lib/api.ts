@@ -54,6 +54,7 @@ export {
 	onOverlayCmd,
 	onOverlayEnd,
 	onOverlayClose,
+	onOverlayControl,
 	onOverlayChat,
 	onOverlayFs,
 	onOverlayFiles,

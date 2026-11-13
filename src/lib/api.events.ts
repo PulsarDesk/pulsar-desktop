@@ -169,6 +169,8 @@ export const onOverlayEnd = (cb: (id: number) => void) => listenTo<number>('over
 /** Client (Linux native overlay): the user dismissed the native overlay (scrim click).
  * Payload is the play id (gate on it — see `onOverlayCmd`). */
 export const onOverlayClose = (cb: (id: number) => void) => listenTo<number>('overlay-close', (id) => cb(id));
+/** The click that closed the native overlay landed on the video beside it: take control. */
+export const onOverlayControl = (cb: (id: number) => void) => listenTo<number>('overlay-control', (id) => cb(id));
 /** Client (Linux native overlay): the user sent a chat line from the overlay's
  * NATIVE composer. Payload tuple (play id, text). */
 export const onOverlayChat = (cb: (e: { id: number; text: string }) => void) =>
