@@ -36,7 +36,7 @@
 	import { reverseConnectBack } from '#lib/connectTarget.js';
 	import { initCaps } from '#lib/caps.svelte.js';
 	import { t, i18n, i18nReady } from '#lib/i18n.svelte.js';
-	import { theme, toggleTheme } from '#lib/theme.svelte.js';
+	import { theme } from '#lib/theme.svelte.js';
 	import type { Config } from '#lib/types.js';
 	import Connecting from '#lib/screens/Connecting.svelte';
 	import SessionView from '#lib/screens/Session.svelte';
@@ -1215,8 +1215,6 @@
 		{#if !sm.fullscreen || (sm.splitMode === 'off' && sm.activeTab === 'home')}
 			<Chrome
 				title={sm.activeTab === 'home' && mode !== 'game' ? t('nav.' + view) : ''}
-				dark={theme.dark}
-				onToggleTheme={toggleTheme}
 				gaming={mode === 'game'}
 				onToggleMode={toggleMode}
 				{modeLocked}

@@ -3,6 +3,7 @@
 	import type { Config } from '#lib/types.js';
 	import { ui, saveUi } from '#lib/settings.svelte.js';
 	import { t, i18n, setLang, LANGS } from '#lib/i18n.svelte.js';
+	import { theme, setDark } from '#lib/theme.svelte.js';
 	import { api, isTauri } from '#lib/api.js';
 	import type { SharedModeStatus } from '#lib/api.types.js';
 	import pkg from '../../../../package.json';
@@ -194,6 +195,10 @@
 </div>
 <div class="subgroup">{t('settings.subApp')}</div>
 <div class="subdesc">{t('settings.subAppDesc')}</div>
+<div class="srow">
+	<div class="st"><b>{t('settings.darkTheme')}</b><span>{t('settings.darkThemeDesc')}</span></div>
+	<button class="toggle" aria-label={t('settings.darkTheme')} class:on={theme.dark} aria-pressed={theme.dark} onclick={() => setDark(!theme.dark)}><span class="knob"></span></button>
+</div>
 {#if shared?.supported}
 	<div class="srow">
 		<div class="st">

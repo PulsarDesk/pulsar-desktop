@@ -8,8 +8,6 @@
 
 	type Props = {
 		title: string;
-		dark: boolean;
-		onToggleTheme: () => void;
 		/** Whether the app is in gaming mode (drives the toggle's active styling). */
 		gaming: boolean;
 		/** Flip the app-level personality (remote ↔ gaming). */
@@ -37,8 +35,6 @@
 	};
 	let {
 		title,
-		dark,
-		onToggleTheme,
 		gaming,
 		onToggleMode,
 		modeLocked = false,
@@ -234,15 +230,6 @@
 			<Icon name="gaming" size={16} />
 		</button>
 		{/if}
-		<button
-			class="icon-btn"
-			use:navItem={gaming}
-			title={t('chrome.theme')}
-			aria-label={t('chrome.themeToggle')}
-			onclick={onToggleTheme}
-		>
-			<Icon name={dark ? 'sun' : 'moon'} size={16} />
-		</button>
 		<span class="mono ver">{ver ? `Pulsar v${ver}` : 'Pulsar'}</span>
 		{#if isTauri}
 			<div class="winctl">

@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/svelte';
 import Chrome from './Chrome.svelte';
 
-const base = { title: '', dark: false, onToggleTheme: () => {}, gaming: false };
+const base = { title: '', gaming: false };
 
 describe('Chrome top bar mode toggle', () => {
 	it('switches the mode when no connection is open', async () => {
