@@ -110,5 +110,7 @@
 	"controllers.testOff": "Titreşim kapalı",
 	"controllers.lock": "Bu oturuma kilitle",
 	"controllers.lockOn": "Kilitli",
-	"controllers.lockOff": "Serbest"
+	"controllers.lockOff": "Serbest",
+	"hint.rows": "Yön tuşları: seç ve değiştir · Enter / A: onayla · Esc / B: geri",
+	"hint.options": "Yön tuşları: gez · Enter / A: seç · Esc / B: vazgeç"
 }

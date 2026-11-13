@@ -110,5 +110,7 @@
 	"controllers.testOff": "Vibration off",
 	"controllers.lock": "Lock to this session",
 	"controllers.lockOn": "Locked",
-	"controllers.lockOff": "Free"
+	"controllers.lockOff": "Free",
+	"hint.rows": "Arrows: select and change · Enter / A: confirm · Esc / B: back",
+	"hint.options": "Arrows: move · Enter / A: pick · Esc / B: cancel"
 }

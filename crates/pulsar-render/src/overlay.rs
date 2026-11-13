@@ -186,6 +186,23 @@ pub struct UiState {
 	/// Root hub: the pad cursor is on headset volume bar N (above the boxes) instead of the
 	/// box grid. None = on the grid.
 	pub hp_sel: Option<usize>,
+	/// The options page of a many-option row, open in place of the section's rows.
+	pub picker: Option<Picker>,
+	/// Inside a section the key / pad cursor sits on the header's category strip (one step
+	/// above the first row): left/right walk the sections, down returns to the rows.
+	pub tab_focus: bool,
+	/// With `tab_focus`: the cursor is on the header's back button, not on a category.
+	pub back_focus: bool,
+}
+
+/// An open options page: the row it belongs to and the option under the key / pad cursor.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Picker {
+	pub row: usize,
+	pub hi: usize,
+	/// Tiles per line, as the page was last drawn (0 before its first frame): the cursor is
+	/// on the first line while `hi < cols`, and up from there reaches the back button.
+	pub cols: usize,
 }
 
 /// One DualSense whose headphones carry the session audio (the app's `hpvol` line):
@@ -866,11 +883,16 @@ pub fn draw(ctx: &egui::Context, st: &OverlayState, ui_state: &mut UiState) -> V
 		ui_state.sub_sel = 0;
 		ui_state.pending = None;
 		ui_state.hp_sel = None;
+		ui_state.picker = None;
+		ui_state.tab_focus = false;
 	}
-	// B / Escape steps back one level: a sub-view returns to the Root menu; from Root it
-	// closes the overlay. (The pad's B button is relayed as Escape — see play.rs.)
+	// B / Escape steps back one level: an options page returns to its rows, a sub-view to the
+	// Root menu; from Root it closes the overlay. (The pad's B button is relayed as Escape —
+	// see play.rs.)
 	if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-		if ui_state.view != View::Root {
+		if ui_state.picker.take().is_some() {
+			// back on the rows
+		} else if ui_state.view != View::Root {
 			ui_state.view = View::Root;
 		} else {
 			cmds.push(OverlayCmd::Close);
@@ -901,84 +923,55 @@ pub fn draw(ctx: &egui::Context, st: &OverlayState, ui_state: &mut UiState) -> V
 		.title_bar(false)
 		.resizable(false)
 		.collapsible(false)
-		.anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-		// 360 pt of CONTENT width: in egui 0.37 `fixed_size` is the OUTER size (margins +
-		// stroke included), so add the frame's margins back to keep the 0.29 layout.
-		.fixed_size(egui::vec2(360.0 + frame.total_margin().sum().x, 0.0))
+		// A FIXED top edge: the panel is as tall as its page (hub, a section's rows, an options
+		// page of two tiles), and centred it jumped up and down under the pointer with every
+		// step — the back button and the strip were never where the last click left them.
+		// The top sits where the tallest page ([`PANEL_REF_H`]) would be centred.
+		.anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, panel_top(ctx.viewport_rect().height())))
+		// `PANEL_W` pt of CONTENT width: in egui 0.37 `fixed_size` is the OUTER size (margins +
+		// stroke included), so add the frame's margins back.
+		.fixed_size(egui::vec2(PANEL_W + frame.total_margin().sum().x, 0.0))
 		.frame(frame)
 		.show(ctx, |ui| {
-			// Header: brand + mode + back arrow when inside a section.
-			ui.horizontal(|ui| {
-				if ui_state.view != View::Root {
-					// PAINTED back arrow — the "←" glyph is missing from egui's bundled
-					// fonts (it rendered as a tofu box, i.e. "no icon" to the user).
-					let (rect, resp) =
-						ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::click());
-					let col = if resp.hovered() {
-						egui::Color32::WHITE
-					} else {
-						egui::Color32::from_rgb(150, 155, 170)
-					};
-					let c = rect.center();
-					let s = egui::Stroke::new(2.0, col);
-					let p = ui.painter();
-					p.line_segment([c + egui::vec2(-6.0, 0.0), c + egui::vec2(6.0, 0.0)], s);
-					p.line_segment([c + egui::vec2(-6.0, 0.0), c + egui::vec2(-1.0, -5.0)], s);
-					p.line_segment([c + egui::vec2(-6.0, 0.0), c + egui::vec2(-1.0, 5.0)], s);
-					if resp.clicked() {
-						ui_state.view = View::Root;
-					}
-					resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-				}
-				let on_root = ui_state.view == View::Root;
-				// "Pulsar" brand only on the Root hub — inside a sub-view the back arrow + the
-				// section title are enough (the extra brand line was redundant clutter).
-				if on_root {
-					ui.heading(egui::RichText::new("Pulsar").color(CYAN).strong());
-				}
-				let key = match (ui_state.view, st.mode) {
-					(View::Stream, _) => "view.stream",
-					(View::Display, _) => "view.display",
-					(View::Audio, _) => "view.audio",
-					(View::Tools, _) => "view.tools",
-					(View::Chat, _) => "view.chat",
-					(View::Files, _) => "view.files",
-					(View::Gauges, _) => "view.gauges",
-					(View::Controllers, _) => "view.controllers",
-					(View::Root, Mode::Game) => "mode.game",
-					(View::Root, Mode::Remote) => "mode.remote",
-				};
-				ui.label(egui::RichText::new(t(key)).color(egui::Color32::GRAY));
-				// Connection label (Relay/Direct) only on Root — irrelevant clutter in sub-views.
-				if on_root {
-					ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-						ui.label(
-							egui::RichText::new(st.conn_label.clone())
-								.monospace()
-								.color(egui::Color32::from_rgb(150, 155, 170)),
-						);
-					});
-				}
-			});
+			// Header: the hub shows the brand, the mode and the transport; a section shows a
+			// large back button and the category strip.
+			if ui_state.view == View::Root {
+				// As tall as a section's strip: the page under it starts at the same height on
+				// the hub and in a section, so nothing shifts on the way in or back.
+				ui.allocate_ui_with_layout(
+					egui::vec2(ui.available_width(), HEADER_H),
+					egui::Layout::left_to_right(egui::Align::Center),
+					|ui| {
+						ui.label(egui::RichText::new("Pulsar").size(20.0).color(CYAN).strong());
+						let key = match st.mode {
+							Mode::Game => "mode.game",
+							Mode::Remote => "mode.remote",
+						};
+						ui.label(egui::RichText::new(t(key)).size(13.0).color(egui::Color32::from_gray(150)));
+						ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+							// The transport (P2P / relay) in a well: something to read, not to click.
+							if !st.conn_label.is_empty() {
+								egui::Frame::new()
+									.fill(SEG_BG)
+									.corner_radius(8.0)
+									.inner_margin(egui::Margin::symmetric(10, 5))
+									.show(ui, |ui| {
+										ui.label(
+											egui::RichText::new(st.conn_label.clone())
+												.monospace()
+												.size(12.0)
+												.color(egui::Color32::from_rgb(150, 155, 170)),
+										);
+									});
+							}
+						});
+					},
+				);
+			} else {
+				draw_section_header(ui, st, ui_state);
+			}
 			ui.add_space(6.0);
 
-			// Section enter/leave animation: a quick fade + downward slide-in instead of
-			// the old instant swap. The transition restarts on every view change (the
-			// bumped counter keys a fresh animation id, primed at 0 the first frame).
-			if ui_state.anim_view != ui_state.view || open_edge {
-				ui_state.anim_view = ui_state.view;
-				ui_state.anim_gen = ui_state.anim_gen.wrapping_add(1);
-				ui.ctx().animate_value_with_time(
-					egui::Id::unique(("ov-view-fade", ui_state.anim_gen)),
-					0.0,
-					0.0,
-				);
-			}
-			let fade = ui.ctx().animate_value_with_time(
-				egui::Id::unique(("ov-view-fade", ui_state.anim_gen)),
-				1.0,
-				0.16,
-			);
 			// One read of the controller/keyboard nav for this frame, handed to the active view.
 			let mut nav = ui.input(|i| Nav {
 				up: i.key_pressed(egui::Key::ArrowUp),
@@ -999,6 +992,85 @@ pub fn draw(ctx: &egui::Context, st: &OverlayState, ui_state: &mut UiState) -> V
 				ui_state.hp_sel = (!headsets().is_empty()).then_some(0);
 				nav = Nav::default();
 			}
+			// A mouse click hands the menu back to the pointer: the cursor ring hides (it would
+			// stay on a row the user is no longer looking at) until the next key wakes it.
+			if ui_state.nav_active && ui.input(|i| i.pointer.any_click()) {
+				ui_state.nav_active = false;
+				ui_state.tab_focus = false;
+				ui_state.pending = None;
+			}
+			// The header is one step above a section's first row: up from row 0 puts the cursor
+			// on the current category. Left / right there walk the sections, and left from the
+			// first one reaches the BACK button (keys and a pad could not get to it: it was a
+			// mouse-only button); down, or A on a category, returns to the rows; A on the back
+			// button goes back one level. An options page has no strip to walk — up from its
+			// first line goes straight to the back button.
+			if ui_state.view == View::Root {
+				ui_state.tab_focus = false;
+			} else if ui_state.tab_focus {
+				if ui_state.back_focus {
+					if nav.activate {
+						if ui_state.picker.take().is_none() {
+							ui_state.view = View::Root;
+						}
+						ui_state.tab_focus = false;
+					} else if nav.down {
+						ui_state.tab_focus = false;
+					} else if nav.right && ui_state.picker.is_none() {
+						ui_state.back_focus = false;
+					}
+				} else {
+					let tabs: Vec<View> = section_tabs(st.mode).map(|c| c.2).collect();
+					if let Some(i) = tabs.iter().position(|v| *v == ui_state.view) {
+						if nav.left {
+							if i > 0 {
+								ui_state.view = tabs[i - 1];
+							} else {
+								ui_state.back_focus = true;
+							}
+						} else if nav.right && i + 1 < tabs.len() {
+							ui_state.view = tabs[i + 1];
+						}
+					}
+					if nav.down || nav.activate {
+						ui_state.tab_focus = false;
+					}
+				}
+				nav = Nav::default();
+			} else if nav.up {
+				let (top, paging) = match ui_state.picker {
+					Some(p) => (p.cols > 0 && p.hi < p.cols, true),
+					None => (ui_state.sub_sel == 0 && has_rows(ui_state.view), false),
+				};
+				if top {
+					ui_state.tab_focus = true;
+					ui_state.back_focus = paging;
+					nav = Nav::default();
+				}
+			}
+
+			// Section enter/leave animation: a quick fade + downward slide-in instead of
+			// the old instant swap. The transition restarts on every view change (the
+			// bumped counter keys a fresh animation id, primed at 0 the first frame).
+			if ui_state.anim_view != ui_state.view || open_edge {
+				ui_state.anim_view = ui_state.view;
+				ui_state.anim_gen = ui_state.anim_gen.wrapping_add(1);
+				// A section starts with its cursor on the first row, nothing staged, no
+				// options page (the strip moves between sections without a stop at the hub).
+				ui_state.sub_sel = 0;
+				ui_state.pending = None;
+				ui_state.picker = None;
+				ui.ctx().animate_value_with_time(
+					egui::Id::unique(("ov-view-fade", ui_state.anim_gen)),
+					0.0,
+					0.0,
+				);
+			}
+			let fade = ui.ctx().animate_value_with_time(
+				egui::Id::unique(("ov-view-fade", ui_state.anim_gen)),
+				1.0,
+				0.16,
+			);
 			// Entering any sub-view always starts its row cursor at the top.
 			if ui_state.view == View::Root {
 				ui_state.sub_sel = 0;
@@ -1010,60 +1082,86 @@ pub fn draw(ctx: &egui::Context, st: &OverlayState, ui_state: &mut UiState) -> V
 			if nav.up || nav.down {
 				ui_state.pending = None;
 			}
+			// The key / pad cursor shows once it woke, and on the rows unless it is on the strip.
+			let cursor = ui_state.nav_active && !ui_state.tab_focus;
 			ui.scope(|ui| {
 				ui.set_opacity(fade);
 				ui.add_space((1.0 - fade) * 8.0);
-				match ui_state.view {
-					View::Root => {
-						draw_root(
-							ui,
-							st,
-							&mut ui_state.view,
-							&mut ui_state.sel,
-							&mut ui_state.hp_sel,
-							nav,
-							ui_state.nav_active,
-							&mut cmds,
-						)
-					}
-					View::Stream => draw_stream(
+				let view = ui_state.view;
+				match view {
+					View::Root => draw_root(
 						ui,
 						st,
-						&ui_state.deferred,
-						&mut ui_state.sub_sel,
+						&mut ui_state.view,
+						&mut ui_state.sel,
+						&mut ui_state.hp_sel,
 						nav,
-						&mut ui_state.pending,
+						ui_state.nav_active,
 						&mut cmds,
 					),
-					View::Display => draw_display(
-						ui,
-						st,
-						st.mode,
-						&ui_state.deferred,
-						&mut ui_state.sub_sel,
-						nav,
-						&mut ui_state.pending,
-						&mut cmds,
-					),
-					View::Audio => {
-						draw_audio(ui, st, &ui_state.deferred, &mut ui_state.sub_sel, nav, &mut ui_state.pending, &mut cmds)
-					}
-					View::Tools => {
-						draw_tools(ui, &mut ui_state.view, st.mode, &mut ui_state.sub_sel, nav, &mut cmds)
-					}
 					View::Chat => draw_chat(ui, st, &mut ui_state.chat_input, ui_state.chat_new_from, &mut cmds),
 					View::Files => draw_files(ui, st, ui_state, &mut cmds),
-					View::Gauges => {
-						draw_gauges(ui, st, &mut ui_state.sub_sel, nav, &mut ui_state.pending, &mut cmds)
-					}
-					View::Controllers => {
-						draw_controllers(ui, st, &mut ui_state.sub_sel, nav, &mut ui_state.pending, &mut cmds)
+					_ => {
+						// A section's rows scroll when they are taller than the surface (a
+						// windowed 720p app is ~576 pt high; four controllers are far more).
+						// The cap is what the surface leaves under the panel's fixed top once
+						// the header, the footer and the frame are taken off (`PANEL_CHROME_H`).
+						// `min_scrolled_height` = the cap: this auto-height window offers the
+						// area no height of its own, and it would collapse to one row.
+						let vh = ui.ctx().viewport_rect().height();
+						let max_h = (vh - panel_top(vh) - PANEL_CHROME_H).max(160.0);
+						let out = egui::ScrollArea::vertical()
+							.id_salt(("ov-rows", ui_state.anim_gen))
+							.max_height(max_h)
+							.min_scrolled_height(max_h)
+							.auto_shrink([false, true])
+							.show(ui, |ui| {
+								// Room for the cursor ring of the first / last row (2 pt wider
+								// than the row) inside the area's clip.
+								ui.add_space(3.0);
+								let input = RowsIn {
+									sub_sel: &mut ui_state.sub_sel,
+									nav,
+									cursor,
+									pending: &mut ui_state.pending,
+									picker: &mut ui_state.picker,
+								};
+								match view {
+									View::Stream => draw_stream(ui, st, &ui_state.deferred, input, &mut cmds),
+									View::Display => draw_display(ui, st, &ui_state.deferred, input, &mut cmds),
+									View::Audio => draw_audio(ui, st, &ui_state.deferred, input, &mut cmds),
+									View::Tools => draw_tools(ui, st.mode, input, &mut cmds),
+									View::Gauges => draw_gauges(ui, st, input, &mut cmds),
+									View::Controllers => draw_controllers(ui, st, input, &mut cmds),
+									View::Root | View::Chat | View::Files => {}
+								}
+								ui.add_space(3.0);
+							});
+						// More rows above / below the visible part: fade that edge into the panel.
+						let hidden_above = out.state.offset().y;
+						let hidden_below = out.content_size.y - out.inner_rect.height() - out.state.offset().y;
+						let bg = ui.ctx().global_style().visuals.window_fill;
+						if hidden_above > 1.0 {
+							paint_fade(ui.painter(), out.inner_rect, true, bg);
+						}
+						if hidden_below > 1.0 {
+							paint_fade(ui.painter(), out.inner_rect, false, bg);
+						}
 					}
 				}
 			});
 			ui.add_space(6.0);
+			// Footer: the hub (and the typing views) list the global shortcuts, a section how
+			// keys / a pad drive its rows.
+			let hint = if !has_rows(ui_state.view) {
+				t("shortcuts")
+			} else if ui_state.picker.is_some() {
+				t("hint.options")
+			} else {
+				t("hint.rows")
+			};
 			ui.label(
-				egui::RichText::new(t("shortcuts"))
+				egui::RichText::new(hint)
 				.monospace()
 				.small()
 				.color(egui::Color32::from_rgb(120, 125, 140)),
@@ -1091,22 +1189,46 @@ pub fn draw(ctx: &egui::Context, st: &OverlayState, ui_state: &mut UiState) -> V
 	out
 }
 
-/// Move the Root-menu selection over a 2-column grid of `n` boxes plus an End-session button
+/// Content width of the overlay panel (pt). 2026-11-13: 360 was too narrow for the stream line
+/// and the growing rows; 520 still fits a windowed 720p app (≈ 1280 pt wide).
+const PANEL_W: f32 = 520.0;
+/// Gap between the tiles of the stat and category grids (pt).
+const GRID_GAP: f32 = 8.0;
+/// Height of the tallest page (pt, frame included): the remote Stream section's eight rows.
+const PANEL_REF_H: f32 = 540.0;
+
+/// What a section's panel has around its rows (pt): frame margins (28), the header strip and
+/// the gap under it (42), the footer line and its gap (24), the enter slide (8) and a gap to
+/// the bottom of the surface (24).
+const PANEL_CHROME_H: f32 = 126.0;
+
+/// The panel's top edge on a surface `viewport_h` pt high: where a [`PANEL_REF_H`] panel would
+/// be centred, and never closer than 12 pt to the top.
+fn panel_top(viewport_h: f32) -> f32 {
+	((viewport_h - PANEL_REF_H) / 2.0).max(12.0)
+}
+
+/// Category grid columns: remote's 8 boxes in 2 rows of 4, game's 6 in 2 rows of 3.
+fn grid_cols(n: usize) -> usize {
+	if n % 4 == 0 { 4 } else { 3 }
+}
+
+/// Move the Root-menu selection over a `grid_cols`-column grid of `n` boxes plus an End-session button
 /// at index `n` (its own full-width row below the grid). left/right step within a grid row;
 /// up/down step between rows, with the bottom grid row going to End and End going back up.
 fn move_grid_sel(sel: usize, n: usize, nav: Nav) -> usize {
-	const COLS: usize = 2;
+	let cols = grid_cols(n);
 	let end = n;
 	let mut s = sel.min(end);
-	if nav.right && s < n && s % COLS < COLS - 1 && s + 1 < n {
+	if nav.right && s < n && s % cols < cols - 1 && s + 1 < n {
 		s += 1;
 	}
-	if nav.left && s < n && s % COLS > 0 {
+	if nav.left && s < n && s % cols > 0 {
 		s -= 1;
 	}
 	if nav.down {
 		if s < n {
-			let nx = s + COLS;
+			let nx = s + cols;
 			s = if nx < n { nx } else { end };
 		}
 		// From End there is nowhere lower — stay.
@@ -1114,9 +1236,9 @@ fn move_grid_sel(sel: usize, n: usize, nav: Nav) -> usize {
 	if nav.up {
 		if s == end {
 			// Jump back to the first cell of the last grid row.
-			s = if n == 0 { 0 } else { ((n - 1) / COLS) * COLS };
-		} else if s >= COLS {
-			s -= COLS;
+			s = if n == 0 { 0 } else { ((n - 1) / cols) * cols };
+		} else if s >= cols {
+			s -= cols;
 		}
 	}
 	s
@@ -1137,6 +1259,7 @@ fn draw_root(
 	let (enc_ms, target_mbit) = host_parts(st);
 	let bw = fmt_mbps(st.mbps);
 	// Two compact tile rows: RTT · fps · encode / decode · BITRATE target · bandwidth.
+	ui.spacing_mut().item_spacing = egui::vec2(GRID_GAP, GRID_GAP);
 	ui.horizontal(|ui| {
 		stat_tile(ui, &format!("{:.0}", st.latency_ms), icon::PULSE, t("stat.latency"));
 		stat_tile(ui, &format!("{:.0}", st.fps), icon::FILM_STRIP, "FPS");
@@ -1250,28 +1373,7 @@ fn draw_root(
 	// in-game audio control (host audio / speakers / mic) is essential, and Tools carries the
 	// fullscreen toggle (game mode trims Tools to JUST fullscreen, see draw_tools). Remote mode
 	// gets the full eight boxes incl. file transfer, chat, mic, monitor.
-	let game_boxes: &[(&str, &str, View)] = &[
-		(icon::BROADCAST, t("view.stream"), View::Stream),
-		(icon::MONITOR, t("view.display"), View::Display),
-		(icon::SPEAKER_HIGH, t("view.audio"), View::Audio),
-		(icon::CHART_BAR, t("view.gauges"), View::Gauges),
-		(icon::GAME_CONTROLLER, t("view.controllers"), View::Controllers),
-		(icon::WRENCH, t("view.tools"), View::Tools),
-	];
-	let remote_boxes: &[(&str, &str, View)] = &[
-		(icon::BROADCAST, t("view.stream"), View::Stream),
-		(icon::MONITOR, t("view.display"), View::Display),
-		(icon::SPEAKER_HIGH, t("view.audio"), View::Audio),
-		(icon::CHAT_CIRCLE, t("view.chat"), View::Chat),
-		(icon::FOLDER, t("view.files"), View::Files),
-		(icon::WRENCH, t("view.tools"), View::Tools),
-		(icon::GAME_CONTROLLER, t("view.controllers"), View::Controllers),
-		(icon::CHART_BAR, t("view.gauges"), View::Gauges),
-	];
-	let boxes: &[(&str, &str, View)] = match st.mode {
-		Mode::Game => game_boxes,
-		Mode::Remote => remote_boxes,
-	};
+	let boxes = categories(st.mode);
 	let n = boxes.len();
 	// Selection cycles over the n boxes PLUS the End-session button at index n, so the pad
 	// reaches End too.
@@ -1283,15 +1385,16 @@ fn draw_root(
 		*sel = 0;
 	}
 	*sel = move_grid_sel(*sel, n, nav);
+	let cols = grid_cols(n);
 	egui::Grid::new("ov_boxes")
-		.num_columns(2)
-		.spacing(egui::vec2(8.0, 8.0))
+		.num_columns(cols)
+		.spacing(egui::vec2(GRID_GAP, GRID_GAP))
 		.show(ui, |ui| {
-			for (i, (icon, label, v)) in boxes.iter().enumerate() {
+			for (i, (icon, key, v)) in boxes.iter().enumerate() {
 				// Unread host messages also show on the Chat box (not only on the closed-state
 				// open button), until the Chat view is opened.
 				let badge = if *v == View::Chat { st.chat_unread } else { 0 };
-				let resp = cat_box(ui, icon, label, nav_active_grid && i == *sel, badge);
+				let resp = cat_box(ui, icon, t(key), nav_active_grid && i == *sel, badge, cols);
 				if resp.clicked() || (activate && i == *sel) {
 					// Files opens the app's dedicated per-session window — the in-overlay
 					// two-pane view was too cramped (kept as code for a potential fallback).
@@ -1301,7 +1404,7 @@ fn draw_root(
 						*view = *v;
 					}
 				}
-				if i % 2 == 1 {
+				if i % cols == cols - 1 {
 					ui.end_row();
 				}
 			}
@@ -1310,15 +1413,35 @@ fn draw_root(
 	// End-session button = the last nav item (index n). Cyan stroke when the pad cursor is on
 	// it; A/Enter (activate) ends the session, same as a click. Highlight only once nav woke.
 	let end_selected = nav_active_grid && *sel == n;
-	let mut end_btn = egui::Button::new(
-		egui::RichText::new(t("end")).color(egui::Color32::WHITE),
-	)
-	.fill(egui::Color32::from_rgb(200, 60, 70))
-	.min_size(egui::vec2(ui.available_width(), 32.0));
+	// A row like a section's: full width, row height, the cursor ring — in red, calm at rest
+	// and bright under the pointer / the cursor (it was a 32 pt bar in full red at all times).
+	let (rect, resp) =
+		ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h(ui.ctx())), egui::Sense::click());
+	let lit = end_selected || resp.hovered();
 	if end_selected {
-		end_btn = end_btn.stroke(egui::Stroke::new(2.5, CYAN));
+		ui.painter().rect_filled(rect.expand(2.0), 10.0, CYAN);
 	}
-	if ui.add(end_btn).clicked() || (activate && end_selected) {
+	ui.painter().rect_filled(rect, 8.0, if lit { DANGER } else { DANGER_DIM });
+	let label = t("end");
+	let col = if lit { egui::Color32::WHITE } else { egui::Color32::from_rgb(255, 214, 216) };
+	let x0 = rect.center().x - (26.0 + text_w(ui, label, 13.5)) / 2.0;
+	ui.painter().text(
+		egui::pos2(x0 + 9.0, rect.center().y),
+		egui::Align2::CENTER_CENTER,
+		icon::SIGN_OUT,
+		egui::FontId::proportional(17.0),
+		col,
+	);
+	ui.painter().text(
+		egui::pos2(x0 + 26.0, rect.center().y),
+		egui::Align2::LEFT_CENTER,
+		label,
+		egui::FontId::proportional(13.5),
+		col,
+	);
+	let clicked = resp.clicked();
+	resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+	if clicked || (activate && end_selected) {
 		cmds.push(OverlayCmd::End);
 	}
 }
@@ -1330,10 +1453,10 @@ fn headset_bar(ui: &mut egui::Ui, b: &HeadsetBar, label: &str, selected: bool) -
 	let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 34.0), egui::Sense::click_and_drag());
 	let p = ui.painter();
 	if selected {
-		p.rect_filled(rect.expand(2.0), 7.0, CYAN);
-		p.rect_filled(rect, 6.0, egui::Color32::from_rgb(20, 54, 70));
+		p.rect_filled(rect.expand(2.0), 10.0, CYAN);
+		p.rect_filled(rect, 8.0, ROW_SEL);
 	} else {
-		p.rect_filled(rect, 6.0, egui::Color32::from_rgb(26, 28, 38));
+		p.rect_filled(rect, 8.0, if resp.hovered() { ROW_HOVER } else { ROW_BG });
 	}
 	let top = rect.top() + 10.0;
 	let swatch = match b.rgb {
@@ -1360,13 +1483,13 @@ fn headset_bar(ui: &mut egui::Ui, b: &HeadsetBar, label: &str, selected: bool) -
 		egui::pos2(rect.left() + 10.0, rect.bottom() - 11.0),
 		egui::pos2(rect.right() - 10.0, rect.bottom() - 6.0),
 	);
-	p.rect_filled(track, 2.5, egui::Color32::from_gray(60));
+	p.rect_filled(track, 2.5, egui::Color32::from_rgb(62, 66, 84));
 	let frac = b.volume as f32 / 100.0;
 	let fill = egui::Rect::from_min_max(
 		track.min,
 		egui::pos2(track.left() + track.width() * frac, track.bottom()),
 	);
-	p.rect_filled(fill, 2.5, CYAN);
+	p.rect_filled(fill, 2.5, ACCENT);
 	p.circle_filled(egui::pos2(fill.right(), track.center().y), 5.0, egui::Color32::WHITE);
 	if resp.hovered() {
 		resp.clone().on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -1379,15 +1502,158 @@ fn headset_bar(ui: &mut egui::Ui, b: &HeadsetBar, label: &str, selected: bool) -
 	None
 }
 
-/// Stream section: codec/encoder/res/fps/bandwidth-limit + quality/pacing, as pad-navigable
-/// rows. up/down move the row cursor; left/right cycle the selected row's value.
+/// The hub's category boxes per mode, in display order: icon, label key, section. Game mode
+/// shows the slim set; Audio + Tools were added on the maintainer's request — in-game audio
+/// control (host audio / speakers / mic) is essential, and Tools carries the fullscreen toggle
+/// (game mode trims Tools to JUST fullscreen, see draw_tools). Remote mode gets the full eight
+/// incl. file transfer, chat, mic, monitor. Chat + Files are NATIVE views.
+fn categories(mode: Mode) -> &'static [(&'static str, &'static str, View)] {
+	match mode {
+		Mode::Game => &[
+			(icon::BROADCAST, "view.stream", View::Stream),
+			(icon::MONITOR, "view.display", View::Display),
+			(icon::SPEAKER_HIGH, "view.audio", View::Audio),
+			(icon::CHART_BAR, "view.gauges", View::Gauges),
+			(icon::GAME_CONTROLLER, "view.controllers", View::Controllers),
+			(icon::WRENCH, "view.tools", View::Tools),
+		],
+		Mode::Remote => &[
+			(icon::BROADCAST, "view.stream", View::Stream),
+			(icon::MONITOR, "view.display", View::Display),
+			(icon::SPEAKER_HIGH, "view.audio", View::Audio),
+			(icon::CHAT_CIRCLE, "view.chat", View::Chat),
+			(icon::FOLDER, "view.files", View::Files),
+			(icon::WRENCH, "view.tools", View::Tools),
+			(icon::GAME_CONTROLLER, "view.controllers", View::Controllers),
+			(icon::CHART_BAR, "view.gauges", View::Gauges),
+		],
+	}
+}
+
+/// The sections the header strip lists: every category but Files (it opens its own window from
+/// the hub and has no page here).
+fn section_tabs(mode: Mode) -> impl Iterator<Item = &'static (&'static str, &'static str, View)> {
+	categories(mode).iter().filter(|c| c.2 != View::Files)
+}
+
+/// Sections made of rows (cursor, options pages, the scroll area) — not the typing views.
+fn has_rows(view: View) -> bool {
+	matches!(
+		view,
+		View::Stream | View::Display | View::Audio | View::Tools | View::Gauges | View::Controllers
+	)
+}
+
+/// A section's header: a large back button and the category strip. One click on a strip entry —
+/// or, with keys / a pad, up from the first row and then left/right — moves between sections
+/// without a trip through the hub. (The old header was a 20 pt arrow and nothing else: every
+/// change of section was back, aim, click.)
+fn draw_section_header(ui: &mut egui::Ui, st: &OverlayState, us: &mut UiState) {
+	const H: f32 = HEADER_H;
+	ui.horizontal(|ui| {
+		ui.spacing_mut().item_spacing.x = 4.0;
+		// Back: from an options page to its rows, from the rows to the hub.
+		let (rect, resp) = ui.allocate_exact_size(egui::vec2(44.0, H), egui::Sense::click());
+		let hov = resp.hovered();
+		// The cursor on it: the ring and plate every other cursor stop has.
+		let focus = us.nav_active && us.tab_focus && us.back_focus;
+		if focus {
+			ui.painter().rect_filled(rect.expand(2.0), 10.0, CYAN);
+		}
+		let fill = if focus {
+			ROW_SEL
+		} else if hov {
+			ROW_HOVER
+		} else {
+			ROW_BG
+		};
+		ui.painter().rect_filled(rect, 8.0, fill);
+		{
+			// PAINTED arrow — the "←" glyph is missing from egui's bundled fonts.
+			let col = if hov || focus { egui::Color32::WHITE } else { egui::Color32::from_gray(190) };
+			let c = rect.center();
+			let s = egui::Stroke::new(2.0, col);
+			let p = ui.painter();
+			p.line_segment([c + egui::vec2(-7.0, 0.0), c + egui::vec2(7.0, 0.0)], s);
+			p.line_segment([c + egui::vec2(-7.0, 0.0), c + egui::vec2(-1.5, -5.5)], s);
+			p.line_segment([c + egui::vec2(-7.0, 0.0), c + egui::vec2(-1.5, 5.5)], s);
+		}
+		if resp.clicked() && us.picker.take().is_none() {
+			us.view = View::Root;
+		}
+		resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+		ui.add_space(4.0);
+		for (icon, key, v) in section_tabs(st.mode) {
+			let active = *v == us.view;
+			let label = t(key);
+			// The current section shows its name; the others are an icon (the name on hover).
+			let w = if active { 38.0 + text_w(ui, label, 13.0) + 12.0 } else { 40.0 };
+			let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, H), egui::Sense::click());
+			let hov = resp.hovered();
+			if active && us.nav_active && us.tab_focus && !us.back_focus {
+				ui.painter().rect_filled(rect.expand(2.0), 10.0, CYAN);
+			}
+			// The category you are in looks like the category the cursor is on in the hub:
+			// the same plate (`ROW_SEL`), cyan icon, white name — the hub's box, minus the
+			// ring (the ring is the cursor, and it is on the rows). It was indigo, the colour
+			// of a VALUE in force, so the hub and the strip marked "this category" in two
+			// different colours.
+			let fill = if active {
+				ROW_SEL
+			} else if hov {
+				ROW_HOVER
+			} else {
+				ROW_BG
+			};
+			ui.painter().rect_filled(rect, 8.0, fill);
+			if active {
+				ui.painter().rect_stroke(
+					rect,
+					8.0,
+					egui::Stroke::new(1.0, CYAN.gamma_multiply(0.45)),
+					egui::StrokeKind::Inside,
+				);
+			}
+			ui.painter().text(
+				egui::pos2(rect.left() + 20.0, rect.center().y),
+				egui::Align2::CENTER_CENTER,
+				*icon,
+				egui::FontId::proportional(18.0),
+				if hov && !active { egui::Color32::WHITE } else { CYAN },
+			);
+			if active {
+				ui.painter().text(
+					egui::pos2(rect.left() + 38.0, rect.center().y),
+					egui::Align2::LEFT_CENTER,
+					label,
+					egui::FontId::proportional(13.0),
+					egui::Color32::WHITE,
+				);
+			} else if *v == View::Chat && st.chat_unread > 0 {
+				ui.painter().circle_filled(
+					egui::pos2(rect.right() - 8.0, rect.top() + 8.0),
+					4.0,
+					egui::Color32::from_rgb(225, 60, 70),
+				);
+			}
+			if resp.clicked() && !active {
+				us.view = *v;
+				us.picker = None;
+			}
+			let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+			if !active {
+				resp.on_hover_text(egui::RichText::new(label).size(12.0));
+			}
+		}
+	});
+}
+
+/// Stream section: codec / encoder / resolution / fps / bitrate limit / quality / pacing.
 fn draw_stream(
 	ui: &mut egui::Ui,
 	st: &OverlayState,
 	deferred: &[(&'static str, String)],
-	sub_sel: &mut usize,
-	nav: Nav,
-	pending: &mut Option<(usize, String)>,
+	input: RowsIn<'_>,
 	cmds: &mut Vec<OverlayCmd>,
 ) {
 	// Capability gating: only offer what the HOST really has (empty = unknown host → show
@@ -1432,55 +1698,43 @@ fn draw_stream(
 	let fps = fps_opts();
 	let br = bitrate_opts();
 	let quality = [("latency", t("lowlat")), ("quality", t("quality"))];
-	let pace = [("on", t("on")), ("off", t("off"))];
+	let onoff = [("on", t("on")), ("off", t("off"))];
 	let pace_cur = if st.pace { "on" } else { "off" };
 
 	// Remote mode adds the "show my pointer on the host" row (game sessions never label it).
 	let remote = st.mode == Mode::Remote;
-	let rows: usize = if remote { 8 } else { 7 };
-	if nav.down {
-		*sub_sel = (*sub_sel + 1).min(rows - 1);
-	}
-	if nav.up {
-		*sub_sel = sub_sel.saturating_sub(1);
-	}
-	let s = (*sub_sel).min(rows - 1);
-	ui.spacing_mut().item_spacing.y = 6.0;
-	if let Some(v) = choice_row(ui, s == 0, nav, "Codec", staged(deferred, "codec", &st.codec), &codecs, 0, pending) {
+	let mut rows = Rows::new(if remote { 8 } else { 7 }, input);
+	ui.spacing_mut().item_spacing.y = ROW_GAP;
+	if let Some(v) = rows.choice(ui, 0, "Codec", staged(deferred, "codec", &st.codec), &codecs, None) {
 		cmds.push(OverlayCmd::Set("codec", v));
 	}
-	if let Some(v) =
-		choice_row(ui, s == 1, nav, "Encoder", staged(deferred, "encoder", &st.encoder), &encoders, 1, pending)
-	{
+	if let Some(v) = rows.choice(ui, 1, "Encoder", staged(deferred, "encoder", &st.encoder), &encoders, None) {
 		cmds.push(OverlayCmd::Set("encoder", v));
 	}
-	if let Some(v) = choice_row(ui, s == 2, nav, t("res"), staged(deferred, "res", &st.res), res, 2, pending) {
+	if let Some(v) = rows.choice(ui, 2, t("res"), staged(deferred, "res", &st.res), res, None) {
 		cmds.push(OverlayCmd::Set("res", v));
 	}
-	if let Some(v) = choice_row(ui, s == 3, nav, "FPS", staged(deferred, "fps", &st.fps_sel), &fps, 3, pending) {
+	if let Some(v) = rows.choice(ui, 3, "FPS", staged(deferred, "fps", &st.fps_sel), &fps, None) {
 		cmds.push(OverlayCmd::Set("fps", v));
 	}
 	// The bitrate LIMIT (the adaptive controller's ceiling; it still goes lower on a weak link).
-	if let Some(v) = choice_row_i(ui, s == 4, nav, t("bwlimit"), &st.bitrate, &br, 4, pending, Some(t("info.bitrate"))) {
+	if let Some(v) = rows.choice(ui, 4, t("bwlimit"), &st.bitrate, &br, Some(t("info.bitrate"))) {
 		cmds.push(OverlayCmd::Set("bitrate", v));
 	}
-	if let Some(v) =
-		choice_row(ui, s == 5, nav, t("quality"), staged(deferred, "quality", &st.quality), &quality, 5, pending)
-	{
+	if let Some(v) = rows.choice(ui, 5, t("quality"), staged(deferred, "quality", &st.quality), &quality, None) {
 		cmds.push(OverlayCmd::Set("quality", v));
 	}
-	if let Some(v) =
-		choice_row_i(ui, s == 6, nav, t("pacing"), pace_cur, &pace, 6, pending, Some(t("info.pacing")))
-	{
+	if let Some(v) = rows.choice(ui, 6, t("pacing"), pace_cur, &onoff, Some(t("info.pacing"))) {
 		cmds.push(OverlayCmd::Set("pace", v));
 	}
 	if remote {
 		let cur = if st.cur_label { "on" } else { "off" };
-		if let Some(v) =
-			choice_row_i(ui, s == 7, nav, t("curlabel"), cur, &pace, 7, pending, Some(t("info.curlabel")))
-		{
+		if let Some(v) = rows.choice(ui, 7, t("curlabel"), cur, &onoff, Some(t("info.curlabel"))) {
 			cmds.push(OverlayCmd::Set("curlabel", v));
 		}
+	}
+	if rows.picking() {
+		return;
 	}
 	pending_note(ui, deferred);
 	// Decoder is auto-selected by this renderer — display only.
@@ -1500,32 +1754,23 @@ fn draw_stream(
 }
 
 /// Display section: host monitor picker (when the host has >1 display, BOTH modes) +
-/// AnyDesk-style view-fit modes (renderer-local, instant).
+/// AnyDesk-style view-fit modes (renderer-local, instant), picture upscaling, screen
+/// adaptation, mouse sensitivity and (remote) the pointer rows.
 fn draw_display(
 	ui: &mut egui::Ui,
 	st: &OverlayState,
-	mode: Mode,
 	deferred: &[(&'static str, String)],
-	sub_sel: &mut usize,
-	nav: Nav,
-	pending: &mut Option<(usize, String)>,
+	input: RowsIn<'_>,
 	cmds: &mut Vec<OverlayCmd>,
 ) {
 	// Rows: the host monitor picker (only when the host exposes >1 display), the view-fit mode,
-	// then the "screen adaptation" toggle. up/down move the cursor; left/right change the row.
+	// upscaling, the "screen adaptation" toggle, mouse sensitivity.
 	let multi = st.displays.len() > 1;
-	// Remote mode adds the free-cursor row (game mode always keeps the cursor in the video).
-	let free_row = mode == Mode::Remote;
-	// Remote mode also gets the host-pointer row (issue #7) right after it.
-	let rows = 4 + usize::from(multi) + 2 * usize::from(free_row);
-	if nav.down {
-		*sub_sel = (*sub_sel + 1).min(rows - 1);
-	}
-	if nav.up {
-		*sub_sel = sub_sel.saturating_sub(1);
-	}
-	let s = (*sub_sel).min(rows - 1);
-	ui.spacing_mut().item_spacing.y = 6.0;
+	// Remote mode adds the free-cursor row (game mode always keeps the cursor in the video)
+	// and the host-pointer row (issue #7) right after it.
+	let free_row = st.mode == Mode::Remote;
+	let mut rows = Rows::new(4 + usize::from(multi) + 2 * usize::from(free_row), input);
+	ui.spacing_mut().item_spacing.y = ROW_GAP;
 	let mut row = 0;
 	if multi {
 		let idx_strs: Vec<String> = st.displays.iter().map(|(i, _)| i.to_string()).collect();
@@ -1537,7 +1782,7 @@ fn draw_display(
 			.collect();
 		let live = st.display_idx.to_string();
 		let cur = staged(deferred, "display", &live);
-		if let Some(v) = choice_row(ui, s == row, nav, t("monitor.title"), cur, &opts, row, pending) {
+		if let Some(v) = rows.choice(ui, row, t("monitor.title"), cur, &opts, None) {
 			cmds.push(OverlayCmd::Set("display", v));
 		}
 		row += 1;
@@ -1547,7 +1792,7 @@ fn draw_display(
 		("stretch", t("fit.stretch")),
 		("original", t("fit.original")),
 	];
-	if let Some(v) = choice_row(ui, s == row, nav, t("fit.title"), &st.fit, &fit, row, pending) {
+	if let Some(v) = rows.choice(ui, row, t("fit.title"), &st.fit, &fit, Some(t("fit.help"))) {
 		cmds.push(OverlayCmd::Set("fit", v));
 	}
 	row += 1;
@@ -1561,7 +1806,7 @@ fn draw_display(
 	];
 	let up_live = upscale_mode();
 	let up_cur = staged(deferred, "upscale", &up_live);
-	if let Some(v) = choice_row(ui, s == row, nav, t("upscale.title"), up_cur, &up, row, pending) {
+	if let Some(v) = rows.choice(ui, row, t("upscale.title"), up_cur, &up, None) {
 		set_upscale_mode(&v);
 		cmds.push(OverlayCmd::Set("upscale", v));
 	}
@@ -1576,9 +1821,7 @@ fn draw_display(
 		Some((_, v)) => if v == "off" { "off" } else { "on" },
 		None => if st.adapt { "on" } else { "off" },
 	};
-	if let Some(v) =
-		choice_row_i(ui, s == row, nav, t("display.adapt"), adapt_cur, &onoff, row, pending, Some(t("info.adapt")))
-	{
+	if let Some(v) = rows.choice(ui, row, t("display.adapt"), adapt_cur, &onoff, Some(t("info.adapt"))) {
 		if v == "on" {
 			let sr = ui.ctx().viewport_rect();
 			let ppp = ui.ctx().pixels_per_point();
@@ -1594,37 +1837,27 @@ fn draw_display(
 	// device's raw deltas, applied by the app. Instant — no stream restart.
 	let senses: Vec<(&str, String)> = MOUSE_SENSES.iter().map(|v| (*v, format!("{v}×"))).collect();
 	let sense_opts: Vec<(&str, &str)> = senses.iter().map(|(v, l)| (*v, l.as_str())).collect();
-	if let Some(v) =
-		choice_row_i(ui, s == row, nav, t("mouse.sens"), mouse_sens(), &sense_opts, row, pending, Some(t("info.msens")))
-	{
+	if let Some(v) = rows.choice(ui, row, t("mouse.sens"), mouse_sens(), &sense_opts, Some(t("info.msens"))) {
 		cmds.push(OverlayCmd::Set("msens", v));
 	}
 	row += 1;
 	if free_row {
 		let cur = if ptr_free() { "on" } else { "off" };
-		if let Some(v) =
-			choice_row_i(ui, s == row, nav, t("mouse.free"), cur, &onoff, row, pending, Some(t("info.mfree")))
-		{
+		if let Some(v) = rows.choice(ui, row, t("mouse.free"), cur, &onoff, Some(t("info.mfree"))) {
 			set_ptr_free(v == "on");
 			cmds.push(OverlayCmd::Set("ptrfree", v));
 		}
 		row += 1;
 		let cur = if host_ptr_show() { "on" } else { "off" };
-		if let Some(v) =
-			choice_row_i(ui, s == row, nav, t("hostptr.show"), cur, &onoff, row, pending, Some(t("info.hostptr")))
-		{
+		if let Some(v) = rows.choice(ui, row, t("hostptr.show"), cur, &onoff, Some(t("info.hostptr"))) {
 			set_host_ptr_show(v == "on");
 			cmds.push(OverlayCmd::Set("hostptr", v));
 		}
 	}
-	let _ = row;
+	if rows.picking() {
+		return;
+	}
 	pending_note(ui, deferred);
-	ui.add_space(6.0);
-	ui.label(
-		egui::RichText::new(t("fit.help"))
-			.size(10.0)
-			.color(egui::Color32::from_gray(110)),
-	);
 }
 
 /// "Applied when the menu closes" under the rows while stream-restarting choices are staged.
@@ -1636,9 +1869,7 @@ fn pending_note(ui: &mut egui::Ui, deferred: &[(&'static str, String)]) {
 	ui.label(egui::RichText::new(t("pending.apply")).size(11.0).color(ACCENT));
 }
 
-/// Audio section: voice call / host transmit / host speakers / mic to host — as pad-navigable
-/// rows (up/down move the cursor, ◂/▸ stage + A confirms), so the controller can drive audio in
-/// game mode (the old seg-button layout was mouse-only). Mirrors the other sub-views.
+/// Audio section: voice call / host transmit / host speakers / mic to host / quality.
 ///
 /// "Sesli görüşme" = both directions at once (host audio here + our mic there); the host already
 /// plays inbound mic audio, so it's a paired toggle. SEMANTIC (must match the backends' `call`
@@ -1648,38 +1879,27 @@ fn draw_audio(
 	ui: &mut egui::Ui,
 	st: &OverlayState,
 	deferred: &[(&'static str, String)],
-	sub_sel: &mut usize,
-	nav: Nav,
-	pending: &mut Option<(usize, String)>,
+	input: RowsIn<'_>,
 	cmds: &mut Vec<OverlayCmd>,
 ) {
 	let onoff = [("on", t("on")), ("off", t("off"))];
-	const ROWS: usize = 5;
-	if nav.down {
-		*sub_sel = (*sub_sel + 1).min(ROWS - 1);
-	}
-	if nav.up {
-		*sub_sel = sub_sel.saturating_sub(1);
-	}
-	let s = (*sub_sel).min(ROWS - 1);
-	ui.spacing_mut().item_spacing.y = 6.0;
+	let mut rows = Rows::new(5, input);
+	ui.spacing_mut().item_spacing.y = ROW_GAP;
 	let call = if st.mic_on { "on" } else { "off" };
-	if let Some(v) =
-		choice_row_i(ui, s == 0, nav, t("audio.call"), call, &onoff, 0, pending, Some(t("info.call")))
-	{
+	if let Some(v) = rows.choice(ui, 0, t("audio.call"), call, &onoff, Some(t("info.call"))) {
 		cmds.push(OverlayCmd::Set("call", v));
 	}
 	let host = if st.audio_tx { "on" } else { "off" };
-	if let Some(v) = choice_row(ui, s == 1, nav, t("audio.host"), host, &onoff, 1, pending) {
+	if let Some(v) = rows.choice(ui, 1, t("audio.host"), host, &onoff, None) {
 		cmds.push(OverlayCmd::Set("atx", v));
 	}
 	// Speakers ON = not muted; the emitted `amute` is the inverse.
 	let spk = if st.audio_mute { "off" } else { "on" };
-	if let Some(v) = choice_row(ui, s == 2, nav, t("audio.speakers"), spk, &onoff, 2, pending) {
+	if let Some(v) = rows.choice(ui, 2, t("audio.speakers"), spk, &onoff, None) {
 		cmds.push(OverlayCmd::Set("amute", if v == "on" { "off".into() } else { "on".into() }));
 	}
 	let mic = if st.mic_on { "on" } else { "off" };
-	if let Some(v) = choice_row(ui, s == 3, nav, t("audio.mic"), mic, &onoff, 3, pending) {
+	if let Some(v) = rows.choice(ui, 3, t("audio.mic"), mic, &onoff, None) {
 		cmds.push(OverlayCmd::Set("mic", v));
 	}
 	// Audio quality — a stream restart, so it waits for the menu to close (RESTART_FIELDS).
@@ -1690,69 +1910,49 @@ fn draw_audio(
 		("raw", t("aq.raw")),
 	];
 	let q = staged(deferred, "aquality", audio_quality());
-	if let Some(v) =
-		choice_row_i(ui, s == 4, nav, t("audio.quality"), q, &qualities, 4, pending, Some(t("info.aquality")))
-	{
+	if let Some(v) = rows.choice(ui, 4, t("audio.quality"), q, &qualities, Some(t("info.aquality"))) {
 		cmds.push(OverlayCmd::Set("aquality", v));
 	}
+	if rows.picking() {
+		return;
+	}
+	pending_note(ui, deferred);
 }
 
 /// Tools section. GAME mode trims this to JUST the fullscreen toggle (clipboard / file pick /
-/// reverse are remote-desktop concerns — irrelevant in-game; maintainer's request) and renders
-/// it as a pad-navigable action row. REMOTE mode keeps the full set of mouse buttons (clipboard
-/// push, quick file pick, reverse direction, fullscreen). Chat + the file manager have their own
-/// native views now.
-fn draw_tools(
-	ui: &mut egui::Ui,
-	view: &mut View,
-	mode: Mode,
-	sub_sel: &mut usize,
-	nav: Nav,
-	cmds: &mut Vec<OverlayCmd>,
-) {
+/// reverse are remote-desktop concerns — irrelevant in-game; maintainer's request). REMOTE mode
+/// has the clipboard sync switch and the one-shot actions (clipboard push, quick file pick,
+/// reverse direction, fullscreen) — rows like every other section, so keys / a pad reach them
+/// too (they were plain mouse buttons). Chat + the file manager have their own native views.
+fn draw_tools(ui: &mut egui::Ui, mode: Mode, input: RowsIn<'_>, cmds: &mut Vec<OverlayCmd>) {
+	ui.spacing_mut().item_spacing.y = ROW_GAP;
 	if mode == Mode::Game {
-		// One row → always the selection target; A/Enter or a click toggles fullscreen.
-		*sub_sel = 0;
-		if action_row(ui, true, nav, t("tools.fullscreen"), CYAN) {
+		let mut rows = Rows::new(1, input);
+		if rows.action(ui, 0, t("tools.fullscreen"), CYAN, true) {
 			cmds.push(OverlayCmd::Set("fullscreen", "1".into()));
 		}
-		let _ = view;
 		return;
 	}
-	let w = ui.available_width();
-	// Label-only buttons — the leading emoji icons render as tofu in the bundled egui font.
-	let sync = clip_sync();
-	let label = format!("{}: {}", t("tools.clipsync"), if sync { t("on") } else { t("off") });
-	if ui.add(egui::Button::new(label).min_size(egui::vec2(w, 30.0))).clicked() {
-		set_clip_sync(!sync);
-		cmds.push(OverlayCmd::Set("clipsync", if sync { "off".into() } else { "on".into() }));
+	let mut rows = Rows::new(5, input);
+	let onoff = [("on", t("on")), ("off", t("off"))];
+	let sync = if clip_sync() { "on" } else { "off" };
+	if let Some(v) = rows.choice(ui, 0, t("tools.clipsync"), sync, &onoff, None) {
+		set_clip_sync(v == "on");
+		cmds.push(OverlayCmd::Set("clipsync", v));
 	}
-	if ui
-		.add(egui::Button::new(t("tools.clip")).min_size(egui::vec2(w, 30.0)))
-		.clicked()
-	{
+	if rows.action(ui, 1, t("tools.clip"), CYAN, true) {
 		cmds.push(OverlayCmd::Set("sendclip", "1".into()));
 	}
-	if ui
-		.add(egui::Button::new(t("tools.file")).min_size(egui::vec2(w, 30.0)))
-		.clicked()
-	{
+	if rows.action(ui, 2, t("tools.file"), CYAN, true) {
 		// Handled Rust-side (rfd) in render_stats.rs — no webview activation needed.
 		cmds.push(OverlayCmd::Set("pickfile", "1".into()));
 	}
-	if ui
-		.add(egui::Button::new(t("tools.reverse")).min_size(egui::vec2(w, 30.0)))
-		.clicked()
-	{
+	if rows.action(ui, 3, t("tools.reverse"), CYAN, true) {
 		cmds.push(OverlayCmd::Set("reverse", "1".into()));
 	}
-	if ui
-		.add(egui::Button::new(t("tools.fullscreen")).min_size(egui::vec2(w, 30.0)))
-		.clicked()
-	{
+	if rows.action(ui, 4, t("tools.fullscreen"), CYAN, true) {
 		cmds.push(OverlayCmd::Set("fullscreen", "1".into()));
 	}
-	let _ = view;
 }
 
 /// NATIVE chat: the session conversation + a composer. Typing arrives as relayed
@@ -2045,50 +2245,25 @@ fn load_local(us: &mut UiState) {
 }
 
 /// Gauges section: the always-on HUD + the Parsec-style open button toggles.
-fn draw_gauges(
-	ui: &mut egui::Ui,
-	st: &OverlayState,
-	sub_sel: &mut usize,
-	nav: Nav,
-	pending: &mut Option<(usize, String)>,
-	cmds: &mut Vec<OverlayCmd>,
-) {
+fn draw_gauges(ui: &mut egui::Ui, st: &OverlayState, input: RowsIn<'_>, cmds: &mut Vec<OverlayCmd>) {
 	let onoff = [("on", t("on")), ("off", t("off"))];
-	const ROWS: usize = 2;
-	if nav.down {
-		*sub_sel = (*sub_sel + 1).min(ROWS - 1);
-	}
-	if nav.up {
-		*sub_sel = sub_sel.saturating_sub(1);
-	}
-	let s = (*sub_sel).min(ROWS - 1);
-	ui.spacing_mut().item_spacing.y = 6.0;
+	let mut rows = Rows::new(2, input);
+	ui.spacing_mut().item_spacing.y = ROW_GAP;
 	let hud = if st.stats_hud { "on" } else { "off" };
-	if let Some(v) = choice_row(ui, s == 0, nav, t("gauges.statshud"), hud, &onoff, 0, pending) {
+	if let Some(v) = rows.choice(ui, 0, t("gauges.statshud"), hud, &onoff, None) {
 		cmds.push(OverlayCmd::Set("statshud", v));
 	}
 	let ovb = if st.overlay_btn { "on" } else { "off" };
-	if let Some(v) = choice_row(ui, s == 1, nav, t("gauges.ovbtn"), ovb, &onoff, 1, pending) {
+	if let Some(v) = rows.choice(ui, 1, t("gauges.ovbtn"), ovb, &onoff, None) {
 		cmds.push(OverlayCmd::Set("ovbtn", v));
 	}
 }
 
-/// Controllers section: ordered player-slot list with ▲/▼ swap buttons and a
-/// per-row emulation-target picker (Otomatik / Xbox 360 / DualShock 4).
-/// Game mode only — the box does not appear in remote_boxes.
-/// ▲ click on row i pushes `OverlayCmd::Set("ctrlswap", "{i},{i-1}")`.
-/// ▼ click on row i pushes `OverlayCmd::Set("ctrlswap", "{i},{i+1}")`.
-/// Emulation picker pushes `OverlayCmd::Set("ctrlemu", "{uuid},{target}")`.
-/// The bundled egui font lacks ▲/▼ glyphs — both arrows are painted with
-/// `line_segment`, matching the back-arrow style used in the header.
-fn draw_controllers(
-	ui: &mut egui::Ui,
-	st: &OverlayState,
-	sub_sel: &mut usize,
-	nav: Nav,
-	pending: &mut Option<(usize, String)>,
-	cmds: &mut Vec<OverlayCmd>,
-) {
+/// Controllers section: the ordered player-slot list. Per pad: a header with the two
+/// move-up / move-down buttons (`ctrlswap` "{i},{to}"), the emulation target (`ctrlemu`
+/// "{uuid},{target}"), vibration (`ctrlrumble`), a test pulse (`ctrltest`), enabled
+/// (`ctrldisable`) and "lock to this session" (`ctrllock`).
+fn draw_controllers(ui: &mut egui::Ui, st: &OverlayState, input: RowsIn<'_>, cmds: &mut Vec<OverlayCmd>) {
 	if st.controllers.is_empty() {
 		ui.add_space(20.0);
 		ui.vertical_centered(|ui| {
@@ -2100,19 +2275,11 @@ fn draw_controllers(
 		return;
 	}
 	let n = st.controllers.len();
-	// Each pad = 5 controller-navigable rows: [header/reorder, emulation, vibration, test, status].
-	// up/down move the cursor across ALL pads' rows; ◂/▸ change the focused row's value (or
-	// swap, on the header row); A confirms a staged value (or fires the test pulse). Every row is
-	// mouse-clickable too — one setting per row, so nothing overflows the narrow panel.
+	// Each pad = 6 rows: [header/reorder, emulation, vibration, test, status, lock]. up/down move
+	// the cursor across ALL pads' rows; left/right change the focused row (or move the pad, on
+	// the header row); A confirms a staged value (or fires the test pulse).
 	const PER: usize = 6;
-	let rows = n * PER;
-	if nav.down {
-		*sub_sel = (*sub_sel + 1).min(rows - 1);
-	}
-	if nav.up {
-		*sub_sel = sub_sel.saturating_sub(1);
-	}
-	let s = (*sub_sel).min(rows - 1);
+	let mut rows = Rows::new(n * PER, input);
 
 	let emu_opts: &[(&str, &str)] = &[
 		("auto", t("controllers.emuAuto")),
@@ -2136,73 +2303,70 @@ fn draw_controllers(
 		("off", t("controllers.lockOff")),
 	];
 
-	ui.spacing_mut().item_spacing.y = 5.0;
+	ui.spacing_mut().item_spacing.y = ROW_GAP;
 	for (i, (slot, kind, name, uuid, target, rumble, disabled)) in st.controllers.iter().enumerate() {
 		let base = i * PER;
-		// --- Row 0: header + reorder. Label = "Oyuncu N · kind · name"; ◂/▸ swap with the
-		// neighbouring pad (immediate; the cursor follows the moved pad). ---
-		let hdr = format!("{} {} · {} · {}", t("controllers.slot"), slot + 1, kind, name);
-		let hsel = s == base;
-		ui.add_space(if i == 0 { 0.0 } else { 4.0 });
-		let (hrect, hresp) =
-			ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), egui::Sense::click());
-		if hsel {
-			ui.painter().rect_filled(hrect.expand(2.0), 7.0, CYAN);
-			ui.painter().rect_filled(hrect, 6.0, egui::Color32::from_rgb(20, 54, 70));
-		}
-		let hcol = if *disabled {
-			egui::Color32::from_gray(110)
-		} else if hsel {
-			CYAN
-		} else {
-			egui::Color32::from_rgb(228, 230, 240)
-		};
-		ui.painter().text(
-			egui::pos2(hrect.left() + 10.0, hrect.center().y),
-			egui::Align2::LEFT_CENTER,
-			&hdr,
-			egui::FontId::proportional(12.5),
-			hcol,
-		);
-		let hovered_h = hresp.hovered();
-		if hsel || hovered_h {
+		// --- Row 0: the pad ("Oyuncu N · kind · name") and its place in the player order: the
+		// two buttons (or left/right on the row) swap it with the pad above / below; the cursor
+		// follows the moved pad. ---
+		if let Some((hrect, _, hsel)) = rows.frame(ui, base, row_h(ui.ctx())) {
+			let hdr = format!("{} {} · {} · {}", t("controllers.slot"), slot + 1, kind, name);
+			let hcol = if *disabled {
+				egui::Color32::from_gray(110)
+			} else if hsel {
+				CYAN
+			} else {
+				egui::Color32::from_rgb(228, 230, 240)
+			};
 			let cy = hrect.center().y;
-			let p = ui.painter();
-			paint_tri(&p, egui::pos2(hrect.right() - 12.0, cy), 4.5, true, CYAN);
-			paint_tri(&p, egui::pos2(hrect.right() - 28.0, cy), 4.5, false, CYAN);
-		}
-		// Pad reorder via ◂/▸ (when selected) or a mouse click on the row's right/left half.
-		let swap = |to: usize, cmds: &mut Vec<OverlayCmd>| {
-			cmds.push(OverlayCmd::Set("ctrlswap", format!("{i},{to}")));
-		};
-		if hsel && nav.left && i > 0 {
-			swap(i - 1, cmds);
-			*sub_sel = (i - 1) * PER;
-		} else if hsel && nav.right && i + 1 < n {
-			swap(i + 1, cmds);
-			*sub_sel = (i + 1) * PER;
-		} else if hresp.clicked() {
-			let px = hresp.interact_pointer_pos().map(|p| p.x).unwrap_or(hrect.center().x);
-			if px >= hrect.center().x && i + 1 < n {
-				swap(i + 1, cmds);
-				*sub_sel = (i + 1) * PER;
-			} else if px < hrect.center().x && i > 0 {
-				swap(i - 1, cmds);
-				*sub_sel = (i - 1) * PER;
+			ui.painter().text(
+				egui::pos2(hrect.left() + 14.0, cy),
+				egui::Align2::LEFT_CENTER,
+				&hdr,
+				egui::FontId::proportional(13.5),
+				hcol,
+			);
+			let mut swap_to = None;
+			for up in [true, false] {
+				let x = hrect.right() - if up { 68.0 } else { 28.0 };
+				let r = egui::Rect::from_center_size(egui::pos2(x, cy), egui::vec2(36.0, 28.0));
+				let can = if up { i > 0 } else { i + 1 < n };
+				let bresp = ui.interact(r, ui.make_persistent_id(("ov-ctrl-move", i, up)), egui::Sense::click());
+				let hov = can && bresp.hovered();
+				ui.painter().rect_filled(r, 6.0, if hov { ACCENT_DIM } else { SEG_BG });
+				let col = if !can {
+					egui::Color32::from_gray(70)
+				} else if hov {
+					egui::Color32::WHITE
+				} else {
+					CYAN
+				};
+				paint_tri_v(ui.painter(), r.center(), 4.5, up, col);
+				if can && bresp.clicked() {
+					swap_to = Some(if up { i - 1 } else { i + 1 });
+				}
+				if hov {
+					bresp.on_hover_cursor(egui::CursorIcon::PointingHand);
+				}
+			}
+			if hsel && rows.nav.left && i > 0 {
+				swap_to = Some(i - 1);
+			} else if hsel && rows.nav.right && i + 1 < n {
+				swap_to = Some(i + 1);
+			}
+			if let Some(to) = swap_to {
+				cmds.push(OverlayCmd::Set("ctrlswap", format!("{i},{to}")));
+				rows.move_cursor(to * PER);
 			}
 		}
 
-		// --- Rows 1-3: emulation, vibration, status — standard pad/mouse choice rows. ---
-		if let Some(v) =
-			choice_row(ui, s == base + 1, nav, t("controllers.emulation"), target, emu_opts, base + 1, pending)
-		{
+		// --- Rows 1-2: emulation, vibration. ---
+		if let Some(v) = rows.choice(ui, base + 1, t("controllers.emulation"), target, emu_opts, None) {
 			if !uuid.is_empty() {
 				cmds.push(OverlayCmd::Set("ctrlemu", format!("{uuid},{v}")));
 			}
 		}
-		if let Some(v) =
-			choice_row(ui, s == base + 2, nav, t("controllers.rumble"), rumble, rumble_opts, base + 2, pending)
-		{
+		if let Some(v) = rows.choice(ui, base + 2, t("controllers.rumble"), rumble, rumble_opts, None) {
 			if !uuid.is_empty() {
 				cmds.push(OverlayCmd::Set("ctrlrumble", format!("{uuid},{v}")));
 			}
@@ -2211,14 +2375,11 @@ fn draw_controllers(
 		// it. Disabled when vibration is off (would do nothing) or the pad has no uuid.
 		let test_on = !uuid.is_empty() && rumble != "off";
 		let test_label = if test_on { t("controllers.test") } else { t("controllers.testOff") };
-		let test_col = if test_on { CYAN } else { egui::Color32::from_gray(110) };
-		if action_row(ui, s == base + 3, nav, test_label, test_col) && test_on {
+		if rows.action(ui, base + 3, test_label, CYAN, test_on) {
 			cmds.push(OverlayCmd::Set("ctrltest", uuid.clone()));
 		}
 		let status_cur = if *disabled { "off" } else { "on" };
-		if let Some(v) =
-			choice_row(ui, s == base + 4, nav, t("controllers.status"), status_cur, status_opts, base + 4, pending)
-		{
+		if let Some(v) = rows.choice(ui, base + 4, t("controllers.status"), status_cur, status_opts, None) {
 			if !uuid.is_empty() {
 				let dis = if v == "off" { 1 } else { 0 };
 				cmds.push(OverlayCmd::Set("ctrldisable", format!("{uuid},{dis}")));
@@ -2229,13 +2390,14 @@ fn draw_controllers(
 		// `ctrls` line's per-pad lock field (st.controllers_locked, filled by the platform parser).
 		// Emits `ctrllock` "<uuid>,1|0" — mirroring `ctrldisable` exactly. ---
 		let lock_cur = if st.controllers_locked.contains(uuid) { "on" } else { "off" };
-		if let Some(v) =
-			choice_row(ui, s == base + 5, nav, t("controllers.lock"), lock_cur, lock_opts, base + 5, pending)
-		{
+		if let Some(v) = rows.choice(ui, base + 5, t("controllers.lock"), lock_cur, lock_opts, None) {
 			if !uuid.is_empty() {
 				let locked = if v == "on" { 1 } else { 0 };
 				cmds.push(OverlayCmd::Set("ctrllock", format!("{uuid},{locked}")));
 			}
+		}
+		if i + 1 < n && !rows.picking() {
+			ui.add_space(6.0);
 		}
 	}
 }
@@ -2319,44 +2481,50 @@ fn fmt_mbps(mbps: f32) -> String {
 /// (e.g. `egui_phosphor::regular::BROADCAST`) painted at the left — the Phosphor font is
 /// installed into egui's atlas in `apply_theme`, so the glyph renders on every backend.
 /// One hub box; `badge` > 0 draws the unread-count disc at its right edge.
-fn cat_box(ui: &mut egui::Ui, icon: &str, label: &str, selected: bool, badge: usize) -> egui::Response {
-	let size = egui::vec2((ui.available_width() / 2.0 - 6.0).max(140.0), 40.0);
+fn cat_box(ui: &mut egui::Ui, icon: &str, label: &str, selected: bool, badge: usize, cols: usize) -> egui::Response {
+	// Equal tiles across the panel (`cols` per row): icon on top, label under it.
+	let cols = cols.max(1) as f32;
+	let w = ((PANEL_W - GRID_GAP * (cols - 1.0)) / cols).floor();
+	let short = short_surface(ui.ctx());
+	let size = egui::vec2(w, if short { 64.0 } else { 72.0 });
 	let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
 	// `selected` = the controller-nav cursor (UiState.sel, moved by the pad up/down) is on
 	// this box. Draw a bright cyan BORDER + brighter fill so it's unmistakable; A/Enter
 	// activates it. Driven purely by sel (not egui has_focus) so egui's invisible Tab-focus
 	// traversal can't paint a second highlight on a different box.
 	let focused = selected;
+	let hov = resp.hovered();
+	// The same plate, ring and hover as a section's rows and option tiles.
 	if focused {
-		ui.painter().rect_filled(rect.expand(2.5), 9.0, CYAN);
+		ui.painter().rect_filled(rect.expand(2.0), 10.0, CYAN);
 	}
 	let fill = if focused {
-		egui::Color32::from_rgb(18, 70, 92)
-	} else if resp.hovered() {
-		egui::Color32::from_rgb(40, 42, 58)
+		ROW_SEL
+	} else if hov {
+		ROW_HOVER
 	} else {
-		egui::Color32::from_rgb(28, 30, 42)
+		ROW_BG
 	};
 	ui.painter().rect_filled(rect, 8.0, fill);
 	// Section icon: the per-category Phosphor glyph (distinct per box). Cyan so it reads as the
 	// accent; it renders because `apply_theme` installed the Phosphor font into egui's atlas.
 	ui.painter().text(
-		egui::pos2(rect.left() + 16.0, rect.center().y),
+		egui::pos2(rect.center().x, rect.top() + if short { 23.0 } else { 26.0 }),
 		egui::Align2::CENTER_CENTER,
 		icon,
-		egui::FontId::proportional(16.0),
-		CYAN,
+		egui::FontId::proportional(22.0),
+		if hov && !focused { egui::Color32::WHITE } else { CYAN },
 	);
 	ui.painter().text(
-		egui::pos2(rect.left() + 42.0, rect.center().y),
-		egui::Align2::LEFT_CENTER,
+		egui::pos2(rect.center().x, rect.bottom() - if short { 16.0 } else { 18.0 }),
+		egui::Align2::CENTER_CENTER,
 		label,
-		egui::FontId::proportional(13.0),
-		egui::Color32::from_rgb(228, 230, 240),
+		egui::FontId::proportional(13.5),
+		if hov || focused { egui::Color32::WHITE } else { egui::Color32::from_gray(218) },
 	);
 	if badge > 0 {
 		let n = if badge > 9 { "9+".to_string() } else { badge.to_string() };
-		let bc = egui::pos2(rect.right() - 16.0, rect.center().y);
+		let bc = egui::pos2(rect.right() - 14.0, rect.top() + 14.0);
 		ui.painter().circle_filled(bc, 8.5, egui::Color32::from_rgb(225, 60, 70));
 		ui.painter().text(
 			bc,
@@ -2366,261 +2534,615 @@ fn cat_box(ui: &mut egui::Ui, icon: &str, label: &str, selected: bool, badge: us
 			egui::Color32::WHITE,
 		);
 	}
-	resp
+	resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// One pad-navigable settings row inside a sub-view: `label` left, the current option's display
-/// right (framed by ◂ ▸ when selected). STAGED-CONFIRM model: when selected, the pad's
-/// left/right cycle a PENDING value (shown amber, NOT applied); pressing A/activate confirms it
-/// and the value is returned (else None). Moving rows / changing view discards the pending value
-/// (cleared by the caller), so a controller cycle never disrupts the live stream until confirmed.
-/// `row` is this row's index within the view; `pending` is `(row, value)` held in UiState.
-fn choice_row(
-	ui: &mut egui::Ui,
-	selected: bool,
-	nav: Nav,
-	label: &str,
-	current: &str,
-	options: &[(&str, &str)],
-	row: usize,
-	pending: &mut Option<(usize, String)>,
-) -> Option<String> {
-	choice_row_i(ui, selected, nav, label, current, options, row, pending, None)
+// ===========================================================================
+// Section rows
+// ===========================================================================
+//
+// Every setting inside a section is one full-width row, and the whole row (or a wide part of
+// it) is the target — the old rows were 30 pt strips whose value changed by clicking the left
+// or right half to step through the options, with 9 pt arrows as the only hint: picking the
+// fifth resolution took four aimed clicks. Three shapes, chosen by the options themselves:
+//
+// * on / off            → a switch; a click anywhere on the row flips it;
+// * up to four options  → all of them side by side, one click on the wanted one;
+// * more (or too wide)  → the row shows the value and opens an OPTIONS PAGE: every option a
+//                         large tile, one click picks it and returns.
+//
+// Keys and a pad use the same rows: up/down move the cursor (from the first row, up reaches
+// the header strip), left/right step a switch at once and STAGE a side-by-side option (amber
+// until A / Enter confirms, dropped when the cursor moves on — a pad never walks the live
+// stream through the options in between), A / Enter opens the options page and picks in it,
+// B / Escape goes back one level.
+
+/// Row plate colours.
+const ROW_BG: egui::Color32 = egui::Color32::from_rgb(26, 28, 38);
+const ROW_HOVER: egui::Color32 = egui::Color32::from_rgb(38, 41, 56);
+const ROW_SEL: egui::Color32 = egui::Color32::from_rgb(20, 54, 70);
+/// The well behind side-by-side options.
+const SEG_BG: egui::Color32 = egui::Color32::from_rgb(15, 17, 24);
+/// The VALUE in force: the lit option, the switch that is on, the current tile of an options
+/// page (a dimmed [`ACCENT`]). Where you ARE is the other colour, on the hub and in a section
+/// alike: [`ROW_SEL`] under the cursor and on the current category, [`CYAN`] for the cursor's
+/// ring.
+const ACCENT_DIM: egui::Color32 = egui::Color32::from_rgb(74, 66, 156);
+/// A pad-staged option that A has not confirmed yet.
+const AMBER: egui::Color32 = egui::Color32::from_rgb(240, 185, 70);
+/// Gap between rows (pt).
+const ROW_GAP: f32 = 6.0;
+/// Height of the panel's header (pt) — the hub's brand line and a section's strip alike.
+const HEADER_H: f32 = 36.0;
+/// "End session": the plate at rest and lit (hover / cursor).
+const DANGER_DIM: egui::Color32 = egui::Color32::from_rgb(104, 34, 42);
+const DANGER: egui::Color32 = egui::Color32::from_rgb(200, 60, 70);
+/// Side-by-side options: gap between two, and the well's padding around them.
+const SEG_GAP: f32 = 2.0;
+const SEG_PAD: f32 = 3.0;
+
+/// Row height (pt). 44 is the size a pointer (and a finger) hits without aiming; a short
+/// surface — a windowed 720p app is ~576 pt high — gets 38, so the longest section still shows
+/// whole (anything taller scrolls).
+fn row_h(ctx: &egui::Context) -> f32 {
+	if short_surface(ctx) { 38.0 } else { 44.0 }
 }
 
-/// Like [`choice_row`] but with an optional inline ⓘ explainer right after the label (a painted
-/// info glyph with a click/hover popup — same affordance as the standalone [`info`] helper, used
-/// for rows whose name alone doesn't explain them, e.g. frame pacing / voice call). A click on the
-/// ⓘ opens the popup WITHOUT cycling the row value.
-#[allow(clippy::too_many_arguments)]
-fn choice_row_i(
-	ui: &mut egui::Ui,
-	selected: bool,
+/// A surface too short for the full sizes (a windowed 720p app is ~576 pt high): rows, the
+/// hub's stat tiles and its category boxes take their compact height.
+fn short_surface(ctx: &egui::Context) -> bool {
+	ctx.viewport_rect().height() < 620.0
+}
+
+/// Width of `s` at `size` pt in the UI font.
+fn text_w(ui: &egui::Ui, s: &str, size: f32) -> f32 {
+	ui.painter()
+		.layout_no_wrap(s.to_string(), egui::FontId::proportional(size), egui::Color32::WHITE)
+		.size()
+		.x
+}
+
+/// What a section hands [`Rows::new`]: its slice of the frame-persistent [`UiState`] plus this
+/// frame's nav input.
+struct RowsIn<'a> {
+	sub_sel: &'a mut usize,
 	nav: Nav,
-	label: &str,
-	current: &str,
-	options: &[(&str, &str)],
-	row: usize,
-	pending: &mut Option<(usize, String)>,
-	info: Option<&str>,
-) -> Option<String> {
-	// Effective value = the staged value for THIS row if one is pending, else the live value.
-	let effective = match pending.as_ref() {
-		Some((r, v)) if *r == row => v.clone(),
-		_ => current.to_string(),
-	};
-	let mut confirmed = None;
-	if selected && !options.is_empty() {
-		let cur = options.iter().position(|(v, _)| *v == effective).unwrap_or(0);
-		if nav.right {
-			*pending = Some((row, options[(cur + 1) % options.len()].0.to_string()));
-		} else if nav.left {
-			*pending = Some((row, options[(cur + options.len() - 1) % options.len()].0.to_string()));
-		} else if nav.activate {
-			if let Some((r, v)) = pending.clone() {
-				if r == row {
-					confirmed = Some(v);
-					*pending = None;
+	/// Keys / a pad are in use and the cursor is on the rows (not on the header strip).
+	cursor: bool,
+	pending: &'a mut Option<(usize, String)>,
+	picker: &'a mut Option<Picker>,
+}
+
+/// One section's rows for this frame. The section calls [`Rows::choice`] / [`Rows::action`]
+/// once per row, top to bottom, with the row's index; while an options page is open the row
+/// it belongs to draws the page and every other row draws nothing.
+struct Rows<'a> {
+	sub_sel: &'a mut usize,
+	/// The row under the cursor.
+	sel: usize,
+	nav: Nav,
+	cursor: bool,
+	/// The cursor moved this frame: scroll it into view.
+	moved: bool,
+	pending: &'a mut Option<(usize, String)>,
+	picker: &'a mut Option<Picker>,
+	/// Options page to open / to close once every row of this frame has been drawn (changing
+	/// it mid-frame would draw half the rows and half the page).
+	open: Option<Picker>,
+	close: bool,
+}
+
+/// How a row offers its options.
+enum RowKind {
+	Switch,
+	/// Side by side, each this wide (one width per option).
+	Segments(Vec<f32>),
+	Page,
+}
+
+impl<'a> Rows<'a> {
+	/// `n` rows. Moves the cursor by this frame's up / down (the options page takes the
+	/// arrows while it is open).
+	fn new(n: usize, i: RowsIn<'a>) -> Self {
+		let last = n.saturating_sub(1);
+		let mut moved = false;
+		if i.picker.is_none() {
+			if i.nav.down {
+				*i.sub_sel = (*i.sub_sel + 1).min(last);
+				moved = true;
+			}
+			if i.nav.up {
+				*i.sub_sel = i.sub_sel.saturating_sub(1);
+				moved = true;
+			}
+		}
+		let sel = (*i.sub_sel).min(last);
+		Rows {
+			sub_sel: i.sub_sel,
+			sel,
+			nav: i.nav,
+			cursor: i.cursor,
+			moved,
+			pending: i.pending,
+			picker: i.picker,
+			open: None,
+			close: false,
+		}
+	}
+
+	/// An options page is up in place of the rows.
+	fn picking(&self) -> bool {
+		self.picker.is_some()
+	}
+
+	/// Put the cursor on `row` from the next frame on (a pad that was moved takes it along).
+	fn move_cursor(&mut self, row: usize) {
+		*self.sub_sel = row;
+	}
+
+	/// Allocate row `row`, `h` high, and paint its plate (cursor ring, hover). Returns the
+	/// rect, the row's own click response and whether the cursor is on it — `None` while an
+	/// options page replaces the rows.
+	fn frame(&self, ui: &mut egui::Ui, row: usize, h: f32) -> Option<(egui::Rect, egui::Response, bool)> {
+		if self.picking() {
+			return None;
+		}
+		let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), h), egui::Sense::click());
+		let selected = self.cursor && self.sel == row;
+		if selected && self.moved {
+			ui.scroll_to_rect(rect.expand(8.0), None);
+		}
+		if selected {
+			ui.painter().rect_filled(rect.expand(2.0), 10.0, CYAN);
+			ui.painter().rect_filled(rect, 8.0, ROW_SEL);
+		} else {
+			// A hover anywhere on the row (also on one of its options) lights the plate.
+			let hov = resp.hovered() || ui.rect_contains_pointer(rect);
+			ui.painter().rect_filled(rect, 8.0, if hov { ROW_HOVER } else { ROW_BG });
+		}
+		Some((rect, resp, selected))
+	}
+
+	fn kind(ui: &egui::Ui, options: &[(&str, &str)], room: f32) -> RowKind {
+		let has = |x: &str| options.iter().any(|(v, _)| *v == x);
+		if options.len() == 2 && has("on") && has("off") {
+			return RowKind::Switch;
+		}
+		if (2..=4).contains(&options.len()) {
+			let n = options.len() as f32;
+			let chrome = SEG_GAP * (n - 1.0) + 2.0 * SEG_PAD;
+			let own: Vec<f32> = options.iter().map(|(_, d)| (text_w(ui, d, 13.0) + 22.0).max(52.0)).collect();
+			// Equal widths read best; a long name among short ones gets its own width instead.
+			let widest = own.iter().copied().fold(0.0, f32::max).max(56.0);
+			if widest * n + chrome <= room {
+				return RowKind::Segments(vec![widest; options.len()]);
+			}
+			if own.iter().sum::<f32>() + chrome <= room {
+				return RowKind::Segments(own);
+			}
+		}
+		RowKind::Page
+	}
+
+	/// One setting: `label` (and an optional ⓘ explainer), its `options` as `(value, display)`
+	/// and the value in force. Returns the newly chosen value.
+	fn choice(
+		&mut self,
+		ui: &mut egui::Ui,
+		row: usize,
+		label: &str,
+		current: &str,
+		options: &[(&str, &str)],
+		info: Option<&str>,
+	) -> Option<String> {
+		if let Some(p) = *self.picker {
+			return if p.row == row { self.options_page(ui, p, label, current, options) } else { None };
+		}
+		let h = row_h(ui.ctx());
+		let (rect, resp, selected) = self.frame(ui, row, h)?;
+		let cy = rect.center().y;
+		ui.painter().text(
+			egui::pos2(rect.left() + 14.0, cy),
+			egui::Align2::LEFT_CENTER,
+			label,
+			egui::FontId::proportional(13.5),
+			egui::Color32::from_gray(218),
+		);
+		let mut used = 14.0 + text_w(ui, label, 13.5);
+		// A click ON the ⓘ opens its popup and leaves the row alone.
+		let mut on_info = false;
+		if let Some(text) = info {
+			on_info = info_marker(ui, egui::pos2(rect.left() + used + 15.0, cy), row, text);
+			used += 28.0;
+		}
+		let live = options.iter().position(|(v, _)| *v == current);
+		match Self::kind(ui, options, rect.width() - used - 24.0) {
+			RowKind::Switch => {
+				let on = current == "on";
+				let mut set = None;
+				if selected {
+					if self.nav.activate {
+						set = Some(!on);
+					} else if self.nav.right {
+						set = Some(true);
+					} else if self.nav.left {
+						set = Some(false);
+					}
 				}
+				if resp.clicked() && !on_info {
+					set = Some(!on);
+				}
+				let (tw, th) = (42.0, 24.0);
+				let track = egui::Rect::from_min_size(
+					egui::pos2(rect.right() - 12.0 - tw, cy - th / 2.0),
+					egui::vec2(tw, th),
+				);
+				let a = ui
+					.ctx()
+					.animate_bool_with_time(ui.make_persistent_id(("ov-switch", row)), on, 0.12);
+				let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * a).round() as u8;
+				let off = egui::Color32::from_rgb(62, 66, 84);
+				let fill = egui::Color32::from_rgb(
+					mix(off.r(), ACCENT.r()),
+					mix(off.g(), ACCENT.g()),
+					mix(off.b(), ACCENT.b()),
+				);
+				let p = ui.painter();
+				p.rect_filled(track, th / 2.0, fill);
+				p.circle_filled(
+					egui::pos2(track.left() + 12.0 + (tw - 24.0) * a, cy),
+					9.0,
+					egui::Color32::WHITE,
+				);
+				// The state in words (some switches read "Kilitli / Serbest", not on / off).
+				let word = live.and_then(|i| options.get(i)).map(|(_, d)| *d).unwrap_or("");
+				p.text(
+					egui::pos2(track.left() - 10.0, cy),
+					egui::Align2::RIGHT_CENTER,
+					word,
+					egui::FontId::proportional(12.5),
+					egui::Color32::from_gray(if on { 225 } else { 150 }),
+				);
+				resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+				set.filter(|v| *v != on).map(|v| if v { "on" } else { "off" }.to_string())
+			}
+			RowKind::Segments(widths) => {
+				let n = options.len();
+				let staged_at = |pending: &Option<(usize, String)>| match pending {
+					Some((r, v)) if *r == row => options.iter().position(|(o, _)| o == v),
+					_ => None,
+				};
+				let mut chosen = None;
+				if selected {
+					let at = staged_at(self.pending).or(live).unwrap_or(0);
+					if self.nav.right {
+						*self.pending = Some((row, options[(at + 1) % n].0.to_string()));
+					} else if self.nav.left {
+						*self.pending = Some((row, options[(at + n - 1) % n].0.to_string()));
+					} else if self.nav.activate {
+						if let Some(i) = staged_at(self.pending) {
+							chosen = Some(options[i].0.to_string());
+							*self.pending = None;
+						}
+					}
+				}
+				let staged = if selected { staged_at(self.pending) } else { None };
+				let total = widths.iter().sum::<f32>() + SEG_GAP * (n as f32 - 1.0) + 2.0 * SEG_PAD;
+				let sh = h - 12.0;
+				let well = egui::Rect::from_min_size(
+					egui::pos2(rect.right() - 8.0 - total, cy - sh / 2.0),
+					egui::vec2(total, sh),
+				);
+				ui.painter().rect_filled(well, 8.0, SEG_BG);
+				let mut x = well.left() + SEG_PAD;
+				for (i, (v, d)) in options.iter().enumerate() {
+					let r = egui::Rect::from_min_size(
+						egui::pos2(x, well.top() + SEG_PAD),
+						egui::vec2(widths[i], sh - 2.0 * SEG_PAD),
+					);
+					x += widths[i] + SEG_GAP;
+					let sresp = ui.interact(r, ui.make_persistent_id(("ov-seg", row, i)), egui::Sense::click());
+					let is_live = live == Some(i);
+					let is_staged = staged == Some(i);
+					let hov = sresp.hovered();
+					let p = ui.painter();
+					if is_live {
+						p.rect_filled(r, 6.0, ACCENT_DIM);
+					} else if hov {
+						p.rect_filled(r, 6.0, ROW_HOVER);
+					}
+					if is_staged {
+						p.rect_stroke(r, 6.0, egui::Stroke::new(1.5, AMBER), egui::StrokeKind::Inside);
+					}
+					let col = if is_staged {
+						AMBER
+					} else if is_live || hov {
+						egui::Color32::WHITE
+					} else {
+						egui::Color32::from_gray(178)
+					};
+					p.text(r.center(), egui::Align2::CENTER_CENTER, *d, egui::FontId::proportional(13.0), col);
+					if sresp.clicked() {
+						chosen = Some(v.to_string());
+						*self.pending = None;
+					}
+					if hov {
+						sresp.on_hover_cursor(egui::CursorIcon::PointingHand);
+					}
+				}
+				chosen.filter(|v| v != current)
+			}
+			RowKind::Page => {
+				let lit = selected || resp.hovered();
+				let disp = live.and_then(|i| options.get(i)).map(|(_, d)| *d).unwrap_or(current);
+				ui.painter().text(
+					egui::pos2(rect.right() - 32.0, cy),
+					egui::Align2::RIGHT_CENTER,
+					disp,
+					egui::FontId::proportional(13.0),
+					if lit { CYAN } else { egui::Color32::from_gray(225) },
+				);
+				paint_chevron(
+					ui.painter(),
+					egui::pos2(rect.right() - 17.0, cy),
+					5.0,
+					if lit { CYAN } else { egui::Color32::from_gray(140) },
+				);
+				let open = (selected && (self.nav.activate || self.nav.right)) || (resp.clicked() && !on_info);
+				if open && !options.is_empty() {
+					self.open = Some(Picker { row, hi: live.unwrap_or(0), cols: 0 });
+					*self.pending = None;
+				}
+				resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+				None
 			}
 		}
 	}
-	// Re-read after this frame's staging for display.
-	let staged = selected && matches!(pending.as_ref(), Some((r, _)) if *r == row);
-	let value = match pending.as_ref() {
-		Some((r, v)) if *r == row => v.clone(),
-		_ => current.to_string(),
-	};
-	let cur = options.iter().position(|(v, _)| *v == value).unwrap_or(0);
-	let disp = options.get(cur).map(|(_, d)| *d).unwrap_or(value.as_str());
-	let (rect, resp) =
-		ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::click());
-	// Inline ⓘ explainer hit-rect (computed before the row-click handling so a click ON the icon
-	// opens its popup WITHOUT also cycling the row value). Positioned just right of the label.
-	let info_icon = info.map(|text| {
-		let lw = ui
-			.painter()
-			.layout_no_wrap(label.to_string(), egui::FontId::proportional(13.0), egui::Color32::from_gray(205))
-			.size()
-			.x;
-		let ic = egui::pos2(rect.left() + 12.0 + lw + 12.0, rect.center().y);
-		(text, ic, egui::Rect::from_center_size(ic, egui::vec2(16.0, 16.0)))
-	});
-	let over_info = info_icon
-		.map(|(_, _, ir)| ui.input(|i| i.pointer.hover_pos()).is_some_and(|p| ir.contains(p)))
-		.unwrap_or(false);
-	// MOUSE: clicking the row changes the value IMMEDIATELY — right half = next option, left
-	// half = previous (the ◂ ▸ are clickable). Mouse applies directly (instant), discarding
-	// any pad-staged value; the pad path stages + confirms with A.
-	let hovered = resp.hovered();
-	if confirmed.is_none() && resp.clicked() && !over_info && !options.is_empty() {
-		let live = options.iter().position(|(v, _)| *v == current).unwrap_or(0);
-		let px = resp.interact_pointer_pos().map(|p| p.x).unwrap_or(rect.center().x);
-		let ni = if px >= rect.center().x {
-			(live + 1) % options.len()
+
+	/// The options page of row `p.row`: its label, then every option as a large tile (the
+	/// current one lit). A click — or the arrows and A / Enter — picks one and returns to the
+	/// rows; the back button and B / Escape return without a change.
+	fn options_page(
+		&mut self,
+		ui: &mut egui::Ui,
+		mut p: Picker,
+		label: &str,
+		current: &str,
+		options: &[(&str, &str)],
+	) -> Option<String> {
+		let n = options.len();
+		if n == 0 {
+			self.close = true;
+			return None;
+		}
+		// As many columns as the longest option allows: short ones (fps, bitrate) four across,
+		// names (encoders, monitors) two.
+		let widest = options.iter().map(|(_, d)| text_w(ui, d, 13.5)).fold(0.0, f32::max);
+		let cols = (if widest <= 92.0 {
+			4
+		} else if widest <= 136.0 {
+			3
 		} else {
-			(live + options.len() - 1) % options.len()
+			2
+		})
+		.min(n);
+		p.hi = p.hi.min(n - 1);
+		p.cols = cols;
+		let moved = self.nav.up || self.nav.down || self.nav.left || self.nav.right;
+		if self.nav.right && p.hi + 1 < n && p.hi % cols < cols - 1 {
+			p.hi += 1;
+		}
+		if self.nav.left && p.hi % cols > 0 {
+			p.hi -= 1;
+		}
+		if self.nav.down {
+			if p.hi + cols < n {
+				p.hi += cols;
+			} else if p.hi / cols < (n - 1) / cols {
+				// A short last line: its last tile.
+				p.hi = n - 1;
+			}
+		}
+		if self.nav.up && p.hi >= cols {
+			p.hi -= cols;
+		}
+		let mut picked = (self.cursor && self.nav.activate).then_some(p.hi);
+		ui.label(egui::RichText::new(label).size(13.0).color(egui::Color32::from_gray(165)));
+		let h = row_h(ui.ctx());
+		let w = ((ui.available_width() - GRID_GAP * (cols as f32 - 1.0)) / cols as f32).floor();
+		let cursor = self.cursor;
+		egui::Grid::new(("ov_options", p.row))
+			.num_columns(cols)
+			.spacing(egui::vec2(GRID_GAP, GRID_GAP))
+			.show(ui, |ui| {
+				for (i, (v, d)) in options.iter().enumerate() {
+					let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
+					let is_cur = *v == current;
+					let hi = cursor && i == p.hi;
+					let hov = resp.hovered();
+					if hi && moved {
+						ui.scroll_to_rect(rect.expand(8.0), None);
+					}
+					let painter = ui.painter();
+					if hi {
+						painter.rect_filled(rect.expand(2.0), 10.0, CYAN);
+					}
+					let fill = if is_cur {
+						ACCENT_DIM
+					} else if hi {
+						ROW_SEL
+					} else if hov {
+						ROW_HOVER
+					} else {
+						ROW_BG
+					};
+					painter.rect_filled(rect, 8.0, fill);
+					painter.text(
+						rect.center(),
+						egui::Align2::CENTER_CENTER,
+						*d,
+						egui::FontId::proportional(13.5),
+						if is_cur || hi || hov { egui::Color32::WHITE } else { egui::Color32::from_gray(205) },
+					);
+					if resp.clicked() {
+						picked = Some(i);
+					}
+					resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+					if i % cols == cols - 1 {
+						ui.end_row();
+					}
+				}
+			});
+		*self.picker = Some(p);
+		let v = options[picked?].0;
+		self.close = true;
+		(v != current).then(|| v.to_string())
+	}
+
+	/// A row that does something (no value): a click, or A / Enter with the cursor on it.
+	/// `accent` colours the label while it is lit; a disabled row is dimmed and inert.
+	fn action(&mut self, ui: &mut egui::Ui, row: usize, label: &str, accent: egui::Color32, enabled: bool) -> bool {
+		let Some((rect, resp, selected)) = self.frame(ui, row, row_h(ui.ctx())) else {
+			return false;
 		};
-		confirmed = Some(options[ni].0.to_string());
-		*pending = None;
-	}
-	if hovered {
+		let lit = enabled && (selected || resp.hovered());
+		let col = if !enabled {
+			egui::Color32::from_gray(110)
+		} else if lit {
+			accent
+		} else {
+			egui::Color32::from_gray(218)
+		};
+		ui.painter().text(
+			egui::pos2(rect.left() + 14.0, rect.center().y),
+			egui::Align2::LEFT_CENTER,
+			label,
+			egui::FontId::proportional(13.5),
+			col,
+		);
+		if !enabled {
+			return false;
+		}
+		paint_chevron(
+			ui.painter(),
+			egui::pos2(rect.right() - 17.0, rect.center().y),
+			5.0,
+			if lit { accent } else { egui::Color32::from_gray(140) },
+		);
+		let fired = (selected && self.nav.activate) || resp.clicked();
 		resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+		fired
 	}
-	// Show the value arrows + framing when pad-selected OR mouse-hovered (so it reads as
-	// clickable under the mouse too).
-	let active = selected || hovered;
-	if selected {
-		ui.painter().rect_filled(rect.expand(2.0), 8.0, CYAN);
-		ui.painter().rect_filled(rect, 7.0, egui::Color32::from_rgb(20, 54, 70));
-	} else {
-		ui.painter()
-			.rect_filled(rect, 7.0, egui::Color32::from_rgb(26, 28, 38));
+}
+
+impl Drop for Rows<'_> {
+	fn drop(&mut self) {
+		if self.close {
+			*self.picker = None;
+		} else if let Some(p) = self.open.take() {
+			*self.picker = Some(p);
+		}
 	}
-	ui.painter().text(
-		egui::pos2(rect.left() + 12.0, rect.center().y),
-		egui::Align2::LEFT_CENTER,
-		label,
-		egui::FontId::proportional(13.0),
-		egui::Color32::from_gray(205),
-	);
-	// Value (right-aligned), flanked by PAINTED ◂ ▸ triangles when selected. AMBER while a
-	// change is staged (not yet applied — press A to confirm); cyan when selected & committed.
-	let amber = egui::Color32::from_rgb(240, 185, 70);
-	let color = if staged {
-		amber
-	} else if active {
+}
+
+/// The inline ⓘ of a row at `ic`: a painted glyph with a click / hover popup (on a pad- or
+/// touch-driven overlay a hover tip never shows, so a click opens it too). Returns whether
+/// the pointer is on it.
+fn info_marker(ui: &mut egui::Ui, ic: egui::Pos2, row: usize, text: &str) -> bool {
+	let irect = egui::Rect::from_center_size(ic, egui::vec2(22.0, 22.0));
+	let popup_id = ui.make_persistent_id(("crow-info-popup", row));
+	let iresp = ui.interact(irect, ui.make_persistent_id(("crow-info-hit", row)), egui::Sense::click());
+	let open = egui::Popup::is_id_open(ui.ctx(), popup_id);
+	let col = if iresp.hovered() || open {
 		CYAN
 	} else {
-		egui::Color32::from_gray(225)
+		egui::Color32::from_rgb(120, 125, 140)
 	};
-	let font = egui::FontId::proportional(13.0);
-	let vw = ui
-		.painter()
-		.layout_no_wrap(disp.to_string(), font.clone(), color)
-		.size()
-		.x;
-	let cy = rect.center().y;
-	let tri = 4.5;
-	let gap = 8.0;
-	let val_right = if active {
-		rect.right() - 12.0 - tri * 2.0 - gap
-	} else {
-		rect.right() - 12.0
-	};
-	ui.painter().text(
-		egui::pos2(val_right, cy),
-		egui::Align2::RIGHT_CENTER,
-		disp,
-		font,
-		color,
-	);
-	if active {
-		let arrow = if staged { amber } else { CYAN };
+	{
 		let p = ui.painter();
-		paint_tri(&p, egui::pos2(rect.right() - 12.0 - tri, cy), tri, true, arrow);
-		paint_tri(&p, egui::pos2(val_right - vw - gap - tri, cy), tri, false, arrow);
+		p.circle_stroke(ic, 6.5, egui::Stroke::new(1.3, col));
+		p.circle_filled(ic + egui::vec2(0.0, -3.0), 0.9, col);
+		p.line_segment(
+			[ic + egui::vec2(0.0, -0.4), ic + egui::vec2(0.0, 3.2)],
+			egui::Stroke::new(1.5, col),
+		);
 	}
-	// Inline ⓘ explainer: paint the glyph + a click/hover popup (the hit-rect was reserved above).
-	if let Some((text, ic, irect)) = info_icon {
-		let popup_id = ui.make_persistent_id(("crow-info-popup", row));
-		let iresp = ui.interact(irect, ui.make_persistent_id(("crow-info-hit", row)), egui::Sense::click());
-		let open = egui::Popup::is_id_open(ui.ctx(), popup_id);
-		let col = if iresp.hovered() || open {
-			CYAN
-		} else {
-			egui::Color32::from_rgb(120, 125, 140)
-		};
-		{
-			let p = ui.painter();
-			p.circle_stroke(ic, 6.0, egui::Stroke::new(1.3, col));
-			p.circle_filled(ic + egui::vec2(0.0, -2.8), 0.9, col);
-			p.line_segment(
-				[ic + egui::vec2(0.0, -0.4), ic + egui::vec2(0.0, 3.0)],
-				egui::Stroke::new(1.5, col),
-			);
-		}
-		iresp.clone().on_hover_text(egui::RichText::new(text).size(12.0));
-		// A click toggles the popup (egui 0.37 `Popup` API; `popup_below_widget` and
-		// `Memory::toggle_popup` are gone).
-		egui::Popup::from_response(&iresp)
-			.id(popup_id)
-			.open_memory(iresp.clicked().then_some(egui::SetOpenCommand::Toggle))
-			.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-			.show(|ui| {
-				ui.set_max_width(240.0);
-				ui.label(egui::RichText::new(text).size(12.0));
-			});
-	}
-	confirmed
+	iresp.clone().on_hover_text(egui::RichText::new(text).size(12.0));
+	// A click toggles the popup (egui 0.37 `Popup` API; `popup_below_widget` and
+	// `Memory::toggle_popup` are gone).
+	egui::Popup::from_response(&iresp)
+		.id(popup_id)
+		.open_memory(iresp.clicked().then_some(egui::SetOpenCommand::Toggle))
+		.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+		.show(|ui| {
+			ui.set_max_width(260.0);
+			ui.label(egui::RichText::new(text).size(12.0));
+		});
+	ui.input(|i| i.pointer.hover_pos()).is_some_and(|p| irect.contains(p))
 }
 
-/// A button-style row (no value, no ◂▸): pad-select + A, or a mouse click, fires the action.
-/// Returns true when activated this frame. `accent` colours the label when active (e.g. cyan).
-fn action_row(ui: &mut egui::Ui, selected: bool, nav: Nav, label: &str, accent: egui::Color32) -> bool {
-	let (rect, resp) =
-		ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::click());
-	let hovered = resp.hovered();
-	let clicked = resp.clicked();
-	if hovered {
-		resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-	}
-	let active = selected || hovered;
-	if selected {
-		ui.painter().rect_filled(rect.expand(2.0), 8.0, accent);
-		ui.painter().rect_filled(rect, 7.0, egui::Color32::from_rgb(20, 54, 70));
-	} else {
-		ui.painter()
-			.rect_filled(rect, 7.0, egui::Color32::from_rgb(26, 28, 38));
-	}
-	let col = if active { accent } else { egui::Color32::from_gray(205) };
-	ui.painter().text(
-		rect.center(),
-		egui::Align2::CENTER_CENTER,
-		label,
-		egui::FontId::proportional(12.5),
-		col,
-	);
-	(selected && nav.activate) || clicked
+/// Fade the top (or bottom) 18 pt of `area` into `bg`: rows continue out of sight there.
+fn paint_fade(painter: &egui::Painter, area: egui::Rect, top: bool, bg: egui::Color32) {
+	let clear = egui::Color32::from_rgba_premultiplied(0, 0, 0, 0);
+	let (y_bg, y_clear) = if top { (area.top(), area.top() + 18.0) } else { (area.bottom(), area.bottom() - 18.0) };
+	let mut mesh = egui::Mesh::default();
+	mesh.colored_vertex(egui::pos2(area.left(), y_bg), bg);
+	mesh.colored_vertex(egui::pos2(area.right(), y_bg), bg);
+	mesh.colored_vertex(egui::pos2(area.right(), y_clear), clear);
+	mesh.colored_vertex(egui::pos2(area.left(), y_clear), clear);
+	mesh.add_triangle(0, 1, 2);
+	mesh.add_triangle(0, 2, 3);
+	painter.add(egui::Shape::mesh(mesh));
 }
 
-/// Paint a small filled triangle marker (the ◂/▸ value arrows — the unicode glyphs are missing
-/// from the bundled egui font). `right` = pointing right, otherwise pointing left.
-fn paint_tri(painter: &egui::Painter, center: egui::Pos2, half: f32, right: bool, color: egui::Color32) {
-	let dx = if right { half } else { -half };
+/// A painted ">" (the chevron glyphs are missing from the bundled egui font).
+fn paint_chevron(painter: &egui::Painter, c: egui::Pos2, half: f32, color: egui::Color32) {
+	let s = egui::Stroke::new(1.8, color);
+	painter.line_segment([c + egui::vec2(-half * 0.5, -half), c + egui::vec2(half * 0.5, 0.0)], s);
+	painter.line_segment([c + egui::vec2(-half * 0.5, half), c + egui::vec2(half * 0.5, 0.0)], s);
+}
+
+/// A small filled triangle pointing up or down (painted: the ▲ / ▼ glyphs are missing from the
+/// bundled egui font).
+fn paint_tri_v(painter: &egui::Painter, center: egui::Pos2, half: f32, up: bool, color: egui::Color32) {
+	let dy = if up { -half } else { half };
 	let pts = vec![
-		egui::pos2(center.x - dx, center.y - half),
-		egui::pos2(center.x - dx, center.y + half),
-		egui::pos2(center.x + dx, center.y),
+		egui::pos2(center.x - half, center.y - dy),
+		egui::pos2(center.x + half, center.y - dy),
+		egui::pos2(center.x, center.y + dy),
 	];
 	painter.add(egui::Shape::convex_polygon(pts, color, egui::Stroke::NONE));
 }
 
 fn stat_tile(ui: &mut egui::Ui, value: &str, icon: &str, label: &str) {
-	egui::Frame::NONE
-		.fill(egui::Color32::from_rgb(22, 24, 34))
-		.corner_radius(8.0)
-		.inner_margin(egui::Margin::symmetric(10, 8))
-		.show(ui, |ui| {
-			ui.vertical(|ui| {
-				ui.label(egui::RichText::new(value).size(18.0).strong().color(CYAN));
-				// Phosphor icon glyph + label. The icon is a real font glyph now (installed in
-				// `apply_theme`), so it paints instead of a tofu box.
-				ui.horizontal(|ui| {
-					ui.spacing_mut().item_spacing.x = 4.0;
-					ui.label(
-						egui::RichText::new(icon)
-							.size(12.0)
-							.color(egui::Color32::from_rgb(120, 200, 230)),
-					);
-					ui.label(
-						egui::RichText::new(label)
-							.small()
-							.color(egui::Color32::GRAY),
-					);
-				});
-			});
-		});
+	// Three equal tiles per row across the panel: the value large on top, icon + label under it.
+	let w = ((PANEL_W - GRID_GAP * 2.0) / 3.0).floor();
+	let h = if short_surface(ui.ctx()) { 50.0 } else { 58.0 };
+	let (rect, _) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
+	let p = ui.painter();
+	// A well, not a plate: the numbers are read, the plates below are clicked.
+	p.rect_filled(rect, 8.0, SEG_BG);
+	p.text(
+		egui::pos2(rect.left() + 12.0, rect.top() + if h < 58.0 { 17.0 } else { 19.0 }),
+		egui::Align2::LEFT_CENTER,
+		value,
+		egui::FontId::proportional(19.0),
+		CYAN,
+	);
+	p.text(
+		egui::pos2(rect.left() + 12.0, rect.bottom() - if h < 58.0 { 13.0 } else { 15.0 }),
+		egui::Align2::LEFT_CENTER,
+		icon,
+		egui::FontId::proportional(12.0),
+		egui::Color32::from_rgb(120, 200, 230),
+	);
+	p.text(
+		egui::pos2(rect.left() + 29.0, rect.bottom() - if h < 58.0 { 13.0 } else { 15.0 }),
+		egui::Align2::LEFT_CENTER,
+		label,
+		egui::FontId::proportional(11.0),
+		egui::Color32::from_gray(150),
+	);
 }
 
 /// A labelled ComboBox; returns Some(value) when the user picks a new value.
@@ -2973,9 +3495,9 @@ mod focus_tests {
 				},
 				|ui| {
 					egui::CentralPanel::default().show(ui, |ui| {
-						cat_box(ui, icon::BROADCAST, "one", false, 0);
-						cat_box(ui, icon::MONITOR, "two", false, 0);
-						cat_box(ui, icon::CHART_BAR, "three", false, 0);
+						cat_box(ui, icon::BROADCAST, "one", false, 0, 4);
+						cat_box(ui, icon::MONITOR, "two", false, 0, 4);
+						cat_box(ui, icon::CHART_BAR, "three", false, 0, 4);
 					});
 				},
 			)
@@ -3222,5 +3744,210 @@ mod host_ptr_tests {
 		host_ptr_line("1 0.5 0.5");
 		assert!(host_ptr_visible(Mode::Remote).is_none());
 		set_host_ptr_show(true);
+	}
+}
+
+#[cfg(test)]
+mod rows_tests {
+	use super::*;
+
+	fn key(k: egui::Key) -> egui::Event {
+		egui::Event::Key {
+			key: k,
+			physical_key: None,
+			pressed: true,
+			repeat: false,
+			modifiers: egui::Modifiers::default(),
+		}
+	}
+
+	fn run(ctx: &egui::Context, st: &OverlayState, ui: &mut UiState, events: Vec<egui::Event>) -> Vec<OverlayCmd> {
+		let mut cmds = Vec::new();
+		let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 720.0));
+		let mut out = ctx.run_pass(
+			egui::RawInput { events, screen_rect: Some(screen), ..Default::default() },
+			|ctx| {
+				cmds = draw(ctx, st, ui);
+			},
+		);
+		out.textures_delta.clear(); // no painter here (egui asserts on unapplied deltas)
+		cmds
+	}
+
+	fn sets(cmds: &[OverlayCmd]) -> Vec<(&'static str, String)> {
+		cmds.iter()
+			.filter_map(|c| match c {
+				OverlayCmd::Set(f, v) => Some((*f, v.clone())),
+				_ => None,
+			})
+			.collect()
+	}
+
+	fn press(ctx: &egui::Context, st: &OverlayState, ui: &mut UiState, k: egui::Key) -> Vec<(&'static str, String)> {
+		sets(&run(ctx, st, ui, vec![key(k)]))
+	}
+
+	/// An open overlay on `view` with the key / pad cursor awake on the first row.
+	fn opened(view: View, st: &OverlayState) -> (egui::Context, UiState) {
+		let ctx = egui::Context::default();
+		let mut ui = UiState::default();
+		run(&ctx, st, &mut ui, vec![]);
+		ui.view = view;
+		run(&ctx, st, &mut ui, vec![]);
+		// The first input only wakes the cursor.
+		assert!(press(&ctx, st, &mut ui, egui::Key::ArrowDown).is_empty());
+		assert!(ui.nav_active && ui.sub_sel == 0 && !ui.tab_focus);
+		(ctx, ui)
+	}
+
+	fn open_state() -> OverlayState {
+		OverlayState { open: true, ..OverlayState::default() }
+	}
+
+	#[test]
+	fn a_switch_flips_at_once() {
+		let st = open_state();
+		let (ctx, mut ui) = opened(View::Gauges, &st);
+		// Row 0 = the stats HUD, off: A / Enter turns it on, right too, left does nothing.
+		assert_eq!(press(&ctx, &st, &mut ui, egui::Key::Enter), vec![("statshud", "on".to_string())]);
+		assert_eq!(press(&ctx, &st, &mut ui, egui::Key::ArrowRight), vec![("statshud", "on".to_string())]);
+		assert!(press(&ctx, &st, &mut ui, egui::Key::ArrowLeft).is_empty(), "already off");
+		assert!(ui.pending.is_none(), "a switch stages nothing");
+	}
+
+	#[test]
+	fn side_by_side_options_are_staged_until_confirmed() {
+		let st = open_state();
+		let (ctx, mut ui) = opened(View::Display, &st);
+		// Row 0 = the view fit (fit / stretch / original), on "fit".
+		assert!(press(&ctx, &st, &mut ui, egui::Key::ArrowRight).is_empty(), "staged, not applied");
+		assert_eq!(ui.pending, Some((0, "stretch".to_string())));
+		assert!(press(&ctx, &st, &mut ui, egui::Key::ArrowRight).is_empty());
+		assert_eq!(ui.pending, Some((0, "original".to_string())));
+		assert_eq!(press(&ctx, &st, &mut ui, egui::Key::Enter), vec![("fit", "original".to_string())]);
+		assert!(ui.pending.is_none());
+		// Staged, then the cursor moves on: dropped.
+		press(&ctx, &st, &mut ui, egui::Key::ArrowLeft);
+		assert!(ui.pending.is_some());
+		assert!(press(&ctx, &st, &mut ui, egui::Key::ArrowDown).is_empty());
+		assert!(ui.pending.is_none() && ui.sub_sel == 1);
+	}
+
+	#[test]
+	fn a_long_list_opens_its_options_page() {
+		let st = open_state();
+		let (ctx, mut ui) = opened(View::Stream, &st);
+		press(&ctx, &st, &mut ui, egui::Key::ArrowDown);
+		assert_eq!(ui.sub_sel, 1, "the encoder row: eight options");
+		assert!(press(&ctx, &st, &mut ui, egui::Key::Enter).is_empty());
+		assert_eq!(ui.picker, Some(Picker { row: 1, hi: 0, cols: 0 }), "opens on the value in force");
+		// The arrows move in the page, not between the rows.
+		press(&ctx, &st, &mut ui, egui::Key::ArrowRight);
+		press(&ctx, &st, &mut ui, egui::Key::ArrowDown);
+		assert_eq!(ui.sub_sel, 1);
+		let hi = ui.picker.expect("still open").hi;
+		assert!(hi > 1, "one right, one line down: {hi}");
+		// A picks: the page closes; the encoder restarts the stream, so it waits for the close.
+		assert!(press(&ctx, &st, &mut ui, egui::Key::Enter).is_empty());
+		assert_eq!(ui.picker, None);
+		assert_eq!(ui.deferred, vec![("encoder", encoders_opts()[hi].0.to_string())]);
+	}
+
+	#[test]
+	fn escape_goes_back_one_level_at_a_time() {
+		let st = open_state();
+		let (ctx, mut ui) = opened(View::Stream, &st);
+		press(&ctx, &st, &mut ui, egui::Key::ArrowDown);
+		press(&ctx, &st, &mut ui, egui::Key::Enter);
+		assert!(ui.picker.is_some());
+		let out = run(&ctx, &st, &mut ui, vec![key(egui::Key::Escape)]);
+		assert!(ui.picker.is_none() && ui.view == View::Stream && out.is_empty(), "page → rows");
+		run(&ctx, &st, &mut ui, vec![key(egui::Key::Escape)]);
+		assert!(ui.view == View::Root, "rows → hub");
+		let out = run(&ctx, &st, &mut ui, vec![key(egui::Key::Escape)]);
+		assert!(out.iter().any(|c| matches!(c, OverlayCmd::Close)), "hub → closed");
+	}
+
+	#[test]
+	fn up_from_the_first_row_reaches_the_section_strip() {
+		let st = open_state();
+		let (ctx, mut ui) = opened(View::Stream, &st);
+		press(&ctx, &st, &mut ui, egui::Key::ArrowUp);
+		assert!(ui.tab_focus && ui.view == View::Stream);
+		// Left / right walk the sections (game mode: Stream, Display, Audio, …). Left of the
+		// first one is the back button; right from it is the first section again.
+		press(&ctx, &st, &mut ui, egui::Key::ArrowLeft);
+		assert!(ui.view == View::Stream && ui.tab_focus && ui.back_focus);
+		press(&ctx, &st, &mut ui, egui::Key::ArrowLeft);
+		assert!(ui.view == View::Stream && ui.back_focus, "nothing left of the back button");
+		press(&ctx, &st, &mut ui, egui::Key::ArrowRight);
+		assert!(ui.view == View::Stream && ui.tab_focus && !ui.back_focus);
+		press(&ctx, &st, &mut ui, egui::Key::ArrowRight);
+		assert!(ui.view == View::Display && ui.tab_focus);
+		press(&ctx, &st, &mut ui, egui::Key::ArrowRight);
+		assert!(ui.view == View::Audio);
+		// Down returns to the rows of the section it stopped on, at the top.
+		press(&ctx, &st, &mut ui, egui::Key::ArrowDown);
+		assert!(!ui.tab_focus && ui.view == View::Audio && ui.sub_sel == 0);
+		// On the strip the rows take no input.
+		press(&ctx, &st, &mut ui, egui::Key::ArrowUp);
+		assert!(press(&ctx, &st, &mut ui, egui::Key::Enter).is_empty());
+		assert!(!ui.tab_focus, "A on the strip enters the rows, it does not flip the first one");
+	}
+
+	#[test]
+	fn the_back_button_takes_the_cursor() {
+		let st = open_state();
+		// From the rows: up (strip), left (back button), A → the hub.
+		let (ctx, mut ui) = opened(View::Stream, &st);
+		press(&ctx, &st, &mut ui, egui::Key::ArrowUp);
+		press(&ctx, &st, &mut ui, egui::Key::ArrowLeft);
+		assert!(ui.back_focus);
+		// Down from it is the rows again, nothing changed.
+		assert!(press(&ctx, &st, &mut ui, egui::Key::ArrowDown).is_empty());
+		assert!(!ui.tab_focus && ui.view == View::Stream && ui.sub_sel == 0);
+		press(&ctx, &st, &mut ui, egui::Key::ArrowUp);
+		assert!(ui.tab_focus && !ui.back_focus, "up lands on the category, not on the button");
+		press(&ctx, &st, &mut ui, egui::Key::ArrowLeft);
+		let out = run(&ctx, &st, &mut ui, vec![key(egui::Key::Enter)]);
+		assert!(ui.view == View::Root && !ui.tab_focus && out.is_empty(), "A on back → the hub");
+
+		// From an options page: up from its first line is the back button; A returns to the
+		// rows without a change, and the cursor is where it was.
+		let (ctx, mut ui) = opened(View::Stream, &st);
+		press(&ctx, &st, &mut ui, egui::Key::ArrowDown);
+		press(&ctx, &st, &mut ui, egui::Key::Enter);
+		assert!(ui.picker.is_some());
+		run(&ctx, &st, &mut ui, vec![]); // the page's first frame (its columns are known after)
+		press(&ctx, &st, &mut ui, egui::Key::ArrowUp);
+		assert!(ui.tab_focus && ui.back_focus && ui.picker.is_some());
+		// Right has nowhere to go (no strip to walk while a page is up), Enter picks nothing.
+		press(&ctx, &st, &mut ui, egui::Key::ArrowRight);
+		assert!(ui.back_focus && ui.picker.is_some());
+		assert!(press(&ctx, &st, &mut ui, egui::Key::Enter).is_empty());
+		assert!(ui.picker.is_none() && ui.view == View::Stream && !ui.tab_focus && ui.sub_sel == 1);
+	}
+
+	#[test]
+	fn the_strip_skips_files_and_the_hub_keeps_every_category() {
+		assert_eq!(categories(Mode::Remote).len(), 8);
+		assert_eq!(categories(Mode::Game).len(), 6);
+		assert!(section_tabs(Mode::Remote).all(|c| c.2 != View::Files));
+		assert_eq!(section_tabs(Mode::Remote).count(), 7);
+		for (_, _, v) in categories(Mode::Game) {
+			assert!(has_rows(*v), "every game-mode section is made of rows");
+		}
+	}
+
+	#[test]
+	fn the_tools_actions_fire_from_the_keys() {
+		let st = OverlayState { open: true, mode: Mode::Remote, ..OverlayState::default() };
+		let (ctx, mut ui) = opened(View::Tools, &st);
+		press(&ctx, &st, &mut ui, egui::Key::ArrowDown);
+		assert_eq!(press(&ctx, &st, &mut ui, egui::Key::Enter), vec![("sendclip", "1".to_string())]);
+		for _ in 0..3 {
+			press(&ctx, &st, &mut ui, egui::Key::ArrowDown);
+		}
+		assert_eq!(press(&ctx, &st, &mut ui, egui::Key::Enter), vec![("fullscreen", "1".to_string())]);
 	}
 }

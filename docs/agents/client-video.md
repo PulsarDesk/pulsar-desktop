@@ -96,6 +96,41 @@ Hidden by default, opened with a key combo. Drawn **natively by pulsar-render
 file/mic/clipboard. Video may pause while the rich menu screen is open —
 acceptable; priority is Moonlight-class latency during play.
 
+### Menu layout and navigation (`overlay.rs`, 2026-11-13, LOCAL, not yet approved by the maintainer)
+
+- **Hub** (`View::Root`): header as tall as a section's strip (`HEADER_H`: brand, mode, the
+  transport in a well), stat tiles, the category boxes (`categories(mode)`), end session.
+  One visual rule for hub and sections: what is CLICKED is a plate (`ROW_BG` / `ROW_HOVER`,
+  cursor = `ROW_SEL` + cyan ring), what is only READ is a well (`SEG_BG`: stat tiles, the
+  transport, the well behind side-by-side options). End session is a red plate, dim at rest.
+  Two colours, the same on the hub and in a section: **where you are** is teal / cyan
+  (`ROW_SEL` under the cursor and on the current category of the strip, the `CYAN` ring = the
+  cursor itself); **the value in force** is indigo (`ACCENT_DIM` / `ACCENT`: lit option,
+  switch, current tile). The strip's current category used to be indigo — the hub and the
+  strip marked "this category" in two colours.
+  Stat tiles and category boxes take a compact height on a short surface (`short_surface`).
+- **Section**: header = a 44 pt back button + the category strip (`draw_section_header`; the
+  current section shows its name, the others an icon; Files is hub-only, it opens its own
+  window). The panel's top edge is fixed (`panel_top`) so the header never moves under the
+  pointer when the page height changes.
+- **Rows** (`Rows`, one call per row): 44 pt high (38 on a surface under 620 pt), the shape
+  follows the options — on/off → a switch (a click anywhere on the row); 2-4 options that fit
+  → side by side, one click each; anything else → the row opens an **options page** of large
+  tiles (`UiState::picker`). Rows taller than the surface scroll (`ScrollArea`, fades at the
+  cut edges). The old rows changed their value by clicking the left / right half to step
+  through the options — do not bring that back.
+- **Keys and pad** (same `k up|down|left|right|go|escape` stdin channel): up/down move the
+  cursor; up from the first row reaches the strip (left/right walk the sections, down
+  returns); left of the first section is the **back button** (`UiState::back_focus`; A goes
+  back one level), and up from the first line of an options page goes straight to it;
+  left/right flip a switch at once and STAGE a side-by-side option (amber) until
+  A / Enter confirms; A / Enter opens an options page and picks in it; B / Escape goes back
+  one level (page → rows → hub → closed). A mouse click hides the cursor ring until the next
+  key. Stream-restarting choices still wait for the menu to close (`UiState::deferred`).
+- Covered by `overlay::rows_tests` (key-driven, headless). To LOOK at it without a session:
+  run the renderer in a test window fed by `ffmpeg testsrc2` and drive it over stdin /
+  posted mouse messages (the renderer draws no overlay before its first decoded frame).
+
 ## Loss recovery on Windows — reference-frame invalidation (RFI)
 
 When the host advertises `rfi` (native NVENC), the Windows client asks for `StreamReq::rfi`.
