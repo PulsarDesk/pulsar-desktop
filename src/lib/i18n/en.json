@@ -316,7 +316,7 @@
 	"settings.duplicateSessions": "Several sessions to one device",
 	"settings.duplicateSessionsDesc": "Connecting to a device again opens another session instead of switching to the open one (e.g. the same PC in two tabs).",
 	"settings.upscale": "Picture upscaling",
-	"settings.upscaleDesc": "Sharpens a lower-resolution picture as it is scaled up; only acts while the picture is enlarged (e.g. when a slow link lowers the resolution). Auto: the NVIDIA RTX / Intel GPU's AI upscaler, Snapdragon GSR on Snapdragon (Windows), else AMD FSR.",
+	"settings.upscaleDesc": "Sharpens a lower-resolution picture as it is scaled up; only acts while the picture is enlarged (e.g. when a slow link lowers the resolution). Auto: the NVIDIA RTX / Intel GPU's AI upscaler (Windows), else AMD FSR.",
 	"settings.upscaleOff": "Off",
 	"settings.upscaleAuto": "Auto",
 	"settings.upscaleAi": "AI (NVIDIA/Intel)",

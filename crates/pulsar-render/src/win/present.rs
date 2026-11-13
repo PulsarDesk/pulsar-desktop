@@ -114,12 +114,15 @@ pub fn fit_rects(
 }
 
 /// Picture upscaling (Settings → Görüntü → Görüntü iyileştirme), stdin `upscale <mode>`:
-/// 0 off · 1 auto (the GPU's AI upscaler if it has one; Snapdragon GSR on Qualcomm Adreno; else
-/// FSR) · 2 FSR · 3 AI (NVIDIA RTX Video Super Resolution / Intel VSR; FSR where the GPU has
-/// none) · 4 Snapdragon GSR (any GPU).
+/// 0 off · 1 auto (the GPU's AI upscaler if it has one, else FSR) · 2 FSR · 3 AI (NVIDIA RTX
+/// Video Super Resolution / Intel VSR; FSR where the GPU has none) · 4 Snapdragon GSR (any GPU;
+/// experimental, not offered in the settings — see `pick`).
 static UPSCALE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 pub fn set_upscale(mode: &str) {
+	// Diagnostics: `PULSAR_UPSCALE=off|auto|fsr|ai|sgsr` pins the mode over the app's setting.
+	let forced = std::env::var("PULSAR_UPSCALE").ok();
+	let mode = forced.as_deref().unwrap_or(mode);
 	let v = match mode.trim() {
 		"auto" => 1,
 		"fsr" => 2,
@@ -132,8 +135,6 @@ pub fn set_upscale(mode: &str) {
 
 const VENDOR_NVIDIA: u32 = 0x10DE;
 const VENDOR_INTEL: u32 = 0x8086;
-/// Qualcomm's DXGI vendor id ("QCOM").
-const VENDOR_QUALCOMM: u32 = 0x4D4F_4351;
 
 /// The upscaler a frame uses, given the setting and the GPU.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -150,7 +151,9 @@ fn pick(mode: u8, vendor: u32) -> Upscaler {
 	let ai = vendor == VENDOR_NVIDIA || vendor == VENDOR_INTEL;
 	match mode {
 		1 | 3 if ai => Upscaler::Vendor,
-		1 if vendor == VENDOR_QUALCOMM => Upscaler::Sgsr,
+		// Not on Auto (2026-11-13 A/B on desktop text, 1920x1200 → 2880x1800 on an Adreno: SGSR
+		// came out jagged with dark halos where FSR and plain scaling were clean) — only when
+		// asked for by name, which the settings don't offer until that's fixed.
 		4 => Upscaler::Sgsr,
 		1..=3 => Upscaler::Fsr,
 		_ => Upscaler::None,
