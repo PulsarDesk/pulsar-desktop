@@ -78,6 +78,16 @@ and `client` are `fixed`, `vcredist` is kept because `usbip.exe` needs the VC++ 
   `/S` path never runs it (no surprise UAC prompt). CI copies `resources/usbip/USBip-*.exe`
   into the setup payload.
 
+**Windows Firewall (both installers):** Windows asks "allow access?" once per program that
+listens (pulsar, pulsar-render, ffmpeg, ffplay). Instead the app adds one inbound allow rule
+per program, named `Pulsar (<file>)` and scoped to its path: `pulsar.exe --firewall-setup` /
+`--firewall-remove` (`src-tauri/src/firewall.rs`, needs elevation). NSIS runs them in its
+post-install / pre-uninstall hooks (already elevated). pulsar-setup checks the rule
+(`netsh … show rule`, no elevation needed) and when it is missing runs the app through ONE UAC
+prompt (`src/firewall.rs`); the headless `/S` path skips it. An elevated app also re-checks at
+startup. Rules are per path, so the per-user installs of several Windows users on one PC each
+keep their own rule; removal deletes only this install's.
+
 **usbipd-win coexistence:** usbipd-win (Microsoft's WSL USB tool, a USB/IP *server*) often
 owns TCP 3240 on dev machines. Our server binds an ephemeral loopback port and passes it with
 `--tcp-port` (pulsar-core `attach.rs`), so the two do not conflict; both can stay installed.

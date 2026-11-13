@@ -18,6 +18,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod drivers;
+mod firewall;
 mod install;
 mod mock;
 mod ui;

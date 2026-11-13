@@ -83,6 +83,14 @@ fn main() {
 	if args.iter().any(|a| a == "--ds5-probe") {
 		std::process::exit(pulsar_tauri::ds5_probe());
 	}
+	// `pulsar --firewall-setup` / `--firewall-remove`: the installer runs these elevated (one
+	// UAC prompt) to allow / remove Pulsar's programs in Windows Firewall, then exits.
+	if args.iter().any(|a| a == "--firewall-setup") {
+		std::process::exit(pulsar_tauri::firewall_cli(true));
+	}
+	if args.iter().any(|a| a == "--firewall-remove") {
+		std::process::exit(pulsar_tauri::firewall_cli(false));
+	}
 	// `pulsar --probe-nvenc`: ask the NVENC SDK which codecs this GPU encodes, print, exit.
 	// Run as a child by the encoder probe so a GPU that hangs the SDK can't hang the app.
 	if args.iter().any(|a| a == "--probe-nvenc") {

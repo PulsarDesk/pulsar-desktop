@@ -72,7 +72,7 @@ pub fn default_install_dir() -> PathBuf {
 /// The full install: stop a running Pulsar, extract the payload, copy this exe in
 /// as the uninstaller, write shortcuts + the uninstall registry entry. With `drivers`
 /// (the interactive install only), also install usbip-win2 when it is missing or older
-/// (UAC prompt; never fatal, see drivers.rs). Blocking — run on a worker thread.
+/// (UAC prompt; never fatal, see drivers.rs) and the firewall rules (firewall.rs). Blocking — run on a worker thread.
 pub fn install(dir: &Path, desktop_shortcut: bool, drivers: bool, tx: &Sender<Msg>) {
 	let r = (|| -> Result<(), String> {
 		if !have_payload() {
@@ -125,6 +125,11 @@ pub fn install(dir: &Path, desktop_shortcut: bool, drivers: bool, tx: &Sender<Ms
 				// Not fatal: without usbip-win2 the host just does not offer the virtual DualSense.
 				let _ = crate::drivers::install_usbip(&installer);
 			}
+			// One UAC prompt for the firewall rules instead of one Windows prompt per program on
+			// first use. Interactive install only (a silent update keeps the rules: same paths).
+			if !crate::firewall::rules_present(dir) {
+				let _ = crate::firewall::run_elevated(dir, "--firewall-setup");
+			}
 		}
 		Ok(())
 	})();
@@ -166,6 +171,10 @@ pub fn uninstall() {
 		.or_else(|| std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)))
 		.unwrap_or_else(default_install_dir);
 	kill_running();
+	// Our firewall rules go with the app (elevated; declined → they stay, harmless).
+	if crate::firewall::rules_present(&dir) {
+		let _ = crate::firewall::run_elevated(&dir, "--firewall-remove");
+	}
 	remove_shortcuts();
 	remove_uninstall_registry();
 	#[cfg(windows)]

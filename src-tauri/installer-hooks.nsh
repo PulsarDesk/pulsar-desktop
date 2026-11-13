@@ -160,6 +160,13 @@
   Pop $1
   Pop $0
 
+  ; Windows Firewall: one inbound allow rule per shipped program ("Pulsar (<file>)"), so
+  ; Windows does not ask once per program on first use. The app does it (firewall.rs); the
+  ; installer is already elevated. Same paths on update → a quick no-op.
+  IfFileExists "$INSTDIR\pulsar.exe" 0 +3
+    DetailPrint "Pulsar: güvenlik duvarı izinleri ekleniyor..."
+    ExecWait '"$INSTDIR\pulsar.exe" --firewall-setup'
+
   ; In-app updates (the updater passes /UPDATE → Tauri's $UpdateMode) run the installer in
   ; passive mode: a progress window, no clicks. The drivers were set up by the first
   ; install, so skip the reboot note — a modal here would also hold back the /R relaunch.
@@ -168,4 +175,11 @@
   ${If} $UpdateMode <> 1
     MessageBox MB_OK|MB_ICONINFORMATION "Pulsar kuruldu. Klavye/gamepad ve sanal ses sürücülerinin etkinleşmesi için bilgisayarı bir kez yeniden başlatın." /SD IDOK
   ${EndIf}
+!macroend
+
+; Uninstall: remove our firewall rules (only this install's paths) while pulsar.exe still
+; exists. The drivers stay (shared system components, see windows-drivers.md).
+!macro NSIS_HOOK_PREUNINSTALL
+  IfFileExists "$INSTDIR\pulsar.exe" 0 +2
+    ExecWait '"$INSTDIR\pulsar.exe" --firewall-remove'
 !macroend

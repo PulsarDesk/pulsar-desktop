@@ -151,6 +151,19 @@ pub fn selftest() -> i32 {
 	selftest::run()
 }
 
+/// `pulsar --firewall-setup` / `--firewall-remove` (see firewall.rs). 0 elsewhere (no-op).
+pub fn firewall_cli(add: bool) -> i32 {
+	#[cfg(windows)]
+	{
+		firewall::cli(add)
+	}
+	#[cfg(not(windows))]
+	{
+		let _ = add;
+		0
+	}
+}
+
 /// `pulsar --probe-nvenc` (see `process::nvenc_codecs_isolated`): prints `nvenc <codecs>`.
 pub fn probe_nvenc_cli() -> i32 {
 	#[cfg(windows)]
