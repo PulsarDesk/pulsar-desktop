@@ -1148,8 +1148,7 @@ fn draw_root(
 		ui.label(egui::RichText::new(&head).size(11.0).color(gray));
 		if !fps.is_empty() {
 			ui.label(egui::RichText::new(format!(" · {fps} ")).size(11.0).color(gray));
-			// Hover shows the tip, a click / tap toggles it (no hover on a controller or touch).
-			info(ui, t("stat.fpsTargetHint"));
+			info_hover_below(ui, t("stat.fpsTargetHint"));
 		}
 		if !display.is_empty() {
 			ui.label(egui::RichText::new(format!(" · {display}")).size(11.0).color(gray));
@@ -2849,6 +2848,28 @@ fn seg(ui: &mut egui::Ui, on: bool, label: &str) -> bool {
 		egui::Color32::from_rgb(28, 30, 42)
 	};
 	ui.add(egui::Button::new(label).fill(fill)).clicked() && !on
+}
+
+/// Painted ⓘ whose tip shows only while the pointer is on it, BELOW the marker (no click).
+fn info_hover_below(ui: &mut egui::Ui, text: &str) {
+	let (rect, resp) = ui.allocate_exact_size(egui::vec2(15.0, 15.0), egui::Sense::hover());
+	let col = if resp.hovered() { CYAN } else { egui::Color32::from_rgb(110, 115, 130) };
+	let c = rect.center();
+	{
+		let p = ui.painter();
+		p.circle_stroke(c, 6.0, egui::Stroke::new(1.3, col));
+		p.circle_filled(c + egui::vec2(0.0, -2.8), 0.9, col);
+		p.line_segment([c + egui::vec2(0.0, -0.4), c + egui::vec2(0.0, 3.0)], egui::Stroke::new(1.5, col));
+	}
+	egui::Popup::from_response(&resp)
+		.kind(egui::PopupKind::Tooltip)
+		.align(egui::RectAlign::BOTTOM)
+		.align_alternatives(&[egui::RectAlign::BOTTOM_START, egui::RectAlign::BOTTOM_END])
+		.open(resp.hovered())
+		.show(|ui| {
+			ui.set_max_width(260.0);
+			ui.label(egui::RichText::new(text).size(12.0));
+		});
 }
 
 /// Small painted ⓘ marker with a hover tooltip — for options whose name alone
