@@ -278,7 +278,11 @@ fn probe_ok(mut cmd: std::process::Command) -> bool {
 			Ok(None) => {
 				if std::time::Instant::now() >= deadline {
 					let _ = child.kill();
-					let _ = child.wait();
+					// Reap it elsewhere: a probe stuck in a driver can't die until the call
+					// returns, and waiting here would hold the whole caps probe again.
+					std::thread::spawn(move || {
+						let _ = child.wait();
+					});
 					return false;
 				}
 				std::thread::sleep(std::time::Duration::from_millis(50));
@@ -670,57 +674,29 @@ pub fn validated_codecs(ffmpeg: &str, encoder: HwEncoder, vaapi_device: &str) ->
 }
 
 /// The NVENC SDK's codec list (`pulsar_capture::nvenc_codecs`), asked in a CHILD process
-/// (`pulsar --probe-nvenc`) with a deadline: opening an NVENC session needs a D3D device, and a
-/// wedged GPU path hangs that call forever (2026-11-12: a host's probe never returned, so it
-/// never answered a client). A child that overruns is killed and NVENC counts as unavailable
-/// (the other encoders still serve). Cached for the process life.
+/// (`pulsar --probe-nvenc`) with a deadline. Opening an NVENC session needs a D3D device, and the
+/// driver can hold that call for minutes (2026-11-13, measured on the home PC: the child sat in
+/// the driver > 1 min — unkillable meanwhile; the 2026-11-12 "host never answers" hang was the
+/// same call in-process). Past the deadline NVENC counts as unavailable FOR NOW and nothing
+/// waits on the child: when it does answer, its result is cached and later streams use NVENC.
 #[cfg(windows)]
-pub fn nvenc_codecs_isolated() -> &'static [pulsar_capture::Codec] {
-	use std::sync::OnceLock;
-	static CACHE: OnceLock<Vec<pulsar_capture::Codec>> = OnceLock::new();
-	CACHE.get_or_init(|| {
-		const DEADLINE: std::time::Duration = std::time::Duration::from_secs(8);
-		let t0 = std::time::Instant::now();
-		tracing::info!("encoder probe: nvenc (child process) started");
-		let Ok(exe) = std::env::current_exe() else {
-			return pulsar_capture::nvenc_codecs().to_vec();
-		};
-		let mut cmd = std::process::Command::new(exe);
-		cmd.arg("--probe-nvenc");
-		no_window(&mut cmd);
-		cmd.stdin(std::process::Stdio::null());
-		cmd.stdout(std::process::Stdio::piped());
-		cmd.stderr(std::process::Stdio::null());
-		let mut child = match cmd.spawn() {
-			Ok(c) => c,
-			Err(e) => {
-				tracing::warn!(%e, "encoder probe: nvenc child failed to start — probing in-process");
-				return pulsar_capture::nvenc_codecs().to_vec();
-			}
-		};
-		crate::job::assign(&child);
-		loop {
-			match child.try_wait() {
-				Ok(Some(_)) => break,
-				Ok(None) if t0.elapsed() < DEADLINE => std::thread::sleep(std::time::Duration::from_millis(50)),
-				_ => {
-					let _ = child.kill();
-					let _ = child.wait();
-					tracing::error!(
-						ms = t0.elapsed().as_millis() as u64,
-						"encoder probe: nvenc did not answer in time (GPU stuck?) — NVENC treated as unavailable"
-					);
-					return Vec::new();
-				}
-			}
-		}
-		let mut out = String::new();
-		if let Some(mut so) = child.stdout.take() {
-			use std::io::Read as _;
-			let _ = so.read_to_string(&mut out);
-		}
-		let codecs: Vec<pulsar_capture::Codec> = out
-			.lines()
+pub fn nvenc_codecs_isolated() -> Vec<pulsar_capture::Codec> {
+	use std::sync::atomic::{AtomicBool, Ordering};
+	use std::sync::Mutex;
+	static KNOWN: Mutex<Option<Vec<pulsar_capture::Codec>>> = Mutex::new(None);
+	static RUNNING: AtomicBool = AtomicBool::new(false);
+	const DEADLINE: std::time::Duration = std::time::Duration::from_secs(8);
+	if let Some(v) = KNOWN.lock().unwrap().clone() {
+		return v;
+	}
+	// A probe still out there (stuck in the driver): unavailable until it answers.
+	if RUNNING.swap(true, Ordering::SeqCst) {
+		return Vec::new();
+	}
+	let t0 = std::time::Instant::now();
+	tracing::info!("encoder probe: nvenc (child process) started");
+	let parse = |out: &str| -> Vec<pulsar_capture::Codec> {
+		out.lines()
 			.find_map(|l| l.strip_prefix("nvenc "))
 			.map(|list| {
 				list.split(',')
@@ -732,10 +708,48 @@ pub fn nvenc_codecs_isolated() -> &'static [pulsar_capture::Codec] {
 					})
 					.collect()
 			})
-			.unwrap_or_default();
-		tracing::info!(ms = t0.elapsed().as_millis() as u64, ?codecs, "encoder probe: nvenc done");
-		codecs
-	})
+			.unwrap_or_default()
+	};
+	let spawned = std::env::current_exe().and_then(|exe| {
+		let mut cmd = std::process::Command::new(exe);
+		cmd.arg("--probe-nvenc");
+		no_window(&mut cmd);
+		cmd.stdin(std::process::Stdio::null());
+		cmd.stdout(std::process::Stdio::piped());
+		cmd.stderr(std::process::Stdio::null());
+		cmd.spawn()
+	});
+	let child = match spawned {
+		Ok(c) => c,
+		Err(e) => {
+			tracing::warn!(%e, "encoder probe: nvenc child failed to start — probing in-process");
+			let v = pulsar_capture::nvenc_codecs().to_vec();
+			*KNOWN.lock().unwrap() = Some(v.clone());
+			RUNNING.store(false, Ordering::SeqCst);
+			return v;
+		}
+	};
+	crate::job::assign(&child);
+	let (tx, rx) = std::sync::mpsc::channel();
+	std::thread::spawn(move || {
+		let out = child.wait_with_output();
+		let codecs = out.map(|o| parse(&String::from_utf8_lossy(&o.stdout))).unwrap_or_default();
+		let late = t0.elapsed() > DEADLINE;
+		tracing::info!(ms = t0.elapsed().as_millis() as u64, ?codecs, late, "encoder probe: nvenc done");
+		*KNOWN.lock().unwrap() = Some(codecs.clone());
+		RUNNING.store(false, Ordering::SeqCst);
+		let _ = tx.send(codecs);
+	});
+	match rx.recv_timeout(DEADLINE) {
+		Ok(c) => c,
+		Err(_) => {
+			tracing::error!(
+				ms = DEADLINE.as_millis() as u64,
+				"encoder probe: nvenc did not answer in time (driver busy?) — unavailable until it does"
+			);
+			Vec::new()
+		}
+	}
 }
 
 /// Resolve the requested codec against the VALIDATED codec set for `encoder` (probe-backed):

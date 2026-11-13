@@ -21,6 +21,8 @@ mod device_creds;
 mod avatar;
 mod caps;
 mod caps_guard;
+#[cfg(windows)]
+mod firewall;
 mod autostart;
 #[cfg(windows)]
 mod dpi_watch;
@@ -427,6 +429,10 @@ pub fn run() {
 			// ready (splash.rs also holds the never-ready fallback). In a LOCKED session (or
 			// if the build fails) it's deferred/retried and the host goes online without it.
 			// Also sets the display scale for the native renderer's overlay.
+			// Windows: firewall allow rules for Pulsar + its bundled programs (elevated only) —
+			// one decision instead of a prompt per program; ours before the app goes online.
+			#[cfg(windows)]
+			crate::firewall::setup(app.handle());
 			crate::ui_start::start(app.handle());
 			// Shared mode: the machine-wide host lease (one host per PC, follows the active session).
 			crate::shared_mode::lease::start(app.handle().clone());

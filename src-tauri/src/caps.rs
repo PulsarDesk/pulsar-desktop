@@ -327,7 +327,10 @@ fn output_within(mut cmd: std::process::Command, limit: std::time::Duration) -> 
 		}
 		if t0.elapsed() >= limit {
 			let _ = child.kill();
-			let _ = child.wait();
+			// Reaped elsewhere (see process::probe_ok): never wait on a stuck child here.
+			std::thread::spawn(move || {
+				let _ = child.wait();
+			});
 			tracing::error!(ms = t0.elapsed().as_millis() as u64, "caps probe: renderer probe did not finish — killed");
 			return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "probe timed out"));
 		}
