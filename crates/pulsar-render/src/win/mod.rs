@@ -514,6 +514,7 @@ fn stdin_control() {
 		} else if let Some(rest) = l.strip_prefix("upscale ") {
 			// Picture upscaling mode (off|auto|fsr|ai) — see present::set_upscale.
 			present::set_upscale(rest);
+			crate::overlay::set_upscale_mode(rest);
 		} else if let Some(rest) = l.strip_prefix("reparent ") {
 			// The session moved to another app window: hide until its screen reports a rect.
 			let h = parse_handle(rest);
@@ -2454,6 +2455,8 @@ fn apply_ov_cmd(ostate: &mut crate::overlay::OverlayState, c: crate::overlay::Ov
 				"msens" => crate::overlay::set_mouse_sens(&val),
 				"ptrfree" => crate::overlay::set_ptr_free(val == "on"),
 				"hostptr" => crate::overlay::set_host_ptr_show(val == "on"),
+				// Upscaling picked in the menu: applied now, forwarded for the app to save.
+				"upscale" => present::set_upscale(&val),
 				// Optimistic controller swap: the overlay row ▲/▼ was clicked.
 				// Swap the two entries in CONTROLLERS immediately so the list
 				// re-renders at the next frame without waiting for the gilrs

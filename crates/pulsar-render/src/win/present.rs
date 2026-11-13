@@ -387,6 +387,13 @@ impl Present {
 		}
 		if self.logged.get() != Some(which) {
 			self.logged.set(Some(which));
+			crate::overlay::set_upscaler_active(match which {
+				Upscaler::None => "",
+				Upscaler::Fsr => "FSR",
+				Upscaler::Sgsr => "SGSR",
+				Upscaler::Vendor if self.vendor == VENDOR_NVIDIA => "NVIDIA VSR",
+				Upscaler::Vendor => "Intel VSR",
+			});
 			eprintln!(
 				"pulsar-render(win): upscaler {which:?} (gpu vendor 0x{:04x}, {}x{} -> {}x{})",
 				self.vendor,

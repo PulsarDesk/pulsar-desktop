@@ -826,6 +826,13 @@
 				case 'quality': controls.setQuality(val as 'latency' | 'quality'); break;
 				case 'pace': controls.setFramePacing(val === 'on' || val === '1' || val === 'true'); break;
 				case 'statshud': controls.setStatsHud(val === 'on' || val === '1' || val === 'true'); break;
+				// Picture upscaling picked in the native menu: the same setting as Settings → Görüntü.
+				case 'upscale':
+					if (val === 'off' || val === 'auto' || val === 'fsr' || val === 'ai') {
+						ui.upscale = val;
+						saveUi();
+					}
+					break;
 				// "Show my name on my pointer" (Yayın row): saved + sent to the host Rust-side.
 				case 'curlabel': api.setCursorLabel(playId, val === 'on').catch(() => {}); break;
 				case 'ovbtn': controls.setOverlayButton(val === 'on' || val === '1' || val === 'true'); break;

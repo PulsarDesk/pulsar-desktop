@@ -2137,6 +2137,8 @@ impl Presenter {
 		if fsr_prev.is_none() {
 			gl.viewport(vx, vy, rw, rh);
 		}
+		// The menu's stream line names the upscaler only while it really runs.
+		crate::overlay::set_upscaler_active(if fsr_prev.is_some() { "FSR" } else { "" });
 		let quad: [f32; 24] = [
 			-1.0, -1.0, 0.0, 1.0, 1.0, -1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, -1.0, -1.0, 0.0, 1.0,
 			1.0, 1.0, 1.0, 0.0, -1.0, 1.0, 0.0, 0.0,

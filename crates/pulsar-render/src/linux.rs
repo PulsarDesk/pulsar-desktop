@@ -603,7 +603,11 @@ pub fn run() {
 				Some("hostptr") => crate::overlay::host_ptr_line(&it.collect::<Vec<_>>().join(" ")),
 				Some("hostptrshow") => crate::overlay::set_host_ptr_show(it.next() == Some("1")),
 				// Picture upscaling (Settings → Görüntü): FSR in the GL presenter (gl_fsr.rs).
-				Some("upscale") => crate::gl_fsr::set_upscale(it.next().unwrap_or("off")),
+				Some("upscale") => {
+					let m = it.next().unwrap_or("off");
+					crate::gl_fsr::set_upscale(m);
+					crate::overlay::set_upscale_mode(m);
+				}
 				Some("hostname") => crate::overlay::set_host_name(&it.collect::<Vec<_>>().join(" ")),
 				// Session audio truth from the app (atx/amute/mic 0|1) so the overlay's
 				// Ses toggles highlight the real state.
@@ -1939,6 +1943,7 @@ fn emit_cmd(state: &mut OverlayState, c: OverlayCmd) {
 				"msens" => crate::overlay::set_mouse_sens(&val),
 				"ptrfree" => crate::overlay::set_ptr_free(val == "on"),
 				"hostptr" => crate::overlay::set_host_ptr_show(val == "on"),
+				"upscale" => crate::gl_fsr::set_upscale(&val),
 				// Audio toggles apply optimistically; the app's `audio …` line
 				// re-syncs the truth after the host acknowledges.
 				"atx" => AUDIO_TX.store(val == "on", Ordering::SeqCst),

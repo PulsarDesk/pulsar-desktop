@@ -337,6 +337,30 @@ pub fn set_host_name(name: &str) {
 	*HOST_NAME.lock().unwrap_or_else(|e| e.into_inner()) = name.trim().to_string();
 }
 
+/// Picture-upscaling setting as the overlay shows it ("off"|"auto"|"fsr"|"ai"), mirrored from
+/// the app's `upscale <mode>` line and the overlay's own pick.
+static UPSCALE_MODE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+/// The upscaler the presenter is running right now ("" = none: the picture isn't enlarged, or
+/// upscaling is off), e.g. "FSR", "NVIDIA VSR" — shown on the menu's stream line.
+static UPSCALER_ACTIVE: std::sync::Mutex<&'static str> = std::sync::Mutex::new("");
+
+pub fn set_upscale_mode(mode: &str) {
+	*UPSCALE_MODE.lock().unwrap() = mode.trim().to_string();
+}
+
+fn upscale_mode() -> String {
+	let m = UPSCALE_MODE.lock().unwrap();
+	if m.is_empty() { "off".into() } else { m.clone() }
+}
+
+pub fn set_upscaler_active(name: &'static str) {
+	*UPSCALER_ACTIVE.lock().unwrap() = name;
+}
+
+fn upscaler_active() -> &'static str {
+	*UPSCALER_ACTIVE.lock().unwrap()
+}
+
 pub fn set_host_ptr_show(on: bool) {
 	HOST_PTR_SHOW.store(on, std::sync::atomic::Ordering::Relaxed);
 }
@@ -1133,10 +1157,11 @@ fn draw_root(
 		);
 		stat_tile(ui, &bw, icon::CELL_SIGNAL_HIGH, t("stat.band"));
 	});
-	// What is on the wire: codec · host encoder · resolution · target fps (ⓘ) · host monitor,
-	// e.g. "H.265 · NVENC · 1080p · 120 fps ⓘ · Display 2".
+	// What is on the wire: codec · host encoder · resolution · the upscaler drawing it (when the
+	// picture is enlarged) · target fps (ⓘ) · host monitor, e.g.
+	// "H.265 · NVENC · 1080p · FSR · 120 fps ⓘ · Display 2".
 	let gray = egui::Color32::from_gray(150);
-	let head = [stream_codec(st), stream_encoder(st), stream_res_label()]
+	let head = [stream_codec(st), stream_encoder(st), stream_res_label(), upscaler_active().to_string()]
 		.into_iter()
 		.filter(|p| !p.is_empty())
 		.collect::<Vec<_>>()
@@ -1492,7 +1517,7 @@ fn draw_display(
 	// Remote mode adds the free-cursor row (game mode always keeps the cursor in the video).
 	let free_row = mode == Mode::Remote;
 	// Remote mode also gets the host-pointer row (issue #7) right after it.
-	let rows = 3 + usize::from(multi) + 2 * usize::from(free_row);
+	let rows = 4 + usize::from(multi) + 2 * usize::from(free_row);
 	if nav.down {
 		*sub_sel = (*sub_sel + 1).min(rows - 1);
 	}
@@ -1524,6 +1549,21 @@ fn draw_display(
 	];
 	if let Some(v) = choice_row(ui, s == row, nav, t("fit.title"), &st.fit, &fit, row, pending) {
 		cmds.push(OverlayCmd::Set("fit", v));
+	}
+	row += 1;
+	// Picture upscaling (same setting as Settings → Görüntü → Görüntü iyileştirme): applied here
+	// at once and forwarded so the app saves it.
+	let up = [
+		("off", t("upscale.off")),
+		("auto", t("upscale.auto")),
+		("fsr", "FSR"),
+		("ai", t("upscale.ai")),
+	];
+	let up_live = upscale_mode();
+	let up_cur = staged(deferred, "upscale", &up_live);
+	if let Some(v) = choice_row(ui, s == row, nav, t("upscale.title"), up_cur, &up, row, pending) {
+		set_upscale_mode(&v);
+		cmds.push(OverlayCmd::Set("upscale", v));
 	}
 	row += 1;
 	// SCREEN ADAPTATION (Parsec-style): when ON, the host switches the captured monitor to the
