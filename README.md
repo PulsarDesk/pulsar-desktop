@@ -18,8 +18,8 @@
 ---
 
 ## 🚀 Project Status
-**Current Status:** Alpha (0.x). Connecting, remote control, game streaming, file transfer, clipboard and chat work.
-Expect rough edges and [report what you find](#-reporting-a-bug).
+**Alpha (0.x).** Remote control, game streaming, file transfer, clipboard and chat work; expect rough edges and
+[report what you find](#-reporting-a-bug).
 
 <p align="center">
   <img src="docs/screenshots/connect.png" width="49%" alt="Connect screen">
@@ -27,21 +27,57 @@ Expect rough edges and [report what you find](#-reporting-a-bug).
 </p>
 
 One app does both jobs: connect to another computer, or share this one. Connections go peer-to-peer when they can
-and through a relay when they can't, always end-to-end encrypted.
-
-- **Holds up on weak links:** it measures the connection before the picture starts, then keeps adjusting bitrate,
-  error correction and resolution, so a phone hotspot or a busy Wi-Fi stays usable.
-- **Audio:** Opus at up to 320 kb/s, or uncompressed on a local network (Settings -> Display -> Audio quality,
-  *Auto* picks the highest the link carries). On a Windows host its own volume and mute don't affect what you hear.
-- **Games:** when a game grabs the mouse, Pulsar sends raw mouse motion (with a sensitivity setting), passes
-  controllers through, and can keep the host's speakers silent.
+and through a relay when they can't.
 
 ---
 
-## 📦 Other Pulsar Repositories
-- [**pulsar-mobile**](https://github.com/PulsarDesk/pulsar-mobile) - Pulsar for Android
-- [**relay**](https://github.com/PulsarDesk/relay) - Run your own relay server
-- [**pulsar-core**](https://github.com/PulsarDesk/pulsar-core) - The shared engine behind both apps
+## ✨ Features
+
+### 🎮 Game streaming
+- **Up to 4K, up to 240 fps:** 720p / 1080p / 1440p / 4K or the host monitor's own modes, at 30 to 240 fps
+  (120, 144, 165, 240 Hz panels included; capped by what the host monitor refreshes at).
+- **Low latency:** hardware encoding on the host and hardware decoding on the client, the picture drawn by a native
+  renderer (never the browser view), frames sent the moment they are captured, raw mouse input while a game holds
+  the cursor.
+- **H.264, H.265 and AV1**, plus **10-bit HDR** on supported displays. Software encode/decode as a fallback, so there
+  is always a picture.
+- **Optimized stream:** measures the link before the picture starts, then keeps tuning bitrate, resolution, error
+  correction (FEC) and loss recovery, so a busy Wi-Fi or a phone hotspot stays playable.
+- **Picture upscaling:** AMD FSR, plus NVIDIA RTX / Intel Video Super Resolution on Windows, so a lower stream
+  resolution still looks sharp.
+- **DualSense, for real:** the host sees a real DualSense: adaptive triggers, HD haptics, lightbar and LEDs,
+  speaker, headset jack, microphone, gyro, touchpad, over USB or Bluetooth. Headphones in the pad get the game's
+  sound, like on a PS5. Xbox, DualShock and Switch Pro pads work too ([details](#-controllers)).
+- **Wake with a controller:** the PS / Xbox button brings Pulsar forward in game mode; controller input can keep
+  flowing while another app is in front.
+- **Game audio:** Opus up to 320 kb/s, or uncompressed on a local network. The host's speakers can stay silent while
+  you play.
+- **Same-PC co-op (advanced):** split the screen, give each pane its own game window and its own controller.
+- **Small devices:** a dedicated Orange Pi 5 (RK3588) build with hardware decoding, usable as a living-room box.
+
+### 🖥️ Remote desktop
+- **Tabs like a browser:** every session is a tab; drag one out into its own window, drop it onto another window,
+  or drag it onto the picture to show two sessions side by side.
+- **Split screen:** several independent sessions in one window, to the same host or different ones.
+- **Multi-monitor:** pick which host monitor to view.
+- **File manager:** browse the other computer's files and download them, or drop files to send them.
+- **Clipboard sync, chat and microphone** over the same session.
+- **Free cursor:** leave the picture and the mouse is yours again; enter it and you control the other side. When
+  the person at the host uses their own mouse, you see their pointer labelled "Host".
+- **Block control:** the person at the host can take control back at any time with one click.
+- **Switch sides:** turn a session around so the other person controls your computer, in one click.
+
+### 🔒 Security and network
+- **End-to-end encryption, always on:** password-authenticated key exchange (PAKE) with forward secrecy. The relay
+  only ever sees encrypted traffic.
+- **Access control:** one-time password, a fixed connect password, approve / deny on screen, trusted (paired)
+  devices, unattended access, and two-factor authentication (TOTP) for any of them.
+- **Peer-to-peer first:** direct connection with NAT punching and automatic router port opening (UPnP / NAT-PMP),
+  works over ZeroTier, Tailscale and other VPNs, and falls back to the relay only when it has to.
+- **Self-hostable relay:** run your own [relay](https://github.com/PulsarDesk/relay), or the same `pulsar` binary
+  with `--relay`.
+- **Finds devices on your network** without typing an ID.
+- **Free and open source** (GPLv3): no account, no subscription, no telemetry.
 
 ---
 
@@ -57,59 +93,51 @@ Download the installer for your system from the [latest release](https://github.
 
 Open Pulsar, share your **ID and one-time password** with the other side, or type theirs to connect.
 
-- **Windows:** the installer is not code-signed, so SmartScreen may warn: "More info" -> "Run anyway".
-- **macOS:** the app is not notarized: right-click it -> Open the first time.
-- **Linux on Wayland:** sharing your screen asks for permission once per session (the system's screen-share dialog).
+- **Windows:** not code-signed yet; if SmartScreen warns, choose "More info" -> "Run anyway".
+- **macOS:** not notarized yet; right-click the app -> Open the first time.
+- **Linux on Wayland:** the system asks once per session before your screen is shared.
+
+---
+
+## 📦 Other Pulsar Repositories
+- [**pulsar-mobile**](https://github.com/PulsarDesk/pulsar-mobile) - Pulsar for Android
+- [**relay**](https://github.com/PulsarDesk/relay) - Run your own relay server
+- [**pulsar-core**](https://github.com/PulsarDesk/pulsar-core) - The shared engine behind both apps
 
 ---
 
 ## 🖥️ Where it has been tested
-Every computer falls back to software encoding and decoding when its graphics card can't be used, so a session
-should always show a picture, only slower.
+| System | Share this computer | Connect to others |
+|---|---|---|
+| Windows 11, NVIDIA RTX | ✅ hardware (NVENC) | ✅ hardware |
+| Windows 11 on ARM, Snapdragon | ✅ hardware (Media Foundation) | ✅ hardware |
+| Windows 10, NVIDIA MX230 + Intel UHD | ✅ software | ✅ hardware |
+| Linux (KDE Plasma, Wayland), AMD + NVIDIA | ✅ hardware | ✅ hardware |
+| Raspberry Pi, Orange Pi 5 (RK3588) | ✅ | ✅ hardware on the Orange Pi 5 |
+| Windows with AMD, Linux on GNOME / Intel, macOS | ❔ not tested yet | ❔ not tested yet |
 
-| System | Graphics | Share this computer | Connect to others |
-|---|---|---|---|
-| Windows 11 | NVIDIA RTX 3080 laptop | ✅ hardware (NVENC) | ✅ hardware |
-| Windows 11 on ARM | Snapdragon (Adreno) | ✅ hardware (Media Foundation) | ✅ hardware |
-| Linux (KDE Plasma, Wayland) | AMD Radeon iGPU + NVIDIA RTX laptop | ✅ hardware | ✅ hardware |
-| Linux (Raspberry Pi, Orange Pi 5 / RK3588) | built-in | ✅ | ✅ hardware on the Orange Pi 5 |
-| Windows 10 | NVIDIA MX230 + Intel UHD | ✅ software (no NVENC on this GPU) | ✅ hardware |
-| Windows with an AMD GPU | — | ❔ not tested yet | ❔ not tested yet |
-| macOS | — | ❔ builds, not tested | ❔ builds, not tested |
-| Linux on GNOME, Intel GPUs | — | ❔ not tested yet | ❔ not tested yet |
-
-The Linux `.AppImage` starts on Fedora 41, Ubuntu 24.04, Debian 12, openSUSE Tumbleweed and Arch (checked on every
-release). It needs a system at least as new as Ubuntu 22.04. On Linux, `Pulsar.AppImage --selftest` shows which
-encoders work on your machine.
-
-Tried it on something not listed? A short note in an [issue](https://github.com/PulsarDesk/pulsar-desktop/issues)
-helps, even when everything worked.
+Without a usable graphics card Pulsar falls back to software encoding and decoding: slower, but there is always a
+picture. The `.AppImage` is checked on Fedora, Ubuntu, Debian, openSUSE and Arch every release (Ubuntu 22.04 or
+newer); `Pulsar.AppImage --selftest` shows which encoders work on your machine. Tried another system? A short
+[issue](https://github.com/PulsarDesk/pulsar-desktop/issues) helps, even when everything worked.
 
 ---
 
 ## 🎮 Controllers
-Plug a controller into the computer you connect **from** (USB or Bluetooth). Pulsar reads it through SDL3, so any
-pad your system sees works: Xbox 360 / One / Series, PlayStation (DualShock 3, DualShock 4, DualSense), Switch Pro
-and generic pads. On the computer you connect **to**, games see a virtual controller:
+Plug any controller into the computer you connect **from** (USB or Bluetooth, read through SDL3). The host's games
+see a virtual one:
 
-| Your controller | Windows host | Linux host | macOS host |
-|---|---|---|---|
-| Xbox, Switch Pro, generic | Xbox 360 pad: buttons, sticks, triggers (no rumble yet) | virtual pad: buttons, sticks, triggers (no rumble yet) | ❌ not supported |
-| DualShock 3 / 4 | DualShock 4: rumble, touchpad, PS button | virtual pad (no rumble yet) | ❌ not supported |
-| DualSense | **a real DualSense** (with "Use DualSense features" on): adaptive triggers, HD haptics, lightbar and LEDs, speaker, headset jack, microphone, gyro, touchpad, over USB or Bluetooth | **a real DualSense**, same as Windows | ❌ not supported |
+| Your controller | Windows / Linux host |
+|---|---|
+| Xbox, Switch Pro, generic | Xbox 360 pad (no rumble yet) |
+| DualShock 3 / 4 | DualShock 4 with rumble, touchpad and PS button (Windows; a generic pad without rumble on Linux) |
+| DualSense | **a real DualSense**: adaptive triggers, HD haptics, lightbar, speaker, headset jack, mic, gyro, touchpad |
 
-- **Which virtual pad:** *Automatic* picks DualShock 4 for PlayStation pads and Xbox 360 for the rest. You can pick
-  per controller in the Controllers panel (the Games screen, or the controller button in game mode) or in the
-  session menu.
-- **Drivers:** the Windows installer adds ViGEmBus (virtual Xbox / DualShock 4 pads) and usbip-win2 (the virtual
-  DualSense). Linux uses the kernel's own `uinput` and `vhci-hcd`.
-- **Headphones in the controller:** with headphones in a DualSense, the session sound plays there instead of on your
-  computer (like a PS5). The same for a USB DualShock 4 (v2 or Sony's USB adapter) is **experimental** and off by
-  default: Controllers panel -> "DS4 headset jack (experimental)".
-- **Background:** controllers only reach the host while Pulsar is the focused window, unless you turn on
-  Settings -> General -> "Controller input in the background".
-- **Not tested yet:** the DualSense microphone and a USB-cabled DualSense on the connecting side, and the DS4 headset
-  jack. Tried one? Tell us in an [issue](https://github.com/PulsarDesk/pulsar-desktop/issues).
+- Pick the virtual pad per controller in the Controllers panel; *Automatic* uses DualShock 4 for PlayStation pads.
+- The Windows installer adds the drivers (ViGEmBus, usbip-win2); Linux uses the kernel's `uinput` and `vhci-hcd`.
+  macOS hosts have no virtual controllers yet.
+- Not tested yet: the DualSense mic, a USB-cabled DualSense on the connecting side, and the experimental DS4
+  headset jack.
 
 ---
 
