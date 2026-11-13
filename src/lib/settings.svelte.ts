@@ -112,7 +112,9 @@ export interface UiSettings {
 	 * own mouse, and show ours separately (issue #7). Default on; also in the session menu. */
 	hostCursor: boolean;
 	/** Picture upscaling (client): 'off' | 'auto' (the GPU's AI upscaler, else FSR) | 'fsr' |
-	 * 'ai' (NVIDIA RTX / Intel Video Super Resolution). Off by default. */
+	 * 'ai' (NVIDIA RTX / Intel Video Super Resolution). Default 'auto': it only acts when the
+	 * picture is scaled UP (the adaptive ladder dropped the stream below the screen's size, or a
+	 * smaller host), so a full-size stream is untouched and a lowered one comes back sharp. */
 	upscale: 'off' | 'auto' | 'fsr' | 'ai';
 	/** Allow more than one session to the same device (same host, mode and game): a repeat
 	 * connect opens another session instead of switching to the open one. Off by default. */
@@ -261,7 +263,7 @@ const DEFAULTS: UiSettings = {
 	pointerFree: false,
 	hostCursor: true,
 	duplicateSessions: false,
-	upscale: 'off',
+	upscale: 'auto',
 	statusBar: false,
 	// The always-on stats HUD's set (codec · fps · latency · decode · bitrate).
 	statusFields: ['codec', 'fps', 'latency', 'decode', 'bitrate'],
@@ -313,6 +315,13 @@ function load(): UiSettings {
 		if (!migrated.pacingOffV2) {
 			migrated.framePacing = false;
 			migrated.pacingOffV2 = true;
+		}
+		// One-time move to the 'auto' upscaling default (v0.26/0.27 saved 'off', the old default,
+		// for everyone): an explicit FSR / AI pick stays.
+		const up = migrated as Partial<UiSettings> & { upscaleAutoV1?: boolean };
+		if (!up.upscaleAutoV1) {
+			if (up.upscale === undefined || up.upscale === 'off') up.upscale = 'auto';
+			up.upscaleAutoV1 = true;
 		}
 		return { ...DEFAULTS, ...migrated, ds5: normalizeDs5(migrated.ds5) };
 	} catch {

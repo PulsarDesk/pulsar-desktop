@@ -43,7 +43,7 @@ pub fn set_upscale_mode(mode: &str) {
 pub fn upscale_mode() -> String {
 	let g = UPSCALE.lock().unwrap();
 	if g.is_empty() {
-		"off".into()
+		"auto".into()
 	} else {
 		g.clone()
 	}

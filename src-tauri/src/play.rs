@@ -1258,10 +1258,12 @@ pub(crate) async fn start_remote_play(
 		// the bottom rung: under its minimum only the bitrate drops.
 		acfg.min_fps = 60;
 		acfg.min_height = 720;
-		// Picture upscaling on (every desktop renderer + mpv): a lower resolution comes back
+		// An explicit FSR / AI pick (every desktop renderer + mpv): a lower resolution comes back
 		// sharp, so each rung needs a quarter more bitrate before it is kept — the ladder gives
 		// up resolution before blockiness sets in, and the upscaler covers the difference.
-		if crate::native_view::upscale_mode() != "off" {
+		// 'auto' (the default) keeps the normal thresholds: it only adds the upscaler once the
+		// ladder has dropped below the screen's size, it doesn't drop earlier.
+		if matches!(crate::native_view::upscale_mode().as_str(), "fsr" | "ai") {
 			acfg.min_kbps_scale = 1.25;
 		}
 	}
