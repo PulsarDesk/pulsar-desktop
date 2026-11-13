@@ -65,3 +65,9 @@ export function guardIdSpaces(e: KeyboardEvent & { currentTarget: HTMLInputEleme
 		el.setSelectionRange(s + 1, s + 1);
 	}
 }
+
+/** Host: a controlling client asked to swap roles (`reverse-request`). The id to connect
+ * back to, or null when we must not: no id, or a `--host-only` instance (it never connects
+ * out). */
+export const reverseConnectBack = (hostOnly: boolean, id: string | undefined): string | null =>
+	hostOnly || !id ? null : id;

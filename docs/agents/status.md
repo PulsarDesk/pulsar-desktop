@@ -51,3 +51,11 @@ audio endpoint (13), split-pads channel instead of ViGEm/USB-IP pads (14 — pad
 created by pulsar-core in seat mode), per-seat capture/encoder in `status`,
 `clients.*`, live `log.level`, `trust.revoke` ending that device's live sessions, `access:
 approve`, Zeroize of parsed secrets (frames are wiped; parsed `String`s are not).
+Review fixes (same day): the headless host refuses to start next to an **elevated** GUI
+(access-denied on the singleton mutex = running), the seat pipe reader is no longer
+cancelled by events (split frames stayed in sync only by luck), `--host-only` ignores
+`reverse-request`, the caps cache goes to the seat `--data-dir`, Unix stop signals use a
+self-pipe instead of an inherited blocked mask, and the stop event grants the same user
+`EVENT_MODIFY_STATE` with a Medium label (`--headless-stop` exit 7 = access denied).
+Unverified: the elevated-GUI / elevated-host cases (needs an elevated run), the Unix signal
+path (not compiled on Linux here), and `--headless-host` on Linux needs a display.

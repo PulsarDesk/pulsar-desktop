@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { isAddr, fmtTarget, canConnectTarget, guardIdSpaces, reformatInput } from './connectTarget';
+import {
+	isAddr,
+	fmtTarget,
+	canConnectTarget,
+	guardIdSpaces,
+	reformatInput,
+	reverseConnectBack
+} from './connectTarget';
 
 describe('connectTarget', () => {
 	it('isAddr detects IP/IP:port vs relay id', () => {
@@ -73,5 +80,12 @@ describe('id input space guard', () => {
 		expect(reformatInput(el)).toBe('517 072 042');
 		expect(el.value).toBe('517 072 042');
 		expect(el.selectionStart).toBe(7);
+	});
+
+	it('reverseConnectBack never connects out from a host-only instance', () => {
+		expect(reverseConnectBack(false, '641724395')).toBe('641724395');
+		expect(reverseConnectBack(true, '641724395')).toBeNull();
+		expect(reverseConnectBack(false, '')).toBeNull();
+		expect(reverseConnectBack(false, undefined)).toBeNull();
 	});
 });

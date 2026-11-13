@@ -33,6 +33,7 @@
 	import { gameStore } from '#lib/games.svelte.js';
 	import { ui, configTick, saveUi } from '#lib/settings.svelte.js';
 	import { modalCount } from '#lib/overlayModals.svelte.js';
+	import { reverseConnectBack } from '#lib/connectTarget.js';
 	import { initCaps } from '#lib/caps.svelte.js';
 	import { t, i18n, i18nReady } from '#lib/i18n.svelte.js';
 	import { theme, toggleTheme } from '#lib/theme.svelte.js';
@@ -831,12 +832,17 @@
 		});
 		// A controlled client asked to reverse direction — connect back to it so the
 		// roles swap (it must be online/serving for this to land).
+		// A --host-only instance never connects out (it offers hosting only).
 		await onReverseRequest((e) => {
-			api.uiLog(`reverse request from ${e.id}: connecting back`).catch(() => {});
-			if (e.id)
-				sm.startConnect({ name: t('home.remoteDevice'), id: e.id }, 'remote').catch((err) =>
-					api.uiLog(`reverse connect-back failed: ${err}`).catch(() => {})
-				);
+			const back = reverseConnectBack(hostOnly, e.id);
+			if (!back) {
+				api.uiLog(`reverse request from ${e.id}: ignored (host-only or no id)`).catch(() => {});
+				return;
+			}
+			api.uiLog(`reverse request from ${back}: connecting back`).catch(() => {});
+			sm.startConnect({ name: t('home.remoteDevice'), id: back }, 'remote').catch((err) =>
+				api.uiLog(`reverse connect-back failed: ${err}`).catch(() => {})
+			);
 		});
 		// Client (Linux native): Ctrl+Shift+F11 (evdev-captured, so it never reaches the
 		// webview as a keydown) — toggle fullscreen (SAME action as the button + F11). The

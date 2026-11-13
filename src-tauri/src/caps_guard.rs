@@ -19,6 +19,11 @@ const CACHE_FILE: &str = "last-stream-caps.json";
 static INFLIGHT: AtomicBool = AtomicBool::new(false);
 
 fn cache_path(app: &AppHandle) -> Option<std::path::PathBuf> {
+	// Seat host: keep it in the seat's `--data-dir` (as SYSTEM the app config dir is the
+	// systemprofile one, shared by every seat). Otherwise the per-user dir as before.
+	if let Some(d) = crate::seat::data_dir() {
+		return Some(d.join(CACHE_FILE));
+	}
 	app.path().app_config_dir().ok().map(|d| d.join(CACHE_FILE))
 }
 

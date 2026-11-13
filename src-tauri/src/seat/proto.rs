@@ -505,9 +505,28 @@ where
 	W: AsyncWrite + Unpin,
 {
 	let mut session = Session::new(seat_id);
+	// `read_frame` (two `read_exact`s) is not cancellation-safe: selecting it against
+	// `events.recv()` would drop the bytes of a half-read frame whenever an event wins, and
+	// desync the stream. So one long-lived reader future owns `r` and hands whole frames
+	// over a channel (`recv` is cancel-safe). It never completes: after a read error it
+	// parks, so the error is always delivered through the channel first.
+	let (ftx, mut frx) = tokio::sync::mpsc::channel::<std::io::Result<Wiped>>(1);
+	let reader = async move {
+		loop {
+			let f = read_frame(&mut r).await;
+			let failed = f.is_err();
+			if ftx.send(f).await.is_err() || failed {
+				break;
+			}
+		}
+		std::future::pending::<()>().await;
+	};
+	tokio::pin!(reader);
 	loop {
 		tokio::select! {
-			frame = read_frame(&mut r) => {
+			_ = &mut reader => unreachable!("the seat pipe reader never completes"),
+			frame = frx.recv() => {
+				let Some(frame) = frame else { return Action::Close };
 				let frame = match frame {
 					Ok(f) => f,
 					Err(e) => {
@@ -897,6 +916,38 @@ mod tests {
 		tx.send(event("otp.changed", json!({}))).unwrap();
 		let e: Value = serde_json::from_slice(&read_frame(&mut sr).await.unwrap()).unwrap();
 		assert_eq!(e["event"], "otp.changed");
+		write_frame(&mut sw, &req(2, "server.shutdown", json!({})))
+			.await
+			.unwrap();
+		let r: Value = serde_json::from_slice(&read_frame(&mut sr).await.unwrap()).unwrap();
+		assert_eq!(r["id"], 2);
+		assert_eq!(task.await.unwrap(), Action::Shutdown { grace_ms: 5000 });
+	}
+
+	/// A request frame that arrives in two pieces with a host event in between must not
+	/// lose its first half (the reader is not cancelled by the event branch).
+	#[tokio::test]
+	async fn serve_split_frame_with_event_between() {
+		let (svc, host_end) = tokio::io::duplex(1 << 16);
+		let (hr, hw) = tokio::io::split(host_end);
+		let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+		let fake = std::sync::Arc::new(Fake::default());
+		let f2 = fake.clone();
+		let task = tokio::spawn(async move { serve(hr, hw, SEAT, &*f2, rx).await });
+		let (mut sr, mut sw) = tokio::io::split(svc);
+		let frame = encode_frame(&req(1, "hello", hello_body())).unwrap();
+		let (a, b) = frame.split_at(frame.len() / 2);
+		sw.write_all(a).await.unwrap();
+		sw.flush().await.unwrap();
+		tokio::task::yield_now().await;
+		tx.send(event("otp.changed", json!({}))).unwrap();
+		let e: Value = serde_json::from_slice(&read_frame(&mut sr).await.unwrap()).unwrap();
+		assert_eq!(e["event"], "otp.changed");
+		sw.write_all(b).await.unwrap();
+		sw.flush().await.unwrap();
+		let r: Value = serde_json::from_slice(&read_frame(&mut sr).await.unwrap()).unwrap();
+		assert_eq!(r["id"], 1);
+		assert_eq!(r["ok"], true);
 		write_frame(&mut sw, &req(2, "server.shutdown", json!({})))
 			.await
 			.unwrap();

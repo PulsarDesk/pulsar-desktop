@@ -32,8 +32,8 @@ relay (`relay_mode.rs`, same `pulsar_relay::Limits` flags as the relay repo).
 | Flag | What | Where |
 | --- | --- | --- |
 | `--host-only` | Normal GUI instance (window, tray, single-instance) whose UI only offers hosting: Home shows the SelfCard (ID, password, connected clients) only; the nav is Home + Settings; no connect form, recents, LAN devices, Devices, Games, game mode or split. `--connect` is ignored. Combines with `--background`. | `lib.rs` `HOST_ONLY` + `host_only` command; `+page.svelte` `hostOnly`, `Home.svelte` `hostOnly` |
-| `--headless-host` | Host with no window, no tray, no webview (a Tauri app that creates none; `ui_start::set_headless` makes every popup/toast/cursor window a no-op). This user's config, identity, pairings (or shared mode with its lease). `headless::start` loop (retry 3 s → 12 s, stops on `needs_user`). Logs: the normal daily file + stdout (attaches to the parent console). Stops cleanly on Ctrl+C / Ctrl+Break / console close / logoff / shutdown (console handler), SIGINT/SIGTERM/SIGHUP on Linux/macOS, and `pulsar --headless-stop` (Windows, `Local\PulsarHeadlessHostStop` event). Accepts no other flag. | `headless_host.rs` |
-| `--headless-stop` | Signal this session's headless host to stop (exit 0; 1 = none running). | `headless_host.rs` |
+| `--headless-host` | Host with no window, no tray, no webview (a Tauri app that creates none; `ui_start::set_headless` makes every popup/toast/cursor window a no-op). This user's config, identity, pairings (or shared mode with its lease). `headless::start` loop (retry 3 s → 12 s, stops on `needs_user`). Logs: the normal daily file + stdout (attaches to the parent console). Stops cleanly on `pulsar --headless-stop` (Windows, `Local\PulsarHeadlessHostStop` event), SIGINT/SIGTERM/SIGHUP on Linux/macOS (self-pipe handler; children keep default signal handling), and — **only when started from a console** (the release exe is GUI-subsystem and attaches to the parent console if there is one) — Ctrl+C / Ctrl+Break / console close / logoff / shutdown. Started by a supervisor, Task Scheduler or Explorer there is no console: logoff/shutdown then kill it without teardown, so a supervisor should call `--headless-stop` first. While attached, a Ctrl+C typed later in that shell (prompt already back) also stops it. Linux: still a (window-less) Tauri/GTK app, so it needs a display (`DISPLAY`/`WAYLAND_DISPLAY`); without one (plain systemd unit, ssh) it fails at start. Accepts no other flag. | `headless_host.rs` |
+| `--headless-stop` | Signal this session's headless host to stop (exit 0; 1 = none running; 7 = one runs but this process may not signal it). The stop event grants this user `EVENT_MODIFY_STATE` with a Medium label, so a normal shell can stop a host started elevated by the same account. | `headless_host.rs` |
 | `--split-seat <id> --data-dir <abs> --log <abs>` | One Pulsar Split seat host (Windows only), started by the Pulsar Split service as SYSTEM. Contract: pulsar-split `docs/agents/pulsar-host-backend.md`. | `headless_host.rs`, `seat/` |
 
 All three headless flags are handled in `main.rs` before the elevation relaunch (no UAC
@@ -44,14 +44,19 @@ and unattended access; a seat host asks the Pulsar Split operator over the pipe.
 
 **Coexistence:** `--headless-host` takes `Local\PulsarSingletonMutex` like the GUI, so it
 never runs next to a GUI instance of the same user/session (both would register the same
-identity and fight over the relay ID). It exits with code 3 when a GUI runs; a GUI started
-while the headless host runs finds the mutex, signals the show event nobody listens to, and
-exits — stop the headless host first. A seat host takes neither that mutex nor shared mode,
+identity and fight over the relay ID). It exits with code 3 when a GUI runs — also when that
+GUI is elevated (the default, `request_admin`) and the headless host is not: the mutex then
+exists with a High label and opening it fails with access denied, which the headless path
+(`acquire_single_instance_strict`) treats as "running" (the GUI's own guard still fails open
+on errors). A GUI started while the headless host runs finds the mutex, signals the show
+event nobody listens to, and exits — stop the headless host first. Gap: a non-elevated GUI
+with `request_admin` off, started next to an **elevated** headless host, gets access denied
+and fails open, so both run; keep them in the same elevation or stop the host first. A seat host takes neither that mutex nor shared mode,
 so it coexists with the seat user's own Pulsar.
 
 Exit codes (`headless_host.rs`): 0 ok, 2 bad argv, 3 already running (session / seat),
 4 seat pipe could not be opened or its server is not the service, 5 seat pipe lost,
-6 seat mutex could not be created (not SYSTEM).
+6 seat mutex could not be created (not SYSTEM), 7 `--headless-stop` refused (access denied).
 
 ### Split seat host (`--split-seat`)
 

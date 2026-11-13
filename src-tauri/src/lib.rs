@@ -243,6 +243,33 @@ fn acquire_single_instance() -> bool {
 	unsafe { GetLastError() != ERROR_ALREADY_EXISTS }
 }
 
+/// The headless host's variant of [`acquire_single_instance`]: it must never run next to a
+/// GUI (same identity, they would fight over the relay ID), so it does not fail open on
+/// `ERROR_ACCESS_DENIED`. That is what a non-elevated `--headless-host` gets when an
+/// elevated GUI (the default, `request_admin`) owns the mutex: the object exists but its
+/// High-integrity label refuses MUTEX_ALL_ACCESS. Other creation failures still fail open.
+#[cfg(windows)]
+pub(crate) fn acquire_single_instance_strict() -> bool {
+	use windows_sys::Win32::Foundation::{GetLastError, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS};
+	use windows_sys::Win32::System::Threading::CreateMutexW;
+	let name: Vec<u16> = "Local\\PulsarSingletonMutex\0".encode_utf16().collect();
+	let h = unsafe { CreateMutexW(std::ptr::null(), 1, name.as_ptr()) };
+	let err = unsafe { GetLastError() };
+	if h.is_null() {
+		if err == ERROR_ACCESS_DENIED {
+			return false; // exists, owned by a more privileged (elevated) Pulsar
+		}
+		tracing::warn!(err, "single-instance mutex not creatable — starting anyway");
+		return true;
+	}
+	err != ERROR_ALREADY_EXISTS
+}
+
+#[cfg(not(windows))]
+pub(crate) fn acquire_single_instance_strict() -> bool {
+	acquire_single_instance()
+}
+
 /// Name of the per-session "show yourself" event used to wake a tray-hidden instance
 /// when the user launches Pulsar again. `Local\` → scoped to the logon session (ASTER).
 #[cfg(windows)]

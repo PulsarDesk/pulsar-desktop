@@ -4,7 +4,8 @@
 //! - `pulsar --headless-host`: host only, no window, no tray, no webview. Existing config,
 //!   identity and pairings of this user (or shared mode), logs to the normal log file and
 //!   stdout. Stops cleanly on Ctrl+C / Ctrl+Break / console close / logoff / shutdown
-//!   (Windows console handler; SIGINT / SIGTERM / SIGHUP elsewhere) and on
+//!   (Windows console handler — only when started from a console, which it attaches to;
+//!   SIGINT / SIGTERM / SIGHUP elsewhere) and on
 //!   `pulsar --headless-stop` (Windows: the `Local\PulsarHeadlessHostStop` event).
 //!   Takes `Local\PulsarSingletonMutex` like the GUI, so it never runs next to a GUI
 //!   instance of the same user/session (both would register the same identity).
@@ -27,6 +28,8 @@ pub const EXIT_PIPE: i32 = 4;
 pub const EXIT_PIPE_LOST: i32 = 5;
 /// The seat mutex could not be created (not SYSTEM / not elevated).
 pub const EXIT_MUTEX: i32 = 6;
+/// `--headless-stop`: a headless host runs but this process may not signal it.
+pub const EXIT_DENIED: i32 = 7;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Cli {
@@ -155,7 +158,7 @@ fn wide(s: &str) -> Vec<u16> {
 }
 
 /// `pulsar --headless-stop`: ask the headless host of this session to stop. 0 = signalled,
-/// 1 = none running.
+/// 1 = none running, 7 = one runs but may not be signalled from here.
 fn stop_signal() -> i32 {
 	#[cfg(windows)]
 	unsafe {
@@ -164,6 +167,12 @@ fn stop_signal() -> i32 {
 		let name = wide(STOP_EVENT);
 		let h = OpenEventW(EVENT_MODIFY_STATE, 0, name.as_ptr());
 		if h.is_null() {
+			if windows_sys::Win32::Foundation::GetLastError()
+				== windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED
+			{
+				eprintln!("pulsar: a headless host runs, but this shell may not stop it (started by another account?) — run --headless-stop from an elevated shell");
+				return EXIT_DENIED;
+			}
 			eprintln!("pulsar: no headless host is running in this session");
 			return 1;
 		}
@@ -203,6 +212,61 @@ unsafe extern "system" fn on_console_ctrl(_ctrl: u32) -> windows_sys::core::BOOL
 	1
 }
 
+/// Security descriptor for the stop event: full access for SYSTEM, Administrators and this
+/// process's user, Medium mandatory label. Null on failure (caller LocalFree's it).
+#[cfg(windows)]
+unsafe fn stop_event_sd() -> windows_sys::Win32::Security::PSECURITY_DESCRIPTOR {
+	use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE};
+	use windows_sys::Win32::Security::Authorization::{
+		ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+		SDDL_REVISION_1,
+	};
+	use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+	use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+	let mut tok: HANDLE = std::ptr::null_mut();
+	if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok) == 0 {
+		return std::ptr::null_mut();
+	}
+	let mut tbuf = [0u64; 64]; // u64: TOKEN_USER needs pointer alignment
+	let mut need = 0u32;
+	let ok = GetTokenInformation(
+		tok,
+		TokenUser,
+		tbuf.as_mut_ptr() as _,
+		std::mem::size_of_val(&tbuf) as u32,
+		&mut need,
+	) != 0;
+	CloseHandle(tok);
+	if !ok {
+		return std::ptr::null_mut();
+	}
+	let user = &*(tbuf.as_ptr() as *const TOKEN_USER);
+	let mut s: windows_sys::core::PWSTR = std::ptr::null_mut();
+	if ConvertSidToStringSidW(user.User.Sid, &mut s) == 0 {
+		return std::ptr::null_mut();
+	}
+	let mut n = 0;
+	while *s.add(n) != 0 {
+		n += 1;
+	}
+	let sid = String::from_utf16_lossy(std::slice::from_raw_parts(s, n));
+	LocalFree(s as _);
+	let sddl = wide(&format!(
+		"D:(A;;0x1F0003;;;SY)(A;;0x1F0003;;;BA)(A;;0x1F0003;;;{sid})S:(ML;;NW;;;ME)"
+	));
+	let mut sd = std::ptr::null_mut();
+	if ConvertStringSecurityDescriptorToSecurityDescriptorW(
+		sddl.as_ptr(),
+		SDDL_REVISION_1,
+		&mut sd,
+		std::ptr::null_mut(),
+	) == 0
+	{
+		return std::ptr::null_mut();
+	}
+	sd
+}
+
 /// Stop paths for `--headless-host`, installed before anything else spawns threads.
 fn install_stop_handlers() {
 	#[cfg(windows)]
@@ -216,7 +280,26 @@ fn install_stop_handlers() {
 		AttachConsole(ATTACH_PARENT_PROCESS);
 		SetConsoleCtrlHandler(Some(on_console_ctrl), 1);
 		let name = wide(STOP_EVENT);
-		let ev = CreateEventW(std::ptr::null(), 1, 0, name.as_ptr()) as usize;
+		// An elevated host's event would get a High label and the creator's default DACL, so
+		// `--headless-stop` from a normal shell of the same user would be refused: give this
+		// user EVENT_MODIFY_STATE and a Medium label (no-write-up). Default security if the
+		// descriptor cannot be built.
+		let sd = stop_event_sd();
+		let sa = windows_sys::Win32::Security::SECURITY_ATTRIBUTES {
+			nLength: std::mem::size_of::<windows_sys::Win32::Security::SECURITY_ATTRIBUTES>()
+				as u32,
+			lpSecurityDescriptor: sd,
+			bInheritHandle: 0,
+		};
+		let psa = if sd.is_null() {
+			std::ptr::null()
+		} else {
+			&sa as *const _
+		};
+		let ev = CreateEventW(psa, 1, 0, name.as_ptr()) as usize;
+		if !sd.is_null() {
+			windows_sys::Win32::Foundation::LocalFree(sd as _);
+		}
 		if ev != 0 {
 			std::thread::spawn(move || {
 				if WaitForSingleObject(ev as _, INFINITE) == 0 {
@@ -227,20 +310,52 @@ fn install_stop_handlers() {
 	}
 	#[cfg(unix)]
 	unsafe {
-		// Block the stop signals in this (main) thread before any other thread exists, so
-		// every thread inherits the mask and only the sigwait thread receives them.
-		let mut set: libc::sigset_t = std::mem::zeroed();
-		libc::sigemptyset(&mut set);
-		for s in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
-			libc::sigaddset(&mut set, s);
+		// Self-pipe: the handler only write(2)s a byte (async-signal-safe), a thread turns it
+		// into a clean stop. Not a blocked signal mask + sigwait: a mask is inherited across
+		// fork/exec, so every child (ffmpeg, capture helpers) would ignore SIGTERM/SIGINT.
+		// A caught signal's disposition resets to default on exec, so children are unaffected.
+		let mut fds = [0 as libc::c_int; 2];
+		if libc::pipe(fds.as_mut_ptr()) != 0 {
+			tracing::warn!("headless host: no signal pipe — stop it with SIGKILL");
+			return;
 		}
-		libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+		for fd in fds {
+			libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+		}
+		SIG_PIPE_W.store(fds[1], std::sync::atomic::Ordering::SeqCst);
+		let mut sa: libc::sigaction = std::mem::zeroed();
+		sa.sa_sigaction = on_stop_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+		sa.sa_flags = libc::SA_RESTART;
+		libc::sigemptyset(&mut sa.sa_mask);
+		for s in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+			libc::sigaction(s, &sa, std::ptr::null_mut());
+		}
+		let r = fds[0];
 		std::thread::spawn(move || {
-			let mut sig = 0;
-			if libc::sigwait(&set, &mut sig) == 0 {
-				request_stop("signal");
+			let mut b = 0u8;
+			loop {
+				let n = libc::read(r, (&mut b as *mut u8).cast(), 1);
+				if n == 1 {
+					request_stop("signal");
+					return;
+				}
+				if n == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+					return;
+				}
 			}
 		});
+	}
+}
+
+#[cfg(unix)]
+static SIG_PIPE_W: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
+#[cfg(unix)]
+extern "C" fn on_stop_signal(_sig: libc::c_int) {
+	let fd = SIG_PIPE_W.load(std::sync::atomic::Ordering::Relaxed);
+	if fd >= 0 {
+		let b = 1u8;
+		unsafe { libc::write(fd, (&b as *const u8).cast(), 1) };
 	}
 }
 
@@ -302,7 +417,7 @@ fn run_headless() -> i32 {
 		return EXIT_OK;
 	}
 	set_error_mode();
-	if !crate::acquire_single_instance() {
+	if !crate::acquire_single_instance_strict() {
 		tracing::error!("another Pulsar is already running for this user/session — not starting the headless host");
 		return EXIT_RUNNING;
 	}
