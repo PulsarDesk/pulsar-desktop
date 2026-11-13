@@ -166,5 +166,8 @@ showed ~600 ms head-of-line holds, "stream stopped" over a live session and a lo
   black. `cargo test -p pulsar-render fsr` compiles the HLSL.
 - **mpv** (macOS, the Linux mpv fallback): `--glsl-shaders=<temp>/pulsar-fsr.glsl`
   (`native_view/FSR.glsl`, AMD FSR 1.0.2 MIT, agyild's port) for any mode but off.
-- **Linux pulsar-render**: not yet (GLES2 paths; needs an FBO pass per path).
+- **Linux pulsar-render** (`crates/pulsar-render/src/gl_fsr.rs`): the presenter's draw (any
+  decode path) is redirected into a stream-sized FBO texture, EASU scales it into a second one,
+  RCAS sharpens onto the screen; GLSL ES 1.00 (guarded divisions instead of bit-cast
+  reciprocals). Not on the KMS zero-copy (game-mode lease) path, which bypasses GL.
 - ABR: with an upscaler on, game mode uses `min_kbps_scale = 1.25` (gives resolution up earlier).

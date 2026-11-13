@@ -316,7 +316,7 @@
 	"settings.duplicateSessions": "Бір құрылғыға бірнеше сеанс",
 	"settings.duplicateSessionsDesc": "Құрылғыға қайта қосылғанда ашық сеансқа ауысудың орнына жаңа сеанс ашылады (мысалы, бір компьютер екі қойындыда).",
 	"settings.upscale": "Кескінді жақсарту",
-	"settings.upscaleDesc": "Төмен ажыратымдылықты кескінді үлкейткенде анықтайды. ЖИ: NVIDIA RTX / Intel бейнекартасының өз үлкейткіші, болмаса AMD FSR. Әзірге Windows және macOS (mpv) жүйесінде.",
+	"settings.upscaleDesc": "Төмен ажыратымдылықты кескінді үлкейткенде анықтайды. ЖИ: NVIDIA RTX / Intel бейнекартасының өз үлкейткіші (Windows); басқа жерде AMD FSR.",
 	"settings.upscaleOff": "Өшірулі",
 	"settings.upscaleAuto": "Автоматты",
 	"settings.upscaleAi": "ЖИ (NVIDIA/Intel)",

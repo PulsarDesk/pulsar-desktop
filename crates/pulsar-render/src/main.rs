@@ -36,6 +36,8 @@ mod kms_lease;
 mod linux;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod video;
+#[cfg(all(unix, not(target_os = "macos")))]
+mod gl_fsr;
 
 // Shared streaming types + RTP depacketizer for the native-decode backends (Win MF, mac VT,
 // Linux libavcodec — the Linux renderer feeds the decoder from it unless

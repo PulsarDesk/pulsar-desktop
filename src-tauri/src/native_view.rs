@@ -27,8 +27,9 @@ mod spawn;
 pub use ipc::*;
 
 /// Picture upscaling (Settings → Görüntü → Görüntü iyileştirme): "off" | "auto" | "fsr" | "ai".
-/// The Windows renderer gets it as `upscale <mode>` (FSR / NVIDIA RTX VSR / Intel VSR); mpv
-/// (macOS, the Linux mpv fallback) loads the FSR shader for any mode but "off".
+/// pulsar-render gets it as `upscale <mode>` (Windows: FSR / NVIDIA RTX VSR / Intel VSR;
+/// Linux: FSR in the GL presenter); mpv (macOS, the Linux mpv fallback) loads the FSR shader
+/// for any mode but "off".
 static UPSCALE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
 pub fn set_upscale_mode(mode: &str) {

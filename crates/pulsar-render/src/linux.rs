@@ -602,6 +602,8 @@ pub fn run() {
 				// and the user's switch.
 				Some("hostptr") => crate::overlay::host_ptr_line(&it.collect::<Vec<_>>().join(" ")),
 				Some("hostptrshow") => crate::overlay::set_host_ptr_show(it.next() == Some("1")),
+				// Picture upscaling (Settings → Görüntü): FSR in the GL presenter (gl_fsr.rs).
+				Some("upscale") => crate::gl_fsr::set_upscale(it.next().unwrap_or("off")),
 				Some("hostname") => crate::overlay::set_host_name(&it.collect::<Vec<_>>().join(" ")),
 				// Session audio truth from the app (atx/amute/mic 0|1) so the overlay's
 				// Ses toggles highlight the real state.

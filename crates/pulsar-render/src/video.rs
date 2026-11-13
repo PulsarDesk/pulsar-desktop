@@ -1428,6 +1428,9 @@ pub struct Presenter {
 	// when the recent min depth shows the queue keeps draining (so it can absorb the next burst).
 	depth_hist: [u16; 32],
 	depth_idx: usize,
+	/// Picture upscaling (`gl_fsr`), built on first use; `fsr_failed` = it can't run here.
+	fsr: Option<crate::gl_fsr::GlFsr>,
+	fsr_failed: bool,
 }
 
 const VERT: &str = "attribute vec2 pos;\nattribute vec2 uvin;\nvarying vec2 uv;\nvoid main(){ uv=uvin; gl_Position=vec4(pos,0.0,1.0); }\n";
@@ -1570,6 +1573,8 @@ impl Presenter {
 			max_gap_ms: 0.0,
 			depth_hist: [0; 32],
 			depth_idx: 0,
+			fsr: None,
+			fsr_failed: false,
 		}
 	}
 
@@ -2105,7 +2110,32 @@ impl Presenter {
 		// Source (host-pixel) dims alongside the rect — the cursor overlay needs both to derive
 		// the host→displayed scale for sizing the side-channel pointer (see VIDEO_SRC).
 		*VIDEO_SRC.lock().unwrap() = [vw, vh];
-		gl.viewport(vx, vy, rw, rh);
+		// Picture upscaling: when the frame is scaled UP, draw it into a stream-sized texture
+		// first and let FSR (EASU + RCAS) put it on screen — see gl_fsr.rs. Never for the 1:1
+		// ORIGINAL fit.
+		let mut fsr_prev: Option<Option<glow::Framebuffer>> = None;
+		if crate::gl_fsr::enabled()
+			&& !self.fsr_failed
+			&& FIT_MODE.load(Ordering::Relaxed) != 2
+			&& (rw > vw || rh > vh)
+		{
+			if self.fsr.is_none() {
+				self.fsr = crate::gl_fsr::GlFsr::new(gl);
+				self.fsr_failed = self.fsr.is_none();
+			}
+			let fps = FPS.lock().unwrap()[0];
+			if let Some(f) = self.fsr.as_mut() {
+				if f.affordable(rw as i64 * rh as i64, fps) {
+					fsr_prev = f.begin(gl, vw, vh);
+					if fsr_prev.is_none() {
+						self.fsr_failed = true;
+					}
+				}
+			}
+		}
+		if fsr_prev.is_none() {
+			gl.viewport(vx, vy, rw, rh);
+		}
 		let quad: [f32; 24] = [
 			-1.0, -1.0, 0.0, 1.0, 1.0, -1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, -1.0, -1.0, 0.0, 1.0,
 			1.0, 1.0, 1.0, 0.0, -1.0, 1.0, 0.0, 0.0,
@@ -2117,6 +2147,12 @@ impl Presenter {
 		gl.enable_vertex_attrib_array(0);
 		gl.enable_vertex_attrib_array(1);
 		gl.draw_arrays(glow::TRIANGLES, 0, 6);
+		if let (Some(prev), Some(f)) = (fsr_prev, self.fsr.as_mut()) {
+			if !f.finish(gl, prev, vx, vy, rw, rh) {
+				eprintln!("pulsar-render: FSR off (no render target) — plain scaling");
+				self.fsr_failed = true;
+			}
+		}
 
 		for img in imgs {
 			if !img.is_null() {

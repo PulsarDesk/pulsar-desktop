@@ -316,7 +316,7 @@
 	"settings.duplicateSessions": "Aynı cihaza birden fazla oturum",
 	"settings.duplicateSessionsDesc": "Aynı cihaza tekrar bağlanınca açık oturuma geçmek yerine yeni bir oturum açılır (ör. aynı bilgisayarı iki sekmede).",
 	"settings.upscale": "Görüntü iyileştirme",
-	"settings.upscaleDesc": "Düşük çözünürlüklü görüntüyü ekrana büyütürken netleştirir. Yapay zekâ: NVIDIA RTX ve Intel ekran kartlarının kendi büyütücüsü; yoksa AMD FSR. Şimdilik Windows'ta ve mpv ile oynatan macOS'ta.",
+	"settings.upscaleDesc": "Düşük çözünürlüklü görüntüyü ekrana büyütürken netleştirir. Yapay zekâ: NVIDIA RTX ve Intel ekran kartlarının kendi büyütücüsü (Windows); diğer her yerde AMD FSR.",
 	"settings.upscaleOff": "Kapalı",
 	"settings.upscaleAuto": "Otomatik",
 	"settings.upscaleAi": "Yapay zekâ (NVIDIA/Intel)",
