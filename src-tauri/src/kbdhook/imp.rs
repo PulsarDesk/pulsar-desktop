@@ -36,6 +36,9 @@ struct Globals {
 	ctrl_down: bool,
 	alt_down: bool,
 	shift_down: bool,
+	/// Ctrl / Shift of a combo that RELEASED control while they stayed physically down: when
+	/// each was kept as held (see `keep_chord`). `None` = that boolean comes from real edges.
+	chord_kept: [Option<std::time::Instant>; 2],
 	/// Recent RightCtrl press times for the 3×RightCtrl release combo (≤1 s window).
 	rctrl_presses: Vec<std::time::Instant>,
 	/// Every key currently held DOWN on the host (forwarded down, no up yet). Flushed
@@ -132,6 +135,7 @@ fn globals() -> &'static Mutex<Globals> {
 			ctrl_down: false,
 			alt_down: false,
 			shift_down: false,
+			chord_kept: [None; 2],
 			rctrl_presses: Vec::new(),
 			held: std::collections::HashSet::new(),
 			held_buttons: std::collections::HashSet::new(),
@@ -244,6 +248,7 @@ fn flush_held(g: &mut Globals) {
 	g.ctrl_down = false;
 	g.alt_down = false;
 	g.shift_down = false;
+	g.chord_kept = [None; 2];
 	g.rctrl_presses.clear();
 }
 
@@ -272,8 +277,40 @@ fn flush_held_wh(g: &mut std::sync::MutexGuard<'_, Globals>) -> (Option<tokio::s
 	g.ctrl_down = false;
 	g.alt_down = false;
 	g.shift_down = false;
+	g.chord_kept = [None; 2];
 	g.rctrl_presses.clear();
 	(tx, events)
+}
+
+/// How long the modifiers of a combo that released control count as still held (`keep_chord`).
+const CHORD_KEEP: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Ctrl+Shift stay "held" after the overlay combo released control.
+///
+/// The release flush drops the modifier tracking, and for a reason: a modifier whose up-stroke
+/// is never seen must not let a bare key fire a combo later (see `flush_held`). But these two
+/// ARE down — the combo just fired on them — and nothing else knows it: their down-strokes
+/// were swallowed while engaged, so the OS key state says "up" and the webview gets the next M
+/// as a bare "m". Without this, holding Ctrl+Shift and pressing M a second time did nothing:
+/// the menu opened and would not close (2026-11-14).
+///
+/// Each one ends at its next real edge (its up-stroke reaches the hook, or the webview relay,
+/// which runs while the menu is open), when Pulsar loses the focus, or after `CHORD_KEEP` — so
+/// a missed up-stroke can't leave a bare M / Q acting as the combo for long.
+fn keep_chord(g: &mut Globals) {
+	g.ctrl_down = true;
+	g.shift_down = true;
+	g.chord_kept = [Some(std::time::Instant::now()); 2];
+}
+
+/// End what `keep_chord` kept (a modifier pressed for real since then stays as it is).
+fn drop_kept_chord(g: &mut Globals) {
+	if g.chord_kept[0].take().is_some() {
+		g.ctrl_down = false;
+	}
+	if g.chord_kept[1].take().is_some() {
+		g.shift_down = false;
+	}
 }
 
 /// Send the up-stroke events collected by `flush_held_wh` AFTER the globals lock has
@@ -958,10 +995,21 @@ fn capture_thread() {
 fn handle_key(evdev: u32, down: bool) -> bool {
 	let mut g = globals().lock().unwrap();
 	match evdev {
-		29 | 97 => g.ctrl_down = down,  // L/R Ctrl
-		56 | 100 => g.alt_down = down,  // L/R Alt
-		42 | 54 => g.shift_down = down, // L/R Shift
+		// L/R Ctrl
+		29 | 97 => {
+			g.ctrl_down = down;
+			g.chord_kept[0] = None; // a real edge: no longer kept
+		}
+		56 | 100 => g.alt_down = down, // L/R Alt
+		// L/R Shift
+		42 | 54 => {
+			g.shift_down = down;
+			g.chord_kept[1] = None;
+		}
 		_ => {}
+	}
+	if g.chord_kept.iter().flatten().any(|at| at.elapsed() > CHORD_KEEP) {
+		drop_kept_chord(&mut g);
 	}
 	// Rising-edge detection for combo trigger keys: insert() returns true only on the
 	// FIRST press (autorepeat finds the key already in the set → returns false). The
@@ -1058,6 +1106,8 @@ fn handle_key(evdev: u32, down: bool) -> bool {
 			// Alt+Tab made Windows drop it.
 			clear_confine();
 			let (tx, evs) = flush_held_wh(&mut g);
+			// The chord's Ctrl+Shift are still down: the same press on M closes the menu again.
+			keep_chord(&mut g);
 			(tx, evs, true, g.app.clone())
 		} else {
 			(None, Vec::new(), false, g.app.clone())
@@ -1075,7 +1125,9 @@ fn handle_key(evdev: u32, down: bool) -> bool {
 		// "pressed twice before the menu opened" reports need both presses in the log.
 		tracing::info!(was_engaged, "overlay combo → overlay-toggle");
 		if let Some(app) = &app_handle {
-			let _ = app.emit("overlay-toggle", ());
+			// `true` = Ctrl+Shift were kept as held (`keep_chord`): the webview relay must
+			// treat the next M / Q / F11 as the combo although its event carries no modifiers.
+			let _ = app.emit("overlay-toggle", was_engaged);
 		}
 		return true;
 	}
@@ -1736,6 +1788,7 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, _sta
 		g.ctrl_down = false;
 		g.alt_down = false;
 		g.shift_down = false;
+		g.chord_kept = [None; 2];
 		g.rctrl_presses.clear();
 		g.combo_held.clear();
 		g.combo_active.clear();
@@ -1913,6 +1966,9 @@ use crate::focus_gate::win::{foreground_owner, FgOwner};
 /// back by itself when Pulsar is focused again (PENDING_ENGAGE).
 fn focus_lost() {
 	APP_FOCUSED.store(false, Ordering::SeqCst);
+	// From here a modifier's up-stroke can be missed (where the hook is not called, keys only
+	// arrive through Pulsar's own windows): what `keep_chord` kept ends now.
+	drop_kept_chord(&mut globals().lock().unwrap_or_else(|e| e.into_inner()));
 	if ENGAGED.load(Ordering::SeqCst) {
 		if KIOSK_SESSION.load(Ordering::SeqCst) {
 			PENDING_ENGAGE.store(LAST_PLAY.load(Ordering::SeqCst), Ordering::SeqCst);
@@ -2309,5 +2365,67 @@ unsafe extern "system" fn ll_keyboard_proc(ncode: i32, wparam: WPARAM, lparam: L
 		1 // SUPPRESS locally — the key only acts on the remote.
 	} else {
 		CallNextHookEx(std::ptr::null_mut(), ncode, wparam, lparam)
+	}
+}
+
+#[cfg(test)]
+mod chord_tests {
+	use super::*;
+
+	fn overlay_combo_while_engaged() {
+		APP_FOCUSED.store(true, Ordering::SeqCst);
+		ENGAGED.store(true, Ordering::SeqCst);
+		handle_key(29, true); // Ctrl
+		handle_key(42, true); // Shift
+		assert!(handle_key(50, true), "Ctrl+Shift+M is the overlay combo");
+		assert!(!ENGAGED.load(Ordering::SeqCst), "the combo releases control");
+		handle_key(50, false);
+	}
+
+	/// One test for all of it: `handle_key` works on process-wide state.
+	#[test]
+	fn the_overlay_combo_fires_again_while_its_modifiers_stay_down() {
+		// The menu opened on Ctrl+Shift+M; Ctrl+Shift never came up; M again closes it.
+		overlay_combo_while_engaged();
+		assert!(handle_key(50, true), "second M with the chord still held");
+		handle_key(50, false);
+		// Shift comes up for real: Ctrl+M is no combo, and a bare M after both are up neither.
+		handle_key(42, false);
+		assert!(!handle_key(50, true));
+		handle_key(50, false);
+		handle_key(29, false);
+		assert!(!handle_key(50, true));
+		handle_key(50, false);
+
+		// Up-strokes that were never seen: the kept chord ends by itself.
+		overlay_combo_while_engaged();
+		let long_ago = std::time::Instant::now().checked_sub(CHORD_KEEP + std::time::Duration::from_secs(1)).unwrap();
+		globals().lock().unwrap().chord_kept = [Some(long_ago); 2];
+		assert!(!handle_key(50, true), "a kept chord ends after CHORD_KEEP");
+		handle_key(50, false);
+
+		// So it does when Pulsar loses the focus.
+		overlay_combo_while_engaged();
+		focus_lost();
+		APP_FOCUSED.store(true, Ordering::SeqCst);
+		assert!(!handle_key(50, true), "a kept chord ends with the focus");
+		handle_key(50, false);
+
+		// A modifier pressed for real after the combo is not "kept": it outlives the limit.
+		overlay_combo_while_engaged();
+		handle_key(29, false);
+		handle_key(42, false);
+		handle_key(29, true);
+		handle_key(42, true);
+		{
+			let g = globals().lock().unwrap();
+			assert_eq!(g.chord_kept, [None; 2]);
+			assert!(g.ctrl_down && g.shift_down);
+		}
+		assert!(handle_key(50, true));
+		handle_key(50, false);
+		handle_key(29, false);
+		handle_key(42, false);
+		APP_FOCUSED.store(false, Ordering::SeqCst);
 	}
 }

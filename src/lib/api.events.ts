@@ -151,7 +151,10 @@ export const onKbdReleased = (cb: () => void) => listenTo<null>('kbd-released', 
 export const onKbdDetach = (cb: () => void) => listenTo<null>('kbd-detach', () => cb());
 /** Client (game mode): the user pressed the Ctrl+Shift+M overlay combo — toggle the
  * in-session gaming overlay. Payload-less; the session stays alive (unlike kbd-leave). */
-export const onOverlayToggle = (cb: () => void) => listenTo<null>('overlay-toggle', () => cb());
+/** `chordHeld` (Windows hook only): the combo released control with Ctrl+Shift still down,
+ * and the OS never saw them go down — the next trigger key reaches the webview bare. */
+export const onOverlayToggle = (cb: (chordHeld: boolean) => void) =>
+	listenTo<boolean | null>('overlay-toggle', (p) => cb(p === true));
 /** Client (Linux native): the user pressed the Ctrl+Shift+F11 combo — toggle the Tauri
  * window's fullscreen state. Payload-less; the session stays alive (unlike kbd-leave). */
 export const onFullscreenToggle = (cb: () => void) => listenTo<null>('fullscreen-toggle', () => cb());

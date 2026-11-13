@@ -60,6 +60,15 @@ export class SessionUi {
 					e.stopPropagation();
 					if (this.overlayOpen) this.closeOverlay();
 					else this.closeMenu();
+				} else if (this.overlayOpen && !e.repeat && e.ctrlKey && e.shiftKey && e.code === 'KeyM') {
+					// Ctrl+Shift+M closes the overlay it opened. Opening released control, and
+					// the webview key path only reads its combos while controlling — so on the
+					// sessions it drives (macOS, phone hosts) a second press did nothing. Where
+					// an OS hook sees the key too (Linux evdev) both land in `toggleOverlay`,
+					// whose debounce keeps one.
+					e.preventDefault();
+					e.stopPropagation();
+					this.toggleOverlay();
 				}
 			};
 			window.addEventListener('keydown', onEsc, true);

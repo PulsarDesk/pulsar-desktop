@@ -661,21 +661,36 @@
 	// typed on the host and Ctrl+Alt+Z / Ctrl+Shift+M were dead. Where the hook works it
 	// swallows these keys first (engaged: all of them; disengaged: the combo triggers), so the
 	// webview never sees them and nothing is sent twice. Rust decides engaged vs. combo vs. drop.
+	//
+	// It runs while the Pulsar menu is open too: the menu released control, so Rust drops plain
+	// keys, but the combos must still fire (the menu opened on Ctrl+Shift+M and a second press
+	// did nothing — the relay was off, and nothing else carries the key on these machines) and
+	// the modifiers' up-strokes must still be seen.
 	const isWindows = typeof navigator !== 'undefined' && /Windows/i.test(navigator.userAgent);
+	// Until this time (ms) the Ctrl+Shift of the combo that opened the menu count as held. They
+	// went down while control was engaged, where the keys never reach the OS: its key state
+	// says "up" and the next M arrives here as a bare "m" (Rust keeps them the same way, see
+	// `keep_chord`). Ends at the first real Ctrl / Shift edge.
+	let chordHeldUntil = 0;
 	$effect(() => {
-		if (!isWindows || !native || playId < 0 || !active || dock.overlayOpen) return;
+		if (!isWindows || !native || playId < 0 || !active) return;
 		if (typeof window === 'undefined') return;
 		const relay = (e: KeyboardEvent, down: boolean) => {
 			if (input.controlling) return; // the VNC-style path already forwards these
+			const modifier = /^(Control|Shift|Alt)(Left|Right)$/.test(e.code);
+			if (modifier && !e.code.startsWith('Alt')) chordHeldUntil = 0;
 			const el = e.target as HTMLElement | null;
 			const editable =
 				!!el && (el.isContentEditable || /^(input|textarea|select)$/i.test(el.tagName));
-			// Disengaged typing in a field stays local (Rust would ignore it anyway).
-			if (!nativeEngaged && editable) return;
+			// Disengaged typing in a field stays local (Rust would ignore it anyway). The
+			// modifiers still go: Rust tracks them for the combos, and a missed up-stroke
+			// would leave one latched there.
+			if (!nativeEngaged && editable && !modifier) return;
 			const code = evdevCode(e.code);
 			if (!code) return;
+			const chord = (e.ctrlKey && e.shiftKey) || Date.now() < chordHeldUntil;
 			const combo =
-				(e.ctrlKey && e.shiftKey && /^(KeyM|KeyQ|F11)$/.test(e.code)) ||
+				(chord && /^(KeyM|KeyQ|F11)$/.test(e.code)) ||
 				(e.ctrlKey && e.altKey && e.code === 'KeyZ');
 			if (nativeEngaged || combo) {
 				// The key acts on the host (or is a Pulsar combo) — not on this webview.
@@ -802,8 +817,10 @@
 		// the overlay is drawn on the video and works in any mode. Payload-less global event:
 		// only the active tab toggles, never every mounted game/native tab at once.
 		scope.add(
-			onOverlayToggle(() => {
-				if (active && (mode === 'game' || native)) dock.toggleOverlay();
+			onOverlayToggle((chordHeld) => {
+				if (!active) return;
+				if (chordHeld) chordHeldUntil = Date.now() + 5000; // = CHORD_KEEP (kbdhook)
+				if (mode === 'game' || native) dock.toggleOverlay();
 			})
 		);
 		return scope.dispose;

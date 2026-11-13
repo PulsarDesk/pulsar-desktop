@@ -110,6 +110,32 @@ While another app is focused, Pulsar acts on NO input (maintainer rule, 2026-11-
   `kbdhook/imp.rs`; Linux's evdev grab is held only while focused anyway). On Windows a kiosk
   session now releases on focus loss too and re-engages on its own when focus returns.
 
+## Ctrl+Shift+M toggles the Pulsar menu — the second press has to arrive too
+
+Opening the menu releases control, so the press that closes it comes in on the *disengaged*
+key path. Every path must read it (2026-11-14: it opened and never closed):
+
+- **Linux** — the evdev thread checks the chord before its suspend gate, on the live kernel
+  key state (`chord_mods`).
+- **Windows** (`kbdhook/imp.rs` `handle_key`) — fed by the LL hook, the renderer's hook
+  (`hkey`) and, where the LL hook is never called while Pulsar is focused, the webview relay
+  in `Session.svelte` (`kbd_web_key`). The relay runs while the menu is open as well, and it
+  always passes the modifiers (also from an input field), so their up-strokes are seen.
+- **Kept chord** — the release flush clears the modifier booleans (a missed up-stroke must not
+  let a bare key fire a combo), but after this combo Ctrl+Shift are still physically down and
+  the OS doesn't know (their down-strokes were swallowed while engaged; the webview gets the
+  next M as a bare "m"). `keep_chord` keeps them as held until their next real edge, a focus
+  loss or `CHORD_KEEP` (5 s); the `overlay-toggle` event carries `true` so the relay treats
+  the bare M / Q / F11 as the combo for the same time.
+- **Webview key path** (macOS, phone hosts, the Windows fallback) — `SessionInput.onKey` only
+  reads combos while controlling, so `SessionUi` (the Escape handler) reads Ctrl+Shift+M
+  itself while the overlay is open.
+
+Two sources may report one press (Linux evdev + the webview): both end in
+`SessionUi.toggleOverlay`, whose 250 ms debounce keeps one. Tests: `ui.svelte.test.ts`,
+`kbdhook::imp::chord_tests` (the Tauri crate's test binary needs a Common-Controls v6
+manifest next to it to load on Windows — `TaskDialogIndirect`).
+
 ## Free cursor ("Serbest imleç", remote mode, all desktop platforms)
 
 Parsec-style handover, issue #3. Settings → Görüntü + the session menu's Görüntü view
