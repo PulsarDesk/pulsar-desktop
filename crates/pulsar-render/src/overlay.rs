@@ -1148,7 +1148,8 @@ fn draw_root(
 		ui.label(egui::RichText::new(&head).size(11.0).color(gray));
 		if !fps.is_empty() {
 			ui.label(egui::RichText::new(format!(" · {fps} ")).size(11.0).color(gray));
-			ui.label(egui::RichText::new(icon::INFO).size(11.0).color(gray)).on_hover_text(t("stat.fpsTargetHint"));
+			// Hover shows the tip, a click / tap toggles it (no hover on a controller or touch).
+			info(ui, t("stat.fpsTargetHint"));
 		}
 		if !display.is_empty() {
 			ui.label(egui::RichText::new(format!(" · {display}")).size(11.0).color(gray));
