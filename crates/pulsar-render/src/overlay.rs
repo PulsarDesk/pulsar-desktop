@@ -1133,17 +1133,27 @@ fn draw_root(
 		);
 		stat_tile(ui, &bw, icon::CELL_SIGNAL_HIGH, t("stat.band"));
 	});
-	// The codec, host encoder and stream resolution actually on the wire ("H.265 · NVENC · 1080p").
-	let line = [stream_codec(st), stream_encoder(st), stream_res_label()]
+	// What is on the wire: codec · host encoder · resolution · target fps (ⓘ) · host monitor,
+	// e.g. "H.265 · NVENC · 1080p · 120 fps ⓘ · Display 2".
+	let gray = egui::Color32::from_gray(150);
+	let head = [stream_codec(st), stream_encoder(st), stream_res_label()]
 		.into_iter()
 		.filter(|p| !p.is_empty())
 		.collect::<Vec<_>>()
 		.join(" · ");
-	ui.label(
-		egui::RichText::new(line)
-		.size(11.0)
-		.color(egui::Color32::from_gray(150)),
-	);
+	let fps = stream_target_fps(st);
+	let display = if st.displays.is_empty() { String::new() } else { format!("Display {}", st.display_idx + 1) };
+	ui.horizontal(|ui| {
+		ui.spacing_mut().item_spacing.x = 0.0;
+		ui.label(egui::RichText::new(&head).size(11.0).color(gray));
+		if !fps.is_empty() {
+			ui.label(egui::RichText::new(format!(" · {fps} ")).size(11.0).color(gray));
+			ui.label(egui::RichText::new(icon::INFO).size(11.0).color(gray)).on_hover_text(t("stat.fpsTargetHint"));
+		}
+		if !display.is_empty() {
+			ui.label(egui::RichText::new(format!(" · {display}")).size(11.0).color(gray));
+		}
+	});
 	ui.add_space(6.0);
 
 	// DualSense headphone volume bars (one per pad whose headphones carry the session audio).
@@ -2229,6 +2239,18 @@ fn stream_codec(st: &OverlayState) -> String {
 	}
 }
 
+/// The host's TARGET frame rate from its stats label (fourth field, "120 fps"); empty when
+/// unknown. A target, not a measurement: the FPS tile shows what really arrives.
+fn stream_target_fps(st: &OverlayState) -> String {
+	st.host_active
+		.split(" · ")
+		.nth(3)
+		.map(str::trim)
+		.filter(|p| p.ends_with("fps"))
+		.unwrap_or("")
+		.to_string()
+}
+
 /// The host encoder from the same label (second field), empty when unknown.
 fn stream_encoder(st: &OverlayState) -> String {
 	st.host_active.split(" · ").nth(1).unwrap_or("").trim().to_string()
@@ -3105,6 +3127,7 @@ mod stats_codec_tests {
 	fn the_codec_comes_from_the_host_label_then_the_pick() {
 		let mut st = OverlayState::default();
 		st.host_active = "H.265 · NVENC · 1920x1200 · 120 fps · 17 Mbit hedef · 3.1 ms kodlama".into();
+		assert_eq!(stream_target_fps(&st), "120 fps");
 		assert_eq!(stream_codec(&st), "H.265");
 		assert_eq!(stream_encoder(&st), "NVENC");
 		st.host_active.clear();

@@ -12,6 +12,7 @@
 	"stat.latency": "Gecikme ms",
 	"stat.encode": "Kodlama ms",
 	"stat.decode": "Çözme ms",
+	"stat.fpsTargetHint": "Hedef kare hızı: host'un göndermeye çalıştığı değer. Yukarıdaki FPS kutusu gerçekte gelen kareyi gösterir.",
 	"stat.band": "Bant Mbps",
 	"end": "Oturumu Bitir",
 	"auto": "Otomatik",

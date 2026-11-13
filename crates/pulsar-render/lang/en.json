@@ -12,6 +12,7 @@
 	"stat.latency": "Latency ms",
 	"stat.encode": "Encode ms",
 	"stat.decode": "Decode ms",
+	"stat.fpsTargetHint": "Target frame rate: what the host aims to send. The FPS tile above shows what really arrives.",
 	"stat.band": "Used Mbps",
 	"end": "End Session",
 	"auto": "Auto",
