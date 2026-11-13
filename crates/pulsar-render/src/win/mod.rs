@@ -1662,7 +1662,13 @@ impl Renderer {
 		// Source dims from the decoded texture.
 		let mut td = windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC::default();
 		nv12.GetDesc(&mut td);
-		let (sw, sh) = (td.Width, td.Height);
+		// The VISIBLE picture, not the padded surface: a 1080p stream decodes into 1920×1088,
+		// and presenting all of it showed 8 rows of padding, squashed the picture to 1.765:1
+		// and left it 19 px short of a 1440p screen's width (2026-11-13).
+		let (sw, sh) = match self.decoder.as_ref().and_then(|d| d.visible()) {
+			Some((w, h)) if w <= td.Width && h <= td.Height => (w, h),
+			_ => (td.Width, td.Height),
+		};
 		let rot_dirty = ROT_DIRTY.swap(false, Ordering::SeqCst);
 		if self.present.is_none() || sw != self.src_w || sh != self.src_h || rot_dirty {
 			// Resolution changed (or first frame): the held frame is now stale for the

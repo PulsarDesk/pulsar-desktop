@@ -62,6 +62,9 @@ pub struct Decoder {
 	// via the ULONG_PTR we passed in SET_D3D_MANAGER).
 	_manager: IMFDXGIDeviceManager,
 	subtype: GUID,
+	/// The picture's VISIBLE size (the stream's display aperture: 1920×1080 of a 1920×1088
+	/// surface — decoders pad to the macroblock grid). `None` until the MFT reports it.
+	visible: Option<(u32, u32)>,
 	width: u32,
 	height: u32,
 	fps: u32,
@@ -150,6 +153,7 @@ impl Decoder {
 				context,
 				_manager: manager,
 				subtype,
+				visible: None,
 				width: w,
 				height: h,
 				fps,
@@ -212,6 +216,7 @@ impl Decoder {
 				Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
 					// The decoder discovered the real stream geometry; renegotiate NV12 and retry.
 					set_nv12_output(&self.transform)?;
+					self.visible = visible_size(&self.transform);
 					continue;
 				}
 				Err(e) => return Err(e),
@@ -254,6 +259,33 @@ impl Decoder {
 
 		Ok(dst)
 	}
+}
+
+impl Decoder {
+	/// The visible picture size (see `visible`), once the decoder knows it.
+	pub fn visible(&self) -> Option<(u32, u32)> {
+		self.visible
+	}
+}
+
+/// The output type's visible area: `MF_MT_MINIMUM_DISPLAY_APERTURE` (an `MFVideoArea`; the
+/// SPS conformance window), else its `MF_MT_FRAME_SIZE`. `None` when neither is set.
+unsafe fn visible_size(transform: &IMFTransform) -> Option<(u32, u32)> {
+	use windows::Win32::Media::MediaFoundation::{MFVideoArea, MF_MT_MINIMUM_DISPLAY_APERTURE};
+	let t = transform.GetOutputCurrentType(0).ok()?;
+	let mut area = MFVideoArea::default();
+	let mut got = 0u32;
+	let blob = std::slice::from_raw_parts_mut(&mut area as *mut MFVideoArea as *mut u8, std::mem::size_of::<MFVideoArea>());
+	if t.GetBlob(&MF_MT_MINIMUM_DISPLAY_APERTURE, blob, Some(&mut got)).is_ok()
+		&& got as usize == std::mem::size_of::<MFVideoArea>()
+		&& area.Area.cx > 0
+		&& area.Area.cy > 0
+	{
+		return Some((area.Area.cx as u32, area.Area.cy as u32));
+	}
+	let v = t.GetUINT64(&MF_MT_FRAME_SIZE).ok()?;
+	let (w, h) = ((v >> 32) as u32, v as u32);
+	(w > 0 && h > 0).then_some((w, h))
 }
 
 /// Create the decoder `IMFTransform` for `subtype`. This decoder is driven SYNCHRONOUSLY
