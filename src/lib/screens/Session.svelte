@@ -648,9 +648,21 @@
 	// Floating-menu + game-overlay UI controller (dock open/floating-drag, the Ctrl+Shift+M
 	// overlay's debounced open/close, Escape-to-close). See Session/ui.svelte.ts. Cross-cutting
 	// actions are passed as callbacks (release control, end the tab, fullscreen, reset panel).
+	// Take control of this session the way a click on its video does (see onScreenDown): the
+	// OS-level capture on Windows native and in game mode, the canvas path otherwise. Used when
+	// the Pulsar menu closes by the combo that opened it, or by a click on the video beside it.
+	function takeControl() {
+		if (!active || playId < 0) return;
+		if (native && (isWindows || mode === 'game')) {
+			if (!nativeEngaged) api.kbdEngage().catch(() => {});
+		} else {
+			input.startControl();
+		}
+	}
 	const dock = new SessionUi({
 		playId: () => playId,
 		stopControl,
+		takeControl,
 		onEnd: () => onEnd(),
 		onToggleFullscreen: () => onToggleFullscreen(),
 		resetPanel: () => (sidechan.panel = 'menu')
@@ -1080,12 +1092,7 @@
 		// control as well, the way a click on the video does (see onScreenDown) — one click
 		// instead of two. Windows already engaged in Rust (kbdEngage is a no-op then).
 		scope.add(onOverlayControl((id) => {
-			if (id !== playId || !active) return;
-			if (native && (isWindows || mode === 'game')) {
-				if (!nativeEngaged) api.kbdEngage().catch(() => {});
-			} else {
-				input.startControl();
-			}
+			if (id === playId) takeControl();
 		}));
 		// NOTE: focus loss must NOT close the overlay (alt-tabbing away and back kept
 		// losing it). It can't strand either: a click on the overlay refocuses the

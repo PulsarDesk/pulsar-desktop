@@ -12,6 +12,8 @@ import { api } from '#lib/api.js';
 type Inputs = {
 	playId: () => number;
 	stopControl: () => void;
+	/** Take control of the session, the way a click on the video does. */
+	takeControl: () => void;
 	onEnd: () => void;
 	onToggleFullscreen: () => void;
 	resetPanel: () => void;
@@ -42,6 +44,10 @@ export class SessionUi {
 	#overlayApplied = false;
 	#overlayBusy = false;
 	#lastOverlayAt = 0;
+	// The overlay is being closed by the TOGGLE (Ctrl+Shift+M, the pad combo): the user goes
+	// back to the session, so control is taken once the close is applied — it took a click on
+	// the video after every menu visit. Escape / the close button leave it released.
+	#takeAfterClose = false;
 
 	// Handle drag (when floating) vs click (toggle menu) — a small threshold tells them apart
 	// so a tiny jitter still counts as a click.
@@ -94,6 +100,11 @@ export class SessionUi {
 				const playId = this.#in.playId();
 				if (playId >= 0) await api.setOverlay(playId, open);
 				this.#overlayApplied = open;
+				// Only once it is closed for good (a toggle that came in meanwhile reopens).
+				if (!open && !this.#overlayWant && this.#takeAfterClose) {
+					this.#takeAfterClose = false;
+					this.#in.takeControl();
+				}
 			}
 		} catch {
 			// Resync the tracker with what the UI shows; the next toggle re-pumps.
@@ -109,12 +120,15 @@ export class SessionUi {
 		if (now - this.#lastOverlayAt < 250) return;
 		this.#lastOverlayAt = now;
 		this.#overlayWant = !this.#overlayWant;
+		this.#takeAfterClose = !this.#overlayWant;
 		void this.#pumpOverlay();
 	};
 	closeOverlay = () => {
 		// NEVER swallowed (no busy/debounce gate): the native overlay may already be closed
 		// on its side (`ov close`), and skipping this would strand the suspend/pass-through.
 		this.#overlayWant = false;
+		// Not a toggle: `#takeAfterClose` is left alone — false while the overlay is open
+		// (control stays released), true only if a toggle is already closing it.
 		void this.#pumpOverlay();
 	};
 

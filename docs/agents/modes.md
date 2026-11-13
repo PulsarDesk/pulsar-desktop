@@ -132,7 +132,13 @@ key path. Every path must read it (2026-11-14: it opened and never closed):
   itself while the overlay is open.
 
 Two sources may report one press (Linux evdev + the webview): both end in
-`SessionUi.toggleOverlay`, whose 250 ms debounce keeps one. Tests: `ui.svelte.test.ts`,
+`SessionUi.toggleOverlay`, whose 250 ms debounce keeps one.
+
+**Closing by the toggle takes control again** (2026-11-14): the combo opened the menu out of
+the session and closes it back into it — `SessionUi` calls `takeControl` (Session.svelte: the
+OS capture on Windows native / game mode, the canvas path otherwise) once the close is
+applied. So does a click on the video beside the menu (`ov control`, client-video.md).
+Escape, the menu's own close and B on the pad leave control released (click-to-control). Tests: `ui.svelte.test.ts`,
 `kbdhook::imp::chord_tests` (the Tauri crate's test binary needs a Common-Controls v6
 manifest next to it to load on Windows — `TaskDialogIndirect`).
 
