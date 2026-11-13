@@ -114,8 +114,9 @@ pub fn fit_rects(
 }
 
 /// Picture upscaling (Settings → Görüntü → Görüntü iyileştirme), stdin `upscale <mode>`:
-/// 0 off · 1 auto (the GPU's AI upscaler if it has one, else FSR) · 2 FSR · 3 AI (NVIDIA RTX
-/// Video Super Resolution / Intel VSR; FSR where the GPU has none).
+/// 0 off · 1 auto (the GPU's AI upscaler if it has one; Snapdragon GSR on Qualcomm Adreno; else
+/// FSR) · 2 FSR · 3 AI (NVIDIA RTX Video Super Resolution / Intel VSR; FSR where the GPU has
+/// none) · 4 Snapdragon GSR (any GPU).
 static UPSCALE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 pub fn set_upscale(mode: &str) {
@@ -123,6 +124,7 @@ pub fn set_upscale(mode: &str) {
 		"auto" => 1,
 		"fsr" => 2,
 		"ai" => 3,
+		"sgsr" => 4,
 		_ => 0,
 	};
 	UPSCALE.store(v, std::sync::atomic::Ordering::Relaxed);
@@ -130,12 +132,16 @@ pub fn set_upscale(mode: &str) {
 
 const VENDOR_NVIDIA: u32 = 0x10DE;
 const VENDOR_INTEL: u32 = 0x8086;
+/// Qualcomm's DXGI vendor id ("QCOM").
+const VENDOR_QUALCOMM: u32 = 0x4D4F_4351;
 
 /// The upscaler a frame uses, given the setting and the GPU.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Upscaler {
 	None,
 	Fsr,
+	/// Snapdragon Game Super Resolution 1 (one pass, `fsr.rs`).
+	Sgsr,
 	/// The driver's own (VideoProcessor stream extension).
 	Vendor,
 }
@@ -144,6 +150,8 @@ fn pick(mode: u8, vendor: u32) -> Upscaler {
 	let ai = vendor == VENDOR_NVIDIA || vendor == VENDOR_INTEL;
 	match mode {
 		1 | 3 if ai => Upscaler::Vendor,
+		1 if vendor == VENDOR_QUALCOMM => Upscaler::Sgsr,
+		4 => Upscaler::Sgsr,
 		1..=3 => Upscaler::Fsr,
 		_ => Upscaler::None,
 	}
@@ -371,7 +379,7 @@ impl Present {
 		let (_, dst, crop) = self.blt_rects_crop();
 		let up = (dst.right - dst.left) as u32 > crop.0 || (dst.bottom - dst.top) as u32 > crop.1;
 		let mut which = pick(UPSCALE.load(std::sync::atomic::Ordering::Relaxed), self.vendor);
-		if !up || (which == Upscaler::Fsr && self.fsr_failed.get()) {
+		if !up || (matches!(which, Upscaler::Fsr | Upscaler::Sgsr) && self.fsr_failed.get()) {
 			which = Upscaler::None;
 		}
 		if self.logged.get() != Some(which) {
@@ -389,7 +397,7 @@ impl Present {
 		if vendor_want != self.vendor_on.get() {
 			self.set_vendor_upscale(vendor_want);
 		}
-		if which == Upscaler::Fsr {
+		if matches!(which, Upscaler::Fsr | Upscaler::Sgsr) {
 			let mut slot = self.fsr.borrow_mut();
 			if slot.is_none() {
 				match super::fsr::Fsr::new(&self.device) {
@@ -403,10 +411,12 @@ impl Present {
 				}
 			}
 			let fsr = slot.as_mut().unwrap();
+			// SGSR without its shader (didn't compile on this GPU): FSR instead.
+			let sgsr = which == Upscaler::Sgsr && fsr.has_sgsr();
 			let r = fsr
 				.source(crop.0, crop.1)
 				.and_then(|mid| self.blt_to(src, &mid, Some(crop)))
-				.and_then(|_| fsr.run(back, dst));
+				.and_then(|_| if sgsr { fsr.run_sgsr(back, dst) } else { fsr.run(back, dst) });
 			match r {
 				Ok(()) => return Ok(()),
 				Err(e) => {

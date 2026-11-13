@@ -8,6 +8,10 @@
 //! The shader math is FSR 1.0.2 (Copyright (c) 2021 Advanced Micro Devices, Inc., MIT license),
 //! after agyild's single-file mpv port, extended from luma-only to RGB the way the original
 //! EASU works: the edge direction and length come from luma, the 12 taps accumulate RGB.
+//!
+//! Also Snapdragon Game Super Resolution 1 (`sgsr1.hlsl`, Qualcomm, BSD-3-Clause): ONE pass,
+//! 12-tap Lanczos-like scaling plus edge sharpening, tuned for Adreno - the upscaler a
+//! Snapdragon client (no NVIDIA / Intel video upscaler) uses on Auto.
 
 use windows::core::{Interface, Result, PCSTR};
 use windows::Win32::Foundation::RECT;
@@ -17,11 +21,13 @@ use windows::Win32::Graphics::Direct3D11::{
 	ID3D11Buffer, ID3D11Device, ID3D11DeviceContext, ID3D11PixelShader, ID3D11RenderTargetView,
 	ID3D11SamplerState, ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VertexShader,
 	D3D11_BIND_CONSTANT_BUFFER, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BUFFER_DESC,
-	D3D11_COMPARISON_ALWAYS, D3D11_CPU_ACCESS_WRITE, D3D11_FILTER_MIN_MAG_MIP_POINT,
+	D3D11_COMPARISON_ALWAYS, D3D11_CPU_ACCESS_WRITE, D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_FILTER_MIN_MAG_MIP_POINT,
 	D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_WRITE_DISCARD, D3D11_SAMPLER_DESC, D3D11_TEXTURE2D_DESC,
 	D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_USAGE_DEFAULT, D3D11_USAGE_DYNAMIC, D3D11_VIEWPORT,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+
+const SGSR_HLSL: &str = include_str!("sgsr1.hlsl");
 
 const HLSL: &str = r#"
 cbuffer C : register(b0) {
@@ -175,7 +181,11 @@ pub struct Fsr {
 	vs: ID3D11VertexShader,
 	easu: ID3D11PixelShader,
 	rcas: ID3D11PixelShader,
+	/// Snapdragon GSR 1 (one pass); `None` when its shader didn't compile.
+	sgsr: Option<ID3D11PixelShader>,
 	samp: ID3D11SamplerState,
+	/// Bilinear sampler (SGSR's centre tap; its Gather ignores the filter).
+	lin: ID3D11SamplerState,
 	cb: ID3D11Buffer,
 	/// The converted source at its own resolution (the VideoProcessor writes it).
 	src: Option<Target>,
@@ -184,14 +194,18 @@ pub struct Fsr {
 }
 
 fn compile(entry: &str, target: &str) -> Result<ID3DBlob> {
+	compile_src(HLSL, entry, target)
+}
+
+fn compile_src(src: &str, entry: &str, target: &str) -> Result<ID3DBlob> {
 	let entry_c = format!("{entry}\0");
 	let target_c = format!("{target}\0");
 	let mut blob: Option<ID3DBlob> = None;
 	let mut errors: Option<ID3DBlob> = None;
 	let hr = unsafe {
 		D3DCompile(
-			HLSL.as_ptr() as *const _,
-			HLSL.len(),
+			src.as_ptr() as *const _,
+			src.len(),
 			None,
 			None,
 			None,
@@ -225,6 +239,7 @@ impl Fsr {
 		let easu_b = compile("ps_easu", "ps_5_0")?;
 		let rcas_b = compile("ps_rcas", "ps_5_0")?;
 		let (mut vs, mut easu, mut rcas, mut samp, mut cb) = (None, None, None, None, None);
+		let (mut sgsr, mut lin) = (None, None);
 		unsafe {
 			device.CreateVertexShader(bytes(&vs_b), None, Some(&mut vs))?;
 			device.CreatePixelShader(bytes(&easu_b), None, Some(&mut easu))?;
@@ -242,6 +257,14 @@ impl Fsr {
 				MaxLOD: f32::MAX,
 			};
 			device.CreateSamplerState(&sd, Some(&mut samp))?;
+			let ld = D3D11_SAMPLER_DESC { Filter: D3D11_FILTER_MIN_MAG_MIP_LINEAR, ..sd };
+			device.CreateSamplerState(&ld, Some(&mut lin))?;
+			match compile_src(SGSR_HLSL, "ps_sgsr", "ps_5_0") {
+				Ok(b) => {
+					let _ = device.CreatePixelShader(bytes(&b), None, Some(&mut sgsr));
+				}
+				Err(e) => eprintln!("pulsar-render(win): SGSR shader unavailable ({e})"),
+			}
 			let bd = D3D11_BUFFER_DESC {
 				ByteWidth: std::mem::size_of::<Consts>() as u32,
 				Usage: D3D11_USAGE_DYNAMIC,
@@ -258,7 +281,9 @@ impl Fsr {
 			vs: vs.unwrap(),
 			easu: easu.unwrap(),
 			rcas: rcas.unwrap(),
+			sgsr,
 			samp: samp.unwrap(),
+			lin: lin.unwrap(),
 			cb: cb.unwrap(),
 			src: None,
 			mid: None,
@@ -299,6 +324,7 @@ impl Fsr {
 	unsafe fn pass(
 		&self,
 		ps: &ID3D11PixelShader,
+		samp: &ID3D11SamplerState,
 		input: &ID3D11ShaderResourceView,
 		rtv: &ID3D11RenderTargetView,
 		vp: (f32, f32, f32, f32),
@@ -325,7 +351,7 @@ impl Fsr {
 		ctx.VSSetShader(&self.vs, None);
 		ctx.PSSetShader(ps, None);
 		ctx.PSSetConstantBuffers(0, Some(&[Some(self.cb.clone())]));
-		ctx.PSSetSamplers(0, Some(&[Some(self.samp.clone())]));
+		ctx.PSSetSamplers(0, Some(&[Some(samp.clone())]));
 		ctx.PSSetShaderResources(0, Some(&[Some(input.clone())]));
 		ctx.Draw(3, 0);
 		// Unbind the input: next frame it is a render target again.
@@ -346,6 +372,7 @@ impl Fsr {
 		let (sw, sh) = (src.w as f32, src.h as f32);
 		self.pass(
 			&self.easu,
+			&self.samp,
 			&src.srv,
 			&mid.rtv,
 			(0.0, 0.0, dw as f32, dh as f32),
@@ -357,10 +384,39 @@ impl Fsr {
 		self.ctx.ClearRenderTargetView(&back_rtv, &[0.0, 0.0, 0.0, 1.0]);
 		self.pass(
 			&self.rcas,
+			&self.samp,
 			&mid.srv,
 			&back_rtv,
 			(dst.left as f32, dst.top as f32, dw as f32, dh as f32),
 			Consts { con0: [dw as f32, dh as f32, 1.0 / dw as f32, 1.0 / dh as f32], con1: [dw as f32, dh as f32, SHARPNESS, 0.0] },
+		)
+	}
+}
+
+impl Fsr {
+	pub fn has_sgsr(&self) -> bool {
+		self.sgsr.is_some()
+	}
+
+	/// Snapdragon GSR: `src` -> `back` at `dst` in one pass (bars cleared black).
+	pub unsafe fn run_sgsr(&mut self, back: &ID3D11Texture2D, dst: RECT) -> Result<()> {
+		let (Some(src), Some(ps)) = (self.src.as_ref(), self.sgsr.as_ref()) else {
+			return Ok(());
+		};
+		let dw = (dst.right - dst.left).max(1) as f32;
+		let dh = (dst.bottom - dst.top).max(1) as f32;
+		let (sw, sh) = (src.w as f32, src.h as f32);
+		let mut back_rtv = None;
+		self.device.CreateRenderTargetView(back, None, Some(&mut back_rtv))?;
+		let back_rtv: ID3D11RenderTargetView = back_rtv.unwrap();
+		self.ctx.ClearRenderTargetView(&back_rtv, &[0.0, 0.0, 0.0, 1.0]);
+		self.pass(
+			ps,
+			&self.lin,
+			&src.srv,
+			&back_rtv,
+			(dst.left as f32, dst.top as f32, dw, dh),
+			Consts { con0: [1.0 / sw, 1.0 / sh, sw, sh], con1: [dw, dh, 0.0, 0.0] },
 		)
 	}
 }
@@ -386,5 +442,7 @@ mod tests {
 		for (entry, target) in [("vs_main", "vs_5_0"), ("ps_easu", "ps_5_0"), ("ps_rcas", "ps_5_0")] {
 			assert!(super::compile(entry, target).is_ok(), "{entry} failed to compile");
 		}
+		assert!(super::compile_src(super::SGSR_HLSL, "ps_sgsr", "ps_5_0").is_ok(), "ps_sgsr failed to compile");
+		assert!(super::compile_src(super::SGSR_HLSL, "vs_main", "vs_5_0").is_ok());
 	}
 }

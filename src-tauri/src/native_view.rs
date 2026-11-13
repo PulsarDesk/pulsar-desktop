@@ -34,7 +34,7 @@ static UPSCALE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
 pub fn set_upscale_mode(mode: &str) {
 	let m = match mode {
-		"auto" | "fsr" | "ai" => mode,
+		"auto" | "fsr" | "ai" | "sgsr" => mode,
 		_ => "off",
 	};
 	*UPSCALE.lock().unwrap() = m.to_string();

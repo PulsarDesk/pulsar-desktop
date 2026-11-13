@@ -112,10 +112,11 @@ export interface UiSettings {
 	 * own mouse, and show ours separately (issue #7). Default on; also in the session menu. */
 	hostCursor: boolean;
 	/** Picture upscaling (client): 'off' | 'auto' (the GPU's AI upscaler, else FSR) | 'fsr' |
-	 * 'ai' (NVIDIA RTX / Intel Video Super Resolution). Default 'auto': it only acts when the
+	 * 'ai' (NVIDIA RTX / Intel Video Super Resolution) | 'sgsr' (Snapdragon GSR; FSR off Windows).
+	 * Default 'auto' (AI, else Snapdragon GSR on Qualcomm, else FSR): it only acts when the
 	 * picture is scaled UP (the adaptive ladder dropped the stream below the screen's size, or a
 	 * smaller host), so a full-size stream is untouched and a lowered one comes back sharp. */
-	upscale: 'off' | 'auto' | 'fsr' | 'ai';
+	upscale: 'off' | 'auto' | 'fsr' | 'ai' | 'sgsr';
 	/** Allow more than one session to the same device (same host, mode and game): a repeat
 	 * connect opens another session instead of switching to the open one. Off by default. */
 	duplicateSessions: boolean;
