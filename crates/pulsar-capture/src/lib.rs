@@ -995,6 +995,13 @@ pts += 1;
 					plan.probe = false;
 					probe_results.clear();
 				}
+				// Release log too (2026-11-13: a host whose WGC capture gave no frame and no
+				// fallback left nothing to say why — this line is the first clue next time).
+				encode_log(&format!(
+					"build #{build_no} run exited ({}) frames_sent={frames_sent} submit_errs={submit_errs} dry={}",
+					match exit { dxgi::RunExit::Stop => "stop".to_string(), dxgi::RunExit::Switch(i) => format!("switch->{i}") },
+					went_dry.load(Ordering::Relaxed),
+				));
 				cap_log(&format!(
 					"build #{build_no} run exited ({}) frames_sent={frames_sent} submit_errs={submit_errs}",
 					match exit { dxgi::RunExit::Stop => "stop".to_string(), dxgi::RunExit::Switch(i) => format!("switch->{i}") },
