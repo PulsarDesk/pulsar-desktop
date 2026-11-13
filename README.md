@@ -59,7 +59,7 @@ and through a relay when they can't.
 - **Tabs like a browser:** every session is a tab; drag one out into its own window, drop it onto another window,
   or drag it onto the picture to show two sessions side by side.
 - **Split screen:** several independent sessions in one window, to the same host or different ones.
-- **Multi-monitor:** pick which host monitor to view.
+- **Multi-monitor:** pick which host monitor to view; the list follows monitors being plugged in or removed.
 - **File manager:** browse the other computer's files and download them, or drop files to send them.
 - **Clipboard sync, chat and microphone** over the same session.
 - **Free cursor:** leave the picture and the mouse is yours again; enter it and you control the other side. When
