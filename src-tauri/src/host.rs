@@ -68,6 +68,9 @@ use crate::util::{config_path, display_rotation, identity_path, resolve_relay, D
 #[cfg(target_os = "linux")]
 pub(crate) mod cursor;
 mod handlers;
+/// Windows: host-ordered stream restarts around an NVIDIA driver that stops answering.
+#[cfg(windows)]
+pub(crate) mod failover;
 /// Desktop injector: SYSTEM helper (UAC / lock screen) first, SendInput fallback.
 mod sysinput;
 pub(crate) mod takeover;
@@ -1169,6 +1172,15 @@ pub(crate) async fn bring_online(
 				// an IDR on) a client keyframe-request — MediaNack([0]) — re-issues the last StreamReq
 				// here so capture restarts with a fresh IDR (see on_nack below for the gating).
 				let nack_restream_tx = restream_tx.clone();
+				// And to failover.rs: the stream handler's own restarts when the native NVENC path
+				// stalls on a driver that stopped answering, and when NVENC is back.
+				// `nvenc_told`: whether the caps this client was sent listed NVENC (true until it
+				// asks) — a stream is never moved onto an encoder family its client was not told.
+				#[cfg(windows)]
+				let nvenc_told = Arc::new(std::sync::atomic::AtomicBool::new(true));
+				#[cfg(windows)]
+				let force_restart =
+					failover::register(sid, restream_tx.clone(), last_req_store.clone(), nvenc_told.clone());
 				// Poll the host's own display geometry; on a STABLE change to the streamed
 				// display's size, re-issue the stored StreamReq once so capture rebuilds at the
 				// new size. Inert when nothing has streamed yet (no stored req) and on platforms
@@ -1459,6 +1471,10 @@ pub(crate) async fn bring_online(
 					#[cfg(target_os = "linux")]
 					cap_gen.clone(),
 					last_req_store.clone(),
+					#[cfg(windows)]
+					force_restart,
+					#[cfg(windows)]
+					nvenc_told.clone(),
 					adapt_state.clone(),
 				);
 				// Route the client's input: controllers into a virtual gamepad, and
@@ -2349,7 +2365,19 @@ pub(crate) async fn bring_online(
 					on_file: if crate::seat::active() { Box::new(|_: pulsar_core::service::DataMsg| {}) } else { Box::new(on_file) },
 					on_audio: Box::new(on_audio),
 					on_reverse: Box::new(on_reverse),
-					stream_caps: Box::new(crate::caps_guard::guarded(app_h.clone(), media_features, stream_caps)),
+					stream_caps: Box::new({
+						let answer = crate::caps_guard::guarded(app_h.clone(), media_features, stream_caps);
+						move || {
+							let caps = answer();
+							// What THIS client was told (the guard may have answered its fallback).
+							#[cfg(windows)]
+							nvenc_told.store(
+								caps.encoders.iter().any(|e| e == "nvenc"),
+								std::sync::atomic::Ordering::SeqCst,
+							);
+							caps
+						}
+					}),
 					// The host's visible top-level windows the client can pick as a per-window
 					// (WGC) capture target (Phase 2b co-op) — answers the client's QueryWindows.
 					// Cheap (one EnumWindows pass), called on demand when the client opens its

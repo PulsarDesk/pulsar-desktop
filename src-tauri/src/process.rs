@@ -641,6 +641,10 @@ fn probe_encoder_codec(
 	ok
 }
 
+/// PCI vendor id of Intel GPUs (the only ones Quick Sync runs on).
+#[cfg(windows)]
+const VENDOR_INTEL: u32 = 0x8086;
+
 /// Which codecs an encoder can ACTUALLY encode on this machine, VALIDATED by a real
 /// one-frame probe (not just ffmpeg's `-encoders` listing).
 ///
@@ -666,6 +670,15 @@ pub fn validated_codecs(ffmpeg: &str, encoder: HwEncoder, vaapi_device: &str) ->
 			.filter(|c| listed.contains(c))
 			.collect();
 	}
+	// Windows QSV needs an Intel GPU. Without one the probe can only fail, and on its way it
+	// opens a D3D11 device on whatever GPU is there: on a host whose NVIDIA driver was not
+	// answering (2026-11-13) each of these ffmpegs hung in it, unkillable, and the caps probe
+	// took 55 s for three encoders that could never work.
+	#[cfg(windows)]
+	if encoder == HwEncoder::Qsv && !pulsar_capture::gpu_vendors().contains(&VENDOR_INTEL) {
+		tracing::debug!("encoder probe: qsv skipped — no Intel GPU");
+		return Vec::new();
+	}
 	let listed = encoder.available_codecs(&encoders_text(ffmpeg));
 	listed
 		.into_iter()
@@ -673,43 +686,184 @@ pub fn validated_codecs(ffmpeg: &str, encoder: HwEncoder, vaapi_device: &str) ->
 		.collect()
 }
 
-/// The NVENC SDK's codec list (`pulsar_capture::nvenc_codecs`), asked in a CHILD process
-/// (`pulsar --probe-nvenc`) with a deadline. Opening an NVENC session needs a D3D device, and the
-/// driver can hold that call for minutes (2026-11-13, measured on the home PC: the child sat in
-/// the driver > 1 min — unkillable meanwhile; the 2026-11-12 "host never answers" hang was the
-/// same call in-process). Past the deadline NVENC counts as unavailable FOR NOW and nothing
-/// waits on the child: when it does answer, its result is cached and later streams use NVENC.
+/// NVENC availability on Windows, as the probe child (`pulsar --probe-nvenc`) and the running
+/// streams report it.
+///
+/// Opening an NVENC session needs a D3D device on the NVIDIA GPU, and the driver can hold that
+/// call for hours — uninterruptibly, the process cannot even be killed meanwhile. Measured on
+/// the home PC (2026-11-13, stacks read from the stuck processes): `D3D11CreateDevice` on the
+/// NVIDIA adapter sat in `D3DKMTDestroyHwQueue` for 75 min and for 5 h 50 min, each time for
+/// exactly as long as another program's process hung in the same driver. So nothing ever waits
+/// on NVENC here:
+///
+/// * the codec list is asked in a child with a deadline ([`nvenc_codecs_isolated`]); a child
+///   that answers late still counts — its answer makes NVENC available again;
+/// * a stream whose native NVENC path stalls reports it ([`nvenc_report_stall`]): NVENC is off
+///   from that moment, until the probe child sent then answers. An answer that took long says
+///   the driver was stuck and is back; one that came at once says the driver was never the
+///   reason — NVENC is simply on again, and only the stream that stalled stays off it;
+/// * [`on_nvenc_back`] runs when the driver is back after having been stuck, so the caps are
+///   refreshed and the streams that fell back to another encoder return
+///   ([`nvenc_back_epoch`] counts these returns).
 #[cfg(windows)]
-pub fn nvenc_codecs_isolated() -> Vec<pulsar_capture::Codec> {
-	use std::sync::atomic::{AtomicBool, Ordering};
-	use std::sync::Mutex;
-	static KNOWN: Mutex<Option<Vec<pulsar_capture::Codec>>> = Mutex::new(None);
-	static RUNNING: AtomicBool = AtomicBool::new(false);
-	const DEADLINE: std::time::Duration = std::time::Duration::from_secs(8);
-	if let Some(v) = KNOWN.lock().unwrap().clone() {
-		return v;
+mod nv {
+	use std::sync::{Mutex, OnceLock};
+	use std::time::Duration;
+
+	/// How long a caller waits for the probe child before NVENC counts as unavailable for now.
+	pub(super) const DEADLINE: Duration = Duration::from_secs(8);
+	/// A probe sent after a stall that takes longer than this sat in the driver (a healthy one
+	/// answers in about half a second): the driver was the reason, and it is back.
+	pub(super) const STUCK_ANSWER: Duration = Duration::from_secs(3);
+
+	#[derive(Default)]
+	pub(super) struct State {
+		/// The last probe answer (`None` = never answered).
+		pub known: Option<Vec<pulsar_capture::Codec>>,
+		/// A probe child is out there (maybe stuck in the driver).
+		pub probing: bool,
+		/// A stream's native path stalled and no probe has answered since.
+		pub stalled: bool,
 	}
-	// A probe still out there (stuck in the driver): unavailable until it answers.
-	if RUNNING.swap(true, Ordering::SeqCst) {
-		return Vec::new();
+
+	impl State {
+		/// The codecs NVENC can be used for right now; `None` = not known yet.
+		pub fn usable(&self) -> Option<Vec<pulsar_capture::Codec>> {
+			if self.stalled {
+				return Some(Vec::new());
+			}
+			self.known.clone()
+		}
+
+		/// A probe child answered `codecs` after `took`. Returns whether the driver is back
+		/// after having been stuck (→ run the [`super::on_nvenc_back`] hook): a caller gave up
+		/// on this probe ([`DEADLINE`]), or it was sent for a stall and sat in the driver
+		/// ([`STUCK_ANSWER`]). A stall the driver had no part in is no return: NVENC is usable
+		/// again, and the stream that stalled keeps off it by itself.
+		pub fn on_answer(&mut self, codecs: Vec<pulsar_capture::Codec>, took: Duration) -> bool {
+			let was_stalled = std::mem::take(&mut self.stalled);
+			self.probing = false;
+			let any = !codecs.is_empty();
+			self.known = Some(codecs);
+			any && (took > DEADLINE || (was_stalled && took > STUCK_ANSWER))
+		}
 	}
-	let t0 = std::time::Instant::now();
+
+	/// How many times the driver came back after having been stuck.
+	pub(super) static BACK_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+	pub(super) fn state() -> &'static Mutex<State> {
+		static S: OnceLock<Mutex<State>> = OnceLock::new();
+		S.get_or_init(|| Mutex::new(State::default()))
+	}
+
+	pub(super) static BACK: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+
+	/// The last probe answer, kept across runs (`%LOCALAPPDATA%\dev.pulsar.app\nvenc-codecs.txt`,
+	/// one line like `h264,h265`; empty = no NVENC). A host that starts while the driver is not
+	/// answering lists NVENC from it ([`super::nvenc_codecs_to_advertise`]): a client is told
+	/// the encoder families BEFORE the stream, and one that was not told about NVENC is never
+	/// moved onto it later (its decoder may not take that bitstream).
+	fn memory_path() -> Option<std::path::PathBuf> {
+		std::env::var_os("LOCALAPPDATA").map(|d| std::path::PathBuf::from(d).join("dev.pulsar.app").join("nvenc-codecs.txt"))
+	}
+
+	pub(super) fn remember(codecs: &[pulsar_capture::Codec]) {
+		let Some(path) = memory_path() else { return };
+		let line = codecs.iter().map(|c| name(*c)).collect::<Vec<_>>().join(",");
+		if let Some(dir) = path.parent() {
+			let _ = std::fs::create_dir_all(dir);
+		}
+		let _ = std::fs::write(path, line);
+	}
+
+	pub(super) fn remembered() -> Vec<pulsar_capture::Codec> {
+		memory_path().and_then(|p| std::fs::read_to_string(p).ok()).map(|t| parse(&t)).unwrap_or_default()
+	}
+
+	pub(super) fn name(c: pulsar_capture::Codec) -> &'static str {
+		match c {
+			pulsar_capture::Codec::H264 => "h264",
+			pulsar_capture::Codec::H265 => "h265",
+			pulsar_capture::Codec::Av1 => "av1",
+		}
+	}
+
+	/// `h264,h265` → codecs (unknown names dropped).
+	pub(super) fn parse(list: &str) -> Vec<pulsar_capture::Codec> {
+		list.split(',')
+			.filter_map(|c| match c.trim() {
+				"h264" => Some(pulsar_capture::Codec::H264),
+				"h265" => Some(pulsar_capture::Codec::H265),
+				"av1" => Some(pulsar_capture::Codec::Av1),
+				_ => None,
+			})
+			.collect()
+	}
+}
+
+/// Register what runs when NVENC is available again after having been unavailable (a probe
+/// child that was stuck in the driver answered). One hook per process; later calls are ignored.
+#[cfg(windows)]
+pub fn on_nvenc_back(f: impl Fn() + Send + Sync + 'static) {
+	let _ = nv::BACK.set(Box::new(f));
+}
+
+/// The codecs NVENC can encode right now without asking anything: empty while it is
+/// unavailable (probe not answered yet, a stall reported, see [`nv`]).
+#[cfg(windows)]
+pub fn nvenc_codecs_now() -> Vec<pulsar_capture::Codec> {
+	nv::state().lock().unwrap().usable().unwrap_or_default()
+}
+
+/// How many times the NVIDIA driver came back after having been stuck. A stream whose native
+/// path stalled notes it and keeps off NVENC until it has moved on: stalling again right away
+/// is the one thing a restart must not do, and a later value is the sign that it will not.
+#[cfg(windows)]
+pub fn nvenc_back_epoch() -> u64 {
+	nv::BACK_EPOCH.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// The NVENC codecs to LIST for clients: the last probe answer — also while NVENC is off after
+/// a stall — or, before this run's probe has answered at all (it sits in the driver), the
+/// answer of an earlier run. NVENC stays listed while it is merely not answering so that a
+/// client picks a codec its decoder takes from NVENC too, and its stream can return to NVENC.
+#[cfg(windows)]
+pub fn nvenc_codecs_to_advertise() -> Vec<pulsar_capture::Codec> {
+	let known = nv::state().lock().unwrap().known.clone();
+	known.unwrap_or_else(nv::remembered)
+}
+
+/// A stream's native NVENC path stalled (no frame from a fresh capture, a capture thread stuck
+/// in a GPU call, an init that never finished). NVENC is unavailable from now on, and a probe
+/// child is sent to find out when the driver answers again. Returns `false` when a stall was
+/// already on record.
+#[cfg(windows)]
+pub fn nvenc_report_stall(why: &str) -> bool {
+	let spawn = {
+		let mut g = nv::state().lock().unwrap();
+		if g.stalled {
+			return false;
+		}
+		g.stalled = true;
+		!std::mem::replace(&mut g.probing, true)
+	};
+	tracing::error!(why, "NVENC path stalled — using the next encoder until the NVIDIA driver answers a probe again");
+	if spawn {
+		let _ = spawn_nvenc_probe(std::time::Instant::now(), 0);
+	}
+	true
+}
+
+/// Send one probe child and record its answer whenever it comes (`nv::State::on_answer`). The
+/// caller must have set `probing`. The returned channel gets the answer too.
+#[cfg(windows)]
+fn spawn_nvenc_probe(t0: std::time::Instant, retry: u32) -> std::sync::mpsc::Receiver<Vec<pulsar_capture::Codec>> {
 	tracing::info!("encoder probe: nvenc (child process) started");
 	let parse = |out: &str| -> Vec<pulsar_capture::Codec> {
-		out.lines()
-			.find_map(|l| l.strip_prefix("nvenc "))
-			.map(|list| {
-				list.split(',')
-					.filter_map(|c| match c.trim() {
-						"h264" => Some(pulsar_capture::Codec::H264),
-						"h265" => Some(pulsar_capture::Codec::H265),
-						"av1" => Some(pulsar_capture::Codec::Av1),
-						_ => None,
-					})
-					.collect()
-			})
-			.unwrap_or_default()
+		out.lines().find_map(|l| l.strip_prefix("nvenc ")).map(nv::parse).unwrap_or_default()
 	};
+	let (tx, rx) = std::sync::mpsc::channel();
 	let spawned = std::env::current_exe().and_then(|exe| {
 		let mut cmd = std::process::Command::new(exe);
 		cmd.arg("--probe-nvenc");
@@ -720,35 +874,145 @@ pub fn nvenc_codecs_isolated() -> Vec<pulsar_capture::Codec> {
 		cmd.spawn()
 	});
 	let child = match spawned {
-		Ok(c) => c,
+		Ok(c) => Some(c),
 		Err(e) => {
 			tracing::warn!(%e, "encoder probe: nvenc child failed to start — probing in-process");
-			let v = pulsar_capture::nvenc_codecs().to_vec();
-			*KNOWN.lock().unwrap() = Some(v.clone());
-			RUNNING.store(false, Ordering::SeqCst);
-			return v;
+			None
 		}
 	};
-	crate::job::assign(&child);
-	let (tx, rx) = std::sync::mpsc::channel();
+	if let Some(c) = child.as_ref() {
+		crate::job::assign(c);
+	}
 	std::thread::spawn(move || {
-		let out = child.wait_with_output();
-		let codecs = out.map(|o| parse(&String::from_utf8_lossy(&o.stdout))).unwrap_or_default();
-		let late = t0.elapsed() > DEADLINE;
-		tracing::info!(ms = t0.elapsed().as_millis() as u64, ?codecs, late, "encoder probe: nvenc done");
-		*KNOWN.lock().unwrap() = Some(codecs.clone());
-		RUNNING.store(false, Ordering::SeqCst);
+		let codecs = match child {
+			Some(c) => c.wait_with_output().map(|o| parse(&String::from_utf8_lossy(&o.stdout))).unwrap_or_default(),
+			None => pulsar_capture::nvenc_codecs().to_vec(),
+		};
+		let took = t0.elapsed();
+		let late = took > nv::DEADLINE;
+		tracing::info!(ms = took.as_millis() as u64, ?codecs, late, "encoder probe: nvenc done");
+		// A call that sat in the driver and then FAILED says nothing about the GPU (2026-11-13:
+		// `codecs=[]` after 5 h 50 min, and a fresh probe half an hour later listed both
+		// codecs): ask once more now that the driver answers.
+		if late && codecs.is_empty() && retry == 0 {
+			let _ = tx.send(Vec::new());
+			let _ = spawn_nvenc_probe(std::time::Instant::now(), 1);
+			return;
+		}
+		// The retry's own time says nothing about how long NVENC was away: it counts as the
+		// late answer it follows.
+		let took = if retry > 0 { took.max(nv::DEADLINE + std::time::Duration::from_millis(1)) } else { took };
+		let back = nv::state().lock().unwrap().on_answer(codecs.clone(), took);
+		nv::remember(&codecs);
 		let _ = tx.send(codecs);
+		if back {
+			nv::BACK_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+			tracing::info!("NVENC is available again");
+			if let Some(f) = nv::BACK.get() {
+				f();
+			}
+		}
 	});
-	match rx.recv_timeout(DEADLINE) {
+	rx
+}
+
+/// The NVENC SDK's codec list (`pulsar_capture::nvenc_codecs`), asked in a CHILD process
+/// (`pulsar --probe-nvenc`) with a deadline — see [`nv`]. Past the deadline NVENC counts as
+/// unavailable FOR NOW and nothing waits on the child: when it does answer, its result is
+/// recorded and the streams return to NVENC ([`on_nvenc_back`]).
+#[cfg(windows)]
+pub fn nvenc_codecs_isolated() -> Vec<pulsar_capture::Codec> {
+	let t0 = std::time::Instant::now();
+	{
+		let mut g = nv::state().lock().unwrap();
+		if let Some(v) = g.usable() {
+			return v;
+		}
+		// A probe still out there (stuck in the driver): unavailable until it answers.
+		if std::mem::replace(&mut g.probing, true) {
+			return Vec::new();
+		}
+	}
+	match spawn_nvenc_probe(t0, 0).recv_timeout(nv::DEADLINE) {
 		Ok(c) => c,
 		Err(_) => {
 			tracing::error!(
-				ms = DEADLINE.as_millis() as u64,
+				ms = nv::DEADLINE.as_millis() as u64,
 				"encoder probe: nvenc did not answer in time (driver busy?) — unavailable until it does"
 			);
 			Vec::new()
 		}
+	}
+}
+
+#[cfg(all(test, windows))]
+mod nv_tests {
+	use super::nv::{State, DEADLINE, STUCK_ANSWER};
+	use pulsar_capture::Codec::{H264, H265};
+	use std::time::Duration;
+
+	const FAST: Duration = Duration::from_millis(500);
+
+	#[test]
+	fn a_first_answer_in_time_is_available_at_once() {
+		let mut s = State { probing: true, ..State::default() };
+		assert_eq!(s.usable(), None, "not known yet");
+		assert!(!s.on_answer(vec![H264, H265], FAST), "nobody was told otherwise meanwhile");
+		assert_eq!(s.usable(), Some(vec![H264, H265]));
+		assert!(!s.probing);
+	}
+
+	#[test]
+	fn a_late_first_answer_brings_nvenc_back() {
+		// The startup probe sat in the driver: the caps were built without NVENC.
+		let mut s = State { probing: true, ..State::default() };
+		assert!(s.on_answer(vec![H264], DEADLINE + Duration::from_secs(4000)));
+		assert_eq!(s.usable(), Some(vec![H264]));
+	}
+
+	#[test]
+	fn an_answer_while_nvenc_is_in_use_is_not_a_return() {
+		let mut s = State { known: Some(vec![H264]), ..State::default() };
+		assert!(!s.on_answer(vec![H264, H265], FAST));
+		assert_eq!(s.usable(), Some(vec![H264, H265]));
+	}
+
+	#[test]
+	fn a_stall_turns_nvenc_off_until_the_stuck_probe_answers() {
+		let mut s = State { known: Some(vec![H264, H265]), stalled: true, probing: true };
+		assert_eq!(s.usable(), Some(vec![]), "off while stalled");
+		// The driver was wedged: the probe answers 75 min later → back.
+		assert!(s.on_answer(vec![H264, H265], Duration::from_secs(4500)));
+		assert_eq!(s.usable(), Some(vec![H264, H265]));
+		// A short freeze counts too: the probe sat in the driver for a few seconds.
+		let mut s = State { known: Some(vec![H264]), stalled: true, probing: true };
+		assert!(s.on_answer(vec![H264], STUCK_ANSWER + Duration::from_millis(1)));
+	}
+
+	#[test]
+	fn a_stall_the_driver_had_no_part_in_is_not_a_return() {
+		let mut s = State { known: Some(vec![H264]), stalled: true, probing: true };
+		// The probe answers at once: the capture stalled for another reason. NVENC is usable
+		// again — for other streams; nothing is told to go back to the path that just failed.
+		assert!(!s.on_answer(vec![H264], FAST));
+		assert_eq!(s.usable(), Some(vec![H264]));
+	}
+
+	#[test]
+	fn the_codec_list_round_trips() {
+		use pulsar_capture::Codec::Av1;
+		let line = [H264, H265, Av1].iter().map(|c| super::nv::name(*c)).collect::<Vec<_>>().join(",");
+		assert_eq!(line, "h264,h265,av1");
+		assert_eq!(super::nv::parse(&line), vec![H264, H265, Av1]);
+		assert_eq!(super::nv::parse(" h265 , vp9,\n"), vec![H265]);
+		assert!(super::nv::parse("").is_empty());
+	}
+
+	#[test]
+	fn an_answer_without_codecs_is_never_a_return() {
+		let mut s = State { stalled: true, probing: true, ..State::default() };
+		assert!(!s.on_answer(vec![], DEADLINE + Duration::from_secs(60)));
+		assert_eq!(s.usable(), Some(vec![]));
 	}
 }
 

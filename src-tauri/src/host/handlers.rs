@@ -1672,6 +1672,19 @@ fn spawn_media_forwarders(
 /// (an in-thread monitor switch rebuild takes well under this).
 #[cfg(windows)]
 const NATIVE_WEDGED_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
+/// A native capture thread that is alive but has encoded nothing for this long is stuck inside
+/// a GPU call. Longer than [`NATIVE_WEDGED_AFTER`] on purpose: a DXGI re-init after a display
+/// mode change (a fullscreen game starting) retries for about 5 s without encoding, and ends —
+/// with frames again, or with the thread gone.
+#[cfg(windows)]
+const NATIVE_STUCK_AFTER: std::time::Duration = std::time::Duration::from_secs(8);
+/// The two in ticks of the native stream's 2 Hz stats reporter, which watches the count too:
+/// a FRESH capture without a single frame after [`NATIVE_WEDGED_AFTER`] (its own no-frame
+/// watchdog tried the other source at 2.5 s), a running one after [`NATIVE_STUCK_AFTER`].
+#[cfg(windows)]
+const NATIVE_DRY_TICKS: u32 = (NATIVE_WEDGED_AFTER.as_millis() / 500) as u32;
+#[cfg(windows)]
+const NATIVE_STUCK_TICKS: u32 = (NATIVE_STUCK_AFTER.as_millis() / 500) as u32;
 /// How long a restream waits for the previous native capture thread to exit before detaching it.
 #[cfg(windows)]
 const NATIVE_STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
@@ -1859,6 +1872,15 @@ pub(super) fn make_on_stream(
 	// restart capture at the new geometry.  On Windows this is only populated when
 	// native_started=false (ffmpeg fallback); native DXGI sessions self-heal via ACCESS_LOST.
 	last_req_store: Arc<Mutex<Option<StreamReq>>>,
+	// Set by failover.rs right before it re-issues a request through the restream channel: the
+	// next request is a restart the host ordered (this session's native capture stalled, or
+	// NVENC is back for a session on a fallback encoder) and is carried out in full.
+	#[cfg(windows)] force_restart: Arc<std::sync::atomic::AtomicBool>,
+	// Whether the caps this session's client was sent listed NVENC (true until it asks). A
+	// client drops the codecs its decoder cannot take from the encoder families it was told
+	// (an RK3588's rkmpp and native-NVENC HEVC), so a stream is never put on NVENC when it was
+	// not among them — NVENC can come back mid-session (`process::nv`).
+	#[cfg(windows)] nvenc_told: Arc<std::sync::atomic::AtomicBool>,
 	// Per-session screen-adaptation state (Parsec-style). When a StreamReq carries
 	// `adapt: Some((paneW, paneH))` this handler switches the captured monitor to the best-fit
 	// display mode and records the original here; the SessionCleanupGuard reverts it on teardown.
@@ -1893,6 +1915,12 @@ pub(super) fn make_on_stream(
 	// request (the client re-sends one every ~2 s, and keeps asking while its video is silent).
 	#[cfg(windows)]
 	let mut native_watch = pulsar_capture::ProgressWatch::default();
+	// Set when THIS session's native path stalled, to `process::nvenc_back_epoch()` at that
+	// moment: the session keeps off NVENC until the driver has come back since (the count
+	// moved on). Without it a restart would walk straight back into the capture that just
+	// stalled whenever the driver itself turned out to be fine.
+	#[cfg(windows)]
+	let mut native_stalled_at: Option<u64> = None;
 	// The request the running ffmpeg CLI encode (Windows/macOS software/fallback path) was
 	// started with, and when: ffmpeg can't change its bitrate live, so every ABR step used to
 	// restart capture (a visible gap + keyframe each time → stutter, and the gap itself read as
@@ -1925,6 +1953,12 @@ pub(super) fn make_on_stream(
 		// entirely. The mode change is intentionally allowed to trip the host display-mode watcher
 		// / native encoder rebuild downstream — that's how the capture picks up the new geometry.
 		apply_screen_adaptation(&req, &adapt_state);
+		// A restart the host itself ordered (failover.rs): no live fast path and no "unchanged
+		// bitrate step" absorb may swallow it.
+		#[cfg(windows)]
+		let forced = force_restart.swap(false, std::sync::atomic::Ordering::SeqCst);
+		#[cfg(not(any(windows, target_os = "linux")))]
+		let forced = false;
 		// last_req_store is updated below (after native_started is resolved) so the
 		// display-mode watcher only fires for ffmpeg-path sessions on Windows.
 		// WAYLAND BITRATE-ONLY FAST PATH — the client's ABR re-sends the full StreamReq just to
@@ -2006,17 +2040,37 @@ pub(super) fn make_on_stream(
 				.as_ref()
 				.map(|h| (h.is_alive(), native_watch.observe(h.frames_encoded(), std::time::Instant::now())));
 			if let Some((alive, flat)) = verdict {
-				if !alive || flat >= NATIVE_WEDGED_AFTER {
+				if forced || !alive || flat >= NATIVE_WEDGED_AFTER {
 					let h = slot.take().expect("checked above");
 					drop(slot);
-					let joined = h.stop_within(std::time::Duration::from_millis(1500));
+					// A forced restart already waited its 5 s in the stats reporter.
+					let wait = std::time::Duration::from_millis(if forced { 500 } else { 1500 });
+					let joined = h.stop_within(wait);
 					tracing::warn!(
 						alive,
+						forced,
 						flat_ms = flat.as_millis() as u64,
 						joined,
 						"native capture is not encoding → full restart (thread retired{})",
 						if joined { "" } else { ", detached while stuck" }
 					);
+					// Not stoppable (inside a GPU call), encoding nothing for longer than any
+					// re-init takes, or retired by the stats reporter for just that: the restart
+					// below must not walk into the same capture again — NVENC is off until a
+					// probe child gets an answer from the driver (`process::nv`). A thread that
+					// simply died is no such sign; it gets its plain restart.
+					if alive && (forced || !joined || flat >= NATIVE_STUCK_AFTER) {
+						// (The reporter made the report itself before it forced this restart;
+						// a second one would only send another probe.)
+						if !forced {
+							crate::process::nvenc_report_stall(if joined {
+								"the native capture stopped encoding"
+							} else {
+								"the native capture thread is stuck in a GPU call"
+							});
+						}
+						native_stalled_at = Some(crate::process::nvenc_back_epoch());
+					}
 					native_watch.reset();
 					last_native_req = None;
 				}
@@ -2071,7 +2125,7 @@ pub(super) fn make_on_stream(
 		// lost — the client keeps adapting, and a later request compares against what ffmpeg is
 		// actually streaming. A recovery-mode flip still restarts (short GOP needs a new encoder).
 		#[cfg(not(target_os = "linux"))]
-		if let Some((prev, at)) = last_ff_req.as_ref() {
+		if let Some((prev, at)) = last_ff_req.as_ref().filter(|_| !forced) {
 			let mut probe = prev.clone();
 			probe.bitrate_kbps = req.bitrate_kbps;
 			if probe == req && req.bitrate_kbps > 0 && prev.bitrate_kbps > 0 {
@@ -2450,6 +2504,11 @@ pub(super) fn make_on_stream(
 					wait_ms = NATIVE_STOP_WAIT.as_millis() as u64,
 					"native capture thread did not stop in time — detached, restarting anyway"
 				);
+				// It sits inside a GPU call. The capture this restream is about to start must
+				// not walk into the same driver (its build would only time out): NVENC is off
+				// until a probe child gets an answer (`process::nv`).
+				crate::process::nvenc_report_stall("the native capture thread is stuck in a GPU call");
+				native_stalled_at = Some(crate::process::nvenc_back_epoch());
 			}
 			native_watch.reset();
 		}
@@ -2629,6 +2688,45 @@ pub(super) fn make_on_stream(
 			&enc_text,
 			&cfg.vaapi_device,
 		);
+		// Two reasons to keep THIS session off NVENC although it works:
+		// * its native path stalled and the driver has not come back since — the probe sent
+		//   then answered at once, so the driver was not it and the capture would stall again;
+		// * NVENC answered only after this client was sent its caps (they did not list it): the
+		//   codec it then chose may be one its decoder cannot take from NVENC — unless it asks
+		//   for NVENC by name.
+		// The stream takes the best other family.
+		#[cfg(windows)]
+		let native_stalled = match native_stalled_at {
+			Some(at) if crate::process::nvenc_back_epoch() > at => {
+				native_stalled_at = None;
+				false
+			}
+			at => at.is_some(),
+		};
+		#[cfg(windows)]
+		let encoder = if encoder == HwEncoder::Nvenc
+			&& (native_stalled
+				|| (!nvenc_told.load(std::sync::atomic::Ordering::SeqCst)
+					&& encoder_from_str(&req.encoder) != HwEncoder::Nvenc))
+		{
+			let mut avail: Vec<HwEncoder> = pipeline::detect(&enc_text)
+				.into_iter()
+				.filter(|e| !matches!(e, HwEncoder::Nvenc | HwEncoder::Vulkan | HwEncoder::Vaapi))
+				.collect();
+			let other = loop {
+				let c = pipeline::resolve(HwEncoder::Auto, &avail);
+				if c == HwEncoder::Software
+					|| !crate::process::validated_codecs(&ffmpeg, c, &cfg.vaapi_device).is_empty()
+				{
+					break c;
+				}
+				avail.retain(|e| *e != c);
+			};
+			tracing::info!(encoder = ?other, native_stalled, "this session keeps off NVENC");
+			other
+		} else {
+			encoder
+		};
 		// Validate the codec with a real one-frame encode probe (cached) — catches "listed
 		// but the GPU/driver can't init it" (e.g. av1_nvenc on Ampere), degrading to a codec
 		// that actually works rather than producing a dead stream.
@@ -3077,7 +3175,16 @@ pub(super) fn make_on_stream(
 					// and remember an nvenc-shaped failure so the ffmpeg chain skips nvenc.
 					let msg = e.to_string();
 					tracing::warn!(error = %msg, "native DXGI+NVENC capture failed — falling back to ffmpeg");
-					native_nvenc_failed = msg.contains("nvenc") || msg.contains("nvEnc");
+					// The build never finished: its thread sits inside a GPU call (device
+					// creation on an NVIDIA driver that stopped answering). ffmpeg's nvenc
+					// would walk into the same call, so the chain below skips it, and NVENC
+					// stays off until a probe child gets an answer (`process::nv`).
+					let init_stuck = e.kind() == std::io::ErrorKind::TimedOut;
+					if init_stuck {
+						crate::process::nvenc_report_stall("the native capture never finished building");
+						native_stalled_at = Some(crate::process::nvenc_back_epoch());
+					}
+					native_nvenc_failed = init_stuck || msg.contains("nvenc") || msg.contains("nvEnc");
 					false
 				}
 			}
@@ -3201,6 +3308,10 @@ pub(super) fn make_on_stream(
 				let cap_stats = native_stats.clone();
 				#[cfg(windows)]
 				let mut ticks: u32 = 0;
+				// For the stall watchdog below: the request to restart with, and how long the
+				// encoded-frame count has been standing.
+				#[cfg(windows)]
+				let (req_fo, mut last_encoded, mut flat_ticks) = (req.clone(), 0u32, 0u32);
 				// Bind this reporter to the stream generation: a slow-path restream/teardown flips
 				// this flag (above) so THIS thread exits instead of lingering and re-pushing the old
 				// stream's now-frozen encode-ms label. Store it so the next restream can cancel us.
@@ -3220,6 +3331,33 @@ pub(super) fn make_on_stream(
 					#[cfg(windows)]
 					{
 						ticks = ticks.wrapping_add(1);
+					}
+					// The capture encodes nothing: not one frame since it started (NATIVE_DRY_TICKS),
+					// or none any more (NATIVE_STUCK_TICKS — a healthy one re-encodes the last
+					// surface on a still screen, so its count never stands that long). 2026-11-13:
+					// with the NVIDIA driver not answering, a fresh capture built and then stayed
+					// dry, and the client sat on "no picture" until the host app was restarted.
+					// Hand the stream to the next encoder now; `process::nv` brings it back when
+					// the driver answers.
+					#[cfg(windows)]
+					if let Some(cs) = cap_stats.as_ref() {
+						let n = cs.snapshot().encoded;
+						if n != last_encoded {
+							last_encoded = n;
+							flat_ticks = 0;
+						} else {
+							flat_ticks += 1;
+						}
+						if flat_ticks == if n == 0 { NATIVE_DRY_TICKS } else { NATIVE_STUCK_TICKS } {
+							let why = if n == 0 {
+								"a fresh native capture delivered no frame"
+							} else {
+								"the native capture stopped encoding"
+							};
+							crate::process::nvenc_report_stall(why);
+							let queued = super::failover::restart(sid, req_fo.clone());
+							tracing::error!(encoded = n, queued, "{why} → restarting the stream on the next encoder");
+						}
 					}
 					// 7 s in and not one frame encoded (both capture sources dry — the capture
 					// thread's no-frame watchdog already tried the other one): tell the client

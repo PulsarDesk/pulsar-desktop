@@ -92,6 +92,47 @@ All paths emit **RTP/H.264(+HEVC/AV1) over UDP**.
   `NV_ENC_CONFIG` = 3584 B, offset asserts). `mf.rs` answers RFI with Err. Rate/IDR log:
   `C:\Users\Public\pulsar-capture-dbg.txt`.
 
+## Windows: an NVIDIA driver that stops answering (2026-11-13, LOCAL, unpushed)
+
+Seen on a hybrid laptop host: `D3D11CreateDevice` on the NVIDIA adapter blocked inside
+`D3DKMTDestroyHwQueue` for 75 min and for 5 h 50 min — uninterruptibly (the process cannot be
+killed), each time exactly while another program's process hung in the same driver. A stream
+that was already running kept running; a NEW native capture built and never delivered a frame
+(or never finished building), and the bundled ffmpeg's QSV probes hung the same way. Nothing
+may wait on that driver:
+
+- `process.rs` `nv`: NVENC's state. The codec list is asked in a child (`pulsar
+  --probe-nvenc`) with an 8 s deadline; a late answer still counts. A stream reports a stall
+  (`nvenc_report_stall`) → NVENC is off (`nvenc_codecs_now()` empty, so every encoder pick
+  degrades) until the probe child sent then answers. An answer that took > 3 s (a healthy
+  probe: ~0.5 s) means the driver was stuck and is back → `on_nvenc_back` (and
+  `nvenc_back_epoch()` moves on). An answer at once means the driver was not the cause: NVENC
+  is on again, and only the session that stalled keeps off it (`native_stalled_at`, until the
+  epoch moves on or the session ends) — no global lock-out, no bounce back into the capture
+  that just failed.
+- `host/failover.rs` + `make_on_stream`: a stall is a fresh native capture without one frame
+  after 5 s, a running one that encodes nothing for 8 s (the 2 Hz stats reporter watches the
+  count; 8 s because a DXGI re-init after a mode change retries ~5 s without encoding), a
+  capture thread that cannot be stopped within 3 s, or a build that misses its 3 s init. The
+  stream then restarts on the next encoder (AMF / Media Foundation / software) through the
+  session's restream channel with its `force` flag (a forced request is never absorbed as a
+  bitrate step). When the driver is back, the sessions on a fallback encoder are restarted
+  the same way and return to the native path.
+- A client is told the encoder families before the stream and drops the codecs its decoder
+  cannot take from them (`incompatible_with`), so a session is never moved onto NVENC unless
+  its caps listed it (`nvenc_told`). NVENC therefore stays LISTED while it is merely not
+  answering — also at startup, from the last answer of an earlier run
+  (`%LOCALAPPDATA%\dev.pulsar.app\nvenc-codecs.txt`).
+- `pulsar-capture`: `start_capture_encode` no longer joins a thread that missed its init
+  (stuck in the driver, the join held the host's stream handler); a build that returns after
+  its stop was asked leaves without sending a packet.
+- QSV is probed only when an Intel GPU exists (`pulsar_capture::gpu_vendors()`).
+- ffmpeg CLI path: the remote GOP follows the bitrate (0.5 s from 8 Mbit/s, 2 s at 2 Mbit/s
+  and below — pulsar-core `remote_idr_gop`): the CLI encoder cannot be asked for a keyframe,
+  so the GOP is what bounds "recovering" after an unrepaired loss.
+- Tested on the home PC by suspending the host's capture thread(s) and the probe child
+  (a stand-in for the driver; a real wedge has not been caught since the change).
+
 ## Capability probe (`src-tauri/src/caps.rs`) — read before touching codecs
 
 Moonlight-model startup probe, re-run every launch, no persistence:

@@ -123,6 +123,18 @@ pub(crate) fn probe_all(app: &AppHandle) -> LocalCaps {
 		// init with no error surfaced anywhere. Drop them from the caps entirely.
 		.filter(|e| !e.codecs.is_empty())
 		.collect();
+	// NVENC that is merely not answering right now (its probe sits in the NVIDIA driver, or a
+	// stream reported a stall) stays LISTED, from the last answer it gave: a client is told the
+	// encoder families before the stream, and only a client that was told about NVENC may be
+	// moved onto it when the driver is back. The stream start itself skips it meanwhile.
+	#[cfg(windows)]
+	if !encoders.iter().any(|e| e.id == "nvenc") {
+		let codecs = nvenc_listed(&ffmpeg, &crate::process::nvenc_codecs_to_advertise());
+		if !codecs.is_empty() {
+			tracing::info!(?codecs, "caps probe: NVENC is not answering — listed from its last answer");
+			encoders.insert(0, EncoderCap { id: "nvenc".into(), backend: "ffmpeg".into(), codecs });
+		}
+	}
 	#[cfg(target_os = "linux")]
 	for (genc, codecs) in crate::process::validated_gst_encoders() {
 		let id = genc.wire_id().to_string();
@@ -282,6 +294,17 @@ pub(crate) fn spawn_startup_probe(app: AppHandle) {
 			tracing::error!(secs, "caps probe: still not done (stuck?) — see the last 'caps probe:' line");
 		}
 	});
+	// NVENC answered after it had been unavailable (a probe child that sat in the NVIDIA
+	// driver, see `process::nv`): put it back into the caps and bring the streams that fell
+	// back to another encoder home.
+	#[cfg(windows)]
+	{
+		let app = app.clone();
+		crate::process::on_nvenc_back(move || {
+			refresh_nvenc(&app);
+			crate::host::failover::restart_fallbacks();
+		});
+	}
 	let spawned = std::thread::Builder::new().name("caps-probe".into()).spawn(move || {
 		let t0 = std::time::Instant::now();
 		tracing::info!("caps probe: started");
@@ -298,10 +321,58 @@ pub(crate) fn spawn_startup_probe(app: AppHandle) {
 			.lock()
 			.unwrap() = Some(caps.clone());
 		let _ = app.emit("local-caps", caps);
+		// The NVENC probe may have answered while the rest of this probe was still running
+		// (its hook found no caps to update yet).
+		#[cfg(windows)]
+		refresh_nvenc(&app);
 	});
 	if let Err(e) = spawned {
 		tracing::error!(%e, "caps probe: thread failed to start");
 	}
+}
+
+/// NVENC codecs as caps ids, kept to those the bundled ffmpeg has compiled in (the rule of
+/// `process::validated_codecs`: the ffmpeg fallback path must be able to use them too).
+#[cfg(windows)]
+fn nvenc_listed(ffmpeg: &str, codecs: &[pulsar_capture::Codec]) -> Vec<String> {
+	use pulsar_core::pipeline::{HwEncoder, VCodec};
+	let listed = HwEncoder::Nvenc.available_codecs(&crate::process::encoders_text(ffmpeg));
+	codecs
+		.iter()
+		.map(|c| match c {
+			pulsar_capture::Codec::H264 => VCodec::H264,
+			pulsar_capture::Codec::H265 => VCodec::H265,
+			pulsar_capture::Codec::Av1 => VCodec::Av1,
+		})
+		.filter(|c| listed.contains(c))
+		.map(|c| codec_id(c).to_string())
+		.collect()
+}
+
+/// Put NVENC (back) into the stored caps with the codecs it encodes right now, and push the
+/// caps to the webview again. Only ever ADDS: while NVENC is merely not answering it stays
+/// listed (the stream start skips it by `process::nvenc_codecs_now`) — the Settings UI must
+/// not lose the host's saved encoder choice over a driver that is busy for an hour.
+#[cfg(windows)]
+pub(crate) fn refresh_nvenc(app: &AppHandle) {
+	let codecs = nvenc_listed(&crate::process::ffmpeg_bin(app), &crate::process::nvenc_codecs_now());
+	if codecs.is_empty() {
+		return;
+	}
+	let state = app.state::<crate::state::AppState>();
+	let snapshot = {
+		let mut g = state.local_caps.lock().unwrap();
+		let Some(caps) = g.as_mut() else { return };
+		match caps.encoders.iter_mut().find(|e| e.id == "nvenc" && e.backend == "ffmpeg") {
+			Some(e) if e.codecs == codecs => return,
+			Some(e) => e.codecs = codecs,
+			// First in the list, where `process::validated_encoders` puts it.
+			None => caps.encoders.insert(0, EncoderCap { id: "nvenc".into(), backend: "ffmpeg".into(), codecs }),
+		}
+		caps.clone()
+	};
+	tracing::info!(encoders = ?snapshot.encoders.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), "local caps: NVENC is back");
+	let _ = app.emit("local-caps", snapshot);
 }
 
 /// `Command::output` with a deadline (the child is killed past it → Err TimedOut).
