@@ -156,6 +156,8 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 					{ codec: 'av1', ok: true, name: 'libdav1d', hw: false, tier: 'software' }
 				]
 			} as unknown as T);
+		case 'host_only':
+			return Promise.resolve(false as unknown as T);
 		case 'auto_connect_target':
 			// No CLI auto-connect target in the browser mock (silences the reject log).
 			return Promise.resolve(null as unknown as T);

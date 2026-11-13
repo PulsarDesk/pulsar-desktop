@@ -422,7 +422,11 @@ pub(crate) async fn bring_online(
 	// Windows only (a no-op elsewhere); needs elevation (logged and skipped otherwise).
 	{
 		static PAD_CLEANUP: std::sync::Once = std::sync::Once::new();
+		// Not for a Pulsar Split seat host: pads belong to the service there (contract §5).
 		PAD_CLEANUP.call_once(|| {
+			if crate::seat::active() {
+				return;
+			}
 			let _ = std::thread::Builder::new()
 				.name("pad-cleanup".into())
 				.spawn(pulsar_core::input::pad_cleanup::startup);
@@ -566,7 +570,12 @@ pub(crate) async fn bring_online(
 	let preferred = SocketAddr::new(local.ip(), want_port);
 	// Persisted per-user identity → the relay hands back the SAME 9-digit ID every
 	// launch (stable device ID). Different OS users keep separate identity files.
-	let identity = pulsar_core::crypto::Identity::load_or_create(identity_path(&app));
+	// Pulsar Split seat host: the identity from `secrets.load`, never a file.
+	let identity = match crate::seat::identity() {
+		Some(id) => id,
+		None if crate::seat::active() => return Err("seat identity not loaded".into()),
+		None => pulsar_core::crypto::Identity::load_or_create(identity_path(&app)),
+	};
 	// Credentials for a relay with an auth policy (v4/v5). Normal case: we already hold an
 	// ACCESS KEY for this relay from a previous authentication, so registration is silent.
 	// The password and 2FA code are one-shot values typed into the connect-time prompt —
@@ -650,7 +659,15 @@ pub(crate) async fn bring_online(
 		.node_port
 		.store(node_port, std::sync::atomic::Ordering::SeqCst);
 	let _ = app.emit("node-port", node_port);
-	let discovery =
+	// Seat host: `config.apply.lan_discovery` may turn the beacon off.
+	if !crate::seat::lan_discovery() {
+		if let Some(d) = state.discovery.lock().unwrap().take() {
+			d.set_paused(true);
+		}
+	}
+	let discovery = if !crate::seat::lan_discovery() {
+		None
+	} else {
 		match Discovery::start(announce_name.clone(), node_port, node.public_key(), None).await {
 			Ok(d) => {
 				tracing::info!(port = node_port, name = %announce_name, "LAN discovery beacon started");
@@ -669,7 +686,8 @@ pub(crate) async fn bring_online(
 				tracing::warn!(%e, "LAN discovery failed to start");
 				None
 			}
-		};
+		}
+	};
 
 	// Issue a fresh one-time password for this online session (unless unattended
 	// access is on, in which case no password is required).
@@ -930,6 +948,7 @@ pub(crate) async fn bring_online(
 								&peer,
 								&accepted,
 								&host_pw,
+								peer_pubkey.as_ref(),
 							)
 							.await;
 							// If the race accepted via the one-time password, rotate it
@@ -2323,9 +2342,11 @@ pub(crate) async fn bring_online(
 				};
 				let handlers = DataHandlers {
 					outbound: Some(out_rx),
-					on_clipboard: Box::new(on_clipboard),
+					// Seat host (SYSTEM): no clipboard, file transfer or file browser — they
+					// would act as SYSTEM in the seat user's session (contract §6 item 16).
+					on_clipboard: if crate::seat::active() { Box::new(|_: String| {}) } else { Box::new(on_clipboard) },
 					on_chat: Box::new(on_chat),
-					on_file: Box::new(on_file),
+					on_file: if crate::seat::active() { Box::new(|_: pulsar_core::service::DataMsg| {}) } else { Box::new(on_file) },
 					on_audio: Box::new(on_audio),
 					on_reverse: Box::new(on_reverse),
 					stream_caps: Box::new(crate::caps_guard::guarded(app_h.clone(), media_features, stream_caps)),
@@ -2359,7 +2380,11 @@ pub(crate) async fn bring_online(
 					on_cursor_label: Box::new(on_cursor_label),
 					// File manager: FsList/FsGet from this client, answered through the
 					// same outbound queue (HOME-jailed; see fs_browse).
-					on_fs: Box::new(crate::fs_browse::make_on_fs(fs_out)),
+					on_fs: if crate::seat::active() {
+						Box::new(|_: pulsar_core::service::DataMsg| {})
+					} else {
+						Box::new(crate::fs_browse::make_on_fs(fs_out))
+					},
 					// DualSense passthrough: Ds5Caps / Ds5Feature for the slot's virtual pad.
 					on_ds5: Box::new({
 						let ds5_host = ds5_host.clone();
@@ -2642,6 +2667,12 @@ pub(crate) async fn bring_online(
 		let path = config_path(&app);
 		let mut guard = state.config.lock().unwrap();
 		let relay_addr = guard.relay.clone();
+		// Seat host: the service stores the key (DPAPI); never a config.json in the seat dir.
+		if crate::seat::relay_key_issued(&key) {
+			guard.set_relay_key(&relay_addr, Some(key));
+			drop(guard);
+			tracing::info!("relay access key handed to the Pulsar Split service");
+		} else {
 		guard.set_relay_key(&relay_addr, Some(key));
 		let snapshot = guard.clone();
 		drop(guard);
@@ -2649,6 +2680,7 @@ pub(crate) async fn bring_online(
 			tracing::warn!(error = %e, "could not persist the relay access key");
 		} else {
 			tracing::info!("relay access key stored — this device won't be prompted again");
+		}
 		}
 	}
 	// Tell the UI whether this relay advertises E2E as required (v4). Pulsar always

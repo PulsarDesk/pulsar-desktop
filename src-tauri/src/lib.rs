@@ -54,6 +54,10 @@ mod native_audio;
 mod native_view;
 mod focus_gate;
 mod headless;
+// `pulsar --headless-host` / `--split-seat …`: the host with no window, tray or webview.
+pub mod headless_host;
+// Pulsar Split seat host (`--split-seat`): seat context, control pipe protocol 1.
+mod seat;
 // "Kullanıcılar arası ortak Pulsar": machine-wide identity/config + one host per PC.
 mod shared_mode;
 mod pad_wake;
@@ -149,6 +153,26 @@ pub fn shared_mode_requires_admin() -> bool {
 
 pub fn selftest() -> i32 {
 	selftest::run()
+}
+
+/// The app's Tauri context, shared by the GUI (`run`) and the headless host so the
+/// frontend assets are embedded once.
+pub(crate) fn context() -> tauri::Context<tauri::Wry> {
+	tauri::generate_context!()
+}
+
+/// `pulsar --host-only`: a GUI instance whose UI only offers hosting (no connect form,
+/// devices, games or game mode). Set once in `run()`.
+static HOST_ONLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn host_only_mode() -> bool {
+	HOST_ONLY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The UI asks once at startup whether it runs as `--host-only`.
+#[tauri::command]
+fn host_only() -> bool {
+	host_only_mode()
 }
 
 /// `pulsar --firewall-setup` / `--firewall-remove` (see firewall.rs). 0 elsewhere (no-op).
@@ -391,7 +415,18 @@ pub fn run() {
 		let nofullscreen = args
 			.iter()
 			.any(|a| a == "--nofullscreen" || a == "--no-fullscreen");
-		let target = flag("--connect").map(|id| events::AutoConnect {
+		let host_only = args.iter().any(|a| a == "--host-only");
+		HOST_ONLY.store(host_only, std::sync::atomic::Ordering::Relaxed);
+		if host_only {
+			tracing::info!("--host-only: the UI offers hosting only");
+		}
+		// A host-only instance never connects out: `--connect` is ignored there.
+		let target = flag("--connect").filter(|_| {
+			if host_only {
+				tracing::warn!("--connect ignored: --host-only never connects out");
+			}
+			!host_only
+		}).map(|id| events::AutoConnect {
 			id,
 			pw: flag("--connect-pw").unwrap_or_default(),
 			mode: flag("--mode")
@@ -688,6 +723,7 @@ pub fn run() {
 		})
 		.invoke_handler(tauri::generate_handler![
 			get_config,
+			host_only,
 			log_dir_path,
 			local_relay::set_local_relay,
 			local_relay::local_relay_status,
@@ -851,6 +887,6 @@ pub fn run() {
 			mic_stop,
 			forget_peer
 		])
-		.run(tauri::generate_context!())
+		.run(context())
 		.expect("error while running Pulsar");
 }

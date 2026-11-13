@@ -26,7 +26,8 @@ tauri-plugin-process = "2"
 pulsar-core.workspace = true
 # Lets the same binary double as a headless relay: `pulsar --relay` (see run_relay).
 pulsar-relay.workspace = true
-tokio = { workspace = true }
+# io-util: the split-seat control pipe (seat/proto.rs) reads/writes length-prefixed frames.
+tokio = { workspace = true, features = ["io-util"] }
 socket2 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -112,6 +113,8 @@ windows-sys = { version = "0.61", features = [
 	"Win32_Storage_FileSystem", # shared_mode: CreateDirectoryW with a security descriptor, reparse-point check
 	"Win32_System_Com", # shared_mode: CoTaskMemFree for SHGetKnownFolderPath(FOLDERID_ProgramData)
 	"Win32_UI_HiDpi", # dpi_watch: GetDpiForWindow (the window's real DPI after a display change)
+	"Win32_System_Pipes", # seat: GetNamedPipeServerProcessId (verify the Pulsar Split service end of the seat pipe)
+	"Win32_System_Console", # headless_host: Ctrl+C / console close handler, attach to the parent console
 ] }
 # dpi_watch.rs: re-sync WebView2's RasterizationScale after a display change (same versions
 # wry already pulls in — no new crates).

@@ -266,6 +266,8 @@ export const api = {
 			initBitrateKbps: picks?.bitrateKbps || null,
 			audioQuality: audioQuality ?? null
 		}),
+	/** CLI `--host-only`: the UI offers hosting only. */
+	hostOnly: () => invoke<boolean>('host_only'),
 	/** CLI `--connect` auto-connect target (id/ip + password + mode + app), or null. */
 	autoConnectTarget: () =>
 		invoke<AutoConnectTarget | null>('auto_connect_target'),

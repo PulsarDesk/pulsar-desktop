@@ -14,6 +14,8 @@
 	type View = 'home' | 'devices' | 'gaming' | 'settings';
 	type Props = {
 		nav: { id: View; icon: string }[];
+		/** `--host-only`: Home shows only this device's host card (no connect UI). */
+		hostOnly?: boolean;
 		view: View;
 		mode: 'remote' | 'game';
 		selfId: string;
@@ -52,6 +54,7 @@
 	};
 	let {
 		nav,
+		hostOnly = false,
 		view,
 		mode,
 		selfId,
@@ -125,6 +128,7 @@
 				{hostNames}
 				{activity}
 				debug={ui.debug}
+				{hostOnly}
 				{onRefreshPw}
 				{onDisconnect}
 				{onConnect}

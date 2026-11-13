@@ -263,6 +263,7 @@ fn add(app: &AppHandle, key: &[u8; 32], name: &str, id: &str) {
 	}
 	tracing::info!(%id, "pairing: client key trusted");
 	let _ = app.emit("paired-devices-changed", ());
+	crate::seat::trust_changed();
 }
 
 fn remove(app: &AppHandle, key_hex: &str) -> bool {
@@ -284,6 +285,7 @@ fn remove(app: &AppHandle, key_hex: &str) -> bool {
 		}
 		tracing::info!("pairing: client key revoked");
 		let _ = app.emit("paired-devices-changed", ());
+		crate::seat::trust_changed();
 	}
 	removed
 }
@@ -341,6 +343,17 @@ pub(crate) fn list_paired_devices(app: AppHandle) -> Vec<PairedView> {
 #[tauri::command]
 pub(crate) fn revoke_paired_device(app: AppHandle, key: String) -> bool {
 	remove(&app, &key)
+}
+
+/// The trust store's devices (seat host `trust.list`).
+pub(crate) fn devices(app: &AppHandle) -> Vec<PairedDevice> {
+	let _g = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+	TrustStore::load(&store_path(app)).devices
+}
+
+/// Revoke one paired key (seat host `trust.revoke`). False when it was not paired.
+pub(crate) fn revoke(app: &AppHandle, key_hex: &str) -> bool {
+	remove(app, key_hex)
 }
 
 // ---------------------------------------------------------------------------
@@ -410,7 +423,7 @@ pub(crate) fn make_on_pair(
 						let (pending, next_req) = (pending.clone(), next_req.clone());
 						tokio::spawn(async move {
 							let (paired, reason) =
-								match crate::auth::ask_operator_pair(&app, &pending, &next_req, &peer).await {
+								match crate::auth::ask_operator_pair(&app, &pending, &next_req, &peer, &key, &name).await {
 									Some(true) => {
 										add(&app, &key, &name, &peer);
 										(true, "")

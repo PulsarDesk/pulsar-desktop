@@ -35,3 +35,19 @@ fallback chain, host verdict → client banner, Linux decoder fallback, daily lo
 merged (2026-09-02); AMD-on-Windows, macOS and Windows ARM64 are CI-built but **never run
 on hardware** — read [host-encode.md](host-encode.md) before touching encoder/decoder
 selection.
+
+**Host-only / headless host / Pulsar Split seat host (2026-11-13, not run on hardware):**
+`--host-only`, `--headless-host`, `--headless-stop`, `--split-seat` — see
+[modes.md](modes.md) "Host-only and headless host". Unit-tested (argv parsing, pipe protocol
+1 over an in-memory pipe, `config.apply` mapping); smoke-run for argv errors, the
+coexistence exit and the missing-pipe exit. **Never run** against the real Pulsar Split
+service or as SYSTEM in a seat session. The seat host is the smallest seam (a window-less
+Tauri app keeps the `AppHandle`), not the `HostEnv` extraction of the contract's §6 item 1.
+Still open from that §6 list: a separate `pulsar-host.exe` artefact + its SHA-256 for the
+Split manifest (19; today it is `pulsar.exe --split-seat`, so firewall/installer lists are
+unchanged), in-process SYSTEM input injection following the input desktop (10), app launch
+via the service (9, `apps.set`/`app.launch`), display modes via the service (12), pinned
+audio endpoint (13), split-pads channel instead of ViGEm/USB-IP pads (14 — pads are still
+created by pulsar-core in seat mode), per-seat capture/encoder in `status`,
+`clients.*`, live `log.level`, `trust.revoke` ending that device's live sessions, `access:
+approve`, Zeroize of parsed secrets (frames are wiped; parsed `String`s are not).

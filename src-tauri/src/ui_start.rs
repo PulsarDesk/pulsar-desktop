@@ -172,9 +172,17 @@ fn state_now() -> (bool, Lock, Desk) {
 	(blocked(l, d), l, d)
 }
 
-/// Whether the host may open a window right now (not inside a locked session).
+/// `--headless-host` / `--split-seat`: no window, ever (every host-side window builder —
+/// approval popup, toasts, remote cursor — checks `windows_allowed`).
+static HEADLESS: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn set_headless() {
+	HEADLESS.store(true, Ordering::SeqCst);
+}
+
+/// Whether the host may open a window right now (not inside a locked session, not headless).
 pub(crate) fn windows_allowed() -> bool {
-	!state_now().0
+	!HEADLESS.load(Ordering::SeqCst) && !state_now().0
 }
 
 /// Ask for the main window now (tray "show", a second launch) instead of after the backoff.

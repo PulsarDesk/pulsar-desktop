@@ -27,6 +27,63 @@ defaults to **"Desktop"** — *always present, NOT deletable* (every host expose
 "Desktop" entry). `pulsar --relay --session-rate 10mbit …` runs the app as a
 relay (`relay_mode.rs`, same `pulsar_relay::Limits` flags as the relay repo).
 
+## Host-only and headless host (CLI)
+
+| Flag | What | Where |
+| --- | --- | --- |
+| `--host-only` | Normal GUI instance (window, tray, single-instance) whose UI only offers hosting: Home shows the SelfCard (ID, password, connected clients) only; the nav is Home + Settings; no connect form, recents, LAN devices, Devices, Games, game mode or split. `--connect` is ignored. Combines with `--background`. | `lib.rs` `HOST_ONLY` + `host_only` command; `+page.svelte` `hostOnly`, `Home.svelte` `hostOnly` |
+| `--headless-host` | Host with no window, no tray, no webview (a Tauri app that creates none; `ui_start::set_headless` makes every popup/toast/cursor window a no-op). This user's config, identity, pairings (or shared mode with its lease). `headless::start` loop (retry 3 s → 12 s, stops on `needs_user`). Logs: the normal daily file + stdout (attaches to the parent console). Stops cleanly on Ctrl+C / Ctrl+Break / console close / logoff / shutdown (console handler), SIGINT/SIGTERM/SIGHUP on Linux/macOS, and `pulsar --headless-stop` (Windows, `Local\PulsarHeadlessHostStop` event). Accepts no other flag. | `headless_host.rs` |
+| `--headless-stop` | Signal this session's headless host to stop (exit 0; 1 = none running). | `headless_host.rs` |
+| `--split-seat <id> --data-dir <abs> --log <abs>` | One Pulsar Split seat host (Windows only), started by the Pulsar Split service as SYSTEM. Contract: pulsar-split `docs/agents/pulsar-host-backend.md`. | `headless_host.rs`, `seat/` |
+
+All three headless flags are handled in `main.rs` before the elevation relaunch (no UAC
+prompt — start `--headless-host` from an elevated shell to inject into elevated windows)
+and before `run()`'s single-instance guard. Approval: with no window the Allow/Deny popup is
+never shown — `--headless-host` admits only the password / one-time password, paired devices
+and unattended access; a seat host asks the Pulsar Split operator over the pipe.
+
+**Coexistence:** `--headless-host` takes `Local\PulsarSingletonMutex` like the GUI, so it
+never runs next to a GUI instance of the same user/session (both would register the same
+identity and fight over the relay ID). It exits with code 3 when a GUI runs; a GUI started
+while the headless host runs finds the mutex, signals the show event nobody listens to, and
+exits — stop the headless host first. A seat host takes neither that mutex nor shared mode,
+so it coexists with the seat user's own Pulsar.
+
+Exit codes (`headless_host.rs`): 0 ok, 2 bad argv, 3 already running (session / seat),
+4 seat pipe could not be opened or its server is not the service, 5 seat pipe lost,
+6 seat mutex could not be created (not SYSTEM).
+
+### Split seat host (`--split-seat`)
+
+- Argv is strict: exactly the three flags (any order), seat id = lowercase GUID, absolute
+  paths; anything else (e.g. `--connect-pw`) → exit 2 without echoing values. All `PULSAR_*`
+  env switches are removed from the process (`seat::strip_dev_env`).
+- Takes `Global\PulsarSplit_Seat_<id>_PulsarHost` (DACL `D:P(A;;GA;;;SY)`, exit 3 if it
+  exists); never `Local\PulsarSingletonMutex` / `Local\PulsarShowEvent`; shared mode bypassed
+  (`lease::may_host` Ok, `util::data_dir` = `--data-dir`, never `%ProgramData%\Pulsar`).
+- Logs to `--log` only (append, no stdout, no own rotation, `RUST_LOG` ignored).
+- Opens `\\.\pipe\PulsarSplit\seat\<id>\pulsar-host` (retries 5 s), checks the server is
+  `pulsar-split-service.exe` as SYSTEM in session 0, then speaks protocol 1 (`seat/proto.rs`):
+  `hello` (capabilities `approve`, `connect_password`, `otp`, `trust_store`), `secrets.load`
+  (identity via `Identity::from_secret_bytes`, never `identity.key`; connect password and
+  relay key in memory only), `config.apply` (→ `Config`, never saved; `display_name` is the
+  announced name verbatim; `use_local_relay`/`unattended_access` forced off; `capture`
+  dxgi/wgc → `PULSAR_CAPTURE`; after start, rebind keys come back in `restart_needed`),
+  `status`, `auth.decide`, `auth.otp.get` / `.rotate`, `trust.list` / `.revoke` /
+  `.revoke_all`, `relay.auth`, `server.shutdown` (teardown within `grace_ms`, then exit 0).
+  The host binds/registers only after both `secrets.load` and `config.apply`.
+- Events: `auth.request` / `auth.ended` (replace the popup, same cap 3 and budgets),
+  `otp.changed`, `trust.changed`, `relay.state`, `relay.auth_required`, `relay.key_issued`
+  (the key is never written to `config.json`).
+- `not_supported`: `clients.list`, `clients.kick`, `clients.set_view_only`, `apps.set`,
+  `app.launched`, `display.mode.result`, `pad.attach` / `.denied` / `.detach`, `log.level`;
+  `config.apply` with `access: approve` or `capture: split_idd` is refused `not_supported`;
+  `audio_endpoint_id`, `render_adapter_luid`, `codecs`, `max_clients` are ignored (logged).
+- Off in seat mode: pad cleanup (`pad_cleanup::startup`), clipboard, file transfer and the
+  remote file browser (SYSTEM would act in the seat user's session), the in-app relay, the
+  local-mouse takeover hook and the remote-cursor overlay (never started headless).
+- Broken pipe → exit 5 at once (it must not run uncontrolled).
+
 ## Input only while Pulsar is focused
 
 While another app is focused, Pulsar acts on NO input (maintainer rule, 2026-11-11):

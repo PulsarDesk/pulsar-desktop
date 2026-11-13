@@ -360,6 +360,8 @@ impl Drop for PopupSlotGuard {
 			Some(n.saturating_sub(1))
 		})
 		.ok();
+		// Seat host: a request still open here was cut short (task aborted).
+		crate::seat::auth_abandon(self.id);
 		// Close the window if it is still open (it may already be gone if the
 		// operator dismissed it with the OS chrome — that's fine).
 		if let Some(win) = self.app.get_webview_window(&format!("approve-{}", self.id)) {
@@ -379,7 +381,15 @@ pub(crate) fn open_approval_window(
 	id: u64,
 	peer: &str,
 	pw_status: &str,
+	peer_key: Option<&[u8; 32]>,
+	peer_name: &str,
 ) -> Option<PopupSlotGuard> {
+	// Pulsar Split seat host: nobody sits at the seat — the operator at the Pulsar Split
+	// manager answers (`auth.request` → `auth.decide`). Same slot cap as the popups.
+	if crate::seat::auth_request(id, pw_status == "pair", peer, peer_key, peer_name, pw_status) {
+		OPEN_POPUP_COUNT.fetch_add(1, Ordering::Relaxed);
+		return Some(PopupSlotGuard { app: app.clone(), id });
+	}
 	// Locked session: nobody can answer, and building a webview there wedges the event loop
 	// (ui_start.rs). No popup = the password path alone decides, like a failed window.
 	if !crate::ui_start::windows_allowed() {
@@ -497,6 +507,7 @@ pub(crate) async fn race_host_auth(
 	peer: &str,
 	accepted_pws: &[String],
 	one_time_pw: &str,
+	peer_key: Option<&[u8; 32]>,
 ) -> RaceOutcome {
 	// Cap concurrent popups: an id-cycling attacker opens a fresh connection on
 	// each relay id, each reaching this race before the popup limit is known.
@@ -528,7 +539,7 @@ pub(crate) async fn race_host_auth(
 	// and closes the window regardless of how the race exits — normal return, timeout,
 	// or future cancellation (task abort via JoinHandle::abort when go_online restarts).
 	// This is the C2 fix: a cancelled task can no longer leak a popup slot.
-	let _popup_guard = open_approval_window(app, id, peer, "wait");
+	let _popup_guard = open_approval_window(app, id, peer, "wait", peer_key, "");
 
 	// Inactivity deadline: a client that sends NO password attempt within this
 	// window is auto-denied. ONLY actual password submissions (ClientAuth::Password)
@@ -637,6 +648,7 @@ pub(crate) async fn race_host_auth(
 		}
 	};
 	pending.lock().unwrap().remove(&id);
+	crate::seat::auth_finish(id, result.0, result.3, result.2);
 	// close_approval_window closes the OS window; _popup_guard.drop() (below) handles
 	// OPEN_POPUP_COUNT. Call it explicitly here so the window closes before we return
 	// (the guard will still decrement the counter when it drops at end-of-scope).
@@ -658,6 +670,8 @@ pub(crate) async fn ask_operator_pair(
 	pending: &Arc<Mutex<HashMap<u64, oneshot::Sender<AuthDecision>>>>,
 	next_req: &Arc<AtomicU64>,
 	peer: &str,
+	peer_key: &[u8; 32],
+	peer_name: &str,
 ) -> Option<bool> {
 	if OPEN_POPUP_COUNT.load(Ordering::Relaxed) >= MAX_CONCURRENT_POPUPS {
 		tracing::warn!(%peer, "pairing: concurrent popup cap reached — not asking");
@@ -666,7 +680,7 @@ pub(crate) async fn ask_operator_pair(
 	let id = next_req.fetch_add(1, Ordering::SeqCst);
 	let (tx, rx) = oneshot::channel::<AuthDecision>();
 	pending.lock().unwrap().insert(id, tx);
-	let guard = open_approval_window(app, id, peer, "pair");
+	let guard = open_approval_window(app, id, peer, "pair", Some(peer_key), peer_name);
 	let out = if guard.is_some() {
 		match tokio::time::timeout(std::time::Duration::from_secs(40), rx).await {
 			Ok(Ok(d)) => Some(d.allow),
@@ -676,6 +690,14 @@ pub(crate) async fn ask_operator_pair(
 		None
 	};
 	pending.lock().unwrap().remove(&id);
+	crate::seat::auth_ended(
+		id,
+		match out {
+			Some(true) => "paired",
+			Some(false) => "denied",
+			None => "timeout",
+		},
+	);
 	close_approval_window(app, id);
 	drop(guard);
 	tracing::info!(%peer, decision = ?out, "pairing: operator decision");

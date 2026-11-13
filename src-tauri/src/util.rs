@@ -35,6 +35,11 @@ pub(crate) static AUTO_CONNECT: std::sync::OnceLock<Option<AutoConnect>> =
 /// per-user app config dir, or `%ProgramData%\Pulsar\shared` in shared mode
 /// (`shared_mode.rs`, Settings → Genel → "Kullanıcılar arası ortak Pulsar").
 pub(crate) fn data_dir(app: &AppHandle) -> PathBuf {
+	// Pulsar Split seat host: the per-seat dir the service made (`--data-dir`); never the
+	// per-user or shared dir (and never resolve shared mode as SYSTEM).
+	if let Some(d) = crate::seat::data_dir() {
+		return d;
+	}
 	crate::shared_mode::data_dir(app.path().app_config_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
@@ -894,6 +899,10 @@ mod conn_error_tests {
 /// (or two Duo sessions) used to show up as the same "DESKTOP-AB12CD"; a hostname-equal name
 /// counts as "not chosen" and the signed-in user's name is shown instead.
 pub(crate) fn announce_name(device_name: &str) -> String {
+	// Seat host: the seat display name, verbatim (unique per machine already).
+	if let Some(n) = crate::seat::announce_name() {
+		return n;
+	}
 	let n = device_name.trim();
 	let host = machine_hostname();
 	if n.is_empty() || n == "Pulsar Cihazı" || host.as_deref().is_some_and(|h| h.eq_ignore_ascii_case(n)) {

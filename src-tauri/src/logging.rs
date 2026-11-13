@@ -69,6 +69,29 @@ pub fn init() {
 	install_panic_hook();
 }
 
+/// Seat host (`--split-seat … --log <path>`): log to exactly that file, appending, no stdout
+/// (no console) and no own rotation (the Pulsar Split service rotates it before each start).
+/// Secrets are never logged by the seat code (pipe frames, `secrets.load`, OTP, relay key).
+/// Falls back to no logging when the file cannot be opened — never stops startup.
+pub fn init_file(path: &std::path::Path) {
+	use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+	// RUST_LOG is a dev switch too: a seat host logs at info.
+	let filter = EnvFilter::new("info");
+	if let Some(dir) = path.parent() {
+		let _ = std::fs::create_dir_all(dir);
+	}
+	match std::fs::OpenOptions::new().create(true).append(true).open(path) {
+		Ok(file) => {
+			let layer = fmt::layer().with_ansi(false).with_writer(std::sync::Mutex::new(file));
+			tracing_subscriber::registry().with(filter).with(layer).init();
+		}
+		Err(_) => {
+			tracing_subscriber::registry().with(filter).init();
+		}
+	}
+	install_panic_hook();
+}
+
 /// Route panics into the log. A panic in a spawned tokio task (e.g. the host's video
 /// forwarder) only kills that task and prints to stderr — invisible in a release build — so
 /// the session just goes silent with nothing in the log file. Keep the default hook too.

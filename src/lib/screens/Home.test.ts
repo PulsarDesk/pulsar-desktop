@@ -39,4 +39,13 @@ describe('Home screen', () => {
 		// (no mode argument — the shell's default connect mode is remote).
 		expect(onConnect).toHaveBeenCalledWith({ name: 'Oyun Rig’i', id: '640117992' });
 	});
+
+	it('host-only (--host-only): shows this device, no connect form or recents', () => {
+		recordConnection('640117992', 'Oyun Rig’i');
+		render(Home, { props: { selfId: '482 913 056', hostSessions: [], activity: [], onConnect: noop, hostOnly: true } });
+		expect(screen.getByText('482 913 056')).toBeInTheDocument();
+		expect(screen.queryByRole('button', { name: 'Bağlan' })).toBeNull();
+		expect(screen.queryByLabelText('Hedef cihaz kimliği')).toBeNull();
+		expect(screen.queryByText('Oyun Rig’i')).toBeNull();
+	});
 });

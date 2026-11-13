@@ -396,6 +396,10 @@ pub(crate) mod lease {
 
 	/// Gate for `bring_online`: in shared mode only the lease holder may register.
 	pub(crate) fn may_host() -> Result<(), String> {
+		// Pulsar Split seat host: shared mode is bypassed completely (no lease, no mode.json).
+		if crate::seat::active() {
+			return Ok(());
+		}
 		let r = super::resolved();
 		if r.mode != super::Mode::Shared {
 			return Ok(());

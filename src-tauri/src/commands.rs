@@ -277,6 +277,7 @@ pub(crate) fn rotate_session_password(app: &AppHandle) {
 	// Reuse the existing UI refresh channel: the Home screen polls `session_password`,
 	// and this event lets a live screen update immediately on rotation.
 	let _ = app.emit("session-password", fresh);
+	crate::seat::otp_changed();
 }
 
 /// Canonical form of a one-time password for matching: drop the dash separator and
@@ -319,6 +320,7 @@ pub(crate) fn try_consume_otp(app: &AppHandle, provided: &str) -> bool {
 		pw
 	};
 	let _ = app.emit("session-password", fresh);
+	crate::seat::otp_changed();
 	true
 }
 

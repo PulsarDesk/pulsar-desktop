@@ -28,6 +28,9 @@
 		 * your own id / Allow this device" half (SelfCard) + the page header, so the pane
 		 * focuses purely on connecting OUT to a remote device. Same components/styling. */
 		connectOnly?: boolean;
+		/** Host-only variant (`pulsar --host-only`): only the SelfCard (this device's ID,
+		 * password and connected clients) — no connect form, recents or LAN devices. */
+		hostOnly?: boolean;
 		onRefreshPw?: () => void;
 		/** Kick a connected session by its session id. */
 		onDisconnect?: (sid: number) => void;
@@ -45,6 +48,7 @@
 		activity,
 		debug = false,
 		connectOnly = false,
+		hostOnly = false,
 		onRefreshPw = () => {},
 		onDisconnect = () => {},
 		onConnect
@@ -128,7 +132,7 @@
 	</div>
 {/if}
 
-<div class="grid" class:single={connectOnly}>
+<div class="grid" class:single={connectOnly || hostOnly}>
 	{#if !connectOnly}
 		<SelfCard
 			{selfId}
@@ -148,6 +152,7 @@
 		/>
 	{/if}
 
+	{#if !hostOnly}
 	<div class="card col">
 		<span class="eyebrow mono">{t('home.connectRemote')}</span>
 		<div class="lab mt">{t('home.deviceId')}</div>
@@ -218,9 +223,12 @@
 			{/if}
 		</div>
 	</div>
+	{/if}
 </div>
 
-<LanDevices {onConnect} />
+{#if !hostOnly}
+	<LanDevices {onConnect} />
+{/if}
 
 <style>
 	.head {

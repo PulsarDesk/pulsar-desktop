@@ -74,6 +74,13 @@ fn main() {
 		pulsar_tauri::run_relay(&args);
 		return;
 	}
+	// `pulsar --headless-host` (host only: no window, tray or webview), `--headless-stop`, and
+	// `pulsar --split-seat <id> --data-dir <abs> --log <abs>` (one Pulsar Split seat host).
+	// Before the elevation relaunch (never a UAC prompt) and the single-instance guard
+	// (headless_host.rs takes its own). Strict argv: no other flag is accepted with them.
+	if let Some(code) = pulsar_tauri::headless_host::main(&args) {
+		std::process::exit(code);
+	}
 	// `pulsar --ds5-bridge [seconds]`: local bridge mode, headless (needs admin).
 	if let Some(i) = args.iter().position(|a| a == "--ds5-bridge") {
 		let secs = args.get(i + 1).and_then(|s| s.parse().ok());

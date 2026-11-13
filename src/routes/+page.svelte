@@ -133,6 +133,10 @@
 	];
 
 	let view = $state<View>('home');
+	// `pulsar --host-only`: the UI offers hosting only — no connect form, devices, games,
+	// game mode or split (asked once on mount; remote personality forced).
+	let hostOnly = $state(false);
+	const navItems = $derived(hostOnly ? NAV.filter((n) => n.id === 'home' || n.id === 'settings') : NAV);
 	// App-level personality, persisted in `ui.appMode`. 'remote' = the general
 	// remote-desktop app (left sidebar, host capability); 'game' = the controller-first
 	// game-streaming client shell (bottom dock, centered ID, no hosting). Toggled from
@@ -141,7 +145,7 @@
 
 	// Flip the personality and persist the choice so the app reopens in the last mode.
 	function toggleMode() {
-		if (modeLocked) return;
+		if (modeLocked || hostOnly) return;
 		const next = mode === 'game' ? 'remote' : 'game';
 		// Changing personality ALWAYS leaves split mode (either direction) — the split's panes are
 		// tied to the mode it was entered in.
@@ -683,6 +687,10 @@
 	onMount(async () => {
 		initCaps();
 		boot();
+		if (!isPopupOnly) {
+			hostOnly = await api.hostOnly().catch(() => false);
+			if (hostOnly) mode = 'remote';
+		}
 		if (!isPopupOnly) void tw.init();
 		if (isTabWin && isTauri) {
 			// The capture's fullscreen combo (Ctrl+Shift+F11) — for this window's session.
@@ -1206,9 +1214,9 @@
 				gaming={mode === 'game'}
 				onToggleMode={toggleMode}
 				{modeLocked}
-				showMode={!isTabWin}
+				showMode={!isTabWin && !hostOnly}
 				splitMode={sm.splitMode}
-				onSplit={isTabWin ? undefined : openSplit}
+				onSplit={isTabWin || hostOnly ? undefined : openSplit}
 				fullscreen={sm.fullscreen}
 				onToggleFullscreen={sm.toggleFullscreen}
 				onUpdate={openUpdate}
@@ -1251,7 +1259,8 @@
 		{#if !isTabWin}
 		<div class="layer" class:hidden={sm.activeTab !== 'home' || sm.splitMode !== 'off'}>
 			<HomeView
-				nav={NAV}
+				nav={navItems}
+				{hostOnly}
 				{view}
 				{mode}
 				{selfId}
