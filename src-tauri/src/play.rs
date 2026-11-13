@@ -1,4 +1,4 @@
-//! Client remote-play lifecycle: `start_remote_play` opens a session, brings up the
+﻿//! Client remote-play lifecycle: `start_remote_play` opens a session, brings up the
 //! local video viewer (embedded WebCodecs or a native renderer), holds the control
 //! session open full-duplex, and registers the `PlaySession`. `stop_stream` tears it
 //! all down.
@@ -38,10 +38,10 @@ pub(crate) struct ResidentRender {
 	pub(crate) container_id: u64,
 	/// Shared session id for the renderer's stdout reader thread (see `start_render_reader`).
 	/// The reader uses this to tag `play-vstats`/`play-ready` events with the CURRENT session
-	/// id — so when the renderer is reused for a new session, updating this Arc redirects all
+	/// id â€” so when the renderer is reused for a new session, updating this Arc redirects all
 	/// events to the new session without restarting the reader thread.
 	pub(crate) live_id: std::sync::Arc<std::sync::atomic::AtomicU64>,
-	/// The session mode (`game_mode=true` → game, `false` → remote) the renderer was originally
+	/// The session mode (`game_mode=true` â†’ game, `false` â†’ remote) the renderer was originally
 	/// spawned with. Tracked so the resident-reuse path can detect a cross-session mode change
 	/// and send a `mode game|remote` command to apply the correct overlay/pace-ceiling on reconnect.
 	pub(crate) game_mode: bool,
@@ -49,7 +49,7 @@ pub(crate) struct ResidentRender {
 
 /// "Otomatik" audio quality: the highest the path carries. Raw (~1.6 Mbit/s, no concealment to
 /// speak of) only on a LAN the probe measured with plenty of room and a host that can send it;
-/// High Opus (320 kb/s) once the probe saw a few Mbit/s — or on a LAN without a probe (older
+/// High Opus (320 kb/s) once the probe saw a few Mbit/s â€” or on a LAN without a probe (older
 /// host); Standard (128 kb/s) otherwise.
 pub(crate) fn auto_audio_quality(
 	probe_kbps: Option<u32>,
@@ -66,7 +66,7 @@ pub(crate) fn auto_audio_quality(
 	}
 }
 
-/// A Settings / session-menu preference → what to ask the host for. `raw` falls back to High on
+/// A Settings / session-menu preference â†’ what to ask the host for. `raw` falls back to High on
 /// a host that can't send it; anything else (incl. `auto`) takes the [`auto_audio_quality`] pick.
 pub(crate) fn audio_quality_for(
 	pref: &str,
@@ -97,7 +97,7 @@ fn cursor_external_enabled() -> bool {
 }
 
 /// Format the host's monitors for the renderer's `caps` line `displays=` field, as
-/// `idx:name:w:h:primary` comma-joined — NO spaces (the caps line is whitespace-tokenized,
+/// `idx:name:w:h:primary` comma-joined â€” NO spaces (the caps line is whitespace-tokenized,
 /// and session_cmds patches it token-wise, so a spaced value would corrupt both). The
 /// egui overlay parses this back into its Display-section monitor picker.
 pub(super) fn fmt_displays(displays: &[pulsar_core::service::DisplayInfo]) -> String {
@@ -120,16 +120,16 @@ pub(super) fn fmt_displays(displays: &[pulsar_core::service::DisplayInfo]) -> St
 /// Tear down the viewer relay + any native renderer child spawned before the play
 /// session was registered. Called on the `request_launch`/`request_stream` early
 /// returns so a connect that fails after auth (but before `state.plays` insert)
-/// doesn't orphan the viewer's UDP/WS tasks or the native renderer process — the
+/// doesn't orphan the viewer's UDP/WS tasks or the native renderer process â€” the
 /// same orphaned-renderer class that causes the Pi input-stutter (see MEMORY).
 /// Children go through `stop_render_child` (SIGTERM + grace), never a bare kill:
 /// SIGKILLing a renderer mid-EGL-bind wedges WebKitGTK's shared Mali GL input on
 /// RK3588 (see `stop_render_child`). Also drops the per-id GTK state created
-/// earlier (in-app container / single-surface GL renderer) — ids are never
+/// earlier (in-app container / single-surface GL renderer) â€” ids are never
 /// reused, so skipping that leaks a hidden child window per failed connect.
 ///
 /// `preserve_native_container`: when `true` (Linux only, resident renderer re-parked)
-/// the GDK container for `id` is NOT destroyed — the resident renderer's `--wid`
+/// the GDK container for `id` is NOT destroyed â€” the resident renderer's `--wid`
 /// X parent window must remain valid for the next reconnect.
 async fn teardown_partial(
 	app: &AppHandle,
@@ -141,7 +141,7 @@ async fn teardown_partial(
 ) {
 	view.stop();
 	// Offload SIGTERM-grace polls to blocking threads so this async fn never parks a
-	// Tokio worker for up to ~600 ms × N children (matches the discipline in stop_stream
+	// Tokio worker for up to ~600 ms Ã— N children (matches the discipline in stop_stream
 	// and session_cmds; see `stop_render_child_blocking`).
 	let handles: Vec<_> = children
 		.into_iter()
@@ -165,7 +165,7 @@ async fn teardown_partial(
 }
 
 /// Client: connect to a host, start receiving its video (embedded WebCodecs
-/// viewer, no separate window), and (optionally) stream our controller input —
+/// viewer, no separate window), and (optionally) stream our controller input â€”
 /// all over a single session held open until `stop_stream`. Asks the host to
 /// launch `game_id` (if any) and stream RTP/H.264 to our local viewer.
 #[tauri::command]
@@ -188,7 +188,7 @@ pub(crate) async fn start_remote_play(
 	display_idx: Option<u32>,
 	// Initial per-WINDOW capture target (Phase 2b co-op). `Some(hwnd)` makes the host
 	// capture that single window via WGC (a raw Win32 HWND as i64, from the host's
-	// `host_window_list` reply) instead of the whole monitor — so two panes can share one
+	// `host_window_list` reply) instead of the whole monitor â€” so two panes can share one
 	// monitor / target two app windows. `None` (default) = the `display_idx` monitor path.
 	// Wins over `display_idx` on the host when set. The session menu changes it live via
 	// `Restream::Window`. The launched-game (game-mode) case is resolved host-side, not here.
@@ -221,14 +221,14 @@ pub(crate) async fn start_remote_play(
 	let codec = std::env::var("PULSAR_FORCE_CODEC").unwrap_or(codec);
 
 	let disc = state.discovery.lock().unwrap().clone();
-	// "Show my pointer with my name on the host" (Pulsar menu → Yayın; seeds the overlay row).
+	// "Show my pointer with my name on the host" (Pulsar menu â†’ YayÄ±n; seeds the overlay row).
 	let cur_label = state.config.lock().unwrap().share_cursor_label;
 	let (net_mode, relay) = {
 		let cfg = state.config.lock().unwrap();
 		(cfg.network_mode, cfg.relay.clone())
 	};
 	let (mut sess, peer_label) = connect_target(&app, &node, disc, &target, net_mode, &relay).await?;
-	// The host's E2E-verified key — "reverse direction" lets exactly this host back in.
+	// The host's E2E-verified key â€” "reverse direction" lets exactly this host back in.
 	let host_pubkey: Option<[u8; 32]> = sess.peer_pubkey().await.map(Into::into);
 	// Real connection phase: the transport is now actually established (direct P2P or
 	// relay). Tell the Connecting screen so it reflects the truth instead of guessing.
@@ -251,7 +251,7 @@ pub(crate) async fn start_remote_play(
 	// Rust future fails first and the JS catch sees a real error (not the JS timer's
 	// synthetic CONNECT_TIMEOUT string). When the timeout fires the future is
 	// cancelled; `sess` then falls out of scope when we return Err, which drops the
-	// Session and closes the connection — the host's recv_client_auth sees Gone and
+	// Session and closes the connection â€” the host's recv_client_auth sees Gone and
 	// tears down its Allow/Deny state cleanly.
 	const AUTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(40);
 	let auth_result = tokio::time::timeout(
@@ -267,7 +267,7 @@ pub(crate) async fn start_remote_play(
 	)
 	.await
 	// The JS friendlyConnectError checks for the literal substring "connect-timed-out"
-	// (the same sentinel the UI-side CONNECT_TIMEOUT constant uses) — returning it here
+	// (the same sentinel the UI-side CONNECT_TIMEOUT constant uses) â€” returning it here
 	// lets the JS route both the Rust-side and JS-side timeouts to the same friendly
 	// connErr.timeout translation instead of showing the raw English string.
 	.map_err(|_| "connect-timed-out".to_string())?;
@@ -275,9 +275,9 @@ pub(crate) async fn start_remote_play(
 		return Err(crate::i18n::t("err.denied").into());
 	}
 	// Default codec ("auto"): prefer H.265, but only when the HOST can actually encode
-	// it — asked over the session (validated, hardware-only caps) BEFORE this client
+	// it â€” asked over the session (validated, hardware-only caps) BEFORE this client
 	// writes its decoder SDP, so the SDP and the stream the host starts can never
-	// disagree. Timeout/old host/empty caps → H.264 (universally encodable).
+	// disagree. Timeout/old host/empty caps â†’ H.264 (universally encodable).
 	let host_caps = tokio::time::timeout(
 		std::time::Duration::from_secs(2),
 		pulsar_core::service::query_stream_caps(&mut sess),
@@ -292,7 +292,7 @@ pub(crate) async fn start_remote_play(
 		host_caps.features.iter().any(|f| f == pulsar_core::service::media::FEAT_PINCH),
 	);
 	// Media-over-session: carry the RTP inside the encrypted session (ONE external
-	// socket — the same hole the control channel punched; symmetric NAT then works
+	// socket â€” the same hole the control channel punched; symmetric NAT then works
 	// via the relay). Only when the host advertises it; old hosts stream direct.
 	let mos = host_caps
 		.features
@@ -312,10 +312,10 @@ pub(crate) async fn start_remote_play(
 		// A/B knob: PULSAR_RFI=0 keeps the keyframe recovery.
 		&& std::env::var("PULSAR_RFI").map(|v| v != "0").unwrap_or(true);
 	// This client's DECODE caps (startup probe). Unknown (probe still running /
-	// macOS stub failure) → assume the universal software pair. `incompat` maps a codec
+	// macOS stub failure) â†’ assume the universal software pair. `incompat` maps a codec
 	// to the host encoder families whose REAL bitstream this client can't decode even
-	// though the codec validated against a conformant sample (the diagnosed rkmpp-HEVC ×
-	// native-NVENC case) — used to prune the negotiated set below.
+	// though the codec validated against a conformant sample (the diagnosed rkmpp-HEVC Ã—
+	// native-NVENC case) â€” used to prune the negotiated set below.
 	let probed_decoders = state
 		.local_caps
 		.lock()
@@ -339,9 +339,9 @@ pub(crate) async fn start_remote_play(
 			.map(|d| d.incompatible_with.clone())
 			.unwrap_or_default()
 	};
-	// Negotiated set = host-encodable ∩ client-decodable, MINUS any codec whose client
+	// Negotiated set = host-encodable âˆ© client-decodable, MINUS any codec whose client
 	// decoder is known-incompatible with an encoder family the host actually has (it WILL
-	// use its HW encoder for that codec — e.g. host nvenc → HEVC over native NVENC, which
+	// use its HW encoder for that codec â€” e.g. host nvenc â†’ HEVC over native NVENC, which
 	// the Pi's rkmpp can't decode, so HEVC is dropped and "auto" lands on h264). "auto"
 	// picks by quality (av1 > h265 > h264). The SDP is written from this AFTER the pick,
 	// so the codec on the wire and the client's decoder can never disagree.
@@ -362,7 +362,7 @@ pub(crate) async fn start_remote_play(
 	let codec = resolve_codec(&codec, &allowed);
 	tracing::info!(%codec, ?allowed, "stream codec resolved");
 
-	// Same machine? (loopback P2P) → control would feed back, so flag it.
+	// Same machine? (loopback P2P) â†’ control would feed back, so flag it.
 	let local = matches!(sess.transport(), Transport::Direct)
 		&& sess
 			.peer_addr()
@@ -384,13 +384,13 @@ pub(crate) async fn start_remote_play(
 	// Native external player (opt-in): a hardware-decoded fullscreen player (ffplay on
 	// Windows, mpv on Linux/macOS) fed by its own RTP port + SDP, instead of the in-webview
 	// WebCodecs canvas; the host then streams video to that port. The DEFAULT is the
-	// embedded webview canvas — on Windows WebView2 WebCodecs is GPU-accelerated, and on
+	// embedded webview canvas â€” on Windows WebView2 WebCodecs is GPU-accelerated, and on
 	// Linux WebKitGTK's WebCodecs hardware-decodes via the installed GStreamer decoder
 	// (Rockchip `mppvideodec` on RK3588), so the video stays embedded + controllable.
 	// Falls back to the webview on any spawn failure.
-	// Allocate the play id early — the Linux single-surface renderer keys its GL state by it.
+	// Allocate the play id early â€” the Linux single-surface renderer keys its GL state by it.
 	let id = state.next_play.fetch_add(1, Ordering::SeqCst);
-	// Settings → "Optimize the stream before showing it" (Windows native renderer).
+	// Settings â†’ "Optimize the stream before showing it" (Windows native renderer).
 	let pre_optimize = cfg!(windows) && state.config.lock().unwrap().pre_optimize_stream;
 	let mut native_child: Option<Child> = None;
 	let mut video_port = media_port;
@@ -414,11 +414,11 @@ pub(crate) async fn start_remote_play(
 	#[allow(unused_mut, unused_assignments)]
 	let mut vidsink_rotate_init: u32 = 0;
 	// Native overlay renderer (`pulsar-render`) child + its stdin (shared with the stats thread
-	// which feeds live `stat …` lines). Spawned alongside the vidsink on the Linux native path.
+	// which feeds live `stat â€¦` lines). Spawned alongside the vidsink on the Linux native path.
 	#[allow(unused_mut, unused_assignments)]
 	let mut render_child: Option<Child> = None;
 	// True when `render_child` is a REUSED resident renderer (Linux only).  On a failed
-	// reconnect teardown_partial must NOT call stop_render_child on it — doing so destroys
+	// reconnect teardown_partial must NOT call stop_render_child on it â€” doing so destroys
 	// the EGL context on the shared RK3588 Mali display and wedges WebKitGTK input (the
 	// very wedge the resident model exists to prevent).  Instead we re-park it.
 	#[allow(unused_mut, unused_assignments, unused_variables)]
@@ -431,24 +431,24 @@ pub(crate) async fn start_remote_play(
 	let caps_line: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
 	// Stdin-only renderer state remembered for a codec-switch respawn re-push.
 	let render_seed: Arc<Mutex<RenderSeed>> = Arc::new(Mutex::new(RenderSeed::default()));
-	// Every SDP temp file written for this session — tracked so stop_stream can delete
+	// Every SDP temp file written for this session â€” tracked so stop_stream can delete
 	// them (they're never overwritten because the port-based name is effectively unique
 	// per session, and codec/monitor switches write a fresh one each time).
 	let sdp_files: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
-	// Linux/X11: the embedded webview (WebKitGTK WebCodecs) can't hardware-decode here — it
+	// Linux/X11: the embedded webview (WebKitGTK WebCodecs) can't hardware-decode here â€” it
 	// would software-decode + glitch AND add a webview hop to the video path. So the native
 	// mpv renderer (rkmpp) is the DEFAULT. We first try the moonlight-style SINGLE SURFACE
-	// (libmpv render API → a GtkGLArea with the webview composited transparently on top, in
+	// (libmpv render API â†’ a GtkGLArea with the webview composited transparently on top, in
 	// one window); on any failure we fall back to an embedded `--wid` mpv child. Elsewhere
 	// (Windows WebView2 / macOS WKWebView hardware-decode fine in-webview) it stays opt-in.
-	// All platforms render natively now (Moonlight-style, NO webview video — it was too slow).
+	// All platforms render natively now (Moonlight-style, NO webview video â€” it was too slow).
 	// Linux: pulsar-render (rkmpp). Windows: pulsar-render (Media Foundation + D3D11, embedded).
-	// macOS: native mpv (VideoToolbox HW decode) — the embedded zero-copy Metal renderer is a
+	// macOS: native mpv (VideoToolbox HW decode) â€” the embedded zero-copy Metal renderer is a
 	// later phase (needs a Mac to build), but this already removes the webview video path there.
 	let use_native = true;
 	if use_native {
 		// TODO(port-toctou): free_udp_port() binds an ephemeral UDP port, reads it, and
-		// drops the socket — the renderer child below re-binds it moments later, so a
+		// drops the socket â€” the renderer child below re-binds it moments later, so a
 		// racing process can grab the port in the gap. A clean fix can't live here (the
 		// CHILD owns the bind, not us, so we can't hold the socket open across the spawn
 		// without blocking the child's bind); it belongs in native_view/spawn.rs (out of
@@ -461,10 +461,10 @@ pub(crate) async fn start_remote_play(
 					sdp_files.lock().unwrap().push(sdp.clone());
 					#[cfg(windows)]
 					{
-						// DEFAULT Windows renderer: `pulsar-render` — Media Foundation HW decode +
+						// DEFAULT Windows renderer: `pulsar-render` â€” Media Foundation HW decode +
 						// D3D11 present in a CHILD HWND of the app window (`--wid`), replacing the
-						// webview WebCodecs path (too slow). stdout: `vidsink-fps …`/`ov …`; stdin:
-						// `stat …`/`pace 0|1`. Falls back to ffplay (separate window) if the binary
+						// webview WebCodecs path (too slow). stdout: `vidsink-fps â€¦`/`ov â€¦`; stdin:
+						// `stat â€¦`/`pace 0|1`. Falls back to ffplay (separate window) if the binary
 						// is missing. Embedding needs the Tauri window's HWND.
 						let hwnd = process::window_hwnd(&app);
 						let pace_default = std::env::var("PULSAR_PACE")
@@ -538,16 +538,16 @@ pub(crate) async fn start_remote_play(
 							native_view::spawn_ffplay(&process::ffplay_bin(&app), &sdp)
 						{
 							// Fallback: separate fullscreen ffplay window.
-							tracing::warn!(pid = c.id(), port = vport, "pulsar-render failed → ffplay fallback window");
+							tracing::warn!(pid = c.id(), port = vport, "pulsar-render failed â†’ ffplay fallback window");
 							native_child = Some(c);
 							video_port = vport;
 						} else {
-							tracing::error!("both pulsar-render and ffplay failed to spawn — no video renderer");
+							tracing::error!("both pulsar-render and ffplay failed to spawn â€” no video renderer");
 						}
 					}
 					#[cfg(all(unix, not(target_os = "macos")))]
 					{
-						// The moonlight-style SINGLE SURFACE (libmpv→GtkGLArea + webview overlay)
+						// The moonlight-style SINGLE SURFACE (libmpvâ†’GtkGLArea + webview overlay)
 						// is OPT-IN (`PULSAR_SINGLE_SURFACE=1`) while the final webview-over-GLArea
 						// transparency compositing is sorted; it renders rkmpp video + control
 						// already, but the webview composites opaque over the GLArea on this GTK3
@@ -583,7 +583,7 @@ pub(crate) async fn start_remote_play(
 							// Reuse: take one child from the pool, re-register its GDK container
 							// under the new session id, send `show` + `reopen <new-sdp>` + new caps.
 							// The pool may hold several parked renderers when multiple concurrent tabs
-							// ended — pop the first entry (LIFO is fine; all are equivalent).
+							// ended â€” pop the first entry (LIFO is fine; all are equivalent).
 							let resident = state.resident_render.lock().unwrap().pop();
 							// Shared session id for the reader thread: when reusing the resident,
 							// update this Arc so the existing reader tags events with the new id;
@@ -604,12 +604,12 @@ pub(crate) async fn start_remote_play(
 							let toplevel = crate::render::window_xid(&app).await;
 							// In-app container: a pass-through child GdkWindow the renderer embeds
 							// into. The frontend positions it over the session tab's content area
-							// (`native_view_rect`), so the video renders INSIDE the app — tabs and
-							// chrome stay visible/clickable — instead of covering the whole window.
+							// (`native_view_rect`), so the video renders INSIDE the app â€” tabs and
+							// chrome stay visible/clickable â€” instead of covering the whole window.
 							// Falls back to the toplevel XID (old full-window embed) and then to a
 							// standalone renderer window if there's no XID at all.
 							// When reusing the resident, the existing container (kept alive at session
-							// end) is re-registered under the new id — no new X window is created.
+							// end) is re-registered under the new id â€” no new X window is created.
 							let wid: Option<u64> = if let Some(ref res) = resident {
 								// Re-register the kept container under the new session id.
 								crate::render::rename_native_container(
@@ -619,7 +619,7 @@ pub(crate) async fn start_remote_play(
 								);
 								// The renderer is still embedded in that container (it has been
 								// idle-looping with the window unmapped). The wid for reconnect
-								// re-use is whatever the container's X11 XID already is — the
+								// re-use is whatever the container's X11 XID already is â€” the
 								// renderer's `--wid` arg was set at spawn and doesn't change; we
 								// just need `mpv_wid` bookkeeping for any future codec-switch respawn.
 								// Re-read it so codec-switch respawn uses the correct XID.
@@ -631,12 +631,12 @@ pub(crate) async fn start_remote_play(
 								};
 								container.or(toplevel)
 							};
-							// DEFAULT Linux renderer: `pulsar-render` — a SINGLE-SURFACE native
+							// DEFAULT Linux renderer: `pulsar-render` â€” a SINGLE-SURFACE native
 							// renderer doing rkmpp video + the egui overlay in ONE child window of the
 							// app (`--wid`). The overlay is a child of the app window, so it moves/
 							// clips/stacks WITH it (the earlier separate vidsink + override-redirect
 							// overlay desynced on move and floated above other apps). stdout carries
-							// `vidsink-fps …` (HUD) + `ov …` (interaction). Falls back to the old
+							// `vidsink-fps â€¦` (HUD) + `ov â€¦` (interaction). Falls back to the old
 							// vidsink/mpv if the binary is missing or PULSAR_USE_MPV=1.
 							let rbin = process::render_bin(&app);
 							// Frame-pacing startup default (env; the frontend re-applies the
@@ -653,12 +653,12 @@ pub(crate) async fn start_remote_play(
 							// through to the fresh-spawn path.
 							let resident = resident.and_then(|mut res| {
 								match res.child.try_wait() {
-									Ok(None) => Some(res), // still running — safe to reuse
+									Ok(None) => Some(res), // still running â€” safe to reuse
 									Ok(Some(status)) => {
 										tracing::warn!(
 											pid = res.child.id(),
 											?status,
-											"parked pulsar-render already exited — dropping dead resident, spawning fresh"
+											"parked pulsar-render already exited â€” dropping dead resident, spawning fresh"
 										);
 										let _ = res.child.wait();
 										None
@@ -667,7 +667,7 @@ pub(crate) async fn start_remote_play(
 										tracing::warn!(
 											pid = res.child.id(),
 											err = %e,
-											"try_wait on parked pulsar-render failed — treating as dead, spawning fresh"
+											"try_wait on parked pulsar-render failed â€” treating as dead, spawning fresh"
 										);
 										None
 									}
@@ -676,9 +676,9 @@ pub(crate) async fn start_remote_play(
 							let mut rc = if let Some(res) = resident {
 								use std::io::Write as _;
 								// Activate the resident: show the window + switch to the new SDP.
-								// If the session mode changed (game→remote or remote→game) send a
+								// If the session mode changed (gameâ†’remote or remoteâ†’game) send a
 								// `mode` command so the renderer updates its overlay personality and
-								// pace ceiling — the `--mode` arg was set at original spawn and never
+								// pace ceiling â€” the `--mode` arg was set at original spawn and never
 								// changes otherwise, causing the wrong menu/look/ceiling on reconnect.
 								if let Some(si) = res.stdin.lock().unwrap().as_mut() {
 									if res.game_mode != game_mode {
@@ -735,7 +735,7 @@ pub(crate) async fn start_remote_play(
 									}
 								}
 								// Capture the renderer's stdin so set_frame_pacing (and the HUD
-								// stat writer) can push `pace 0|1` / `stat …` lines to it live.
+								// stat writer) can push `pace 0|1` / `stat â€¦` lines to it live.
 								// (Resident path: stdin was already placed in overlay_stdin above.)
 								if c.stdin.is_some() {
 									if let Some(si) = c.stdin.take() {
@@ -805,8 +805,8 @@ pub(crate) async fn start_remote_play(
 					}
 					#[cfg(target_os = "macos")]
 					{
-						// macOS video: the native mpv child (VideoToolbox HW decode → zero-copy
-						// GL), in its OWN window for now — the embedded zero-copy Metal renderer is
+						// macOS video: the native mpv child (VideoToolbox HW decode â†’ zero-copy
+						// GL), in its OWN window for now â€” the embedded zero-copy Metal renderer is
 						// a later phase (needs a Mac to build). This already removes the webview
 						// video path here.
 						let ipc = std::env::temp_dir().join(format!("pulsar-mpv-{id}.sock"));
@@ -820,10 +820,10 @@ pub(crate) async fn start_remote_play(
 							// mpv missing/unrunnable used to be SILENTLY swallowed (the old
 							// `Err(_) => {}`), leaving the user on a black session with no idea why.
 							// Surface it now: a clear `tracing::error` AND a `host-stats` label line
-							// (the channel the session UI already renders as a status string — see
+							// (the channel the session UI already renders as a status string â€” see
 							// play/hold.rs's `host-stats` emit) telling the user to install mpv
-							// (`brew install mpv`). The session still proceeds — the overlay below +
-							// the control channel come up; only the video is missing — so this is a
+							// (`brew install mpv`). The session still proceeds â€” the overlay below +
+							// the control channel come up; only the video is missing â€” so this is a
 							// degraded-not-fatal notice, NOT a `play-ended` teardown.
 							None => {
 								// No mpv: fall back to the BUNDLED ffplay (software decode, its own
@@ -835,7 +835,7 @@ pub(crate) async fn start_remote_play(
 										tracing::warn!(
 											pid = c.id(),
 											port = vport,
-											"macOS: mpv unavailable — bundled ffplay renders the video (software decode)"
+											"macOS: mpv unavailable â€” bundled ffplay renders the video (software decode)"
 										);
 										native_child = Some(c);
 										video_port = vport;
@@ -846,13 +846,13 @@ pub(crate) async fn start_remote_play(
 										// rather than leaving a silent black session; the overlay + control
 										// channel still come up, so this is degraded-not-fatal.
 										tracing::error!(
-											"macOS: neither mpv nor the bundled ffplay could be spawned — video unavailable (brew install mpv)"
+											"macOS: neither mpv nor the bundled ffplay could be spawned â€” video unavailable (brew install mpv)"
 										);
 										let _ = app.emit(
 											"host-stats",
 											crate::events::PlayStats {
 												id,
-												label: "Video yok — mpv kurulu değil (brew install mpv)"
+												label: "Video yok â€” mpv kurulu deÄŸil (brew install mpv)"
 													.to_string(),
 											},
 										);
@@ -872,7 +872,7 @@ pub(crate) async fn start_remote_play(
 							.map(|v| v == "1" || v == "on" || v == "true")
 							.unwrap_or(false);
 						// No mac-specific spawn helper (spawn_render is Linux-only, spawn_render_win
-						// Windows-only); build the overlay-only command inline — same flags as the
+						// Windows-only); build the overlay-only command inline â€” same flags as the
 						// other backends minus `--wid` (nothing to embed into).
 						let mut cmd = std::process::Command::new(&rbin);
 						cmd.arg(&*sdp)
@@ -887,14 +887,14 @@ pub(crate) async fn start_remote_play(
 						match cmd.spawn() {
 							Ok(mut c) => {
 								tracing::info!(pid = c.id(), "macOS native overlay (pulsar-render) spawned");
-								// Read the overlay-only renderer's stdout (`ov …` interaction lines; it
+								// Read the overlay-only renderer's stdout (`ov â€¦` interaction lines; it
 								// emits no `vidsink-fps` video stats). start_render_reader matches an
 								// overlay-only process and tolerates the missing stats.
 								if let Some(out) = c.stdout.take() {
 									crate::render_stats::start_render_reader(&app, id, out, None);
 								}
 								// Capture its stdin into the SHARED render_stdin slot the other
-								// platforms use, so set_overlay (`open`/`close`), the HUD `stat …`
+								// platforms use, so set_overlay (`open`/`close`), the HUD `stat â€¦`
 								// writer, render_chat/fsjson/audio etc. all reach it.
 								if let Some(si) = c.stdin.take() {
 									*overlay_stdin.lock().unwrap() = Some(si);
@@ -933,10 +933,10 @@ pub(crate) async fn start_remote_play(
 								}
 							}
 							// The overlay binary may be missing (e.g. a dev build that didn't bundle
-							// it) — the session still works without it (video + control are
+							// it) â€” the session still works without it (video + control are
 							// independent), so log it and carry on rather than failing the connect.
 							Err(e) => {
-								tracing::warn!(error = %e, "macOS: pulsar-render overlay failed to spawn — overlay unavailable");
+								tracing::warn!(error = %e, "macOS: pulsar-render overlay failed to spawn â€” overlay unavailable");
 							}
 						}
 					}
@@ -949,12 +949,12 @@ pub(crate) async fn start_remote_play(
 
 	if !game_id.is_empty() {
 		if let Err(e) = request_launch(&mut sess, &game_id).await {
-			// Park ANY live pulsar-render child instead of killing it — regardless of whether
+			// Park ANY live pulsar-render child instead of killing it â€” regardless of whether
 			// it was a reused resident or a freshly-spawned one. On RK3588 the EGL context is
 			// shared with WebKitGTK's Mali display: destroying it (even via clean SIGTERM) wedges
 			// WebKit click input with no in-session recovery. The reuse guard previously checked
 			// `render_child_is_resident` but a fresh renderer on an empty pool carries the same
-			// risk — it is live and rendering into the same shared Mali EGL surface.
+			// risk â€” it is live and rendering into the same shared Mali EGL surface.
 			#[cfg(all(unix, not(target_os = "macos")))]
 			let render_child_parked = if let Some(child) = render_child.take() {
 				use std::io::Write as _;
@@ -1006,8 +1006,8 @@ pub(crate) async fn start_remote_play(
 	// HDR: read from the UI setting persisted in stream_cfg. The PULSAR_HDR env var is a
 	// debug override that wins if set. The UI value is the normal production path.
 	let req_hdr = state.stream_cfg.lock().unwrap().hdr || std::env::var_os("PULSAR_HDR").is_some();
-	// Quality bias from the Settings → Display 'Varsayılan kalite' control (ui.quality).
-	// "hq" → Quality, "fast" → Latency; "auto" (or absent) defers to the mode-natural default
+	// Quality bias from the Settings â†’ Display 'VarsayÄ±lan kalite' control (ui.quality).
+	// "hq" â†’ Quality, "fast" â†’ Latency; "auto" (or absent) defers to the mode-natural default
 	// (game=Latency, remote=Quality). Also seeded into hold_session so re-requests (adaptive
 	// bitrate steps + session-menu changes) preserve the user's chosen bias.
 	let req_quality = match quality.as_deref() {
@@ -1016,17 +1016,17 @@ pub(crate) async fn start_remote_play(
 		_ => if game_mode { QualityPref::Latency } else { QualityPref::Quality },
 	};
 	// Linux/Pi native renderer caps. mpv 0.34 here decodes with rkmpp but the gpu VO has
-	// no DRM_PRIME→EGL interop on this build, so every frame is HW-DOWNLOADED (GPU→CPU)
-	// and re-uploaded for Panfrost GL — far too slow to drain a 1440p60 high-bitrate
-	// stream. The UDP socket then overflows (measured ~1.7k dropped pkt/s → ~90% loss →
+	// no DRM_PRIMEâ†’EGL interop on this build, so every frame is HW-DOWNLOADED (GPUâ†’CPU)
+	// and re-uploaded for Panfrost GL â€” far too slow to drain a 1440p60 high-bitrate
+	// stream. The UDP socket then overflows (measured ~1.7k dropped pkt/s â†’ ~90% loss â†’
 	// ~3 fps + seconds of latency). So the Linux native path asks the host for a stream
 	// it can actually keep up with (720p60 @ 10 Mbit default), instead of deferring to the
 	// host's heavy native resolution. Webview clients (Win/macOS WebCodecs) and the menu's
 	// own resolution selector are unaffected (0 = host default). Env-overridable for tuning:
 	// PULSAR_W / PULSAR_H / PULSAR_FPS / PULSAR_KBPS.
-	// mpv 0.34 on the Pi sustains only ~25 Mpx/s through its rkmpp→HW-download→Panfrost-GL
-	// path, so a 960x540@30 (≈16 Mpx/s) default stays inside that envelope: mpv keeps up, the
-	// socket buffer doesn't fill, latency stays low. (720p60 = 55 Mpx/s overran it → the
+	// mpv 0.34 on the Pi sustains only ~25 Mpx/s through its rkmppâ†’HW-downloadâ†’Panfrost-GL
+	// path, so a 960x540@30 (â‰ˆ16 Mpx/s) default stays inside that envelope: mpv keeps up, the
+	// socket buffer doesn't fill, latency stays low. (720p60 = 55 Mpx/s overran it â†’ the
 	// 3 fps + multi-second lag.) Bump via the in-app resolution menu or PULSAR_W/H/FPS/KBPS
 	// once the Pi runs a zero-copy mpv build. Webview clients defer to the host (0).
 	// "Auto" fps targets the client's display refresh (nearest of 30/60/120).
@@ -1046,11 +1046,11 @@ pub(crate) async fn start_remote_play(
 	tracing::info!(auto_fps, host_hz, "stream fps target (client display refresh, capped by the host's)");
 	// A host with no hardware encoder (x264 on the CPU) can't encode a high-refresh stream in
 	// real time: its frames queue up and the picture stutters at any bitrate. Start such a
-	// host at ≤ 60 fps; the adaptive ladder goes lower if it still can't keep up.
+	// host at â‰¤ 60 fps; the adaptive ladder goes lower if it still can't keep up.
 	let host_sw_only = !host_caps.encoders.is_empty() && host_caps.encoders.iter().all(|e| e == "software");
 	let auto_fps = if host_sw_only { auto_fps.min(60) } else { auto_fps };
 	let client_fps = if host_sw_only { client_fps.min(60) } else { client_fps };
-	// Every host monitor (idx, w, h, Hz) — a monitor switch mid-session rebuilds the ladder.
+	// Every host monitor (idx, w, h, Hz) â€” a monitor switch mid-session rebuilds the ladder.
 	let host_displays: Vec<(u32, u32, u32, u32)> =
 		host_caps.displays.iter().map(|d| (d.idx, d.width, d.height, d.refresh_hz)).collect();
 	let (req_w, req_h, req_fps, req_kbps) = if native && cfg!(target_os = "linux") {
@@ -1061,7 +1061,7 @@ pub(crate) async fn start_remote_play(
 				.unwrap_or(d)
 		};
 		if render_child.is_some() {
-			// Native zero-copy single-surface renderer (rkmpp→DRM_PRIME→EGL): sustains a full
+			// Native zero-copy single-surface renderer (rkmppâ†’DRM_PRIMEâ†’EGL): sustains a full
 			// stream easily. Default 1080p; fps follows the client's display refresh (auto).
 			(
 				g("PULSAR_W", 1920),
@@ -1070,7 +1070,7 @@ pub(crate) async fn start_remote_play(
 				g("PULSAR_KBPS", 15_000),
 			)
 		} else if vidsink_bin_path.is_some() {
-			// Native zero-copy vidsink (rkmpp→DRM_PRIME→EGL): proven 468 fps @1080p / 264 @1440p
+			// Native zero-copy vidsink (rkmppâ†’DRM_PRIMEâ†’EGL): proven 468 fps @1080p / 264 @1440p
 			// on this Pi, so it easily sustains a full stream. Default 1080p; auto fps.
 			(
 				g("PULSAR_W", 1920),
@@ -1079,7 +1079,7 @@ pub(crate) async fn start_remote_play(
 				g("PULSAR_KBPS", 15_000),
 			)
 		} else {
-			// mpv fallback (no DRM_PRIME→EGL interop → HW-downloads every frame): keep the light
+			// mpv fallback (no DRM_PRIMEâ†’EGL interop â†’ HW-downloads every frame): keep the light
 			// 540p30 cap so it can keep up / not overflow the socket.
 			(
 				g("PULSAR_W", 960),
@@ -1090,7 +1090,7 @@ pub(crate) async fn start_remote_play(
 		}
 	} else {
 		// Size + bitrate: the host's defaults. Frame rate: this display's refresh (capped by the
-		// host's) — the ladder then steps it down through the common rates when it can't hold.
+		// host's) â€” the ladder then steps it down through the common rates when it can't hold.
 		(0, 0, auto_fps, 0)
 	};
 	// Relay per-session rate cap (kbit/s, 0 = uncapped): when this session is RELAYED the relay
@@ -1098,7 +1098,7 @@ pub(crate) async fn start_remote_play(
 	// Clamp the requested bitrate to ~90% of it (headroom for audio + RTP/IP overhead) so the
 	// encoder STARTS within the pipe instead of overshooting and waiting for the loss-driven ABR
 	// to ramp down (the bad first ~20 s the maintainer flagged). Direct/P2P sessions (cap 0 or
-	// non-relay transport) are untouched — full quality immediately. `0` requested = host default,
+	// non-relay transport) are untouched â€” full quality immediately. `0` requested = host default,
 	// which under a cap would overshoot, so we pin it to the cap instead.
 	let cap_kbps = if matches!(sess.transport(), Transport::Relay) && sess.rate_cap_kbps() > 0 {
 		(sess.rate_cap_kbps() * 9 / 10).max(2_000)
@@ -1116,7 +1116,7 @@ pub(crate) async fn start_remote_play(
 	if cap_kbps > 0 {
 		tracing::info!(cap_kbps, req_kbps, "relayed session: clamped stream bitrate to per-session cap");
 	}
-	// ── The shared adaptive controller (`pulsar_core::adapt`, Phases 0–3) ────────────────
+	// â”€â”€ The shared adaptive controller (`pulsar_core::adapt`, Phases 0â€“3) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 	// Built here so the FIRST request already carries its start point and rate; hold.rs
 	// feeds it (loss / RTT / frame arrivals) and actuates its decisions.
 	let native_dims = {
@@ -1131,7 +1131,7 @@ pub(crate) async fn start_remote_play(
 	};
 	let peer_key = target.clone();
 	// 0 (host default) means the cap is unknown: allow what a crystal-clear picture of the
-	// native point needs (scaled by pixels, fps and codec — see `auto_cap_kbps`) and let the
+	// native point needs (scaled by pixels, fps and codec â€” see `auto_cap_kbps`) and let the
 	// controller find the path's real budget under it. (Was a flat 15 Mbit: a 1200p120 game
 	// stream on a fast LAN never got past it.)
 	let cap_for_ctl = if req_kbps > 0 { req_kbps } else { auto_cap_kbps(&codec_h, native_dims, game_mode) };
@@ -1149,7 +1149,7 @@ pub(crate) async fn start_remote_play(
 	);
 	// The memory seeds 60 % of the last clean rate, but never under ~2 Mbit: one bad session
 	// (e.g. a host that couldn't keep up) must not start every later one at the floor.
-	// (Pre-optimized sessions used to start at 6 Mbit or more — on a ~10 Mbit mobile link
+	// (Pre-optimized sessions used to start at 6 Mbit or more â€” on a ~10 Mbit mobile link
 	// that opened with 40 % loss; they now start like any other session.)
 	let hint = crate::adapt_memory::hint(&app, &peer_key, path_class)
 		.map(|k| (k * 3 / 5).max(2_000).clamp(pulsar_core::adapt::FLOOR_KBPS, cap_for_ctl));
@@ -1226,28 +1226,28 @@ pub(crate) async fn start_remote_play(
 	tracing::info!(pref = %aq_pref, auto = ?auto_audio, quality = ?audio_quality, "audio quality");
 	let mut acfg = pulsar_core::adapt::Config::new(pulsar_core::adapt::codec_from_wire(&codec_h), cap_for_ctl);
 	acfg.native = native_dims;
-	// No memory of this path → 0: the controller starts cautiously (min(cap, ~4 Mbit)) and
+	// No memory of this path â†’ 0: the controller starts cautiously (min(cap, ~4 Mbit)) and
 	// probes up, instead of opening at the cap.
 	acfg.start_kbps = hint.unwrap_or(0);
 	if let Some(e) = &probe {
 		// 80 % of the measured rate: room for parity, retransmits and the measurement's own
-		// error (a policer's bucket can read a little high). No startup ramp on top — the
+		// error (a policer's bucket can read a little high). No startup ramp on top â€” the
 		// probe already did that job; later climbs follow the controller's normal probing.
 		acfg.start_kbps = (e.kbps as u64 * 4 / 5).clamp(pulsar_core::adapt::FLOOR_KBPS as u64, cap_for_ctl as u64) as u32;
 		acfg.startup_windows = 0;
 	}
 	// Only the Linux libav renderer resumes on a partially intra-refreshed picture (libav
 	// conceals the lost reference). Windows heals a loss by reference-frame invalidation instead
-	// (`host_rfi`; the 2026-11-08 IR attempt there overflowed the AU queue — see stream/rtp.rs
+	// (`host_rfi`; the 2026-11-08 IR attempt there overflowed the AU queue â€” see stream/rtp.rs
 	// IR_MODE), macOS waits for an IDR and gets a short GOP.
 	acfg.ir_capable = cfg!(target_os = "linux");
 	// The resolution/fps ladder is ON: when the budget (or a host that can't keep up) no
 	// longer buys a clean picture at the current point, the controller steps to a lighter
 	// one instead of starving the encoder. A resolution or fps picked in the session menu
-	// still pins that dimension (hold.rs → `set_manual_point`).
+	// still pins that dimension (hold.rs â†’ `set_manual_point`).
 	acfg.ladder = true;
 	// Remote desktop: hold full HD (or the configured/native size if smaller) and adapt only
-	// fps + bitrate — readable text matters more than motion, and desktop content needs far
+	// fps + bitrate â€” readable text matters more than motion, and desktop content needs far
 	// fewer bits than the game-content ladder assumes. Game mode keeps the full ladder.
 	if !game_mode {
 		acfg.min_height = 1080;
@@ -1259,17 +1259,21 @@ pub(crate) async fn start_remote_play(
 		acfg.min_fps = 60;
 		acfg.min_height = 720;
 		// An explicit FSR / AI pick (every desktop renderer + mpv): a lower resolution comes back
-		// sharp, so each rung needs a quarter more bitrate before it is kept — the ladder gives
+		// sharp, so each rung needs a quarter more bitrate before it is kept â€” the ladder gives
 		// up resolution before blockiness sets in, and the upscaler covers the difference.
 		// 'auto' (the default) keeps the normal thresholds: it only adds the upscaler once the
 		// ladder has dropped below the screen's size, it doesn't drop earlier.
-		if matches!(crate::native_view::upscale_mode().as_str(), "fsr" | "ai") {
+		if matches!(crate::native_view::upscale_mode().as_str(), "fsr" | "ai" | "sgsr") {
 			acfg.min_kbps_scale = 1.25;
 		}
 	}
+	// Both modes: a last-resort 720p30 rung under the floors â€” a path that can't carry the
+	// floor rung (remote 1080p30, game 720p60) steps there instead of starving the encoder at
+	// the floor; Auto upscaling puts the picture back on screen sharp (2026-11-13 hotspot).
+	acfg.last_resort = Some((720, 30));
 	let mut ctl = pulsar_core::adapt::Controller::new(acfg);
 	// The user's saved picks: a bitrate limit is the controller's ceiling (it still adapts under
-	// it), a resolution/fps pins that dimension — same as picking them in the session menu.
+	// it), a resolution/fps pins that dimension â€” same as picking them in the session menu.
 	let pin_res = match (init_width, init_height) {
 		(Some(w), Some(h)) if w > 0 && h > 0 => Some((w, h)),
 		_ => None,
@@ -1324,8 +1328,8 @@ pub(crate) async fn start_remote_play(
 		fps: req_fps,
 		audio_port,
 		// Session-menu audio defaults: transmit on; request host-silent in GAME mode (the
-		// Moonlight/Sunshine default — "play on host" is OFF). The host satisfies host-silent by
-		// REDIRECTING its default render endpoint to a sinkless virtual sink and capturing that —
+		// Moonlight/Sunshine default â€” "play on host" is OFF). The host satisfies host-silent by
+		// REDIRECTING its default render endpoint to a sinkless virtual sink and capturing that â€”
 		// NOT by muting the captured endpoint (muting taps post-mute on common codecs and would
 		// stream pure silence; that was the dead-silent bug). Because the host now uses redirect,
 		// requesting host-silent in game mode is safe again. Desktop mode leaves the host playing;
@@ -1333,7 +1337,7 @@ pub(crate) async fn start_remote_play(
 		transmit_audio: true,
 		mute_host: game_mode,
 		game_mode,
-		// 0 = host default; quality: "hq"→Quality, "fast"→Latency, "auto"/missing→mode-derived default.
+		// 0 = host default; quality: "hq"â†’Quality, "fast"â†’Latency, "auto"/missingâ†’mode-derived default.
 		bitrate_kbps: req_kbps,
 		quality: req_quality,
 		hdr: req_hdr,
@@ -1341,7 +1345,7 @@ pub(crate) async fn start_remote_play(
 		// PRUNED set (host-encoder-aware), not raw `client_codecs`: the host clamps its
 		// auto-degraded codec to this, so it can never land on a codec the client dropped
 		// because its decoder is incompatible with the host's encoder family (e.g. the Pi's
-		// rkmpp can't decode native-NVENC HEVC — HEVC is in `client_codecs` but not `allowed`).
+		// rkmpp can't decode native-NVENC HEVC â€” HEVC is in `client_codecs` but not `allowed`).
 		decode_codecs: allowed.clone(),
 		media_over_session: mos,
 		// Cursor side-channel: the native renderer can draw the host pointer itself
@@ -1357,14 +1361,14 @@ pub(crate) async fn start_remote_play(
 		display_idx: display_idx.unwrap_or(0),
 		// Per-window capture target (Phase 2b co-op). When the client picked a host window
 		// (or, in a future flow, a launched game it resolved client-side), the host captures
-		// that single window via WGC instead of the monitor — letting two panes share one
+		// that single window via WGC instead of the monitor â€” letting two panes share one
 		// monitor. `None` (the common case) = the `display_idx` monitor path, unchanged. The
 		// game-mode launched-app window is resolved on the HOST (it owns the PID), not here.
 		window_hwnd,
-		// Screen adaptation starts OFF (None) — the overlay's "Ekran uyarlama" toggle turns it on
+		// Screen adaptation starts OFF (None) â€” the overlay's "Ekran uyarlama" toggle turns it on
 		// live (Restream::Adapt), and hold.rs preserves it across re-requests.
 		adapt: None,
-		// Requested audio channel layout. Default Stereo — the universally-decodable
+		// Requested audio channel layout. Default Stereo â€” the universally-decodable
 		// layout the native/webview audio paths expect (the client's SDP is opus/48000/2
 		// per RFC 7587 and ffmpeg auto-detects multichannel from the bitstream). The host
 		// negotiates this down against its own captured endpoint. A surround picker can
@@ -1373,7 +1377,7 @@ pub(crate) async fn start_remote_play(
 		// Every session starts with the normal GOP; the hold-loop's controller flips this
 		// on the first sustained loss (adaptive streaming Phase 0).
 		loss_recovery: pulsar_core::service::LossRecovery::Normal,
-		// Ask for FEC parity (Phase 2.1) — the host sends it only once we report loss;
+		// Ask for FEC parity (Phase 2.1) â€” the host sends it only once we report loss;
 		// Reed-Solomon (several losses per frame) preferred, XOR for older hosts.
 		fec: mos,
 		fec_rs: mos,
@@ -1381,7 +1385,7 @@ pub(crate) async fn start_remote_play(
 		audio_quality,
 	};
 	if let Err(e) = request_stream(&mut sess, &req).await {
-		// Park ANY live pulsar-render child instead of killing it — regardless of whether
+		// Park ANY live pulsar-render child instead of killing it â€” regardless of whether
 		// it was a reused resident or a freshly-spawned one. Same rationale as the
 		// request_launch guard above: destroying the EGL context on the shared RK3588 Mali
 		// display (even via clean SIGTERM) wedges WebKitGTK click input. A fresh renderer
@@ -1432,14 +1436,14 @@ pub(crate) async fn start_remote_play(
 	}
 
 	// The host's Opus/RTP audio plays natively on every platform (libopus + SDL3,
-	// Moonlight's model — see native_audio.rs). Started even when transmit is off, so a live
+	// Moonlight's model â€” see native_audio.rs). Started even when transmit is off, so a live
 	// toggle on just works; the SDL device only opens when the first packet arrives.
 	let audio_native = (audio_port > 0).then(|| crate::native_audio::start(view.audio_packets(), id));
 
 	// Register this play session (one per connected-host tab). `id` was allocated above.
 	let running = Arc::new(AtomicBool::new(true));
 	let (input_tx, input_rx) = tokio::sync::mpsc::channel::<InputEvent>(256);
-	// Host → client rumble: the session hold loop forwards DataMsg::Rumble onto this
+	// Host â†’ client rumble: the session hold loop forwards DataMsg::Rumble onto this
 	// channel; the gilrs reader thread drains it and replays the force-feedback on the
 	// physical pad. Unused (sender drops) when controllers aren't being forwarded.
 	let (rumble_tx, mut rumble_rx) = tokio::sync::mpsc::channel::<(u8, u8, u8)>(64);
@@ -1447,7 +1451,7 @@ pub(crate) async fn start_remote_play(
 	if gamepad {
 		// Read controllers on a blocking thread (gilrs isn't async/Send-friendly).
 		// Clones the live controller_order Arc so slot reorders apply each tick without
-		// requiring a reconnect (the UI writes via set_controller_order → AppState).
+		// requiring a reconnect (the UI writes via set_controller_order â†’ AppState).
 		let reader_flag = running.clone();
 		let gtx = input_tx.clone();
 		let order_arc = state.controller_order.clone();
@@ -1463,7 +1467,7 @@ pub(crate) async fn start_remote_play(
 		// focused session and a pad LOCKED to a session (CONTROLLER_SESSION_LOCK) forwards only
 		// from its owner. With split mode off there is one session and `focused_session` equals
 		// `play_id` (or 0 before the first set_active_session), so the gate is transparent there
-		// — see the gate at the per-pad forward below.
+		// â€” see the gate at the per-pad forward below.
 		let focused_session = state.focused_session.clone();
 		// Live play sessions (tabs): with more than one open outside split mode, pads go to the
 		// focused tab only (two hosts must not both get / drive the same pad).
@@ -1473,11 +1477,11 @@ pub(crate) async fn start_remote_play(
 		// calls set_active_session in the non-split flow, so focused_session would be 0).
 		let split_pane_count = state.split_pane_count.clone();
 		// App handle so the reader can OPEN/close the overlay from a controller button
-		// (the GUIDE/PS button — pad equivalent of the keyboard Ctrl+Shift+M).
+		// (the GUIDE/PS button â€” pad equivalent of the keyboard Ctrl+Shift+M).
 		let ov_app = app.clone();
 		// DualSense passthrough: a host advertising FEAT_DS5 gets raw DualSense reports
 		// (ds5/client.rs) instead of GamepadSlot for every forwarded DualSense.
-		// Settings → Kontroller → DualSense ("DualSense özelliklerini kullan") or
+		// Settings â†’ Kontroller â†’ DualSense ("DualSense Ã¶zelliklerini kullan") or
 		// `PULSAR_DS5=0` turns it off.
 		let ds5_prefs = crate::ds5::client::prefs();
 		let ds5_client = (host_caps
@@ -1498,13 +1502,13 @@ pub(crate) async fn start_remote_play(
 				// Track which uuids were connected last tick so we can detect disconnects.
 			let mut prev_uuids: std::collections::HashSet<String> =
 				std::collections::HashSet::new();
-			// Remember each uuid → slot mapping from last tick for disconnect events.
+			// Remember each uuid â†’ slot mapping from last tick for disconnect events.
 			let mut prev_slot: std::collections::HashMap<String, u8> =
 				std::collections::HashMap::new();
-			// Sticky uuid→slot assignment for pads not covered by `controller_order`.
+			// Sticky uuidâ†’slot assignment for pads not covered by `controller_order`.
 			// Allocated once per pad-lifetime (lowest free slot in 0..MAX_PADS), freed on
 			// disconnect.  This prevents survivor pads from shifting slots when another pad
-			// disconnects — the bug where player-2 (slot 1) would remap to slot 0 after
+			// disconnects â€” the bug where player-2 (slot 1) would remap to slot 0 after
 			// player-1 (slot 0) disconnected, leaving the host's original slot-1 virtual pad
 			// stuck in its last state indefinitely.
 			const MAX_PADS: u8 = 4;
@@ -1515,18 +1519,18 @@ pub(crate) async fn start_remote_play(
 			// persisted in `controller_order` from a previous session don't push
 			// live pads to index >= MAX_PADS, WITHOUT demoting a surviving pad
 			// when an earlier-order pad disconnects (the R16 regression).
-			// Never cleared on disconnect — only populated on first live appearance.
+			// Never cleared on disconnect â€” only populated on first live appearance.
 			let mut ever_live: std::collections::HashSet<String> =
 				std::collections::HashSet::new();
-			// Last-emitted `ctrls` payload — only re-send when it changes (hotplug /
-			// order change). Also throttled to ~1 Hz (every 60 ticks × 16 ms) so a
+			// Last-emitted `ctrls` payload â€” only re-send when it changes (hotplug /
+			// order change). Also throttled to ~1 Hz (every 60 ticks Ã— 16 ms) so a
 			// stale renderer that missed the initial line eventually gets it.
 			let mut prev_ctrls_line = String::new();
 			// Last `hpvol` line (DualSense headphone volume bars, ds5/headset.rs).
 			let mut prev_hp_line: Option<String> = None;
 			// ~1 Hz WALL-CLOCK keepalive. The loop is now event-driven (iterates at the pad's
 				// event rate, not a fixed tick), so a tick-modulo cadence would swing from ~0.25 Hz
-				// idle to >4 Hz at 1000 Hz — wrong for both the GamepadSlot resync (host holds the
+				// idle to >4 Hz at 1000 Hz â€” wrong for both the GamepadSlot resync (host holds the
 				// last state stickily, so a dropped UDP packet needs a steady ~1 s refresh) and the
 				// ctrls overlay line. Seeded 1 s in the past so the first pass sends a keepalive.
 				let mut last_keepalive = std::time::Instant::now() - std::time::Duration::from_secs(1);
@@ -1537,11 +1541,11 @@ pub(crate) async fn start_remote_play(
 					let mut prev_overlay_combo = false;
 					// Previous quit-combo (Start+Select+L1+R1) state for rising-edge detection.
 					let mut prev_quit_combo = false;
-				// Last GamepadState forwarded per pad (uuid) — send-on-change so the 250 Hz
+				// Last GamepadState forwarded per pad (uuid) â€” send-on-change so the 250 Hz
 				// poll doesn't flood the session while a pad sits idle.
 				let mut last_sent: std::collections::HashMap<String, pulsar_core::input::GamepadState> =
 					std::collections::HashMap::new();
-				// Client-side rumble engine (SDL3 HID drivers — actuates force-feedback
+				// Client-side rumble engine (SDL3 HID drivers â€” actuates force-feedback
 				// where gilrs/evdev can't, e.g. a Bluetooth DualSense / the RK3588 kernel).
 				// None if SDL is unavailable; then host rumble is dropped (never fatal). It
 				// The manager is process-global (one SDL owner of the pads).
@@ -1571,13 +1575,13 @@ pub(crate) async fn start_remote_play(
 					// falling back to pads.first() when order is empty (default / single pad).
 					let p1 = order.first().and_then(|u0| pads.iter().find(|p| &p.uuid == u0)).or_else(|| pads.first());
 					let overlay_open = ov_open.lock().unwrap().contains(&play_id);
-					// Focus gate (focus_gate.rs): another app focused → the pad UI below (combos,
+					// Focus gate (focus_gate.rs): another app focused â†’ the pad UI below (combos,
 					// overlay nav) ignores the pad, and the host gets a released state unless
 					// background controller input is on. Rumble/haptics to the pad keep playing.
 					let app_focused = crate::focus_gate::app_focused();
 					let forward_ok = app_focused || crate::focus_gate::background_input();
 						// Controller overlay toggle: Moonlight's Select+L1+R1+X combo (all four held)
-						// opens/closes the overlay — the pad equivalent of the keyboard Ctrl+Shift+M
+						// opens/closes the overlay â€” the pad equivalent of the keyboard Ctrl+Shift+M
 						// (Moonlight uses this exact combo for its stats overlay). Rising edge of the
 						// full combo; the frontend's `overlay-toggle` handler does the open/close.
 						let ov_combo = p1
@@ -1596,7 +1600,7 @@ pub(crate) async fn start_remote_play(
 							let _ = ov_app.emit("overlay-toggle", ());
 						}
 						prev_overlay_combo = ov_combo;
-						// Controller quit: Moonlight's Start+Select+L1+R1 combo ENDS the session —
+						// Controller quit: Moonlight's Start+Select+L1+R1 combo ENDS the session â€”
 						// the pad equivalent of the keyboard Ctrl+Shift+Q (emits the same `kbd-leave`,
 						// which the frontend turns into an end-session). Distinct from the overlay
 						// combo by START-vs-X, so only one fires. Rising edge.
@@ -1616,8 +1620,8 @@ pub(crate) async fn start_remote_play(
 						prev_quit_combo = quit_combo;
 					// G6: while the overlay is OPEN the pad drives the native egui menu (the host
 					// gets NO pad input meanwhile). Emit a key line on each rising edge (one menu
-					// step per press): up→prev widget, down→next, left/right→within, A→activate,
-					// B→back/close. The renderer's `k` handler turns these into egui key events.
+					// step per press): upâ†’prev widget, downâ†’next, left/rightâ†’within, Aâ†’activate,
+					// Bâ†’back/close. The renderer's `k` handler turns these into egui key events.
 					if overlay_open {
 						use pulsar_core::input::button as b;
 						const NAVT: i16 = 16000;
@@ -1635,7 +1639,7 @@ pub(crate) async fn start_remote_play(
 							})
 							.unwrap_or([false; 6]);
 						// Directions relayed raw; the renderer translates view-aware (Root menu
-						// selection vs sub-view widget focus). A → activate (Enter), B → back (Esc).
+						// selection vs sub-view widget focus). A â†’ activate (Enter), B â†’ back (Esc).
 						let keys = ["up", "down", "left", "right", "go", "escape"];
 						if let Some(si) = ctrls_stdin.lock().unwrap().as_mut() {
 							use std::io::Write as _;
@@ -1668,7 +1672,7 @@ pub(crate) async fn start_remote_play(
 				for p in &pads {
 					ever_live.insert(p.uuid.clone());
 				}
-				// Authoritative slot→uuid map built by the forward loop below.
+				// Authoritative slotâ†’uuid map built by the forward loop below.
 				// Used for rumble routing (replaces the pre-loop duplicate that caused
 				// first-tick slot collisions when sticky_slots was not yet populated).
 				let mut slot_to_uuid: std::collections::HashMap<u8, String> = std::collections::HashMap::new();
@@ -1682,7 +1686,7 @@ pub(crate) async fn start_remote_play(
 						let kind = &p.kind;
 						let state = &p.state;
 					// Compute slot:
-					//   1. If controller_order is non-empty and contains this uuid → use its
+					//   1. If controller_order is non-empty and contains this uuid â†’ use its
 					//      position (unchanged from original behavior).
 					//   2. Otherwise use the sticky map (allocated on first appearance as the
 					//      lowest free slot in 0..MAX_PADS not currently held by any live uuid,
@@ -1694,12 +1698,12 @@ pub(crate) async fn start_remote_play(
 						// so they don't consume rank slots and push live pads beyond
 						// MAX_PADS). Crucially, disconnected-but-previously-live pads
 						// REMAIN in ever_live, so a surviving pad's rank (= its slot)
-						// never changes when an earlier pad disconnects — the R16 regression
+						// never changes when an earlier pad disconnects â€” the R16 regression
 						// where p2 shifted from slot 1 to slot 0 on p1's disconnect is fixed.
 						if let Some(rank) = order.iter().filter(|k| ever_live.contains(k.as_str())).position(|k| k == uuid) {
 							(rank as u8).min(MAX_PADS - 1)
 						} else {
-							// uuid not in order list — fall through to sticky path.
+							// uuid not in order list â€” fall through to sticky path.
 							// (Rare: a pad connected after the order was set.)
 							if !sticky_slots.contains_key(uuid) {
 								// Pre-compute used set before mutably borrowing sticky_slots.
@@ -1727,7 +1731,7 @@ pub(crate) async fn start_remote_play(
 						}
 						sticky_slots[uuid]
 					};
-					// Resolve emulation target from the per-uuid map ("xbox"/"ds4"/absent→Auto).
+					// Resolve emulation target from the per-uuid map ("xbox"/"ds4"/absentâ†’Auto).
 					let target = match emul.get(uuid).map(|s| s.as_str()) {
 						Some("xbox") => EmulationTarget::Xbox360,
 						Some("ds4") => EmulationTarget::Ds4,
@@ -1747,7 +1751,7 @@ pub(crate) async fn start_remote_play(
 						// `lock_owner` is reused for the ctrls line's lock field below.
 						let lock_owner = crate::controllers::controller_lock_owner(uuid);
 						let route_here = if split_pane_count.load(Ordering::SeqCst) <= 1 {
-							// Tabs (split off): one session → it gets every pad. Several open →
+							// Tabs (split off): one session â†’ it gets every pad. Several open â†’
 							// only the focused tab (set_active_session); if the focused id is not
 							// a live session (none set yet / it closed) every session forwards,
 							// the old behaviour.
@@ -1852,7 +1856,7 @@ pub(crate) async fn start_remote_play(
 				// Second pass: forward each pad at its (possibly remapped) host-facing slot.
 				for r in &fwd_records {
 					let uuid = &r.uuid;
-					// The slot this pad was ACTUALLY forwarded under last tick — read BEFORE we
+					// The slot this pad was ACTUALLY forwarded under last tick â€” read BEFORE we
 					// overwrite prev_slot below. In split mode that is the per-session RENUMBERED slot
 					// (e.g. 0), which differs from the pad's global rank; when routing moves away this
 					// tick the neutral frame must target THAT slot, not the global rank, or the held
@@ -1922,7 +1926,7 @@ pub(crate) async fn start_remote_play(
 				prev_uuids = cur_uuids;
 				// Replay any pending host rumble on the physical pads (force-feedback).
 				// Runs AFTER the forward loop so slot_to_uuid is fully and correctly
-				// populated — avoids first-tick collisions from the old pre-loop approach.
+				// populated â€” avoids first-tick collisions from the old pre-loop approach.
 				while let Ok((slot, large, small)) = rumble_rx.try_recv() {
 					mgr.rumble(slot_to_uuid.get(&slot).cloned(), slot, large, small);
 				}
@@ -1930,7 +1934,7 @@ pub(crate) async fn start_remote_play(
 				// the set changes or every ~1 Hz (so a late-spawned renderer gets the list).
 				// Format: NO spaces in the payload; name spaces become underscores. Kind is
 				// the GamepadKind label() string with spaces replaced by underscores.
-				// (keepalive cadence is wall-clock now — see `keepalive` above; no tick counter)
+				// (keepalive cadence is wall-clock now â€” see `keepalive` above; no tick counter)
 				// Names come straight from the SDL snapshot (PadView carries each pad's name).
 				// beyond the list itself; called ~1Hz or on change, not every 16 ms tick).
 				let name_map: std::collections::HashMap<String, String> = if !ctrls_entries.is_empty() {
@@ -1942,7 +1946,7 @@ pub(crate) async fn start_remote_play(
 				} else {
 					std::collections::HashMap::new()
 				};
-				// Whether split mode is active — gates the 8th `:locked` ctrls field (below) so the
+				// Whether split mode is active â€” gates the 8th `:locked` ctrls field (below) so the
 				// 7-field line stays identical when split mode is off (unchanged platform parsing).
 				let split_on = split_pane_count.load(Ordering::SeqCst) > 1;
 				let ctrls_payload: String = {
@@ -1956,7 +1960,7 @@ pub(crate) async fn start_remote_play(
 								.get(uuid)
 								.map(|n| n.replace(' ', "_"))
 								.unwrap_or_else(|| uuid.clone());
-							// 7-field form (split OFF): slot:kind_tag:name:uuid:target:rumble:disabled — byte-for-byte
+							// 7-field form (split OFF): slot:kind_tag:name:uuid:target:rumble:disabled â€” byte-for-byte
 							// the established protocol, so the platform `splitn(7)` parsers are unaffected when split
 							// mode is off. With split mode ON we append an 8th field `:locked` (1 = locked to THIS
 							// session) for the overlay's "Bu oturuma kilitle" toggle; the platform parsers must then
@@ -1972,7 +1976,7 @@ pub(crate) async fn start_remote_play(
 						.collect::<Vec<_>>()
 						.join(",")
 				};
-				// Emit `ctrls` in BOTH modes — the controller overlay view (🎮 Kollar)
+				// Emit `ctrls` in BOTH modes â€” the controller overlay view (ðŸŽ® Kollar)
 				// is available in remote mode too, so it needs the live list there.
 				let changed = ctrls_payload != prev_ctrls_line;
 				let periodic = keepalive;
@@ -1998,25 +2002,25 @@ pub(crate) async fn start_remote_play(
 					prev_hp_line = Some(hp_line);
 				}
 				// Event-driven: block until the SDL manager signals a pad change (wakes at the
-					// pad's native rate, up to 1000Hz — no fixed cap), else every 16 ms to
+					// pad's native rate, up to 1000Hz â€” no fixed cap), else every 16 ms to
 					// service the rumble channel. 0 CPU while the pad is idle.
 					match wake.rx.recv_timeout(std::time::Duration::from_millis(16)) {
-						// Pad change (native rate) or idle timeout (service rumble) — keep looping.
+						// Pad change (native rate) or idle timeout (service rumble) â€” keep looping.
 						Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-						// Our single-slot wake was replaced by a newer gamepad session → this
+						// Our single-slot wake was replaced by a newer gamepad session â†’ this
 						// reader is superseded. STOP, don't hot-loop: recv_timeout on a
 						// disconnected channel returns Err immediately (not after 16 ms), so
-						// discarding it would spin this whole loop at 100% CPU. Safe to break —
+						// discarding it would spin this whole loop at 100% CPU. Safe to break â€”
 						// WakeSub::drop is generation-guarded and won't clear the newer sub.
 						Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
 					}
 			}
 			// Flush all rumble motors to neutral on a genuine session teardown
 			// (reader_flag==false). The Disconnected break path means a newer gamepad
-			// session superseded this one — that session owns the pads and will
+			// session superseded this one â€” that session owns the pads and will
 			// re-actuate as needed, so we must NOT zero it out there.
 			if !reader_flag.load(Ordering::SeqCst) {
-				// Build a teardown slot→uuid map so stop commands route to the
+				// Build a teardown slotâ†’uuid map so stop commands route to the
 				// correct physical pad (mirrors the per-tick map above).
 				let teardown_order: Vec<String> = order_arc.lock().unwrap().clone();
 				crate::ds5::client::Ds5Client::unregister(play_id);
@@ -2067,16 +2071,16 @@ pub(crate) async fn start_remote_play(
 	#[cfg(not(target_os = "linux"))]
 	let _ = touchpad_as_mouse; // suppress unused-variable warning on Windows/macOS
 
-	// Side-channel queue (clipboard / chat / file / mic audio → host).
+	// Side-channel queue (clipboard / chat / file / mic audio â†’ host).
 	let (data_tx, data_rx) = tokio::sync::mpsc::channel::<DataMsg>(512);
 	crate::ds5::client::Ds5Client::set_data_tx(id, data_tx.clone());
-	// Push our identity image to the host (client → host direction; the host's
+	// Push our identity image to the host (client â†’ host direction; the host's
 	// connections list shows it next to our id). Queued here and drained by
-	// hold_session's data_rx → send_data like any side-channel message, so it goes
-	// out right after the session is up. On a blocking thread — resolving the
+	// hold_session's data_rx â†’ send_data like any side-channel message, so it goes
+	// out right after the session is up. On a blocking thread â€” resolving the
 	// avatar may decode a full-size wallpaper, too slow for this async fn. Honors
 	// the avatar_mode setting (anonymous = nothing sent); best-effort, no error path.
-	// Our own relay device ID (if registered) — pushed to the host so its
+	// Our own relay device ID (if registered) â€” pushed to the host so its
 	// connections list can show OUR id even on a direct / same-LAN fast-path
 	// connect, where the host only observed our ip:port. Cloned out of the node
 	// mutex so the std guard is never held across the await.
@@ -2108,7 +2112,7 @@ pub(crate) async fn start_remote_play(
 			}
 		});
 	}
-	// Live stream changes from the session menu (resolution / encoder) → re-request.
+	// Live stream changes from the session menu (resolution / encoder) â†’ re-request.
 	let (restream_tx, restream_rx) = tokio::sync::mpsc::channel::<Restream>(8);
 	// On-demand host-window-list queries (Phase 2b co-op "window" capture picker): the
 	// `host_window_list` command sends a oneshot reply-sender here; the hold loop (which owns
@@ -2120,7 +2124,7 @@ pub(crate) async fn start_remote_play(
 
 	// Hold the control session open full-duplex: forward input + side-channel data,
 	// keepalive every ~2s (UDP has no disconnect signal), and receive the host's
-	// chat/clipboard pushes — surfacing them to the UI.
+	// chat/clipboard pushes â€” surfacing them to the UI.
 	let send_flag = running.clone();
 	tokio::spawn(hold::hold_session(
 		sess,
@@ -2203,7 +2207,7 @@ pub(crate) async fn start_remote_play(
 		local,
 		native,
 		embedded: single_surface,
-		// The UI gates codec options on the NEGOTIATED set (host ∩ client).
+		// The UI gates codec options on the NEGOTIATED set (host âˆ© client).
 		host_codecs: allowed,
 		host_displays: host_caps.displays,
 		host_encoders: host_caps.encoders,
@@ -2215,10 +2219,10 @@ pub(crate) async fn start_remote_play(
 /// entries. Called immediately after every `.push()` at the three park sites.
 ///
 /// # Why this is safe
-/// Only idle (hidden) renderers are ever in the pool — each was sent `hide\n` before being
+/// Only idle (hidden) renderers are ever in the pool â€” each was sent `hide\n` before being
 /// parked, so its X window is already unmapped and its EGL surface is dormant. A SIGTERM
-/// causes the renderer to run its full clean teardown sequence (eglDestroyContext →
-/// XDestroyWindow → XCloseDisplay) and then exit. This is the SAME sequence as a normal
+/// causes the renderer to run its full clean teardown sequence (eglDestroyContext â†’
+/// XDestroyWindow â†’ XCloseDisplay) and then exit. This is the SAME sequence as a normal
 /// session end and does NOT corrupt WebKitGTK's shared Mali GL state. The wedge only occurs
 /// when a SIGKILL abandons an active EGL context mid-frame; an idle renderer hit with SIGTERM
 /// exits cleanly.
@@ -2240,7 +2244,7 @@ fn reap_excess_resident_pool(app: &AppHandle, state: &AppState, cap: usize) {
 		tracing::info!(
 			pid = excess_r.child.id(),
 			container_id = excess_r.container_id,
-			"resident_render pool over cap — reaping excess idle renderer (SIGTERM, EGL-safe)"
+			"resident_render pool over cap â€” reaping excess idle renderer (SIGTERM, EGL-safe)"
 		);
 		// SIGTERM the idle renderer: clean EGL teardown, no Mali wedge.
 		stop_render_child_blocking(excess_r.child);
@@ -2253,11 +2257,11 @@ fn reap_excess_resident_pool(app: &AppHandle, state: &AppState, cap: usize) {
 
 /// Gracefully stop a native renderer child that owns a GL/EGL context + an X window sharing
 /// the display with WebKitGTK (Linux `pulsar-render` / vidsink / mpv). A hard SIGKILL abandons
-/// the EGL context mid-bind and WEDGES the webview's input on RK3588 — after the session ends the
+/// the EGL context mid-bind and WEDGES the webview's input on RK3588 â€” after the session ends the
 /// home screen renders but stops processing clicks (you can hover but nothing is clickable). A
 /// SIGTERM lets the renderer run its clean teardown (release the EGL context, XDestroyWindow,
 /// XCloseDisplay) so WebKit's shared GL/input state stays healthy; SIGKILL is the fallback only
-/// if it doesn't exit promptly. No-op-different on non-unix (plain kill — Windows has no shared-GL
+/// if it doesn't exit promptly. No-op-different on non-unix (plain kill â€” Windows has no shared-GL
 /// wedge and the renderer there is a separate top-level).
 #[cfg(unix)]
 pub(crate) fn stop_render_child(child: &mut std::process::Child) {
@@ -2300,7 +2304,7 @@ pub(crate) async fn stop_stream(
 	state: State<'_, AppState>,
 	id: u64,
 ) -> Result<(), String> {
-	// Remove from the map and DROP the guard before the blocking kill()/wait() below —
+	// Remove from the map and DROP the guard before the blocking kill()/wait() below â€”
 	// otherwise every other state.plays user (forward() on each mouse-move/keystroke,
 	// the setters, mic/kbd commands) stalls until the closed session's children exit.
 	// Shown in a detached tab window: its video goes back under the main window first (a
@@ -2311,7 +2315,7 @@ pub(crate) async fn stop_stream(
 	// accumulate stale entries across reconnects.
 	crate::session_cmds::forget_monitor_debounce(id);
 	// SPLIT MODE: release every controller this session had locked (so a torn-down pane never
-	// leaves a pad orphaned — locked to a dead session, forwarded by no one). And if this was the
+	// leaves a pad orphaned â€” locked to a dead session, forwarded by no one). And if this was the
 	// focused pane, clear the focus (compare_exchange so we don't stomp a focus that already
 	// moved to a surviving pane). With split mode off these are no-ops on empty/0 state.
 	crate::controllers::clear_session_locks(id);
@@ -2322,7 +2326,7 @@ pub(crate) async fn stop_stream(
 		Ordering::SeqCst,
 	);
 	// A session torn down with its overlay still open must release the global
-	// SUSPENDED latch (see AppState::overlay_open) — otherwise the next session
+	// SUSPENDED latch (see AppState::overlay_open) â€” otherwise the next session
 	// starts permanently un-engageable.
 	// `overlay_was_open` is used below (Linux resident path) to send SIGUSR2 so
 	// the parked renderer's OPEN flag is reset before it is reused.
@@ -2337,7 +2341,7 @@ pub(crate) async fn stop_stream(
 		}
 	}
 	// Set to true when the Linux `pulsar-render` child is parked as a resident (kept alive)
-	// rather than killed — in that case the GDK container must NOT be destroyed here.
+	// rather than killed â€” in that case the GDK container must NOT be destroyed here.
 	#[allow(unused_mut, unused_assignments, unused_variables)]
 	let mut resident_container_kept = false;
 	if let Some(mut play) = play {
@@ -2345,10 +2349,10 @@ pub(crate) async fn stop_stream(
 		play.viewer.stop();
 		if let Some(mut mic) = play.mic.lock().unwrap().take() {
 			let _ = mic.kill();
-			let _ = mic.wait(); // reap — kill alone leaves a unix zombie until app exit
+			let _ = mic.wait(); // reap â€” kill alone leaves a unix zombie until app exit
 		}
 		// Close the ffplay fallback renderer (Windows/Linux mpv-fallback), if any. GRACEFUL
-		// (SIGTERM-first, see stop_render_child) — kills a separate window process cleanly.
+		// (SIGTERM-first, see stop_render_child) â€” kills a separate window process cleanly.
 		// The pulsar-render child is handled separately below (Linux: kept resident).
 		// Fire-and-forget: teardown does not need to complete before stop_stream returns.
 		if let Some(child) = play.ffplay.take() {
@@ -2357,7 +2361,7 @@ pub(crate) async fn stop_stream(
 		// Linux `pulsar-render` (embedded `--wid` renderer): keep it RESIDENT between sessions
 		// to avoid destroying its EGL context. On RK3588 destroying the EGL context of an
 		// embedded renderer that shares the Mali display with WebKitGTK corrupts WebKit's shared
-		// Mali GL state — the webview stops processing clicks (hover works, nothing is clickable)
+		// Mali GL state â€” the webview stops processing clicks (hover works, nothing is clickable)
 		// with no in-session recovery short of a reboot. A clean SIGTERM teardown runs the same
 		// EGL context destruction (XDestroyWindow + eglDestroyContext + XCloseDisplay) as a
 		// SIGKILL, so it carries the same risk. The safe model: send `hide\n` (the renderer
@@ -2391,14 +2395,14 @@ pub(crate) async fn stop_stream(
 			// screen with no recovery). Reap it instead and leave resident_render empty so the
 			// next connect falls through to a fresh spawn.
 			let child_alive = match child.try_wait() {
-				Ok(None) => true,        // still running — safe to park
+				Ok(None) => true,        // still running â€” safe to park
 				Ok(Some(status)) => {
-					tracing::warn!(pid = child.id(), ?status, "pulsar-render exited mid-session — dropping dead resident, will spawn fresh on next connect");
+					tracing::warn!(pid = child.id(), ?status, "pulsar-render exited mid-session â€” dropping dead resident, will spawn fresh on next connect");
 					let _ = child.wait(); // reap the zombie
 					false
 				}
 				Err(e) => {
-					tracing::warn!(pid = child.id(), err = %e, "try_wait failed on pulsar-render — treating as dead, will spawn fresh on next connect");
+					tracing::warn!(pid = child.id(), err = %e, "try_wait failed on pulsar-render â€” treating as dead, will spawn fresh on next connect");
 					false
 				}
 			};
@@ -2411,7 +2415,7 @@ pub(crate) async fn stop_stream(
 				// Park in AppState pool. Cap the pool at 1 after pushing: excess idle
 				// parked renderers (e.g. from a prior multi-tab session) are drained from
 				// the front and SIGTERM'd. SIGTERM is safe for idle (hidden-window)
-				// renderers — they run their own EGL teardown cleanly. Only SIGKILL of an
+				// renderers â€” they run their own EGL teardown cleanly. Only SIGKILL of an
 				// active renderer corrupts the shared Mali GL; idle renderers are not
 				// actively rendering and exit cleanly on SIGTERM (see
 				// `reap_excess_resident_pool` for the full rationale). Capping at 1
@@ -2430,9 +2434,9 @@ pub(crate) async fn stop_stream(
 				});
 				// Reap idle residents beyond the live pane count (split_pane_count, min 1).
 				reap_excess_resident_pool(&app, &*state, state.split_pane_count.load(Ordering::SeqCst).max(1));
-				resident_container_kept = true; // container must NOT be destroyed — kept for next session
+				resident_container_kept = true; // container must NOT be destroyed â€” kept for next session
 			}
-			// If the child was dead, resident_container_kept stays false → the container is
+			// If the child was dead, resident_container_kept stays false â†’ the container is
 			// destroyed below (it will be re-created on the next fresh spawn).
 		}
 		// Non-Linux (Windows/macOS) or mpv/ffplay fallback on Linux (render_child is None
@@ -2444,7 +2448,7 @@ pub(crate) async fn stop_stream(
 		}
 		// Stop the native audio player (dropping it ends its thread and closes the device).
 		drop(play.audio_native.take());
-		// Remove the embedded mpv's IPC socket file (deterministic per-id path → at most
+		// Remove the embedded mpv's IPC socket file (deterministic per-id path â†’ at most
 		// one stale file, overwritten on reuse anyway).
 		#[cfg(unix)]
 		if let Some(sock) = play.mpv_ipc.take() {
@@ -2457,10 +2461,10 @@ pub(crate) async fn stop_stream(
 			let _ = std::fs::remove_file(&sdp);
 		}
 	}
-	// Tear down the Linux single-surface renderer (libmpv→GLArea), if this session used it.
+	// Tear down the Linux single-surface renderer (libmpvâ†’GLArea), if this session used it.
 	#[cfg(all(unix, not(target_os = "macos")))]
 	crate::render::teardown_single_surface(&app, id).await;
-	// Drop the in-app video container — UNLESS the renderer was kept resident (the container
+	// Drop the in-app video container â€” UNLESS the renderer was kept resident (the container
 	// is still the renderer's valid `--wid` parent and will be re-registered on reconnect).
 	#[cfg(all(unix, not(target_os = "macos")))]
 	if !resident_container_kept {
@@ -2473,10 +2477,10 @@ pub(crate) async fn stop_stream(
 /// The codec to actually stream for a requested one against the negotiated set. "auto" (or
 /// empty) picks by quality (av1 > h265 > h264). An explicit codec outside the set (the host
 /// can't encode it, or this client can't decode the host's bitstream for it) degrades to that
-/// pick: honoring it verbatim puts one codec in the renderer's SDP and another on the wire →
+/// pick: honoring it verbatim puts one codec in the renderer's SDP and another on the wire â†’
 /// the decoder consumes AUs forever without a frame (permanent black). `PULSAR_FORCE_CODEC`
 /// bypasses the clamp for testing. An EMPTY set means we learned nothing (caps timed out / old
-/// host), not "nothing is supported" — the request is honored and the host degrades it.
+/// host), not "nothing is supported" â€” the request is honored and the host degrades it.
 pub(crate) fn resolve_codec(requested: &str, allowed: &[String]) -> String {
 	let auto_pick = || {
 		["av1", "h265", "h264"]
@@ -2490,7 +2494,7 @@ pub(crate) fn resolve_codec(requested: &str, allowed: &[String]) -> String {
 		auto_pick()
 	} else if !forced && !allowed.is_empty() && !allowed.iter().any(|a| a == requested) {
 		let picked = auto_pick();
-		tracing::warn!(requested, ?allowed, %picked, "requested codec not in negotiated set — degraded");
+		tracing::warn!(requested, ?allowed, %picked, "requested codec not in negotiated set â€” degraded");
 		picked
 	} else {
 		requested.to_string()
@@ -2523,7 +2527,7 @@ mod tests {
 }
 
 /// The adaptive controller's ceiling when neither the user nor the transport set one: what a
-/// clean picture of the native point needs, with headroom. Moonlight-like reference (≈ 20 Mbit
+/// clean picture of the native point needs, with headroom. Moonlight-like reference (â‰ˆ 20 Mbit
 /// for 1080p60 H.264 game content), scaled by pixels, by fps^0.75 (more frames share more
 /// redundancy), and by the codec's efficiency; desktop content needs ~60 % of that. Clamped
 /// to 15..150 Mbit. The controller still only climbs as far as the path stays clean.
@@ -2585,6 +2589,6 @@ mod auto_cap_tests {
 		let uhd = auto_cap_kbps("h265", (3840, 2160, 60), true);
 		assert!((55_000..65_000).contains(&uhd), "{uhd}");
 		assert_eq!(auto_cap_kbps("h264", (1280, 720, 30), false), 15_000, "never under 15 Mbit");
-		assert_eq!(auto_cap_kbps("h264", (0, 0, 0), true), 20_000, "unknown → 1080p60 reference");
+		assert_eq!(auto_cap_kbps("h264", (0, 0, 0), true), 20_000, "unknown â†’ 1080p60 reference");
 	}
 }

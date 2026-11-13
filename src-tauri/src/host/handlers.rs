@@ -1398,7 +1398,7 @@ fn spawn_media_forwarders(
 		let mut ring: std::collections::VecDeque<(u16, Vec<u8>)> =
 			std::collections::VecDeque::with_capacity(NACK_RING);
 		let mut fec_xor = media::FecEncoder::new(0);
-		let mut fec_rs = media::RsFecEncoder::new(0.0);
+		let mut fec_rs = media::RsFecEncoder::new(0.0).with_parity_credit();
 		let mut fec_logged: u16 = 0;
 		let mut buf = vec![0u8; 2048];
 		// Every video-path datagram (video, its FEC parity, NACK retransmits) leaves through ONE

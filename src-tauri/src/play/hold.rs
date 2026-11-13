@@ -677,6 +677,12 @@ pub(super) async fn hold_session(
 	// parity not), and when the window started.
 	let mut win_recv_bytes: u64 = 0;
 	let mut win_recv_fresh: u32 = 0;
+	// Parity bytes received this window (RS + XOR) and the smoothed parity share they give:
+	// what the controller deducts from the target for the encoder. Measured over the window,
+	// not taken from the last block — at a low bitrate a block is 1-2 packets and its own
+	// ratio read 50-100 %, so the encoder share flipped 0 ↔ 100 % every window (2026-11-13).
+	let mut win_parity_bytes: u64 = 0;
+	let mut fec_share_ema: f32 = 0.0;
 	let mut win_start = std::time::Instant::now();
 	// The kind of path the media runs on now (`adapt_memory` key): the last good rate is
 	// remembered under the class the session actually ran cleanly on.
@@ -862,6 +868,7 @@ pub(super) async fn hold_session(
 						}
 						if tag == media::TAG_FEC_RS {
 							last_parity_at = Some(std::time::Instant::now());
+							win_parity_bytes += rtp.len() as u64;
 							let block = media::parse_rs_parity(rtp).map(|p| (p.base_seq, p.k as u16, p.m, p.idx));
 							for (seq, pkt) in fec_rs.on_parity(rtp) {
 								if !v_unix.try_send(&pkt) {
@@ -886,14 +893,11 @@ pub(super) async fn hold_session(
 									}
 								}
 							}
-							let r = fec_rs.last_ratio();
-							if (r - ctl.fec_overhead()).abs() > 1e-3 {
-								ctl.set_fec_overhead(r);
-							}
 							continue;
 						}
 						if tag == media::TAG_FEC {
 							last_parity_at = Some(std::time::Instant::now());
+							win_parity_bytes += rtp.len() as u64;
 							let group = media::parse_parity(rtp).map(|p| (p.base_seq, p.n as u16));
 							if let Some((seq, pkt)) = fec_dec.on_parity(rtp) {
 								if !v_unix.try_send(&pkt) {
@@ -914,11 +918,6 @@ pub(super) async fn hold_session(
 									win_nack_sent += nacks.len() as u32;
 									let _ = send_data(&sess, &DataMsg::MediaNack(nacks)).await;
 								}
-							}
-							let n = fec_dec.last_n();
-							let r = if n == 0 { 0.0 } else { 1.0 / n as f32 };
-							if (r - ctl.fec_overhead()).abs() > 1e-3 {
-								ctl.set_fec_overhead(r);
 							}
 							continue;
 						}
@@ -1818,8 +1817,19 @@ pub(super) async fn hold_session(
 				// and the encoder sat at 12 of the 15 Mbit target for good).
 				if !fec_active(last_parity_at.map(|t| t.elapsed())) && ctl.fec_overhead() > 0.0 {
 					ctl.set_fec_overhead(0.0);
+					fec_share_ema = 0.0;
 					tracing::info!("no parity from the host lately → FEC share released");
+				} else if win_recv_bytes > 0 && win_parity_bytes > 0 {
+					// This window's parity share, smoothed (half the old value, half the new) and
+					// capped at the host's highest policy ratio, so one odd window can't halve the
+					// encoder.
+					let share = (win_parity_bytes as f32 / win_recv_bytes as f32).min(pulsar_core::adapt::fec_policy::RS_MAX_RATIO_HIGH);
+					fec_share_ema = if fec_share_ema <= 0.0 { share } else { (fec_share_ema + share) * 0.5 };
+					if (fec_share_ema - ctl.fec_overhead()).abs() > 0.01 {
+						ctl.set_fec_overhead(fec_share_ema);
+					}
 				}
+				win_parity_bytes = 0;
 				// ---- Adaptive controller (`pulsar_core::adapt`): one decision per 2 s window from
 				// loss (seq gaps after NACK repair) + the window's RTT samples. Actuates a
 				// bitrate step and/or the loss-recovery mode flip by re-requesting the stream
