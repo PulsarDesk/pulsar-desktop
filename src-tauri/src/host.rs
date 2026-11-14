@@ -76,7 +76,7 @@ mod sysinput;
 pub(crate) mod takeover;
 // Per-window capture off Windows (X11 / Wayland portal / macOS ScreenCaptureKit).
 #[cfg(not(windows))]
-mod window_src;
+pub(crate) mod window_src;
 #[cfg(target_os = "linux")]
 mod libav;
 
@@ -320,9 +320,9 @@ impl Drop for SessionCleanupGuard {
 		// Release per-session redirect ownership; idempotent if already released
 		// by the normal teardown block.
 		handlers::release_redirect(self.sid);
-		// macOS: this session's ScreenCaptureKit window source (no-op elsewhere).
+		// This session's streamed window (macOS: its ScreenCaptureKit source) is forgotten.
 		#[cfg(not(windows))]
-		window_src::stop(self.sid);
+		window_src::end(self.sid);
 		// Same-host co-op pre-auth: drop this session's pre-auth refcount. Done HERE only
 		// (the guard always drops, on both the normal and abort paths) so the decrement
 		// happens exactly once — the normal teardown tail does NOT also remove it. When the
@@ -1187,6 +1187,38 @@ pub(crate) async fn bring_online(
 				#[cfg(windows)]
 				let force_restart =
 					failover::register(sid, restream_tx.clone(), last_req_store.clone(), nvenc_told.clone());
+				// Per-window capture off Windows: x11grab keeps the size it opened with and a
+				// ScreenCaptureKit stream scales the window into its old frame, so when the
+				// streamed window settles at a new size — or is closed — re-issue the stored
+				// StreamReq once (the restart re-reads the size, or streams the screen when the
+				// window is gone). Inert while no window is streamed. Exits with the session.
+				// Untested on Linux X11 / macOS hardware.
+				#[cfg(not(windows))]
+				{
+					let last_req_store = last_req_store.clone();
+					let restream_tx = restream_tx.clone();
+					tokio::spawn(async move {
+						let mut debounce = window_src::Debounce::default();
+						loop {
+							tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+							if restream_tx.is_closed() {
+								break;
+							}
+							let seen = tokio::task::spawn_blocking(move || window_src::check(sid))
+								.await
+								.ok()
+								.flatten();
+							let Some(change) = debounce.feed(seen) else { continue };
+							let Some(req) = last_req_store.lock().unwrap().clone() else { continue };
+							tracing::info!(sid, ?change, "streamed window changed -> restarting capture");
+							// Don't fire again before the restart registers the window anew.
+							window_src::ended(sid);
+							if let Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) = restream_tx.try_send(req) {
+								break;
+							}
+						}
+					});
+				}
 				// Poll the host's own display geometry; on a STABLE change to the streamed
 				// display's size, re-issue the stored StreamReq once so capture rebuilds at the
 				// new size. Inert when nothing has streamed yet (no stored req) and on platforms
@@ -1589,11 +1621,8 @@ pub(crate) async fn bring_online(
 						let ghost_region = || -> Option<crate::remote_cursor::Region> {
 							#[cfg(target_os = "linux")]
 							{
-								input_cap
-									.lock()
-									.unwrap()
-									.as_ref()
-									.and_then(|c| c.pointer_region())
+								window_src::input_area(sid)
+									.or_else(|| input_cap.lock().unwrap().as_ref().and_then(|c| c.pointer_region()))
 									.map(|r| (r.x, r.y, r.w, r.h))
 							}
 							#[cfg(windows)]
@@ -1906,10 +1935,15 @@ pub(crate) async fn bring_online(
 												}
 											}
 											// Re-read per move (a re-stream can pick another monitor); cheap.
+											// A streamed X11 window wins: the client's 0..1 pointer is on
+											// THAT window (its rect in the root, refreshed while it moves).
 											#[cfg(target_os = "linux")]
-											d.set_region(
-												input_cap.lock().unwrap().as_ref().and_then(|c| c.pointer_region()),
-											);
+											d.set_region(window_src::input_area(sid).or_else(|| {
+												input_cap.lock().unwrap().as_ref().and_then(|c| c.pointer_region())
+											}));
+											// macOS: a streamed window's frame instead of the main display.
+											#[cfg(target_os = "macos")]
+											d.set_window_rect(window_src::input_area(sid));
 											d.pointer(x, y)
 										}
 										InputEvent::PointerRelative { dx, dy } => {

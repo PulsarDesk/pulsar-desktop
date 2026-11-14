@@ -384,15 +384,24 @@ mod win_fit {
 	}
 }
 
-/// Placeholder off Windows (no window fit there).
+/// Linux X11 / macOS: the same per-window fit through `pulsar_core::window_capture::fit`
+/// (X11 `_NET_MOVERESIZE_WINDOW` on the window's monitor work area; macOS Accessibility
+/// `AXPosition` / `AXSize`, which needs the Accessibility grant). Wayland lets no program
+/// move or resize another program's window, so a portal pick (`hwnd` = `PORTAL_PICK`, -1)
+/// is never fitted. Blocks for up to ~0.5 s while the window manager applies the size (so
+/// the stream that starts right after already grabs it); run off the async workers.
+/// Untested on Linux X11 / macOS hardware.
 #[cfg(not(windows))]
-pub struct WindowPrev;
+pub struct WindowPrev(pulsar_core::window_capture::FitPrev);
 #[cfg(not(windows))]
-pub fn fit_window(_hwnd: i64, _w: u32, _h: u32) -> Option<WindowPrev> {
-	None
+pub fn fit_window(hwnd: i64, w: u32, h: u32) -> Option<WindowPrev> {
+	let id = u64::try_from(hwnd).ok().filter(|id| *id > 0)?;
+	crate::host::window_src::blocking(|| pulsar_core::window_capture::fit(id, w, h)).map(WindowPrev)
 }
 #[cfg(not(windows))]
-pub fn restore_window(_prev: WindowPrev) {}
+pub fn restore_window(prev: WindowPrev) {
+	crate::host::window_src::blocking(|| pulsar_core::window_capture::restore(prev.0));
+}
 
 // ---------------------------------------------------------------------------
 // Non-Windows stubs — keep handlers.rs / host.rs compiling everywhere.

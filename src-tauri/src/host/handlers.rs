@@ -1736,8 +1736,9 @@ fn live_change(prev: &StreamReq, req: &StreamReq) -> Option<(bool, bool)> {
 ///   adaptation off; e.g. it went full-screen). A `None` adapt with nothing applied is a no-op.
 ///
 /// All mutation goes through the one `Arc<Mutex<AdaptState>>` the [`SessionCleanupGuard`] also
-/// holds, so whatever is left applied here is reverted on teardown. No-op off Windows (the
-/// `set_best_mode`/`revert` calls are stubs and `PrevMode` is never `Some`).
+/// holds, so whatever is left applied here is reverted on teardown. The MONITOR mode switch is
+/// Windows-only (`set_best_mode`/`revert` are stubs elsewhere, `PrevMode` is never `Some`);
+/// the per-window fit also works on Linux X11 and macOS (`display_mode::fit_window`).
 fn apply_screen_adaptation(
 	req: &StreamReq,
 	adapt_state: &Arc<Mutex<crate::display_mode::AdaptState>>,
@@ -1906,7 +1907,7 @@ pub(super) fn make_on_stream(
 	#[cfg(target_os = "linux")]
 	let mut last_libav_req: Option<StreamReq> = None;
 	// Wayland window casts: the portal restore token of THIS session's window pick, kept
-	// apart from the persisted screen token so a re-stream (resolution / codec change)
+	// apart from the session's screen token so a re-stream (resolution / codec change)
 	// re-opens the same window without the dialog, and a window pick never replaces the
 	// screen pick. Cleared when the session streams the screen again (the next window
 	// request asks anew).
@@ -2366,7 +2367,8 @@ pub(super) fn make_on_stream(
 				*wl_window_token.lock().unwrap() = None;
 				pulsar_core::capture::Source::Screen
 			};
-			// The token of the kind being opened (screen: persisted; window: this session's).
+			// The token of the kind being opened (both live for this session only; a new
+			// connection opens the dialog again).
 			let token_slot = if wl_window { wl_window_token.clone() } else { restore_token.clone() };
 			let token = token_slot.lock().unwrap().clone();
 			// AppImage: an encoder that only validated on the system gst runs there.
@@ -2620,33 +2622,41 @@ pub(super) fn make_on_stream(
 		// source now and serves its frames to ffmpeg on loopback. The stream is the window's
 		// own aspect fitted into the requested box (never upscaled). A window that is gone (or
 		// a ScreenCaptureKit start that fails) streams the screen instead — as Windows does
-		// when its window capture can't start. Untested on Linux X11 / macOS hardware.
+		// when its window capture can't start. A window stream also maps the session's
+		// pointer onto the window and brings it to the front (`window_src::began`); the
+		// host's window watcher restarts the stream when it is resized or closed. Run off
+		// the async workers (`blocking`): the ScreenCaptureKit query + start can wait ~10 s
+		// behind the Screen Recording prompt. Untested on Linux X11 / macOS hardware.
 		#[cfg(not(windows))]
 		let host_window: Option<(super::window_src::Target, (u32, u32), Option<String>)> = {
 			use super::window_src::{self as ws, Target};
-			match ws::current_target(req.window_hwnd.or_else(|| *launched_hwnd.lock().unwrap())) {
-				Some(t @ (Target::X11(id) | Target::Mac(id))) => match ws::window_size(id) {
-					Some(size) => {
-						let (w, h) = ws::encode_size(size, (eff_w, eff_h));
-						if let Target::Mac(_) = t {
-							match pulsar_core::window_capture::serve_for(sid, id, w, h, eff_fps) {
-								Ok(url) => Some((t, (w, h), Some(url))),
-								Err(e) => {
-									tracing::warn!(id, "window capture failed to start, streaming the screen: {e}");
-									None
-								}
+			let want = req.window_hwnd.or_else(|| *launched_hwnd.lock().unwrap());
+			ws::blocking(|| {
+				let picked = match ws::current_target(want) {
+					Some(t @ Target::X11(id)) => match ws::window_size(id) {
+						Some(size) => Some((t, ws::encode_size(size, (eff_w, eff_h)), None)),
+						None => {
+							tracing::warn!(id, "the chosen window is gone, streaming the screen");
+							None
+						}
+					},
+					// One ScreenCaptureKit query gives the window, its size and the stream.
+					Some(t @ Target::Mac(id)) => {
+						match pulsar_core::window_capture::serve_for(sid, id, (eff_w, eff_h), eff_fps) {
+							Ok((url, size)) => Some((t, size, Some(url))),
+							Err(e) => {
+								tracing::warn!(id, "window capture failed to start, streaming the screen: {e}");
+								None
 							}
-						} else {
-							Some((t, (w, h), None))
 						}
 					}
-					None => {
-						tracing::warn!(id, "the chosen window is gone, streaming the screen");
-						None
-					}
-				},
-				_ => None,
-			}
+					_ => None,
+				};
+				if let Some((Target::X11(id) | Target::Mac(id), ..)) = picked {
+					ws::began(sid, id);
+				}
+				picked
+			})
 		};
 		#[cfg(not(windows))]
 		let (eff_w, eff_h) = host_window.as_ref().map_or((eff_w, eff_h), |(_, s, _)| *s);
