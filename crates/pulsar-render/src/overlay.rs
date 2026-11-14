@@ -1718,6 +1718,24 @@ fn draw_stream(
 	let res: &[(&str, &str)] = &res_owned;
 	let fps = fps_opts();
 	let br = bitrate_opts();
+	// "Otomatik" rows say what the automatic choice is right now: "Otomatik · 60 fps".
+	let codec_cur = staged(deferred, "codec", &st.codec);
+	let enc_cur = staged(deferred, "encoder", &st.encoder);
+	let res_cur = staged(deferred, "res", &st.res);
+	let fps_cur = staged(deferred, "fps", &st.fps_sel);
+	let target_mbit = host_parts(st).1.map(|v| format!("{v:.0} Mbit")).unwrap_or_default();
+	let codecs_l = auto_now(&codecs, codec_cur, &stream_codec(st));
+	let encoders_l = auto_now(&encoders, enc_cur, &stream_encoder(st));
+	let res_l = auto_now(res, res_cur, &stream_res_label());
+	let fps_l = auto_now(&fps, fps_cur, &stream_target_fps(st));
+	// The bitrate's "auto" value is "0" (no limit).
+	let br_auto = if st.bitrate == "0" { "auto" } else { "" };
+	let br_l: Vec<(&str, String)> = auto_now(&br.map(|(v, d)| (if v == "0" { "auto" } else { v }, d)), br_auto, &target_mbit)
+		.into_iter()
+		.map(|(v, d)| (if v == "auto" { "0" } else { v }, d))
+		.collect();
+	let (codecs, encoders, res, fps, br) =
+		(as_opts(&codecs_l), as_opts(&encoders_l), as_opts(&res_l), as_opts(&fps_l), as_opts(&br_l));
 	let quality = [("latency", t("lowlat")), ("quality", t("quality"))];
 	let onoff = [("on", t("on")), ("off", t("off"))];
 	let pace_cur = if st.pace { "on" } else { "off" };
@@ -1726,16 +1744,16 @@ fn draw_stream(
 	let remote = st.mode == Mode::Remote;
 	let mut rows = Rows::new(if remote { 8 } else { 7 }, input);
 	ui.spacing_mut().item_spacing.y = ROW_GAP;
-	if let Some(v) = rows.choice(ui, 0, "Codec", staged(deferred, "codec", &st.codec), &codecs, None) {
+	if let Some(v) = rows.choice(ui, 0, "Codec", codec_cur, &codecs, None) {
 		cmds.push(OverlayCmd::Set("codec", v));
 	}
-	if let Some(v) = rows.choice(ui, 1, "Encoder", staged(deferred, "encoder", &st.encoder), &encoders, None) {
+	if let Some(v) = rows.choice(ui, 1, "Encoder", enc_cur, &encoders, None) {
 		cmds.push(OverlayCmd::Set("encoder", v));
 	}
-	if let Some(v) = rows.choice(ui, 2, t("res"), staged(deferred, "res", &st.res), res, None) {
+	if let Some(v) = rows.choice(ui, 2, t("res"), res_cur, &res, None) {
 		cmds.push(OverlayCmd::Set("res", v));
 	}
-	if let Some(v) = rows.choice(ui, 3, "FPS", staged(deferred, "fps", &st.fps_sel), &fps, None) {
+	if let Some(v) = rows.choice(ui, 3, "FPS", fps_cur, &fps, None) {
 		cmds.push(OverlayCmd::Set("fps", v));
 	}
 	// The bitrate LIMIT (the adaptive controller's ceiling; it still goes lower on a weak link).
@@ -1772,6 +1790,26 @@ fn draw_stream(
 		.size(11.0)
 		.color(egui::Color32::from_gray(150)),
 	);
+}
+
+/// `options` with the "auto" entry's label extended by what the automatic choice is now
+/// (`now`, e.g. "60 fps") — only while "auto" is the value in force and `now` is known.
+fn auto_now<'a>(options: &[(&'a str, &'a str)], current: &str, now: &str) -> Vec<(&'a str, String)> {
+	options
+		.iter()
+		.map(|&(v, d)| {
+			let d = if v == "auto" && current == "auto" && !now.trim().is_empty() && now != "—" {
+				format!("{d} · {}", now.trim())
+			} else {
+				d.to_string()
+			};
+			(v, d)
+		})
+		.collect()
+}
+
+fn as_opts<'a>(owned: &'a [(&'a str, String)]) -> Vec<(&'a str, &'a str)> {
+	owned.iter().map(|(v, d)| (*v, d.as_str())).collect()
 }
 
 /// Display section: host monitor picker (when the host has >1 display, BOTH modes) +
@@ -4023,6 +4061,18 @@ mod rows_tests {
 		let ctx = egui::Context::default();
 		let mut ui = UiState::default();
 		run(&ctx, &st, &mut ui, vec![]);
+	}
+
+	#[test]
+	fn auto_rows_say_what_auto_picked() {
+		let opts = [("auto", "Otomatik"), ("60", "60")];
+		let l = auto_now(&opts, "auto", "120 fps");
+		assert_eq!(l[0].1, "Otomatik · 120 fps");
+		assert_eq!(l[1].1, "60");
+		// A pinned value, or nothing known yet: plain.
+		assert_eq!(auto_now(&opts, "60", "120 fps")[0].1, "Otomatik");
+		assert_eq!(auto_now(&opts, "auto", "")[0].1, "Otomatik");
+		assert_eq!(auto_now(&opts, "auto", "—")[0].1, "Otomatik");
 	}
 
 	#[test]
