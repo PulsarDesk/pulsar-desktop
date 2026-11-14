@@ -140,6 +140,45 @@ may wait on that driver:
 - Tested on the home PC by suspending the host's capture thread(s) and the probe child
   (a stand-in for the driver; a real wedge has not been caught since the change).
 
+## Screen adaptation — host display mode per platform (2026-11-14, LOCAL branch `parity/display-mode`)
+
+A client split pane sends `StreamReq::adapt = Some((w, h))`; the host switches the captured
+monitor to the best-fit mode and restores it on teardown / `adapt: None`
+(`src-tauri/src/display_mode.rs`, driven from `host/handlers.rs::apply_screen_adaptation` and
+`SessionCleanupGuard::drop`). The best-fit choice is shared:
+`crates/pulsar-capture/src/display_mode/mod.rs::plan` (aspect first, then area, ≥1080 lines,
+never past the current size; keeps the refresh rate and the HiDPI scale).
+
+| Platform | How | Crash safety | Hardware |
+| --- | --- | --- | --- |
+| Windows | `EnumDisplaySettingsW` / `ChangeDisplaySettingsExW` | none (mode stays after a crash) | tested earlier |
+| Linux X11 | `xrandr --current` parsed (`display_mode/xrandr.rs`), `xrandr --output --mode --rate --pos` | journal `$XDG_RUNTIME_DIR/pulsar/display-mode.json`, `recover_stale()` at start | **untested** |
+| Linux Wayland, wlroots (Sway, Hyprland, labwc, river, Wayfire) | `wlr-randr --json` / `--output --mode --pos` (wlr-output-management) | same journal | **untested** |
+| Linux Wayland, KDE | `kscreen-doctor -j` / `output.<n>.mode.<id>` | same journal | **untested** |
+| Linux Wayland, GNOME | Mutter `org.gnome.Mutter.DisplayConfig` D-Bus (zbus): `GetCurrentState` + `ApplyMonitorsConfig` method 1 (temporary, not saved to monitors.xml); scale kept when the new mode supports it (`display_mode/linux/gnome.rs`) | same journal | **untested** |
+| Linux Wayland, other compositors (weston, gamescope, cosmic without wlr-output-management…) | **not possible**: Wayland has no standard protocol for a client to change output modes; the compositor offers no API | — | — |
+| macOS | CoreGraphics `CGDisplayCopyAllDisplayModes` (+ duplicate low-res modes) → `CGConfigureDisplayWithDisplayMode`, completed `kCGConfigureForAppOnly` (`pulsar-capture/src/display_mode/macos.rs`) | the window server restores the mode itself when Pulsar exits, even on a crash | **untested** (no Mac) |
+
+Wayland limit: the ScreenCast portal does not say which output it shares, so on Wayland the
+switch is only made when exactly ONE output is enabled; with several nothing changes.
+Mirrored GNOME logical monitors are refused. macOS display index = `CGGetActiveDisplayList`
+order. Per-window fit (`fit_window`, resizing one host app window to the pane) is still
+Windows-only.
+
+### Client display-scale watch
+
+* Windows: `dpi_watch.rs` (WebView2 RasterizationScale vs. the window DPI).
+* Linux: `scale_watch.rs` — tao never emits `ScaleFactorChanged` on GTK, so the main window's
+  GTK `scale-factor` notify is hooked after every main-window build (`ui_start.rs`); a change
+  updates `process::set_ui_scale` and sends `uiscale <f>` to each live `pulsar-render`, whose
+  egui overlay re-scales (`crates/pulsar-render/src/linux.rs`). WebKitGTK follows GTK itself.
+  GTK3's scale is an integer (fractional desktop scales show as the rounded-up integer).
+* macOS: tao's `ScaleFactorChanged` (NSWindowDidChangeBackingProperties) plus a
+  `CGDisplayRegisterReconfigurationCallback` re-read of the window scale; WKWebView and the
+  eframe renderer follow by themselves.
+
+Untested on Linux and macOS hardware.
+
 ## Capability probe (`src-tauri/src/caps.rs`) — read before touching codecs
 
 Moonlight-model startup probe, re-run every launch, no persistence:

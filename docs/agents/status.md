@@ -59,3 +59,12 @@ self-pipe instead of an inherited blocked mask, and the stop event grants the sa
 `EVENT_MODIFY_STATE` with a Medium label (`--headless-stop` exit 7 = access denied).
 Unverified: the elevated-GUI / elevated-host cases (needs an elevated run), the Unix signal
 path (not compiled on Linux here), and `--headless-host` on Linux needs a display.
+
+**Screen adaptation + display-scale watch on Linux/macOS (2026-11-14, LOCAL branch
+`parity/display-mode`, untested on Linux and macOS hardware).** The host display-mode switch for
+a client split pane now exists on Linux (X11 xrandr; Wayland via wlr-randr, kscreen-doctor or
+GNOME Mutter's DisplayConfig D-Bus; crash journal restored at the next start) and macOS
+(CoreGraphics, app-scoped, auto-restored on exit/crash). Other Wayland compositors cannot do it
+(no standard protocol). The client's display-scale change is watched on Linux (GTK
+scale-factor → live `uiscale` to the renderer) and macOS (CG reconfiguration callback). Details:
+[host-encode.md](host-encode.md#screen-adaptation--host-display-mode-per-platform-2026-11-14-local-branch-paritydisplay-mode).

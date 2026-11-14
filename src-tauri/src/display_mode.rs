@@ -425,7 +425,7 @@ mod mac {
 	/// it back by itself when Pulsar exits, since the change is app-scoped.
 	pub struct PrevMode(macos::SavedMode);
 
-	/// Switch display `display_idx` (main display first, then `CGGetActiveDisplayList` order) to
+	/// Switch display `display_idx` (`CGGetActiveDisplayList` order, as advertised) to
 	/// the best fit for the pane; `Some` only when a change was applied.
 	pub fn set_best_mode(display_idx: u32, target_w: u32, target_h: u32) -> Option<PrevMode> {
 		if target_w == 0 || target_h == 0 {

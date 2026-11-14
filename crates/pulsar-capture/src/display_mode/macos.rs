@@ -8,8 +8,8 @@
 //! mode back by itself when the process exits — however it exits. [`restore`] does the same on
 //! a normal session end.
 //!
-//! Display index: 0 is the main display (`CGMainDisplayID`), then the other active displays in
-//! `CGGetActiveDisplayList` order — the order [`displays`] returns.
+//! Display index: the `CGGetActiveDisplayList` order (the main display comes first there) — the
+//! order the host advertises its monitors in and ffmpeg's avfoundation numbers `Capture screen N`.
 //!
 //! Untested on macOS hardware (written and type-checked on Windows; no Mac available).
 
@@ -90,17 +90,17 @@ extern "C" {
 	fn CFRelease(cf: CFTypeRef);
 }
 
-/// Active displays, main first (the index the host uses as `display_idx`).
+/// Active displays in `CGGetActiveDisplayList` order (the index the host uses as
+/// `display_idx`); just the main display if the list can't be read.
 pub fn displays() -> Vec<u32> {
 	let mut ids = [0u32; 32];
 	let mut n = 0u32;
-	let main = unsafe { CGMainDisplayID() };
 	let ok = unsafe { CGGetActiveDisplayList(ids.len() as u32, ids.as_mut_ptr(), &mut n) } == K_CG_ERROR_SUCCESS;
-	let mut out = vec![main];
-	if ok {
-		out.extend(ids[..n as usize].iter().copied().filter(|&d| d != main));
+	if ok && n > 0 {
+		ids[..(n as usize).min(ids.len())].to_vec()
+	} else {
+		vec![unsafe { CGMainDisplayID() }]
 	}
-	out
 }
 
 /// A retained `CGDisplayModeRef` (released on drop).
