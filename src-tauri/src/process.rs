@@ -72,8 +72,9 @@ pub fn linux_displays() -> Vec<LinuxDisplay> {
 /// Host monitors to advertise in `StreamCaps::displays`, primary at idx 0. Windows
 /// uses the DXGI output list (same index the native capture takes); Linux/X11 uses
 /// xrandr; macOS and Linux Wayland use `pulsar_core::displays` (macOS: the
-/// `CGGetActiveDisplayList` order = avfoundation's `Capture screen N`; Wayland: the output
-/// layout — the portal dialog still decides what is captured, see `wayland_wants_repick`).
+/// `CGGetActiveDisplayList` order, main first = avfoundation's `Capture screen N` and the
+/// index the native ScreenCaptureKit capture takes; Wayland: the output layout — the portal
+/// dialog still decides what is captured, see `wayland_wants_repick`).
 pub fn host_displays() -> Vec<pulsar_core::service::DisplayInfo> {
 	use pulsar_core::service::DisplayInfo;
 	#[cfg(windows)]

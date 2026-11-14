@@ -79,6 +79,19 @@ matching pulsar-core branch. X11 + macOS also map the pointer into the window, r
 restart the stream when it is resized / closed, and fit it to a split pane (macOS: needs the
 Accessibility grant). Wayland can do none of those (no window positions for programs).
 
+**macOS native host (2026-11-14, LOCAL branch `parity/mac-host-capture-audio`, never run on a
+Mac — only `cargo check --target aarch64-apple-darwin` of pulsar-capture and pulsar-core; the
+src-tauri wiring is reviewed by hand, it cannot be checked off a Mac):** ScreenCaptureKit →
+VideoToolbox → RTP with live bitrate / keyframe / display switch (see host-encode.md), and the
+system mix without Pulsar via ScreenCaptureKit audio (see audio.md); Screen Recording
+permission notice on the home screen; the absolute pointer and the ffmpeg fallback follow the
+picked display. Not possible on macOS: RFI and intra refresh (VideoToolbox has no API),
+surround system audio (SCK gives at most stereo). Possible but not done: the ghost-pointer
+region. Since the `parity/all` merge, per-window capture comes from `parity/window-capture`
+(SCK window → rawvideo → ffmpeg, not the in-process VideoToolbox path), and the absolute
+pointer follows each session's own display (`DesktopInput::set_display`, `parity/host-displays`);
+the process-wide published display is only the fallback when a session set none.
+
 **Host-only / headless host / Pulsar Split seat host (2026-11-13, not run on hardware):**
 `--host-only`, `--headless-host`, `--headless-stop`, `--split-seat` — see
 [modes.md](modes.md) "Host-only and headless host". Unit-tested (argv parsing, pipe protocol

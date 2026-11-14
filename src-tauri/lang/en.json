@@ -31,6 +31,8 @@
 	"host.captureStopped": "Screen capture stopped",
 	"host.windowPortalPick": "Pick the window on this computer (Wayland)",
 	"host.captureNoFrames": "Can't capture the screen: the host gets no picture from its graphics card. Try restarting Pulsar on the host.",
+	"host.captureNoFramesMac": "Can't capture the screen: the host Mac delivers no picture to Pulsar (ScreenCaptureKit). Check the Screen Recording permission on the host, then restart Pulsar there.",
+	"host.screenPermission": "Can't capture the screen: the host Mac hasn't given Pulsar the Screen Recording permission (System Settings → Privacy & Security → Screen & System Audio Recording). Grant it and restart Pulsar.",
 	"err.identityChanged": "The identity behind this device has changed. Accept the new identity and reconnect?",
 	"err.localRelayBind": "Could not start the in-app relay (the port may be in use)",
 	"splash.start": "Starting…",

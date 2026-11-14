@@ -26,11 +26,44 @@ Part of the pulsar-desktop agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
   - `examples/capbench.rs` measures paint → encoded latency per source (see its doc);
     `PULSAR_CAPTURE=dxgi|wgc|dxgi-mf`, `PULSAR_CAPTURE_REPROBE=1` and `PULSAR_EMIT_ON_ARRIVAL=0`
     are the knobs.
+- **macOS (2026-11-14, LOCAL, untested on macOS hardware)** — `crates/pulsar-capture/src/mac/`:
+  ScreenCaptureKit (pulsar-core `macos_capture::ScStream`: one display, NV12 video range, the
+  client's fps as `minimumFrameInterval`, cursor composited, queue depth 5) → VideoToolbox
+  `VTCompressionSession` (`mac/vt.rs`: H.264 High / HEVC Main, hardware preferred, RealTime,
+  no frame reordering, `MaxFrameDelayCount` 0, `EnableLowLatencyRateControl` when the OS takes
+  it for the codec — the session is re-created without it otherwise, `PrioritizeEncodingSpeed…`
+  for latency picks, 10 s safety GOP) → Annex B (`mac/annexb.rs`, parameter sets before every
+  keyframe) → the same `RtpEgress`. Same `CaptureHandle` contract as Windows: live bitrate
+  (`AverageBitRate` + `DataRateLimits` 1.5× / 1 s), keyframe on request, live display switch
+  (rebuild in the thread, revert on failure), a stream SCK stops on its own is rebuilt (≤ 5 in a
+  row), a still screen re-encodes the last frame once per fps slot, `LiveStats.source = "sck"`,
+  display kept awake (`IOPMAssertion`). Not possible with VideoToolbox: reference-frame
+  invalidation (declined, counted as `rfi_declined`) and periodic intra refresh (keyframes
+  instead). Entered when the resolved encoder is VideoToolbox, codec ≠ AV1, no HDR/4:4:4;
+  `PULSAR_FFMPEG_CAPTURE=1` forces ffmpeg. Falls back to the ffmpeg avfoundation CLI on macOS <
+  12.3 (ScreenCaptureKit is dlopen'ed, never linked — the app still starts on older macOS), a
+  missing **Screen Recording permission** (the host's home screen shows a notice with "İzin
+  iste" / "Sistem Ayarlarını aç" — `screen_permission.rs`, `ScreenPermissionNotice.svelte` —
+  and the client gets a `!` stats line `host.screenPermission`), or a session VideoToolbox
+  refuses (a low-latency-rate-control session that refuses its setup is retried without it
+  first). `host_displays()` on macOS = the CoreGraphics list, main first (the index the native
+  capture takes). The frame is **stretched** to the requested size (`preservesAspectRatio = NO`
+  on macOS 14+, like ffmpeg's scale), never letterboxed. **Multi-display pointer:** the capture
+  publishes the display it streams (pulsar-core `macos_capture::set_streamed_display`; the
+  native thread on every build, the ffmpeg fallback at start) and the macOS injector maps the
+  absolute pointer onto that display's bounds (main display when none / gone). The ffmpeg
+  fallback captures the picked display too (`"Capture screen N"`, N = place in CoreGraphics'
+  active list — a bare index would count the cameras first). A 7 s no-frame notice on macOS uses
+  `host.captureNoFramesMac` (no GPU wording). Open (possible, not done): per-window capture
+  (`window_hwnd` → `SCContentFilter initWithDesktopIndependentWindow:` + a macOS window list for
+  the client's picker + window-relative pointer mapping); the client's labelled ghost pointer
+  region (`ghost_region`) is still None on macOS. The streamed display is process-wide: two
+  sessions streaming different displays map the pointer onto the one published last.
 - **Linux X11** — the ffmpeg **libraries in-process** (`src-tauri/src/host/libav.rs`:
   x11grab → libavfilter → libavcodec x264/x265/SVT-AV1/NVENC → libavformat RTP; live
   bitrate, forced IDR on request, short-GOP recovery; `PULSAR_LIBAV_HOST=0` disables).
   Falls back to the ffmpeg CLI below when it cannot start or for VA-API/Vulkan/HDR/4:4:4.
-- **Windows (non-NVENC) / macOS** (and the Linux fallback) — ffmpeg CLI (`ddagrab`/
+- **Windows (non-NVENC) / macOS fallback** (and the Linux fallback) — ffmpeg CLI (`ddagrab`/
   `gdigrab`/`avfoundation`/`x11grab` → HW encode or libx264 → RTP). Arg builders are pure
   functions in pulsar-core `pipeline/` (unit-tested); spawning is here (`process.rs`, `host/`).
 - **Wayland (KDE/GNOME)** — pulsar-core `capture` (Linux-only module): XDG

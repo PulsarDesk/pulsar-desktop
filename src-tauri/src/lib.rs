@@ -24,6 +24,7 @@ mod caps_guard;
 #[cfg(windows)]
 mod firewall;
 mod autostart;
+mod screen_permission;
 #[cfg(windows)]
 mod dpi_watch;
 mod display_watch;
@@ -881,6 +882,8 @@ pub fn run() {
 			tabwin::tab_drop_target,
 			autostart::set_autostart,
 			autostart::autostart_status,
+			screen_permission::screen_permission,
+			screen_permission::open_screen_permission_settings,
 			tabwin::ui_log,
 			tabwin::tab_play_ready,
 			tabwin::tab_ghost_show,
