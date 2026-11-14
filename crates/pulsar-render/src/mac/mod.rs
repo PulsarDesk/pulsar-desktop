@@ -1791,6 +1791,19 @@ fn event_loop(mtm: MainThreadMarker, parent: u32, port: u16, codec: Codec, mode:
 			break;
 		}
 		win.set_take_mouse(wants_mouse(&win));
+		// Hover while the menu is open: AppKit sends mouse-moved events to the KEY window only,
+		// and the panel never becomes key, so the pointer is polled instead.
+		if OPEN.load(Ordering::SeqCst) {
+			if let Some((x, y)) = win.pointer() {
+				let k = win.scale as f32 / overlay_ppp();
+				let p = egui::pos2(x as f32 * k, y as f32 * k);
+				let mut last = POINTER.lock().unwrap();
+				if (last.0 - p.x).abs() + (last.1 - p.y).abs() > 0.25 {
+					*last = (p.x, p.y);
+					EGUI_EVENTS.lock().unwrap().push(egui::Event::PointerMoved(p));
+				}
+			}
+		}
 		if let Some(l) = link.as_mut() {
 			l.set_display(win.display);
 		}

@@ -54,9 +54,31 @@ fragment float4 video_fs(VOut i [[stage_in]], texture2d<float> ty [[texture(0)]]
 	return float4(saturate(rgb), 1.0);
 }
 
+// ---- egui ----
+struct EguiV { packed_float2 pos; packed_float2 uv; uchar4 color; };
+struct EguiOut { float4 pos [[position]]; float2 uv; float4 color; };
+vertex EguiOut egui_vs(uint vid [[vertex_id]], const device EguiV* v [[buffer(0)]], constant float2& screen [[buffer(1)]]) {
+	EguiV e = v[vid];
+	EguiOut o;
+	o.pos = float4(2.0 * e.pos[0] / screen.x - 1.0, 1.0 - 2.0 * e.pos[1] / screen.y, 0.0, 1.0);
+	o.uv = float2(e.uv[0], e.uv[1]);
+	o.color = float4(e.color) / 255.0;
+	return o;
+}
+fragment float4 egui_fs(EguiOut i [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) {
+	return t.sample(s, i.uv) * i.color;
+}
+"#;
+
+const FSR_SHADERS: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+struct VOut { float4 pos [[position]]; float2 uv; };
+
 vertex VOut full_vs(uint vid [[vertex_id]]) {
 	VOut o;
-	float2 uv = float2((vid << 1) & 2, vid & 2);
+	float2 uv = float2(float((vid << 1) & 2), float(vid & 2));
 	o.uv = uv;
 	o.pos = float4(uv * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
 	return o;
@@ -118,7 +140,7 @@ fragment float4 easu_fs(VOut i [[stage_in]], texture2d<float> tex [[texture(0)]]
 	float3 n = tapAt(tex, pt, k.con0, fp + float2(0, 2)), o = tapAt(tex, pt, k.con0, fp + float2(1, 2));
 	float bL = luma(b), cL = luma(c), eL = luma(e), fL = luma(f), gL = luma(g), hL = luma(h);
 	float iL = luma(ii), jL = luma(j), kL = luma(kk), lL = luma(l), nL = luma(n), oL = luma(o);
-	float2 dir = 0.0;
+	float2 dir = float2(0.0);
 	float len = 0.0;
 	easuSet(dir, len, (1.0 - pp.x) * (1.0 - pp.y), bL, eL, fL, gL, jL);
 	easuSet(dir, len, pp.x * (1.0 - pp.y), cL, fL, gL, hL, kL);
@@ -137,7 +159,7 @@ fragment float4 easu_fs(VOut i [[stage_in]], texture2d<float> tex [[texture(0)]]
 	float2 len2 = float2(1.0 + (stretch - 1.0) * len, 1.0 - 0.5 * len);
 	float lob = 0.5 + ((1.0 / 4.0 - 0.04) - 0.5) * len;
 	float clp = rcpLo(lob);
-	float3 aC = 0.0;
+	float3 aC = float3(0.0);
 	float aW = 0.0;
 	easuTap(aC, aW, float2(0, -1) - pp, dir, len2, lob, clp, b);
 	easuTap(aC, aW, float2(1, -1) - pp, dir, len2, lob, clp, c);
@@ -165,8 +187,8 @@ fragment float4 rcas_fs(VOut i [[stage_in]], texture2d<float> tex [[texture(0)]]
 	float3 b = ld(tex, lim, p + int2(0, -1)), d = ld(tex, lim, p + int2(-1, 0)), e = ld(tex, lim, p), f = ld(tex, lim, p + int2(1, 0)), h = ld(tex, lim, p + int2(0, 1));
 	float3 mn = min(min(b, d), min(f, h));
 	float3 mx = max(max(b, d), max(f, h));
-	float3 hitMin = min(mn, e) / max(4.0 * mx, 1e-5);
-	float3 hitMax = (1.0 - max(mx, e)) / min(4.0 * mn - 4.0, -1e-5);
+	float3 hitMin = min(mn, e) / max(4.0 * mx, float3(1e-5));
+	float3 hitMax = (1.0 - max(mx, e)) / min(4.0 * mn - 4.0, float3(-1e-5));
 	float3 lobeC = max(-hitMin, hitMax);
 	float lobe = max(-RCAS_LIMIT, min(max(lobeC.r, max(lobeC.g, lobeC.b)), 0.0)) * exp2(-k.con1.z);
 	float bL = luma(b), dL = luma(d), eL = luma(e), fL = luma(f), hL = luma(h);
@@ -177,21 +199,6 @@ fragment float4 rcas_fs(VOut i [[stage_in]], texture2d<float> tex [[texture(0)]]
 	lobe *= nz;
 	float rcpL = rcpMed(4.0 * lobe + 1.0);
 	return float4(saturate((lobe * (b + d + h + f) + e) * rcpL), 1.0);
-}
-
-// ---- egui ----
-struct EguiV { packed_float2 pos; packed_float2 uv; uchar4 color; };
-struct EguiOut { float4 pos [[position]]; float2 uv; float4 color; };
-vertex EguiOut egui_vs(uint vid [[vertex_id]], const device EguiV* v [[buffer(0)]], constant float2& screen [[buffer(1)]]) {
-	EguiV e = v[vid];
-	EguiOut o;
-	o.pos = float4(2.0 * e.pos[0] / screen.x - 1.0, 1.0 - 2.0 * e.pos[1] / screen.y, 0.0, 1.0);
-	o.uv = float2(e.uv[0], e.uv[1]);
-	o.color = float4(e.color) / 255.0;
-	return o;
-}
-fragment float4 egui_fs(EguiOut i [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) {
-	return t.sample(s, i.uv) * i.color;
 }
 "#;
 
@@ -313,13 +320,22 @@ impl Gpu {
 			.map_err(|e| format!("shader compile: {}", e.localizedDescription()))?;
 		let video = pso(&device, &lib, "video_vs", "video_fs", false)?;
 		let egui = pso(&device, &lib, "egui_vs", "egui_fs", true)?;
-		// FSR is optional: plain scaling if its pipelines don't build on this GPU.
-		let easu = pso(&device, &lib, "full_vs", "easu_fs", false)
-			.map_err(|e| eprintln!("pulsar-render(mac): FSR EASU unavailable: {e}"))
-			.ok();
-		let rcas = pso(&device, &lib, "full_vs", "rcas_fs", false)
-			.map_err(|e| eprintln!("pulsar-render(mac): FSR RCAS unavailable: {e}"))
-			.ok();
+		// FSR is optional and in its own library: if it doesn't build on this GPU the picture
+		// still shows, with plain scaling.
+		let (easu, rcas) = match device.newLibraryWithSource_options_error(&ns(FSR_SHADERS), None) {
+			Ok(fl) => (
+				pso(&device, &fl, "full_vs", "easu_fs", false)
+					.map_err(|e| eprintln!("pulsar-render(mac): FSR EASU unavailable: {e}"))
+					.ok(),
+				pso(&device, &fl, "full_vs", "rcas_fs", false)
+					.map_err(|e| eprintln!("pulsar-render(mac): FSR RCAS unavailable: {e}"))
+					.ok(),
+			),
+			Err(e) => {
+				eprintln!("pulsar-render(mac): FSR shaders unavailable: {}", e.localizedDescription());
+				(None, None)
+			}
+		};
 		let lin = sampler(&device, MTLSamplerMinMagFilter::Linear)?;
 		let pt = sampler(&device, MTLSamplerMinMagFilter::Nearest)?;
 		let mut cache: CVMetalTextureCacheRef = std::ptr::null_mut();
