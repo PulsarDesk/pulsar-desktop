@@ -127,7 +127,8 @@ pub struct Decoder {
 	av1_seq: Option<Vec<u8>>,
 	/// The decoder in use runs in hardware (`None` until a session exists).
 	pub hw: Option<bool>,
-	/// A session failure the caller reports once (the session is rebuilt on the next keyframe).
+	/// A session failure the caller reports once (the session is rebuilt on the next AU from the
+	/// kept parameter sets, keyframe or not — see `bitstream::needs_session`).
 	pub failed: bool,
 }
 
@@ -310,7 +311,8 @@ impl Decoder {
 						}
 					}
 				}
-				if changed || (self.session.is_null() && au.key) {
+				let have_params = self.sps.is_some() && self.pps.is_some() && (self.codec != Codec::H265 || self.vps.is_some());
+				if bitstream::needs_session(changed, !self.session.is_null(), have_params) {
 					if let Some(f) = self.make_format() {
 						self.apply_format(f)?;
 					}
@@ -319,19 +321,20 @@ impl Decoder {
 			}
 			Codec::Av1 => {
 				let (sample, seq) = bitstream::av1_sample(&au.data);
+				let changed = seq.as_ref().is_some_and(|s| self.av1_seq.as_ref() != Some(s));
 				if let Some(seq) = seq {
-					if self.av1_seq.as_ref() != Some(&seq) || self.session.is_null() {
-						self.av1_seq = Some(seq);
-						if let Some(f) = self.make_format() {
-							self.apply_format(f)?;
-						}
+					self.av1_seq = Some(seq);
+				}
+				if bitstream::needs_session(changed, !self.session.is_null(), self.av1_seq.is_some()) {
+					if let Some(f) = self.make_format() {
+						self.apply_format(f)?;
 					}
 				}
 				sample
 			}
 		};
 		if self.session.is_null() {
-			return Err("no decoder session yet (waiting for a keyframe with parameter sets)".into());
+			return Err("no decoder session yet (waiting for the parameter sets)".into());
 		}
 		if sample.is_empty() {
 			return Ok(Vec::new());
@@ -395,8 +398,9 @@ impl Decoder {
 			let cb_err = self.shared.err.swap(0, Ordering::Relaxed);
 			let st = if st != 0 { st } else { cb_err };
 			if st == kVTInvalidSessionErr || st == kVTVideoDecoderMalfunctionErr {
-				// The session died (sleep / GPU change / decoder reset): rebuild it on the next
-				// keyframe from the parameter sets we keep.
+				// The session died (sleep / GPU change / decoder reset): rebuilt on the next AU from
+				// the parameter sets we keep (no keyframe needed: intra refresh / RFI heal the
+				// picture), while the caller still asks for an IDR.
 				self.drop_session();
 				self.failed = true;
 				return Err(format!("decoder session lost ({st})"));

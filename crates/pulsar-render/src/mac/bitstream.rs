@@ -430,9 +430,30 @@ pub fn av1c(seq: &Av1Seq, seq_obu: &[u8]) -> Vec<u8> {
 	v
 }
 
+/// Whether the decoder (re)builds its VideoToolbox session before an AU. A changed parameter
+/// set / sequence header always does. Without a session (start-up, or the session was lost to
+/// sleep/wake or a GPU change) ANY AU does as soon as parameter sets are kept: a host that heals
+/// with rolling intra refresh or RFI may never send another IDR, and a few broken pictures until
+/// the refresh wave has passed beat a picture frozen until the next keyframe.
+pub fn needs_session(params_changed: bool, have_session: bool, have_params: bool) -> bool {
+	params_changed || (!have_session && have_params)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn session_rebuilds_from_kept_params_without_a_keyframe() {
+		// Lost session + kept SPS/PPS: rebuilt on the next AU, keyframe or not.
+		assert!(needs_session(false, false, true));
+		// Nothing kept yet: wait for the parameter sets.
+		assert!(!needs_session(false, false, false));
+		// Live session, same parameter sets: keep it.
+		assert!(!needs_session(false, true, true));
+		// New parameter sets always rebuild (or re-check) the format.
+		assert!(needs_session(true, true, true));
+	}
 
 	#[test]
 	fn annexb_splits_on_both_start_code_lengths() {

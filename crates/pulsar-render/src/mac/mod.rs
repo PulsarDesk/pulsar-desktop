@@ -1449,8 +1449,10 @@ impl Renderer {
 		let frames = match dec.decode(au) {
 			Ok(f) => f,
 			Err(e) => {
-				// No session yet (waiting for parameter sets), a lost session or bad data: the
-				// picture can only restart from a keyframe.
+				// No session yet (waiting for parameter sets), a lost session or bad data: ask
+				// for a keyframe (again every 500 ms while this repeats). A lost session is
+				// rebuilt on the next AU from the kept parameter sets anyway, so an intra-refresh
+				// or RFI stream heals even if the IDR never comes.
 				if dec.failed || dec.hw.is_some() {
 					eprintln!("pulsar-render(mac): decode: {e}");
 				}
@@ -1674,17 +1676,23 @@ fn event_loop(mtm: MainThreadMarker, parent: u32, port: u16, codec: Codec, mode:
 	app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 	app.finishLaunching();
 
-	let mut win = window::Panel::new(mtm, parent);
-	win.place(None, false);
-	let mut link = window::DisplayLink::new();
-	if link.is_none() {
-		eprintln!("pulsar-render(mac): no display link — frame pacing shows pictures as they come");
-	}
 	let build = |win: &window::Panel| -> Result<metal::Gpu, String> {
 		let device = device_for(win.display).ok_or("no Metal device")?;
 		metal::Gpu::new(device, win.layer.clone())
 	};
-	let mut renderer: Option<Renderer> = Some(Renderer::new(build(&win)?, codec, mode, win.scale));
+	// Startup inside a pool too: the panel, layer and pipeline setup autorelease temporaries
+	// (see the main loop below for why that matters here).
+	let (mut win, first) = objc2::rc::autoreleasepool(|_| {
+		let mut win = window::Panel::new(mtm, parent);
+		win.place(None, false);
+		let first = build(&win).map(|gpu| Renderer::new(gpu, codec, mode, win.scale));
+		(win, first)
+	});
+	let mut renderer: Option<Renderer> = Some(first?);
+	let mut link = window::DisplayLink::new();
+	if link.is_none() {
+		eprintln!("pulsar-render(mac): no display link — frame pacing shows pictures as they come");
+	}
 
 	// RTP receive on its own thread; AUs land in a bounded queue (same overflow rule as
 	// win/mod.rs: drop the stale lead-in up to the newest keyframe past AU_SOFT_CAP, keep an
@@ -1755,199 +1763,211 @@ fn event_loop(mtm: MainThreadMarker, parent: u32, port: u16, codec: Codec, mode:
 	let mut test_fails_left: u32 = 0;
 
 	loop {
-		// ---- AppKit events (the panel's mouse; everything else is AppKit's own business).
-		// SAFETY: a framework static NSString.
-		let mode_key = unsafe { NSDefaultRunLoopMode };
-		while let Some(ev) = app.nextEventMatchingMask_untilDate_inMode_dequeue(
-			NSEventMask::Any,
-			Some(&NSDate::distantPast()),
-			mode_key,
-			true,
-		) {
-			if ev.windowNumber() == win.number() {
-				handle_mouse(&ev, &win);
-			}
-			app.sendEvent(&ev);
-		}
-
-		// ---- Where the picture goes.
-		let np = NEW_PARENT.swap(0, Ordering::SeqCst);
-		if np != 0 && np <= u32::MAX as u64 {
-			win.parent = np as u32;
-			PARENT.store(np, Ordering::SeqCst);
-			eprintln!("pulsar-render(mac): moved to window {np}");
-		}
-		let rect = *VIEW_RECT.lock().unwrap();
-		if let Some(r) = renderer.as_mut() {
-			// `reveal` arrived (or its fallback ran out) while no new picture came.
-			if r.reveal_due() {
-				r.revealed = true;
-			}
-		}
-		let revealed = renderer.as_ref().is_some_and(|r| r.revealed);
-		let resized = win.place(rect, revealed);
-		if win.parent_gone && STALLED.load(Ordering::Relaxed) {
-			// The app window and the app's stdin are both gone: nothing will show us again.
-			break;
-		}
-		win.set_take_mouse(wants_mouse(&win));
-		// Hover while the menu is open: AppKit sends mouse-moved events to the KEY window only,
-		// and the panel never becomes key, so the pointer is polled instead.
-		if OPEN.load(Ordering::SeqCst) {
-			if let Some((x, y)) = win.pointer() {
-				let k = win.scale as f32 / overlay_ppp();
-				let p = egui::pos2(x as f32 * k, y as f32 * k);
-				let mut last = POINTER.lock().unwrap();
-				if (last.0 - p.x).abs() + (last.1 - p.y).abs() > 0.25 {
-					*last = (p.x, p.y);
-					EGUI_EVENTS.lock().unwrap().push(egui::Event::PointerMoved(p));
+		// Each iteration drains its own autorelease pool. The process never runs
+		// -[NSApplication run], so no pool exists on the main thread otherwise: the NSEvents of
+		// the pump, the command buffers, encoders and render pass descriptors, and above all the
+		// CAMetalLayer drawables are autoreleased. Drawables only go back to the layer's small
+		// pool when this pool drains; without it `nextDrawable` blocks for its 1 s timeout and
+		// returns nil after a few frames, and memory grows every frame.
+		let quit = objc2::rc::autoreleasepool(|_| -> bool {
+			// ---- AppKit events (the panel's mouse; everything else is AppKit's own business).
+			// SAFETY: a framework static NSString.
+			let mode_key = unsafe { NSDefaultRunLoopMode };
+			while let Some(ev) = app.nextEventMatchingMask_untilDate_inMode_dequeue(
+				NSEventMask::Any,
+				Some(&NSDate::distantPast()),
+				mode_key,
+				true,
+			) {
+				if ev.windowNumber() == win.number() {
+					handle_mouse(&ev, &win);
 				}
+				app.sendEvent(&ev);
 			}
-		}
-		if let Some(l) = link.as_mut() {
-			l.set_display(win.display);
-		}
-		if refresh_overlay_ppp(win.scale) {
+
+			// ---- Where the picture goes.
+			let np = NEW_PARENT.swap(0, Ordering::SeqCst);
+			if np != 0 && np <= u32::MAX as u64 {
+				win.parent = np as u32;
+				PARENT.store(np, Ordering::SeqCst);
+				eprintln!("pulsar-render(mac): moved to window {np}");
+			}
+			let rect = *VIEW_RECT.lock().unwrap();
 			if let Some(r) = renderer.as_mut() {
-				r.egui_ctx.set_pixels_per_point(overlay_ppp());
+				// `reveal` arrived (or its fallback ran out) while no new picture came.
+				if r.reveal_due() {
+					r.revealed = true;
+				}
 			}
-		}
+			let revealed = renderer.as_ref().is_some_and(|r| r.revealed);
+			let resized = win.place(rect, revealed);
+			if win.parent_gone && STALLED.load(Ordering::Relaxed) {
+				// The app window and the app's stdin are both gone: nothing will show us again.
+				return true;
+			}
+			win.set_take_mouse(wants_mouse(&win));
+			// Hover while the menu is open: AppKit sends mouse-moved events to the KEY window only,
+			// and the panel never becomes key, so the pointer is polled instead.
+			if OPEN.load(Ordering::SeqCst) {
+				if let Some((x, y)) = win.pointer() {
+					let k = win.scale as f32 / overlay_ppp();
+					let p = egui::pos2(x as f32 * k, y as f32 * k);
+					let mut last = POINTER.lock().unwrap();
+					if (last.0 - p.x).abs() + (last.1 - p.y).abs() > 0.25 {
+						*last = (p.x, p.y);
+						EGUI_EVENTS.lock().unwrap().push(egui::Event::PointerMoved(p));
+					}
+				}
+			}
+			if let Some(l) = link.as_mut() {
+				l.set_display(win.display);
+			}
+			if refresh_overlay_ppp(win.scale) {
+				if let Some(r) = renderer.as_mut() {
+					r.egui_ctx.set_pixels_per_point(overlay_ppp());
+				}
+			}
 
-		// ---- GPU loss / GPU switch.
-		let test_now = test_loss.is_some_and(|(at, _)| std::time::Instant::now() >= at);
-		let mut need_rebuild = renderer.as_ref().is_some_and(|r| r.gpu.lost) || test_now;
-		if !need_rebuild && device_check.elapsed() >= std::time::Duration::from_secs(1) {
-			device_check = std::time::Instant::now();
-			if let (Some(r), Some(d)) = (renderer.as_ref(), device_for(win.display)) {
-				need_rebuild = Retained::as_ptr(&d) != Retained::as_ptr(&r.gpu.device);
+			// ---- GPU loss / GPU switch.
+			let test_now = test_loss.is_some_and(|(at, _)| std::time::Instant::now() >= at);
+			let mut need_rebuild = renderer.as_ref().is_some_and(|r| r.gpu.lost) || test_now;
+			if !need_rebuild && device_check.elapsed() >= std::time::Duration::from_secs(1) {
+				device_check = std::time::Instant::now();
+				if let (Some(r), Some(d)) = (renderer.as_ref(), device_for(win.display)) {
+					need_rebuild = Retained::as_ptr(&d) != Retained::as_ptr(&r.gpu.device);
+				}
 			}
-		}
-		if need_rebuild {
-			if test_now {
-				test_fails_left = test_loss.take().map_or(0, |(_, f)| f);
+			if need_rebuild {
+				if test_now {
+					test_fails_left = test_loss.take().map_or(0, |(_, f)| f);
+				}
+				eprintln!("pulsar-render(mac): Metal device lost or changed — rebuilding renderer");
+				if let Some(mut r) = renderer.take() {
+					lost = Some((std::mem::take(&mut r.ostate), std::mem::take(&mut r.ov_ui), r.decoder.take()));
+				}
+				rebuild_at = None;
+				rebuild_fails = 0;
 			}
-			eprintln!("pulsar-render(mac): Metal device lost or changed — rebuilding renderer");
-			if let Some(mut r) = renderer.take() {
-				lost = Some((std::mem::take(&mut r.ostate), std::mem::take(&mut r.ov_ui), r.decoder.take()));
+			if renderer.is_none() && rebuild_at.is_none_or(|t| t.elapsed() >= REBUILD_EVERY) {
+				rebuild_at = Some(std::time::Instant::now());
+				let built = if test_fails_left > 0 {
+					test_fails_left -= 1;
+					Err("test device loss".to_string())
+				} else {
+					build(&win)
+				};
+				match built {
+					Ok(gpu) => {
+						let mut fresh = Renderer::new(gpu, codec, mode, win.scale);
+						if let Some((o, u, d)) = lost.take() {
+							fresh.ostate = o;
+							fresh.ov_ui = u;
+							fresh.decoder = d;
+							fresh.revealed = true;
+						}
+						if rebuild_fails > 0 {
+							eprintln!("pulsar-render(mac): renderer rebuilt after {rebuild_fails} failed attempt(s)");
+						}
+						rebuild_fails = 0;
+						stream::rtp::NEED_IDR.store(true, Ordering::Relaxed);
+						renderer = Some(fresh);
+						last_au_at = std::time::Instant::now();
+					}
+					Err(e) => {
+						rebuild_fails += 1;
+						if rebuild_fails == 1 || rebuild_fails % REBUILD_LOG_EVERY == 0 {
+							eprintln!("pulsar-render(mac): renderer rebuild failed: {e} — retrying (attempt {rebuild_fails})");
+						}
+					}
+				}
 			}
-			rebuild_at = None;
-			rebuild_fails = 0;
-		}
-		if renderer.is_none() && rebuild_at.is_none_or(|t| t.elapsed() >= REBUILD_EVERY) {
-			rebuild_at = Some(std::time::Instant::now());
-			let built = if test_fails_left > 0 {
-				test_fails_left -= 1;
-				Err("test device loss".to_string())
-			} else {
-				build(&win)
+			let Some(r) = renderer.as_mut() else {
+				queue.lock().unwrap().clear();
+				std::thread::sleep(std::time::Duration::from_millis(40));
+				return false;
 			};
-			match built {
-				Ok(gpu) => {
-					let mut fresh = Renderer::new(gpu, codec, mode, win.scale);
-					if let Some((o, u, d)) = lost.take() {
-						fresh.ostate = o;
-						fresh.ov_ui = u;
-						fresh.decoder = d;
-						fresh.revealed = true;
-					}
-					if rebuild_fails > 0 {
-						eprintln!("pulsar-render(mac): renderer rebuilt after {rebuild_fails} failed attempt(s)");
-					}
-					rebuild_fails = 0;
-					stream::rtp::NEED_IDR.store(true, Ordering::Relaxed);
-					renderer = Some(fresh);
-					last_au_at = std::time::Instant::now();
-				}
-				Err(e) => {
-					rebuild_fails += 1;
-					if rebuild_fails == 1 || rebuild_fails % REBUILD_LOG_EVERY == 0 {
-						eprintln!("pulsar-render(mac): renderer rebuild failed: {e} — retrying (attempt {rebuild_fails})");
-					}
-				}
+			if resized {
+				// The picture must follow a resize at once, not on the next frame.
+				r.repaint_idle(&win);
 			}
-		}
-		let Some(r) = renderer.as_mut() else {
-			queue.lock().unwrap().clear();
-			std::thread::sleep(std::time::Duration::from_millis(40));
-			continue;
-		};
-		if resized {
-			// The picture must follow a resize at once, not on the next frame.
-			r.repaint_idle(&win);
-		}
 
-		// ---- Requests to the app.
-		if let Some((first, last)) = stream::rtp::take_rfi_request() {
-			out_line(&format!("vidsink-rfi {first} {last}"));
-		}
-		if last_needidr.elapsed() >= std::time::Duration::from_millis(500) && stream::rtp::NEED_IDR.swap(false, Ordering::Relaxed) {
-			last_needidr = std::time::Instant::now();
-			out_line("vidsink-needidr");
-		}
+			// ---- Requests to the app.
+			if let Some((first, last)) = stream::rtp::take_rfi_request() {
+				out_line(&format!("vidsink-rfi {first} {last}"));
+			}
+			if last_needidr.elapsed() >= std::time::Duration::from_millis(500) && stream::rtp::NEED_IDR.swap(false, Ordering::Relaxed) {
+				last_needidr = std::time::Instant::now();
+				out_line("vidsink-needidr");
+			}
 
-		// ---- Decode + present.
-		let aus: Vec<AccessUnit> = queue.lock().unwrap().drain(..).collect();
-		if aus.is_empty() {
-			if r.decoder.is_none() || r.last.is_none() {
-				if last_idle_paint.elapsed() >= std::time::Duration::from_millis(16) {
-					r.repaint_idle(&win);
-					last_idle_paint = std::time::Instant::now();
+			// ---- Decode + present.
+			let aus: Vec<AccessUnit> = queue.lock().unwrap().drain(..).collect();
+			if aus.is_empty() {
+				if r.decoder.is_none() || r.last.is_none() {
+					if last_idle_paint.elapsed() >= std::time::Duration::from_millis(16) {
+						r.repaint_idle(&win);
+						last_idle_paint = std::time::Instant::now();
+					}
+				} else {
+					let gap = last_au_at.elapsed();
+					let rtt_fresh = RTT_AT.lock().unwrap().is_some_and(|t| t.elapsed() < RTT_FRESH);
+					let recovering = (stream::rtp::WAITING.load(Ordering::Relaxed) && gap >= RECOVER_AFTER)
+						|| (gap.as_secs() >= STALL_SECS && !rtt_fresh);
+					RECOVERING.store(recovering, Ordering::Relaxed);
+					let stalled = STALLED.load(Ordering::Relaxed);
+					let chrome = OPEN.load(Ordering::SeqCst)
+						|| STATS_HUD.load(Ordering::SeqCst)
+						|| OVERLAY_BTN.load(Ordering::SeqCst)
+						|| HINT.lock().unwrap().is_some()
+						|| CURSOR_POS.lock().unwrap().is_some()
+						|| stalled
+						|| recovering;
+					if chrome && last_idle_paint.elapsed() >= std::time::Duration::from_millis(16) {
+						r.repaint_idle(&win);
+						last_idle_paint = std::time::Instant::now();
+					}
 				}
+				std::thread::sleep(std::time::Duration::from_millis(2));
 			} else {
-				let gap = last_au_at.elapsed();
-				let rtt_fresh = RTT_AT.lock().unwrap().is_some_and(|t| t.elapsed() < RTT_FRESH);
-				let recovering = (stream::rtp::WAITING.load(Ordering::Relaxed) && gap >= RECOVER_AFTER)
-					|| (gap.as_secs() >= STALL_SECS && !rtt_fresh);
-				RECOVERING.store(recovering, Ordering::Relaxed);
-				let stalled = STALLED.load(Ordering::Relaxed);
-				let chrome = OPEN.load(Ordering::SeqCst)
-					|| STATS_HUD.load(Ordering::SeqCst)
-					|| OVERLAY_BTN.load(Ordering::SeqCst)
-					|| HINT.lock().unwrap().is_some()
-					|| CURSOR_POS.lock().unwrap().is_some()
-					|| stalled
-					|| recovering;
-				if chrome && last_idle_paint.elapsed() >= std::time::Duration::from_millis(16) {
-					r.repaint_idle(&win);
-					last_idle_paint = std::time::Instant::now();
+				STALLED.store(false, Ordering::Relaxed);
+				RECOVERING.store(false, Ordering::Relaxed);
+				if !live_announced {
+					live_announced = true;
+					out_line("ov stalled 0");
+					stalled_sent = false;
+				}
+				last_au_at = std::time::Instant::now();
+				let burst = aus.len() >= AU_BURST;
+				if burst && aus.len() >= AU_SOFT_CAP {
+					eprintln!("pulsar-render(mac): AU burst of {} — decoded, presenting the newest only", aus.len());
+				}
+				let n = aus.len();
+				for (i, au) in aus.iter().enumerate() {
+					r.on_access_unit(&mut win, au, !burst || i + 1 == n);
+				}
+				if let Some(f) = r.held_back.take() {
+					if burst && PACE.load(Ordering::Relaxed) {
+						r.pace_q.clear();
+					}
+					r.deliver(&mut win, f);
 				}
 			}
-			std::thread::sleep(std::time::Duration::from_millis(2));
-		} else {
-			STALLED.store(false, Ordering::Relaxed);
-			RECOVERING.store(false, Ordering::Relaxed);
-			if !live_announced {
-				live_announced = true;
-				out_line("ov stalled 0");
-				stalled_sent = false;
-			}
-			last_au_at = std::time::Instant::now();
-			let burst = aus.len() >= AU_BURST;
-			if burst && aus.len() >= AU_SOFT_CAP {
-				eprintln!("pulsar-render(mac): AU burst of {} — decoded, presenting the newest only", aus.len());
-			}
-			let n = aus.len();
-			for (i, au) in aus.iter().enumerate() {
-				r.on_access_unit(&mut win, au, !burst || i + 1 == n);
-			}
-			if let Some(f) = r.held_back.take() {
-				if burst && PACE.load(Ordering::Relaxed) {
-					r.pace_q.clear();
-				}
-				r.deliver(&mut win, f);
-			}
-		}
-		r.pace_tick(&mut win, link.as_ref().map(|l| l.refresh()));
+			r.pace_tick(&mut win, link.as_ref().map(|l| l.refresh()));
 
-		let stalled = STALLED.load(Ordering::Relaxed);
-		if stalled != stalled_sent {
-			stalled_sent = stalled;
-			out_line(&format!("ov stalled {}", stalled as u8));
-		}
-		let recovering = RECOVERING.load(Ordering::Relaxed) && !stalled;
-		if recovering != recovering_sent {
-			recovering_sent = recovering;
-			out_line(&format!("ov recovering {}", recovering as u8));
+			let stalled = STALLED.load(Ordering::Relaxed);
+			if stalled != stalled_sent {
+				stalled_sent = stalled;
+				out_line(&format!("ov stalled {}", stalled as u8));
+			}
+			let recovering = RECOVERING.load(Ordering::Relaxed) && !stalled;
+			if recovering != recovering_sent {
+				recovering_sent = recovering;
+				out_line(&format!("ov recovering {}", recovering as u8));
+			}
+			false
+		});
+		if quit {
+			break;
 		}
 	}
 	stop.store(true, Ordering::SeqCst);
