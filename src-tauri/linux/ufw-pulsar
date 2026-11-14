@@ -1,0 +1,4 @@
+[Pulsar]
+title=Pulsar remote desktop
+description=Pulsar LAN discovery (UDP multicast beacon on 21117). Sessions need no rule: they are UDP hole-punched (outbound first), which a stateful firewall already lets back in.
+ports=21117/udp

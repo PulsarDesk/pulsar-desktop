@@ -1,6 +1,7 @@
 import { check } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { api } from './api.commands';
+import { onPkgUpdateProgress } from './api.events';
 import { update as updateState } from './update.svelte';
 import { ui } from './settings.svelte';
 
@@ -47,8 +48,8 @@ export async function silentUpdateCheck(opts?: {
 		// on the old version while the updater appears to "succeed". Skip loudly instead.
 		if (!(await api.selfUpdatePossible().catch(() => true))) {
 			console.warn(
-				'[updater] skipped: self-update unavailable (running without $APPIMAGE — ' +
-					'launch the AppImage with FUSE, not --appimage-extract-and-run, to enable updates)'
+				'[updater] skipped: no silent self-update here (a .deb/.rpm install updates from the ' +
+					'update dialog through the package manager; an AppImage needs FUSE, not --appimage-extract-and-run)'
 			);
 			return;
 		}
@@ -134,9 +135,12 @@ export async function checkForUpdateUi(isBusy?: () => boolean): Promise<void> {
 		updateState.from = update.currentVersion;
 		updateState.to = update.version;
 		updateState.notes = plainNotes(await notesFor(update.version, update.body ?? ''));
-		updateState.installable = await api.selfUpdatePossible().catch(() => true);
+		updateState.kind = await api.updateInstallKind().catch(() => 'inPlace' as const);
+		updateState.installable = updateState.kind !== 'none';
 		updateState.available = true;
-		if (ui.autoUpdate && updateState.installable && !isBusy?.()) {
+		// A distro package needs the admin password: never pop that dialog unasked, even with
+		// auto-update on — the badge + modal offer it and the user clicks Install.
+		if (ui.autoUpdate && updateState.kind === 'inPlace' && !isBusy?.()) {
 			await installUpdate(isBusy);
 		}
 	} catch (e) {
@@ -182,6 +186,7 @@ export async function installUpdate(isBusy?: () => boolean): Promise<void> {
 	}
 	if (!u || !updateState.installable) return;
 	if (updateState.phase === 'downloading' || updateState.phase === 'installing') return;
+	if (updateState.kind === 'deb' || updateState.kind === 'rpm') return installPackage(u.version, isBusy);
 	try {
 		updateState.error = '';
 		updateState.phase = 'downloading';
@@ -215,6 +220,44 @@ export async function installUpdate(isBusy?: () => boolean): Promise<void> {
 		updateState.phase = 'error';
 		updateState.error = String(e);
 		console.warn('[updater] install failed:', e);
+	}
+}
+
+/**
+ * Linux .deb/.rpm install: the backend downloads the signed package from the same channel and
+ * hands it to the package manager behind one pkexec prompt (or to the software installer when
+ * there is no pkexec / polkit agent). Never touches the running files itself.
+ */
+async function installPackage(version: string, isBusy?: () => boolean): Promise<void> {
+	if (isBusy?.()) return;
+	const meter = speedMeter();
+	const off = await onPkgUpdateProgress((p) => {
+		if (p.total) updateState.total = p.total;
+		updateState.received = p.received;
+		meter(p.received);
+		if (p.total && p.received >= p.total) updateState.phase = 'installing';
+	});
+	try {
+		updateState.error = '';
+		updateState.pkgNote = '';
+		updateState.phase = 'downloading';
+		updateState.received = 0;
+		updateState.total = 0;
+		updateState.speed = 0;
+		const res = await api.linuxPackageUpdate(version);
+		if (res === 'installed') {
+			updateState.phase = 'restarting';
+			await relaunch();
+		} else {
+			updateState.phase = 'idle';
+			updateState.pkgNote = res;
+		}
+	} catch (e) {
+		updateState.phase = 'error';
+		updateState.error = String(e);
+		console.warn('[updater] package install failed:', e);
+	} finally {
+		off();
 	}
 }
 

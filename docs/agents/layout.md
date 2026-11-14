@@ -35,6 +35,9 @@ pulsar-desktop/
     src/kbdhook.rs,kbdhook/ # OS-key capture: Windows Interception/LL-hook (imp.rs), Linux
                           #   evdev (linux.rs), macOS CGEventTap glue (mac.rs -> pulsar-macinput)
     src/relay_mode.rs     #   `pulsar --relay …` — the app can run as a relay
+    src/pkg_update.rs     #   Linux .deb/.rpm in-app update (pkexec apt-get/dnf)
+    src/pad_wake.rs       #   pad wake / bring forward (+ mac_activate.rs on macOS)
+    src/firewall*.rs      #   Windows program rules, macOS Application Firewall
     src/{auth,avatar,connections,files,fs_browse,audio_io,io_cmds,…}.rs
     tauri.conf.json       #   frameless 1200×780 window; updater plugin (minisign)
   src/                    # SvelteKit frontend

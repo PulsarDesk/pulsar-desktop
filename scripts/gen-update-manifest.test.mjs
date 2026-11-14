@@ -48,8 +48,30 @@ test('the opi5 profile points a .deb install at the Orange Pi 5 build only', () 
 	assert.equal(m.platforms['linux-aarch64-deb'].url, base + '/Pulsar_0.17.0_opi5_arm64.deb');
 	assert.equal(m.platforms['linux-aarch64-deb'].signature, 'SIG_OPI5');
 	assert.equal(m.platforms['linux-aarch64'].url, base + '/Pulsar_0.17.0_opi5_arm64.deb');
-	// The default manifest never offers the rkmpp build to other arm64 installs.
+	// The default manifest never offers the rkmpp build to other arm64 installs: its .deb
+	// entry is the generic arm64 package.
 	const def = buildManifest({ version: '0.17.0', notes: 'n', pubDate: 'x', assets, base });
 	assert.equal(def.platforms['linux-aarch64'].url, base + '/Pulsar_0.17.0_aarch64.AppImage');
-	assert.equal(def.platforms['linux-aarch64-deb'], undefined);
+	assert.equal(def.platforms['linux-aarch64-deb'].url, base + '/Pulsar_0.17.0_arm64.deb');
+	assert.equal(def.platforms['linux-aarch64-deb'].signature, 'SIG_GENERIC_DEB');
+});
+
+test('distro packages get their own keys; an unsigned package is skipped, not fatal', () => {
+	const assets = {
+		'Pulsar_0.28.0_amd64.deb': null,
+		'Pulsar_0.28.0_amd64.deb.sig': 'SIG_DEB_X64',
+		'Pulsar_0.28.0_arm64.deb': null,
+		'Pulsar_0.28.0_arm64.deb.sig': 'SIG_DEB_ARM',
+		'Pulsar-0.28.0-1.x86_64.rpm': null,
+		'Pulsar-0.28.0-1.x86_64.rpm.sig': 'SIG_RPM_X64',
+		'Pulsar-0.28.0-1.aarch64.rpm': null
+	};
+	const base = 'https://example.invalid/v0.28.0';
+	const m = buildManifest({ version: '0.28.0', notes: 'n', pubDate: 'x', assets, base });
+	assert.equal(m.platforms['linux-x86_64-deb'].url, base + '/Pulsar_0.28.0_amd64.deb');
+	assert.equal(m.platforms['linux-aarch64-deb'].signature, 'SIG_DEB_ARM');
+	assert.equal(m.platforms['linux-x86_64-rpm'].url, base + '/Pulsar-0.28.0-1.x86_64.rpm');
+	assert.equal(m.platforms['linux-aarch64-rpm'], undefined);
+	// A package is never mistaken for the AppImage entry.
+	assert.equal(m.platforms['linux-x86_64'], undefined);
 });

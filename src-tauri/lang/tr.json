@@ -65,5 +65,6 @@
 	"pad.host.mac_unsupported": "Bu macOS sürümü sanal kolu desteklemiyor (10.15 veya üstü gerekir)",
 	"pad.host.vigem_missing": "ViGEmBus sürücüsü kurulu değil; kol girişi oyuna gitmiyor",
 	"pad.host.uinput_denied": "/dev/uinput yazılamıyor; kol girişi oyuna gitmiyor",
-	"pad.host.unavailable": "Sanal kol oluşturulamadı; kol girişi oyuna gitmiyor"
+	"pad.host.unavailable": "Sanal kol oluşturulamadı; kol girişi oyuna gitmiyor",
+	"fw.macPrompt": "Pulsar, uzak bağlantıların gelebilmesi için güvenlik duvarında kendine ve yayın programlarına izin vermek istiyor."
 }

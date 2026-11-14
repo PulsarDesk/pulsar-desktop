@@ -65,5 +65,6 @@
 	"pad.host.mac_unsupported": "This macOS is too old for a virtual controller (10.15 or newer needed)",
 	"pad.host.vigem_missing": "The ViGEmBus driver is not installed; controller input does not reach games",
 	"pad.host.uinput_denied": "/dev/uinput is not writable; controller input does not reach games",
-	"pad.host.unavailable": "The virtual controller could not be created; controller input does not reach games"
+	"pad.host.unavailable": "The virtual controller could not be created; controller input does not reach games",
+	"fw.macPrompt": "Pulsar wants to allow itself and its streaming programs through the firewall so remote connections can reach it."
 }

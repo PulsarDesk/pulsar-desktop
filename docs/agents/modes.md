@@ -442,4 +442,6 @@ and has no Linux/macOS counterpart.
 The requesting client pre-authorizes the host's E2E key for its connect back (one use, 60 s:
 `auth::preauth::expect_reverse` / `take_reverse`) — no password or Allow/Deny; it ends its own
 session and hides Pulsar. The other side brings Pulsar forward (`pad_wake::bring_forward`,
-AttachThreadInput — never a synthetic Alt: that opened the window menu loop and froze the UI).
+AttachThreadInput — never a synthetic Alt: that opened the window menu loop and froze the UI;
+Linux X11 `_NET_ACTIVE_WINDOW`, macOS app activation, Wayland only `present()` — see
+[status.md](status.md) "Platform parity").

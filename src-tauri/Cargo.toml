@@ -126,6 +126,12 @@ windows-core = "0.62"
 # + downscale (same pipeline as the Linux block below).
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp"] }
 
+# macOS app activation (mac_activate.rs: pad wake / bring forward). The same objc2 0.6 /
+# objc2-app-kit 0.3 tao already pulls in — no new crates, only the features it needs.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSRunningApplication", "NSWindow", "NSResponder"] }
+
 # Linux/X11: resolve the Pulsar window's X11 id so the native mpv renderer embeds INSIDE
 # the app window via `--wid` (in-app HW-decoded video, no webview hop). Versions match
 # the gtk3 stack tauri/wry already pull in (gtk/gdk/gdkx11 0.18.2 in Cargo.lock).

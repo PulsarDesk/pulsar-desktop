@@ -15,6 +15,8 @@ describe('Update modal', () => {
 	afterEach(() => {
 		update.available = false;
 		update.open = false;
+		update.kind = 'inPlace';
+		update.pkgNote = '';
 	});
 
 	it('warns that installing closes the open sessions', () => {
@@ -33,5 +35,27 @@ describe('Update modal', () => {
 		show(false);
 		render(UpdateModal, { props: { openSessions: 1 } });
 		expect(screen.queryByText(/oturum kapanacak/)).not.toBeInTheDocument();
+	});
+
+	it('a Linux .deb install says the package manager installs it after a password', () => {
+		show();
+		update.kind = 'deb';
+		render(UpdateModal, { props: { openSessions: 0 } });
+		expect(screen.getByText(/Bu kurulum bir \.deb paketi/)).toBeInTheDocument();
+		expect(screen.getByRole('button', { name: 'Kur' })).toBeEnabled();
+	});
+
+	it('explains a hand-off to the software installer', () => {
+		show();
+		update.kind = 'rpm';
+		update.pkgNote = 'opened';
+		render(UpdateModal, { props: { openSessions: 0 } });
+		expect(screen.getByText(/yazılım yükleyicisinde açıldı/)).toBeInTheDocument();
+	});
+
+	it('in-place installs show no package hint', () => {
+		show();
+		render(UpdateModal, { props: { openSessions: 0 } });
+		expect(screen.queryByText(/paketi:/)).not.toBeInTheDocument();
 	});
 });

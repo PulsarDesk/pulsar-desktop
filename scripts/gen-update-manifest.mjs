@@ -13,7 +13,16 @@ const TARGETS = [
 	{ key: 'linux-x86_64', re: /_amd64\.AppImage$/ },
 	{ key: 'linux-aarch64', re: /_aarch64\.AppImage$/ },
 	{ key: 'darwin-aarch64', re: /aarch64\.app\.tar\.gz$/ },
-	{ key: 'darwin-x86_64', re: /x64\.app\.tar\.gz$/ }
+	{ key: 'darwin-x86_64', re: /x64\.app\.tar\.gz$/ },
+	// Distro packages: a .deb/.rpm install asks for `linux-<arch>-deb|rpm` first and installs
+	// it through the package manager (src-tauri/src/pkg_update.rs). Optional: a package
+	// without a signature is left out (that install then falls back to the AppImage entry,
+	// which it refuses to install) instead of failing the whole release.
+	{ key: 'linux-x86_64-deb', re: /_amd64\.deb$/, optional: true },
+	// The generic arm64 .deb — never the Orange Pi 5 (rkmpp) build, which has its own channel.
+	{ key: 'linux-aarch64-deb', re: /^(?!.*_opi5_).*_arm64\.deb$/, optional: true },
+	{ key: 'linux-x86_64-rpm', re: /\.x86_64\.rpm$/, optional: true },
+	{ key: 'linux-aarch64-rpm', re: /\.aarch64\.rpm$/, optional: true }
 ];
 
 // The Orange Pi 5 build: a .deb linked against the Rockchip (rkmpp) ffmpeg. The updater of a
@@ -27,10 +36,11 @@ const OPI5_TARGETS = [
 export function buildManifest({ version, notes, pubDate, assets, base, profile = 'default' }) {
 	const names = Object.keys(assets);
 	const platforms = {};
-	for (const { key, re } of profile === 'opi5' ? OPI5_TARGETS : TARGETS) {
+	for (const { key, re, optional } of profile === 'opi5' ? OPI5_TARGETS : TARGETS) {
 		const bundle = names.find((n) => re.test(n) && !n.endsWith('.sig'));
 		if (!bundle) continue; // target not built this run
 		const sig = assets[bundle + '.sig'];
+		if (sig == null && optional) continue;
 		if (sig == null) throw new Error(`missing signature for ${bundle}`);
 		platforms[key] = { url: `${base}/${bundle}`, signature: sig };
 	}

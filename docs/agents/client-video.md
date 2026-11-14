@@ -64,6 +64,9 @@ reaches the webview. Don't resurrect a webview video path.
   `@tauri-apps/plugin-updater` + minisign key in `tauri.conf.json`,
   `src/lib/updater.ts`, `routes/page/UpdateModal.svelte`,
   `scripts/gen-update-manifest.mjs` (consent-based: badge, changelog, progress).
+  A `.deb`/`.rpm` install (the Pi) updates through the package manager instead
+  (`src-tauri/src/pkg_update.rs`: pkexec + apt-get/dnf, one password prompt from the
+  modal, never silently) — see [status.md](status.md) "Platform parity".
 
 ## Linux desktop GPUs — zero-copy needs the decoder on the DISPLAY GPU
 

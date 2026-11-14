@@ -36,26 +36,106 @@ pub fn on_guide_press(app: &AppHandle) {
 pub(crate) fn bring_forward(app: &AppHandle) {
 	let app2 = app.clone();
 	let _ = app.run_on_main_thread(move || {
-		let Some(w) = app2.get_webview_window("main") else { return };
-		let _ = w.show();
-		let _ = w.unminimize();
-		#[cfg(windows)]
-		if let Ok(hwnd) = w.hwnd() {
-			force_foreground(hwnd.0 as _);
+		if let Some(w) = app2.get_webview_window("main") {
+			raise(&w);
 		}
-		let _ = w.set_focus();
 	});
 }
 
 fn wake(app: &AppHandle, w: &tauri::WebviewWindow) {
+	// The platform raise calls (GTK, AppKit) must run on the main thread; the Guide watcher
+	// calls us from its own thread.
+	let w2 = w.clone();
+	let _ = app.run_on_main_thread(move || raise(&w2));
+	let _ = app.emit("pad-wake", ());
+}
+
+/// Show + restore + the platform's "take the foreground from another app" + focus.
+fn raise(w: &tauri::WebviewWindow) {
 	let _ = w.show();
 	let _ = w.unminimize();
 	#[cfg(windows)]
 	if let Ok(hwnd) = w.hwnd() {
 		force_foreground(hwnd.0 as _);
 	}
+	#[cfg(target_os = "linux")]
+	linux_raise::force_foreground(w);
+	#[cfg(target_os = "macos")]
+	if let Ok(ns_window) = w.ns_window() {
+		crate::mac_activate::activate(ns_window);
+	}
 	let _ = w.set_focus();
-	let _ = app.emit("pad-wake", ());
+}
+
+/// Linux: a plain `gtk_window_present()` from the background loses to focus-stealing
+/// prevention — the WM only flags the window "demands attention" because the request carries
+/// no fresh user timestamp (the pad press is not X input).
+///
+/// * X11: present with the X server's CURRENT time (`gdk_x11_get_server_time`), and send the
+///   EWMH `_NET_ACTIVE_WINDOW` client message with source indication 2 ("pager"): window
+///   managers (mutter, KWin, xfwm4, openbox…) honour pager requests unconditionally — the
+///   same request `wmctrl -a` makes. The window is moved to the current workspace first.
+/// * Wayland: there is no way for a background client to take focus — xdg-activation needs a
+///   token minted from a focused surface or a launcher. `present()` is all the protocol
+///   allows; GNOME shows "Pulsar is ready", KWin flashes the task entry.
+///
+/// Untested on Linux hardware (written 2026-11-14).
+#[cfg(target_os = "linux")]
+mod linux_raise {
+	use gtk::glib::Cast;
+	use gtk::prelude::{GtkWindowExt, WidgetExt};
+
+	pub(super) fn force_foreground(w: &tauri::WebviewWindow) {
+		let Ok(win) = w.gtk_window() else { return };
+		let Some(gdk_win) = win.window() else {
+			win.present();
+			return;
+		};
+		match gdk_win.downcast::<gdkx11::X11Window>() {
+			Ok(x) => {
+				let ts = gdkx11::functions::x11_get_server_time(&x);
+				x.move_to_current_desktop();
+				win.present_with_time(ts);
+				net_active_window(x.xid(), ts);
+			}
+			Err(_) => {
+				win.present();
+				tracing::info!("bring forward: Wayland — the compositor decides (no activation token)");
+			}
+		}
+	}
+
+	/// EWMH `_NET_ACTIVE_WINDOW` (source = pager) to the root window, on our own short-lived
+	/// Xlib connection (GDK's is not exposed safely; the request is server-side anyway).
+	fn net_active_window(xid: x11::xlib::Window, ts: u32) {
+		use x11::xlib;
+		unsafe {
+			let dpy = xlib::XOpenDisplay(std::ptr::null());
+			if dpy.is_null() {
+				return;
+			}
+			let root = xlib::XDefaultRootWindow(dpy);
+			let mut msg: xlib::XClientMessageEvent = std::mem::zeroed();
+			msg.type_ = xlib::ClientMessage;
+			msg.display = dpy;
+			msg.window = xid;
+			msg.message_type = xlib::XInternAtom(dpy, c"_NET_ACTIVE_WINDOW".as_ptr(), xlib::False);
+			msg.format = 32;
+			msg.data.set_long(0, 2); // source indication: pager
+			msg.data.set_long(1, ts as std::os::raw::c_long);
+			msg.data.set_long(2, 0); // our currently active window: none
+			let mut ev = xlib::XEvent { client_message: msg };
+			xlib::XSendEvent(
+				dpy,
+				root,
+				xlib::False,
+				xlib::SubstructureRedirectMask | xlib::SubstructureNotifyMask,
+				&mut ev,
+			);
+			xlib::XFlush(dpy);
+			xlib::XCloseDisplay(dpy);
+		}
+	}
 }
 
 /// Windows only lets the process that owns the foreground (or got the last input) take it;

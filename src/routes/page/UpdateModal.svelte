@@ -61,6 +61,17 @@
 				<div class="uhint">{t('update.noSelfUpdate')}</div>
 			{/if}
 
+			{#if update.installable && (update.kind === 'deb' || update.kind === 'rpm')}
+				<!-- Linux distro package: installed by apt/dnf/zypper behind one admin prompt. -->
+				<div class="uhint">
+					{update.pkgNote === 'opened'
+						? t('update.pkgOpened')
+						: update.pkgNote === 'cancelled'
+							? t('update.pkgCancelled')
+							: t('update.pkgHint', { pkg: update.kind === 'deb' ? '.deb' : '.rpm' })}
+				</div>
+			{/if}
+
 			{#if update.installable && openSessions > 0 && update.phase !== 'restarting'}
 				<div class="uwarn">
 					<Icon name="power" size={15} />

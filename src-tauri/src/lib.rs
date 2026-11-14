@@ -23,6 +23,7 @@ mod caps;
 mod caps_guard;
 #[cfg(windows)]
 mod firewall;
+mod firewall_mac;
 mod autostart;
 mod screen_permission;
 #[cfg(windows)]
@@ -35,6 +36,8 @@ mod commands;
 mod connections;
 mod local_relay;
 mod logging;
+#[cfg(target_os = "macos")]
+mod mac_activate;
 // Host-side "screen adaptation" (Parsec-style): switch a captured monitor to the
 // best-fit display mode for a client split-pane and revert on teardown. Windows, Linux
 // (X11 xrandr + wlroots/KDE/GNOME Wayland) and macOS (CoreGraphics).
@@ -94,6 +97,7 @@ mod toast;
 mod twofa;
 mod ui_start;
 mod pairing;
+mod pkg_update;
 mod update_guard;
 mod util;
 mod viewer;
@@ -519,6 +523,9 @@ pub fn run() {
 			// one decision instead of a prompt per program; ours before the app goes online.
 			#[cfg(windows)]
 			crate::firewall::setup(app.handle());
+			// macOS: the same for an ENABLED Application Firewall (one admin prompt per version).
+			#[cfg(target_os = "macos")]
+			crate::firewall_mac::setup(app.handle());
 			crate::ui_start::start(app.handle());
 			// Shared mode: the machine-wide host lease (one host per PC, follows the active session).
 			crate::shared_mode::lease::start(app.handle().clone());
@@ -805,6 +812,8 @@ pub fn run() {
 			node_port,
 			auto_connect_target,
 			self_update_possible,
+			pkg_update::update_install_kind,
+			pkg_update::linux_package_update,
 			update_guard::mark_update_installing,
 			update_guard::clear_update_installing,
 			update_guard::launch_update_window,
