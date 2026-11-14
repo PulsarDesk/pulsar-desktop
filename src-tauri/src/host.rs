@@ -9,8 +9,36 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use pulsar_core::input::{
-	create_virtual_pad_target, EmulationTarget, GamepadKind, ResolvedTarget, VirtualGamepad,
+	create_virtual_pad_checked, EmulationTarget, GamepadKind, ResolvedTarget, VirtualGamepad,
 };
+
+/// Create the virtual pad for a client controller at `slot`. When the host has no real
+/// backend (macOS without the virtual-HID entitlement, Windows without ViGEmBus, Linux
+/// without a writable `/dev/uinput`) the pad is a no-op: tell the client why
+/// ([`DataMsg::PadUnavailable`], shown as a notice in its session) and, once per session
+/// (`told`), the person at the host (a toast naming the cause).
+fn create_pad_or_tell(
+	kind: GamepadKind,
+	target: EmulationTarget,
+	slot: u8,
+	out: &tokio::sync::mpsc::Sender<pulsar_core::service::DataMsg>,
+	app: &AppHandle,
+	told: &mut bool,
+) -> Box<dyn VirtualGamepad> {
+	let (pad, failure) = create_virtual_pad_checked(kind, target);
+	if let Some(f) = failure {
+		tracing::warn!(slot, reason = f.as_wire(), "virtual pad unavailable → client notice");
+		let _ = out.try_send(pulsar_core::service::DataMsg::PadUnavailable {
+			slot,
+			reason: f.as_wire().to_string(),
+		});
+		if !*told {
+			*told = true;
+			crate::toast::pad_unavailable(app, crate::pad_notice::host_text(f));
+		}
+	}
+	pad
+}
 
 /// Spawn a thread that forwards the game's rumble from a virtual pad back to the client's
 /// physical controller (as [`DataMsg::Rumble`]). No-op when the backend has no rumble
@@ -1525,6 +1553,9 @@ pub(crate) async fn bring_online(
 					let mut coop = crate::coop::SessionRouter::new(sid);
 					#[cfg(windows)]
 					let coop_app = app_h.clone();
+					// Virtual pads the host can't create are reported (create_pad_or_tell).
+					let pad_app = app_h.clone();
+					let mut pad_told = false;
 					// Which monitor's geometry is currently applied to the desktop injector, so we
 					// only re-resolve the virtual-desktop rect when the streamed monitor changes.
 					// `u32::MAX` = "none applied yet" (forces the first resolve).
@@ -1661,9 +1692,13 @@ pub(crate) async fn bring_online(
 									.or_insert_with(|| {
 										(
 											ResolvedTarget::Xbox360,
-											create_virtual_pad_target(
+											create_pad_or_tell(
 												GamepadKind::Xbox,
 												EmulationTarget::Auto,
+												0,
+												&rumble_out,
+												&pad_app,
+												&mut pad_told,
 											),
 										)
 									})
@@ -1700,7 +1735,14 @@ pub(crate) async fn bring_online(
 										// permanently input-dead after a target switch.
 										return;
 									}
-									let pad = create_virtual_pad_target(kind, target);
+									let pad = create_pad_or_tell(
+										kind,
+										target,
+										slot,
+										&rumble_out,
+										&pad_app,
+										&mut pad_told,
+									);
 									// Forward the game's rumble back to the client's physical pad
 									// (DS4 backend only; no-op for others). The thread ends when
 									// this pad is dropped (its notification IOCTL aborts).

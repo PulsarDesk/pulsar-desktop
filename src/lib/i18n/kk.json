@@ -414,6 +414,7 @@
 	"toast.file-in": "Файл келді",
 	"toast.file-del": "Файл жойылды",
 	"toast.file-mod": "Файл өзгертілді",
+	"toast.pad-off": "Виртуалды геймпад жасалмады",
 	"toast.from": "{peer} жіберді",
 	"toast.reveal": "Қалтада көрсету үшін басыңыз",
 	"toast.close": "Жабу",

@@ -414,6 +414,7 @@
 	"toast.file-in": "Получен файл",
 	"toast.file-del": "Файл удалён",
 	"toast.file-mod": "Файл изменён",
+	"toast.pad-off": "Виртуальный геймпад не создан",
 	"toast.from": "Отправил {peer}",
 	"toast.reveal": "Нажмите, чтобы показать в папке",
 	"toast.close": "Закрыть",

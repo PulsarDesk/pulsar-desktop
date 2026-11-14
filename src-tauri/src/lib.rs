@@ -64,6 +64,7 @@ mod shared_mode;
 mod pad_wake;
 mod link_hint;
 mod play;
+mod pad_notice;
 mod play_notice;
 // Sleep / display off ends the sessions this machine is viewing; waking reconnects them.
 mod power_watch;

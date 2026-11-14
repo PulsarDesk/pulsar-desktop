@@ -49,5 +49,16 @@
 	"ds5.headset.off": "Kulaklık çıkarıldı: ses yeniden bu cihazdan çalıyor",
 	"ds5.headset.player": "Oyuncu",
 	"hint.wifi24": "Wi-Fi 2,4 GHz bandında: gecikme artabilir ve Bluetooth kolu etkilenir. Mümkünse 5/6 GHz ağa bağlan",
-	"hint.wlanPowerSave": "Pilde Wi-Fi güç tasarrufu açık: yayında takılmalar olabilir. Şarja tak ya da güç planında kablosuz bağdaştırıcıyı \"En yüksek performans\" yap"
+	"hint.wlanPowerSave": "Pilde Wi-Fi güç tasarrufu açık: yayında takılmalar olabilir. Şarja tak ya da güç planında kablosuz bağdaştırıcıyı \"En yüksek performans\" yap",
+	"pad.client.title": "Oyuncu {n} kolu karşı tarafta çalışmıyor",
+	"pad.client.mac_entitlement": "Mac'teki Pulsar sürümü sanal kol iznine (imza) sahip değil",
+	"pad.client.mac_unsupported": "Mac'in macOS sürümü sanal kolu desteklemiyor (10.15 veya üstü gerekir)",
+	"pad.client.vigem_missing": "Windows'ta ViGEmBus sürücüsü kurulu değil",
+	"pad.client.uinput_denied": "Linux'ta /dev/uinput erişimi yok",
+	"pad.client.unavailable": "sanal kol oluşturulamadı",
+	"pad.host.mac_entitlement": "Bu Pulsar sürümü sanal kol iznine (imza) sahip değil; kol girişi oyuna gitmiyor",
+	"pad.host.mac_unsupported": "Bu macOS sürümü sanal kolu desteklemiyor (10.15 veya üstü gerekir)",
+	"pad.host.vigem_missing": "ViGEmBus sürücüsü kurulu değil; kol girişi oyuna gitmiyor",
+	"pad.host.uinput_denied": "/dev/uinput yazılamıyor; kol girişi oyuna gitmiyor",
+	"pad.host.unavailable": "Sanal kol oluşturulamadı; kol girişi oyuna gitmiyor"
 }

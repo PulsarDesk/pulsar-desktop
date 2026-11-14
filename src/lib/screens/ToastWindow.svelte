@@ -31,7 +31,8 @@
 		};
 	});
 
-	const icon = (k: PulsarToast['kind']) => (k === 'file-in' ? 'download' : k === 'file-del' ? 'x' : 'edit');
+	const icon = (k: PulsarToast['kind']) =>
+		k === 'file-in' ? 'download' : k === 'file-del' ? 'x' : k === 'pad-off' ? 'gaming' : 'edit';
 </script>
 
 <div class="stack">
@@ -40,16 +41,16 @@
 			class="card"
 			role="button"
 			tabindex="0"
-			title={n.path ? t('toast.reveal') : undefined}
+			title={n.path ? t('toast.reveal') : n.kind === 'pad-off' ? n.name : undefined}
 			onclick={() => api.toastOpen(n.id).catch(() => {})}
 			onkeydown={(e) => {
 				if (e.key === 'Enter' || e.key === ' ') api.toastOpen(n.id).catch(() => {});
 			}}
 		>
-			<span class="ic" class:del={n.kind === 'file-del'}><Icon name={icon(n.kind)} size={16} /></span>
+			<span class="ic" class:del={n.kind === 'file-del' || n.kind === 'pad-off'}><Icon name={icon(n.kind)} size={16} /></span>
 			<div class="txt">
 				<div class="ttl">{t(`toast.${n.kind}`)}</div>
-				<div class="nm">{n.name}</div>
+				<div class="nm" class:wrap={n.kind === 'pad-off'}>{n.name}</div>
 				{#if n.peer}<div class="sub">{t('toast.from', { peer: n.peer })}</div>{/if}
 			</div>
 			<button
@@ -128,6 +129,16 @@
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
+	}
+	/* A sentence (the pad-off cause), not a file name: two lines, then an ellipsis. */
+	.nm.wrap {
+		font-size: 12px;
+		font-weight: 500;
+		white-space: normal;
+		display: -webkit-box;
+		-webkit-line-clamp: 2;
+		line-clamp: 2;
+		-webkit-box-orient: vertical;
 	}
 	.sub {
 		font-size: 11px;

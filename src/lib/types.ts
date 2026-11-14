@@ -110,7 +110,7 @@ export interface SessionStats {
  * reserved for remote delete/rename). Clicking opens `path`'s folder with it selected. */
 export type PulsarToast = {
 	id: number;
-	kind: 'file-in' | 'file-del' | 'file-mod';
+	kind: 'file-in' | 'file-del' | 'file-mod' | 'pad-off';
 	name: string;
 	peer: string;
 	path: string | null;

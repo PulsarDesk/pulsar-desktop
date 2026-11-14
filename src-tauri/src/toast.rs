@@ -27,7 +27,8 @@ const MARGIN: f64 = 6.0;
 const MAX_VISIBLE: usize = 4;
 const LIFETIME: Duration = Duration::from_secs(7);
 
-/// One notice. `kind` picks the title/icon in the UI: `file-in` (a file arrived); the
+/// One notice. `kind` picks the title/icon in the UI: `file-in` (a file arrived),
+/// `pad-off` (a client controller got no virtual pad here — `name` holds the cause); the
 /// file manager has no remote delete/rename yet, so `file-del` / `file-mod` are reserved.
 #[derive(Clone, Serialize)]
 pub(crate) struct Toast {
@@ -51,6 +52,12 @@ pub(crate) fn file_received(app: &AppHandle, peer: &str, path: &Path) {
 		.map(|n| n.to_string_lossy().into_owned())
 		.unwrap_or_default();
 	push(app, "file-in", name, peer.to_string(), Some(path.to_path_buf()));
+}
+
+/// A connected client's controller could not get a virtual pad on this host; `text` is the
+/// localized cause (crate::pad_notice::host_text).
+pub(crate) fn pad_unavailable(app: &AppHandle, text: String) {
+	push(app, "pad-off", text, String::new(), None);
 }
 
 fn push(app: &AppHandle, kind: &'static str, name: String, peer: String, path: Option<PathBuf>) {
@@ -162,7 +169,8 @@ pub(crate) fn toast_close(app: AppHandle, id: u64) {
 	dismiss(&app, id);
 }
 
-/// A click on a file notice: open its folder with the file selected, then dismiss it.
+/// A click on a notice: a file notice opens its folder with the file selected; any notice
+/// is dismissed.
 #[tauri::command]
 pub(crate) fn toast_open(app: AppHandle, id: u64) {
 	let path = TOASTS

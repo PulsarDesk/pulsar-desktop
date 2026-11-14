@@ -49,5 +49,16 @@
 	"ds5.headset.off": "Headphones unplugged: audio plays on this device again",
 	"ds5.headset.player": "Player",
 	"hint.wifi24": "Wi-Fi is on 2.4 GHz: latency may rise and a Bluetooth controller suffers. Use a 5/6 GHz network if you can",
-	"hint.wlanPowerSave": "Wi-Fi power saving is on while on battery: the stream may stall. Plug in, or set the wireless adapter to \"Maximum Performance\" in the power plan"
+	"hint.wlanPowerSave": "Wi-Fi power saving is on while on battery: the stream may stall. Plug in, or set the wireless adapter to \"Maximum Performance\" in the power plan",
+	"pad.client.title": "Player {n}'s controller does nothing on the other side",
+	"pad.client.mac_entitlement": "the Mac's Pulsar build lacks the virtual controller permission (signing)",
+	"pad.client.mac_unsupported": "the Mac's macOS is too old for a virtual controller (10.15 or newer needed)",
+	"pad.client.vigem_missing": "the ViGEmBus driver is not installed on Windows",
+	"pad.client.uinput_denied": "no access to /dev/uinput on Linux",
+	"pad.client.unavailable": "the virtual controller could not be created",
+	"pad.host.mac_entitlement": "This Pulsar build lacks the virtual controller permission (signing); controller input does not reach games",
+	"pad.host.mac_unsupported": "This macOS is too old for a virtual controller (10.15 or newer needed)",
+	"pad.host.vigem_missing": "The ViGEmBus driver is not installed; controller input does not reach games",
+	"pad.host.uinput_denied": "/dev/uinput is not writable; controller input does not reach games",
+	"pad.host.unavailable": "The virtual controller could not be created; controller input does not reach games"
 }
