@@ -117,7 +117,7 @@ event source is live it polls every 3 s (`display_watch::event_driven()`).
 | Windows | DXGI outputs (`pulsar_capture::list_displays`) | DXGI output / ddagrab `output_idx` | `WM_DISPLAYCHANGE` (hidden window) |
 | Linux X11 | `xrandr` (`process::linux_displays`) | x11grab `DISPLAY+x,y` / ximagesrc region | RandR notify (`pulsar_core::displays`, x11rb) |
 | Linux Wayland | `wl_output` + `zxdg_output_v1` over a short-lived Wayland connection (`pulsar_core::displays::list`), origin output first | the **ScreenCast portal dialog decides** — no portal lets an app pre-select a monitor. Per session (beside the restore token) the host remembers the request the picker was last answered for and the monitor that pick streams (`process::WaylandPick`, from `WaylandCapture::stream_rect` → `displays::index_of_rect`). The token is dropped (picker opens again) only for a NEW request — one that differs from both (`process::wayland_wants_repick`); reconnects / codec / ABR restreams of the same request restore silently. A pick that differs from the request is sent to the client as `DataMsg::StreamedDisplay(idx)`: the client (`play/hold.rs`) moves `cur_display`, the renderer overlay (`display N` on stdin), the webview menu (`host-display-streamed` event) and the pane's `displayIdx` there | long-lived Wayland connection: `wl_output` global added / removed, `wl_output.done` |
-| macOS | `CGGetActiveDisplayList` (main first) + pixel mode + `CGDisplayCopyAllDisplayModes`; names from `NSScreen.localizedName` (cached, refreshed on the main queue) | avfoundation `Capture screen N` (`process::avfoundation_screen`; ffmpeg numbers screens in the same list order); absolute pointer goes to that display's `CGDirectDisplayID` bounds (`DesktopInput::set_display`; the id is re-resolved on an index change, a display-change generation change and at least every second). The host-pointer marker maps the pointer into the same display (`displays::pointer_in`), but macOS has no host-takeover detection yet, so it is not sent | `CGDisplayRegisterReconfigurationCallback` (registered on the main queue) |
+| macOS | `CGGetActiveDisplayList` (main first) + pixel mode + `CGDisplayCopyAllDisplayModes`; names from `NSScreen.localizedName` (cached, refreshed on the main queue) | avfoundation `Capture screen N` (`process::avfoundation_screen`; ffmpeg numbers screens in the same list order); absolute pointer goes to that display's `CGDirectDisplayID` bounds (`DesktopInput::set_display`; the id is re-resolved on an index change, a display-change generation change and at least every second). The host-pointer marker maps the pointer into the same display (`displays::pointer_in`) and is sent while the host user takes the mouse (`host::takeover`, macOS listen-only tap — `parity/host-takeover`) | `CGDisplayRegisterReconfigurationCallback` (registered on the main queue) |
 
 Watcher notes: `pulsar_core::displays::watch` never blocks (macOS registers on the main queue,
 Linux connects on its own thread); `display_watch::event_driven()` restarts a Linux watcher whose
@@ -196,7 +196,8 @@ libavcodec's and GStreamer's NVENC encoders cannot invalidate a reference frame,
 host could only heal a client-reported loss with a keyframe. Now the Linux host on an NVIDIA
 GPU runs the **same NVENC SDK session as Windows**:
 
-- `pulsar-capture` builds on Linux too (only the encoder part; capture stays Windows-only).
+- `pulsar-capture` builds on Linux too (only the encoder part; its capture stays Windows +
+  macOS — the macOS ScreenCaptureKit → VideoToolbox path is `src/mac/`).
   `encode/cuda.rs` = the CUDA driver API from `libcuda.so.1` (dlopen: `cuInit`, context,
   `cuMemAllocPitch`, `cuMemcpy2D`); `encode/cuda_enc.rs` = `NvencCuda`: `libnvidia-encode.so.1`
   (dlopen), session on a CUDA context (`NV_ENC_DEVICE_TYPE_CUDA`), one pitched NV12 device
@@ -332,8 +333,9 @@ never past the current size; keeps the refresh rate and the HiDPI scale).
 Wayland limit: the ScreenCast portal does not say which output it shares, so on Wayland the
 switch is only made when exactly ONE output is enabled; with several nothing changes.
 Mirrored GNOME logical monitors are refused. macOS display index = `CGGetActiveDisplayList`
-order. Per-window fit (`fit_window`, resizing one host app window to the pane) is still
-Windows-only.
+order. Per-window fit (`fit_window`, resizing one host app window to the pane) works on
+Windows, Linux X11 and macOS since the `parity/window-capture` merge (see "Per-window
+capture"); not on Wayland.
 
 ### Client display-scale watch
 
