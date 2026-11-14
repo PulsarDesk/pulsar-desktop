@@ -246,3 +246,16 @@ to that desktop. Plan:
   host falls back). Fix if seen: overlapped I/O + `CancelIoEx`.
 - Cargo.lock gains the `pulsar-sysagent` entry; the local `.cargo/config.toml` path patch
   rule still applies (never commit Cargo.lock with it on).
+
+## Pen and touch (protocol v2, 2026-11-14, untested on hardware)
+
+`Request::Pointer { pen, n, contacts }` (tag `0x08`, ≤ 10 contacts of 20 bytes, `MAX_BODY`
+256) carries one synthetic pointer frame in physical virtual-desktop pixels; the helper
+validates flags (`POINTER_FLAG_*` whitelist, exactly one of DOWN / UPDATE / UP), pressure
+≤ 1024, pen-only fields and unique ids, then injects it on its per-connection
+`sysagent-pointer` thread: `CreateSyntheticPointerDevice` (resolved at run time), devices
+recreated when `DesktopFollower` moves to another desktop, everything lifted on `ReleaseAll`,
+disconnect and 1 s without a frame. Version handshake: the helper accepts v1..=v2 and acks the
+client's version; `SysInput::connect` retries as v1 when an older helper rejects v2, and
+`SysInput::pen_touch()` is `None` then (the host injects pen / touch in-process). The host side
+runs pulsar-core's pen / touch driver with a `SysBackend` (`host/sysinput.rs`).

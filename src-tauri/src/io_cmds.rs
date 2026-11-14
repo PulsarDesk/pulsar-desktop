@@ -351,6 +351,67 @@ pub(crate) async fn input_char(
 	Ok(())
 }
 
+/// One pen sample from the webview (PointerEvent with `pointerType === 'pen'`).
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PenArg {
+	x: f32,
+	y: f32,
+	#[serde(default)]
+	pressure: f32,
+	#[serde(default)]
+	tilt_x: f32,
+	#[serde(default)]
+	tilt_y: f32,
+	#[serde(default)]
+	twist: f32,
+	#[serde(default)]
+	in_range: bool,
+	#[serde(default)]
+	contact: bool,
+	#[serde(default)]
+	eraser: bool,
+	#[serde(default)]
+	barrel: bool,
+}
+
+impl From<PenArg> for pulsar_core::input::pen_touch::PenState {
+	fn from(p: PenArg) -> Self {
+		Self {
+			x: p.x,
+			y: p.y,
+			pressure: p.pressure,
+			tilt_x: p.tilt_x,
+			tilt_y: p.tilt_y,
+			twist: p.twist,
+			in_range: p.in_range,
+			contact: p.contact,
+			eraser: p.eraser,
+			barrel: p.barrel,
+		}
+	}
+}
+
+/// Client: forward the pen state (position 0..1, pressure, tilt, eraser, barrel, hover).
+/// The hold loop sends it as `InputEvent::Pen` to a `FEAT_PEN` host, as mouse to others.
+#[tauri::command]
+pub(crate) async fn input_pen(state: State<'_, AppState>, id: u64, pen: PenArg) -> Result<(), String> {
+	forward(&state, id, InputEvent::Pen(pen.into())).await;
+	Ok(())
+}
+
+/// Client: forward every finger on the video (empty = all lifted) as one touch frame.
+#[tauri::command]
+pub(crate) async fn input_touch(
+	state: State<'_, AppState>,
+	id: u64,
+	points: Vec<pulsar_core::input::pen_touch::TouchPoint>,
+) -> Result<(), String> {
+	let frame = pulsar_core::input::pen_touch::TouchFrame::new(&points);
+	forward(&state, id, InputEvent::Touch(frame)).await;
+	Ok(())
+}
+
 /// SPLIT MODE: the frontend calls this whenever the focused pane changes, with that pane's
 /// play/session id (0 = none). It records the focus into [`AppState::focused_session`], which the
 /// controller forward gate (play.rs) reads to route UNLOCKED pads + which kb/mouse routing follows.
@@ -370,6 +431,10 @@ pub(crate) async fn set_active_session(
 ) -> Result<(), String> {
 	use std::sync::atomic::Ordering;
 	let prev = state.focused_session.swap(play_id, Ordering::SeqCst);
+	// The mouse hook's pen / touch exemption follows the focused pane's host.
+	if let Some((pen, touch)) = state.plays.lock().unwrap().get(&play_id).map(|p| p.host_pen_touch) {
+		crate::kbdhook::set_host_pen_touch(pen, touch);
+	}
 	let split_on = state.split_pane_count.load(Ordering::SeqCst) > 1;
 	if split_on && prev != play_id {
 		// Release+flush held keys/buttons from the previously-focused pane so nothing sticks on

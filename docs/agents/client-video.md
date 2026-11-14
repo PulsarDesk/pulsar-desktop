@@ -296,6 +296,25 @@ showed ~600 ms head-of-line holds, "stream stopped" over a live session and a lo
   `adapt_memory.rs` keys the per-peer hint by path class `lan`/`wan`/`relay` (100.64/10 = wan;
   old peer-only entries dropped) — a LAN rate seeding the mobile session started the collapse.
 
+## Pen and touch on the Windows renderer (2026-11-14, untested on pen / touch hardware)
+
+The video child window covers the webview, so a stylus or a finger on the video reaches
+only the renderer, as `WM_POINTER*` (`src/win/pointer.rs`). The app tells it what the host
+injects with `pentouch <pen> <touch>` on stdin (sent at spawn and respawn next to `ptrfree`,
+from `kbdhook::pen_touch_line(host_pen, host_touch)` with the play's own host features). While
+control is engaged and the overlay is closed, those
+messages are answered (no mouse is synthesized from them) and reported on stdout:
+
+- `pen <x> <y> <pressure> <tilt_x> <tilt_y> <twist> <flags>` — 0..1 of the video rect
+  (`vidsink-vrect`), flags bit 0 in range, 1 contact, 2 eraser, 3 barrel;
+- `touch <id>,<x>,<y>,<pressure> …` — every finger of the frame (`GetPointerFrameTouchInfo`,
+  one line per frame id); a bare `touch` = all lifted.
+
+`engaged 0` and `open` print the lifts for whatever is still down. `render_stats.rs`
+(`parse_pen_touch`) turns the lines into `InputEvent::Pen` / `Touch` on the session's input
+channel. For a host without `pen` / `touch` nothing changes: the renderer leaves the messages
+to `DefWindowProc` and the mouse hook forwards the synthesized mouse as before.
+
 ## Picture upscaling (Settings → Görüntü → Görüntü iyileştirme)
 
 `ui.upscale` = off (default) | auto | fsr | ai | sgsr → `set_upscale` → renderer stdin `upscale <mode>`

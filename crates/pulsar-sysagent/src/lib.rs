@@ -23,7 +23,7 @@ pub use geom::MonitorRect;
 pub use proto::DesktopKind;
 
 #[cfg(windows)]
-pub use client::{KeyMap, SysInput, SysInputError};
+pub use client::{KeyMap, SysInput, SysInputError, SysPointer};
 
 /// SCM service name (`sc query PulsarSysAgent`).
 pub const SERVICE_NAME: &str = "PulsarSysAgent";

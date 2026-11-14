@@ -1698,6 +1698,23 @@ pub fn ffmpeg_bin(app: &AppHandle) -> String {
 	bundled_bin(app, "ffmpeg")
 }
 
+/// macOS host: the CGDirectDisplayID behind the avfoundation device the host captures
+/// (`StreamCfg::display`, e.g. `1` = `Capture screen 0` after one camera), so the absolute
+/// pointer, pen and touch land on the streamed display. `None` = the main display. Runs the
+/// ffmpeg device listing once (called when a session's injector is created).
+#[cfg(target_os = "macos")]
+pub fn macos_streamed_display(app: &AppHandle) -> Option<u32> {
+	use pulsar_core::input::avf_screens;
+	let cfg = app.state::<crate::state::AppState>().stream_cfg.lock().unwrap().display.clone();
+	let dev: u32 = cfg.split(':').next()?.trim().parse().ok()?;
+	let out = std::process::Command::new(ffmpeg_bin(app))
+		.args(["-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""])
+		.output()
+		.ok()?;
+	let n = avf_screens::screen_index(&String::from_utf8_lossy(&out.stderr), dev)?;
+	avf_screens::screen_display_id(n)
+}
+
 /// The bundled ffplay (native renderer — HW-decoded fullscreen client playback).
 pub fn ffplay_bin(app: &AppHandle) -> String {
 	bundled_bin(app, "ffplay")

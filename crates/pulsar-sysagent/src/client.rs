@@ -25,7 +25,7 @@ use windows_sys::Win32::System::Pipes::{
 
 use crate::geom::{absolute_move, button_flag, MonitorRect, ScrollAcc, WHEEL_DELTA};
 use crate::proto::{
-	self, DesktopKind, Reply, Request, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
+	self, DesktopKind, PointerContact, Reply, Request, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
 	MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE,
 	MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
 };
@@ -91,6 +91,8 @@ pub struct SysInput {
 	tx: SyncSender<Msg>,
 	shared: Arc<Shared>,
 	session: u32,
+	/// Protocol version the helper acked (1 = an older helper without pointer frames).
+	version: u16,
 	keymap: KeyMap,
 	held_buttons: HashSet<u8>,
 	/// vk → (scan, extended) of keys currently down.
@@ -166,6 +168,74 @@ fn verify_server(f: &File, session: u32) -> Result<()> {
 	Ok(())
 }
 
+use HandshakeError::{Failed, Rejected};
+
+enum HandshakeError {
+	/// The helper answered `Reject { code }` (and closed the pipe).
+	Rejected(u8),
+	Failed(SysInputError),
+}
+
+impl From<SysInputError> for HandshakeError {
+	fn from(e: SysInputError) -> Self {
+		Failed(e)
+	}
+}
+
+impl From<io::Error> for HandshakeError {
+	fn from(e: io::Error) -> Self {
+		Failed(e.into())
+	}
+}
+
+/// Open the session's pipe, check its owner and say hello as `version`.
+fn handshake(session: u32, version: u16) -> std::result::Result<(File, u16), HandshakeError> {
+	let mut pipe = open_pipe(&proto::pipe_name(session))?;
+	verify_server(&pipe, session)?;
+	proto::write_frame(&mut pipe, &Request::Hello { version }.encode())?;
+	match proto::read_reply(&mut pipe)? {
+		Some(Reply::HelloAck { version: v, session: s }) if v == version && s == session => {
+			Ok((pipe, version))
+		}
+		Some(Reply::Reject { code }) => Err(Rejected(code)),
+		other => Err(Failed(SysInputError::Handshake(format!(
+			"unexpected reply {other:?}"
+		)))),
+	}
+}
+
+/// Synthetic pen / touch frames to the helper (see [`SysInput::pen_touch`]). Cheap to clone
+/// and `Send`: the host's pen / touch worker thread owns one.
+#[derive(Clone)]
+pub struct SysPointer {
+	tx: SyncSender<Msg>,
+	shared: Arc<Shared>,
+}
+
+impl SysPointer {
+	pub fn is_alive(&self) -> bool {
+		self.shared.alive.load(Ordering::Acquire)
+	}
+
+	/// One frame on the pen device (`pen`, one contact) or the touch device (≤ 10).
+	pub fn inject(&self, pen: bool, contacts: &[PointerContact]) -> Result<()> {
+		if !self.is_alive() {
+			return Err(SysInputError::Disconnected);
+		}
+		let Some(r) = Request::pointer(pen, contacts) else {
+			return Ok(());
+		};
+		match self.tx.try_send(Msg::Frame(r.encode())) {
+			Ok(()) => Ok(()),
+			Err(TrySendError::Full(_)) => {
+				self.shared.alive.store(false, Ordering::Release);
+				Err(SysInputError::Disconnected)
+			}
+			Err(TrySendError::Disconnected(_)) => Err(SysInputError::Disconnected),
+		}
+	}
+}
+
 fn writer(mut pipe: File, rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
 	let mut seq = 0u32;
 	let dead = |shared: &Shared| shared.alive.store(false, Ordering::Release);
@@ -198,31 +268,19 @@ fn writer(mut pipe: File, rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
 impl SysInput {
 	/// Connect to the helper of the caller's session. Fast (no retries beyond a busy pipe):
 	/// call it when a session starts; on `Err` use `DesktopInput`.
+	///
+	/// Speaks [`proto::VERSION`]; a helper of an older build rejects that, and the connection
+	/// is retried as v1 (mouse / keyboard only — [`SysInput::pen_touch`] is then `None`).
 	pub fn connect(keymap: KeyMap) -> Result<Self> {
 		let session = win::current_session()?;
-		let mut pipe = open_pipe(&proto::pipe_name(session))?;
-		verify_server(&pipe, session)?;
-		proto::write_frame(
-			&mut pipe,
-			&Request::Hello {
-				version: proto::VERSION,
-			}
-			.encode(),
-		)?;
-		match proto::read_reply(&mut pipe)? {
-			Some(Reply::HelloAck {
-				version,
-				session: s,
-			}) if version == proto::VERSION && s == session => {}
-			Some(Reply::Reject { code }) => {
-				return Err(SysInputError::Handshake(format!("rejected (code {code})")))
-			}
-			other => {
-				return Err(SysInputError::Handshake(format!(
-					"unexpected reply {other:?}"
-				)))
-			}
+		let (pipe, version) = match handshake(session, proto::VERSION) {
+			Err(Rejected(proto::REJECT_VERSION)) => handshake(session, proto::MIN_VERSION),
+			r => r,
 		}
+		.map_err(|e| match e {
+			Rejected(code) => SysInputError::Handshake(format!("rejected (code {code})")),
+			Failed(e) => e,
+		})?;
 		let shared = Arc::new(Shared {
 			alive: AtomicBool::new(true),
 			desktop: AtomicU8::new(DesktopKind::Unknown as u8),
@@ -236,6 +294,7 @@ impl SysInput {
 			tx,
 			shared,
 			session,
+			version,
 			keymap,
 			held_buttons: HashSet::new(),
 			held_keys: HashMap::new(),
@@ -247,6 +306,15 @@ impl SysInput {
 
 	pub fn session(&self) -> u32 {
 		self.session
+	}
+
+	/// A sender for synthetic pen / touch frames, when the helper speaks protocol v2. The
+	/// frames go through the same queue as the mouse and keyboard.
+	pub fn pen_touch(&self) -> Option<SysPointer> {
+		(self.version >= proto::VERSION_POINTER).then(|| SysPointer {
+			tx: self.tx.clone(),
+			shared: self.shared.clone(),
+		})
 	}
 
 	pub fn is_alive(&self) -> bool {

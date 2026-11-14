@@ -224,3 +224,21 @@ export interface PairedDevice {
 	pairedAt: number;
 	lastSeen: number;
 }
+
+/** One pen sample for `inputPen` (PointerEvent `pointerType === 'pen'`). Positions are
+ * 0..1 over the video; tilt in degrees (-90..90), twist 0..359, pressure 0..1. */
+export type PenSample = {
+	x: number;
+	y: number;
+	pressure: number;
+	tiltX: number;
+	tiltY: number;
+	twist: number;
+	inRange: boolean;
+	contact: boolean;
+	eraser: boolean;
+	barrel: boolean;
+};
+
+/** One finger for `inputTouch`: the PointerEvent's `pointerId`, position 0..1 over the video. */
+export type TouchSample = { id: number; x: number; y: number; pressure: number };

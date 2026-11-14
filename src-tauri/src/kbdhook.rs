@@ -256,6 +256,21 @@ pub fn set_pointer_lock(_id: u64, _on: bool) {}
 pub fn set_host_pinch(on: bool) {
 	crate::pinch::set_host_pinch(on)
 }
+/// Whether the connected host injects real pen / touch (`FEAT_PEN` / `FEAT_TOUCH`): the
+/// Windows mouse hook then leaves the mouse synthesized from pen / touch to the renderer's
+/// WM_POINTER forwarding. Elsewhere the webview's PointerEvents carry pen / touch.
+#[cfg(windows)]
+pub fn set_host_pen_touch(pen: bool, touch: bool) {
+	imp::set_host_pen_touch(pen, touch)
+}
+#[cfg(not(windows))]
+pub fn set_host_pen_touch(_pen: bool, _touch: bool) {}
+/// The renderer's `pentouch <pen> <touch>` stdin line: which of pen / touch its window
+/// forwards as WM_POINTER (Windows; the other renderers ignore the line). From the play's
+/// own host features (`PlaySession::host_pen_touch`), never another pane's.
+pub fn pen_touch_line(pen: bool, touch: bool) -> String {
+	format!("pentouch {} {}", pen as u8, touch as u8)
+}
 #[cfg(windows)]
 pub fn is_engaged() -> bool {
 	imp::is_engaged()

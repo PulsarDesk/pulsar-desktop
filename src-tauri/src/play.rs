@@ -291,6 +291,13 @@ pub(crate) async fn start_remote_play(
 	crate::kbdhook::set_host_pinch(
 		host_caps.features.iter().any(|f| f == pulsar_core::service::media::FEAT_PINCH),
 	);
+	// Pen / multi-touch: real events to hosts that inject them, mouse events to the rest
+	// (hold.rs, pulsar-core `pen_touch::client`).
+	let host_pen = host_caps.features.iter().any(|f| f == pulsar_core::service::media::FEAT_PEN);
+	let host_touch = host_caps.features.iter().any(|f| f == pulsar_core::service::media::FEAT_TOUCH);
+	// Windows: the renderer forwards WM_POINTER pen / touch itself, so the mouse hook must
+	// not also forward the mouse Windows synthesizes from them.
+	crate::kbdhook::set_host_pen_touch(host_pen, host_touch);
 	// Media-over-session: carry the RTP inside the encrypted session (ONE external
 	// socket â€” the same hole the control channel punched; symmetric NAT then works
 	// via the relay). Only when the host advertises it; old hosts stream direct.
@@ -532,6 +539,7 @@ pub(crate) async fn start_remote_play(
 									);
 									let _ = writeln!(si, "msens {}", crate::kbdhook::mouse_sensitivity());
 									let _ = writeln!(si, "ptrfree {}", if crate::kbdhook::pointer_free() { 1 } else { 0 });
+									let _ = writeln!(si, "{}", crate::kbdhook::pen_touch_line(host_pen, host_touch));
 									let _ = writeln!(si, "upscale {}", crate::native_view::upscale_mode());
 									let _ = writeln!(si, "hostptrshow {}", if crate::kbdhook::host_cursor() { 1 } else { 0 });
 								}
@@ -838,6 +846,7 @@ pub(crate) async fn start_remote_play(
 										);
 										let _ = writeln!(si, "msens {}", crate::kbdhook::mouse_sensitivity());
 										let _ = writeln!(si, "ptrfree {}", if crate::kbdhook::pointer_free() { 1 } else { 0 });
+										let _ = writeln!(si, "{}", crate::kbdhook::pen_touch_line(host_pen, host_touch));
 										let _ = writeln!(si, "upscale {}", crate::native_view::upscale_mode());
 										let _ = writeln!(si, "hostptrshow {}", if crate::kbdhook::host_cursor() { 1 } else { 0 });
 									}
@@ -2095,6 +2104,8 @@ pub(crate) async fn start_remote_play(
 		host_displays,
 		client_fps,
 		direct_cap_kbps,
+		host_pen,
+		host_touch,
 	));
 
 	state.plays.lock().unwrap().insert(
@@ -2125,6 +2136,7 @@ pub(crate) async fn start_remote_play(
 			respawn_lock: Arc::new(tokio::sync::Mutex::new(())),
 			windows_query_tx,
 			host_pubkey,
+			host_pen_touch: (host_pen, host_touch),
 		},
 	);
 	Ok(PlayInfo {

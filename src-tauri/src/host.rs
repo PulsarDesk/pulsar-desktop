@@ -153,6 +153,12 @@ fn media_features() -> Vec<String> {
 	if linux_nvenc_sdk() {
 		v.push(pulsar_core::service::media::FEAT_RFI.to_string());
 	}
+	// Pen + multi-touch: real injection on Windows (synthetic pointer devices) and Linux
+	// (uinput tablet + multitouch screen); on macOS the pen is a CGEvent tablet and touch is
+	// mapped to mouse + scroll (no public touch injection). Clients send the mouse fallback
+	// to hosts without these.
+	v.push(pulsar_core::service::media::FEAT_PEN.to_string());
+	v.push(pulsar_core::service::media::FEAT_TOUCH.to_string());
 	// The session-start bandwidth probe (pulsar-core serve loop answers it on every platform).
 	v.push(pulsar_core::service::media::FEAT_PROBE.to_string());
 	// DualSense passthrough: a virtual wired DualSense over USB/IP (usbip-win2 / vhci-hcd).
@@ -1606,6 +1612,10 @@ pub(crate) async fn bring_online(
 					let mut coop = crate::coop::SessionRouter::new(sid);
 					#[cfg(windows)]
 					let coop_app = app_h.clone();
+					// macOS: which display the avfoundation capture streams (pointer / pen / touch
+					// land there, not on the main display).
+					#[cfg(target_os = "macos")]
+					let mac_app = app_h.clone();
 					// Which monitor's geometry is currently applied to the desktop injector, so we
 					// only re-resolve the virtual-desktop rect when the streamed monitor changes.
 					// `u32::MAX` = "none applied yet" (forces the first resolve).
@@ -1651,6 +1661,9 @@ pub(crate) async fn bring_online(
 					// ffmpeg stream is un-rotated by the client), and Windows SendInput addresses the same
 					// logical desktop coordinate space the upright video shows — coords inject as-is.
 					// (Rotating here would DOUBLE-correct vs the baked-upright video → 180°-mirrored clicks.)
+					// The pen as last injected for this session: in contact (tip down). The
+					// takeover gate lets only real lift edges of a pen that was down through.
+					let mut pen_down = false;
 					move |ev: InputEvent| {
 						// View-only: drop EVERY input event for this session (gamepad too)
 						// while the host user has control revoked.
@@ -1667,6 +1680,8 @@ pub(crate) async fn bring_online(
 								| InputEvent::PointerButton { .. }
 								| InputEvent::Scroll { .. }
 								| InputEvent::Pinch { .. }
+								| InputEvent::Pen(_)
+								| InputEvent::Touch(_)
 						);
 						// Where the streamed screen sits in the virtual desktop, for the client's
 						// labelled pointer drawn while its input is held back (remote_cursor).
@@ -1724,12 +1739,24 @@ pub(crate) async fn bring_online(
 						// (button releases still go through, so nothing stays pressed) and show
 						// where it points instead. Remote-desktop sessions only.
 						if pointer && remote_mode {
-							let release = matches!(ev, InputEvent::PointerButton { down: false, .. });
+							// Lifts go through too: a pen that was down leaving contact (or range),
+							// a pen leaving range, the last finger up. A hovering pen (in range, no
+							// contact) is held back like PointerMotion — the client re-sends it every
+							// KEEPALIVE and it would move the host cursor under the host user.
+							let release = match &ev {
+								InputEvent::PointerButton { down, .. } => !down,
+								InputEvent::Pen(p) => !p.in_range || (pen_down && !p.contact),
+								InputEvent::Touch(f) => f.is_empty(),
+								_ => false,
+							};
 							if takeover::active() && !release {
 								crate::remote_cursor::held_back(sid, &ev, ghost_region());
 								return;
 							}
 							crate::remote_cursor::applied(sid);
+						}
+						if let InputEvent::Pen(p) = &ev {
+							pen_down = p.in_range && p.contact;
 						}
 						// Maximum virtual gamepads per session: matches the client's play.rs
 						// append_idx.min(3) ceiling so an authenticated peer cannot create more
@@ -1903,7 +1930,11 @@ pub(crate) async fn bring_online(
 											| InputEvent::GamepadSlot { .. }
 											| InputEvent::GamepadDisconnect { .. }
 											| InputEvent::Ds5Input { .. }
-											| InputEvent::Pinch { .. } => {
+											| InputEvent::Pinch { .. }
+											// Pen / touch are screen-level pointer devices: the
+											// global injector takes them (no per-window pen path).
+											| InputEvent::Pen(_)
+											| InputEvent::Touch(_) => {
 												routed_to_window = false;
 											}
 										}
@@ -1922,6 +1953,44 @@ pub(crate) async fn bring_online(
 										Ok(d) => desktop = Some(d),
 										Err(e) => tracing::warn!("desktop input unavailable: {e}"),
 									}
+									#[cfg(target_os = "macos")]
+									if let Some(d) = desktop.as_mut() {
+										let id = crate::process::macos_streamed_display(&mac_app);
+										tracing::info!(display = ?id, "input: streamed display (avfoundation)");
+										d.set_display(id);
+									}
+								}
+								// Windows: resolve the streamed monitor's rect for pen / touch (a pen-only
+								// client never sends PointerMotion, which is where the pointer resolves it).
+								// Same reading as the PointerMotion arm below (C4/C8/C23).
+								#[cfg(windows)]
+								macro_rules! resolve_monitor {
+									($d:expr) => {{
+										let idx = match native_out_arc.lock().unwrap().as_ref() {
+											Some(arc) => arc.load(std::sync::atomic::Ordering::Relaxed),
+											None => cur_display.load(std::sync::atomic::Ordering::Relaxed),
+										};
+										let gen = match native_gen_arc.lock().unwrap().as_ref() {
+											Some(arc) => arc.load(std::sync::atomic::Ordering::Relaxed),
+											None => 0,
+										};
+										if idx != applied_display || gen != applied_gen {
+											if let Some(r) = pulsar_capture::display_rect(idx) {
+												applied_display = idx;
+												applied_gen = gen;
+												$d.set_monitor(Some(pulsar_core::input::MonitorRect {
+													mon_left: r.mon_left,
+													mon_top: r.mon_top,
+													mon_width: r.mon_width,
+													mon_height: r.mon_height,
+													virt_left: r.virt_left,
+													virt_top: r.virt_top,
+													virt_width: r.virt_width,
+													virt_height: r.virt_height,
+												}));
+											}
+										}
+									}};
 								}
 								if let Some(d) = desktop.as_mut() {
 									match other {
@@ -2070,6 +2139,27 @@ pub(crate) async fn bring_online(
 										InputEvent::Key { code, down } => d.key(code, down),
 										InputEvent::Char(c) => d.type_char(c),
 										InputEvent::Pinch { phase, scale } => d.pinch(phase, scale),
+										// Pen / touch land on the streamed monitor like absolute motion
+										// (Windows: the rect last resolved for the pointer; Linux: the
+										// portal region, re-read here like PointerMotion does).
+										InputEvent::Pen(p) => {
+											#[cfg(windows)]
+											resolve_monitor!(d);
+											#[cfg(target_os = "linux")]
+											d.set_region(
+												input_cap.lock().unwrap().as_ref().and_then(|c| c.pointer_region()),
+											);
+											d.pen(p)
+										}
+										InputEvent::Touch(f) => {
+											#[cfg(windows)]
+											resolve_monitor!(d);
+											#[cfg(target_os = "linux")]
+											d.set_region(
+												input_cap.lock().unwrap().as_ref().and_then(|c| c.pointer_region()),
+											);
+											d.touch(f)
+										}
 										// Controller variants are routed to virtual pads in the outer
 										// match and never reach the desktop injector.
 										InputEvent::Gamepad(_)

@@ -1388,6 +1388,36 @@ const PINCH_STEP: f64 = 1.12;
 /// No pinch step for this long (and the synthesized Ctrl released) = the gesture ended.
 const PINCH_IDLE_MS: u64 = 200;
 
+/// The FOCUSED session's host injects real pen / touch (`FEAT_PEN` / `FEAT_TOUCH`): set by
+/// play.rs at start and by `set_active_session` on a split-mode focus change, from that
+/// play's own `host_pen_touch`. The renderer then forwards WM_POINTER pen / touch itself
+/// (`pen` / `touch` stdout lines), so the mouse Windows synthesizes from that input must not
+/// be forwarded as well.
+static HOST_PEN: AtomicBool = AtomicBool::new(false);
+static HOST_TOUCH: AtomicBool = AtomicBool::new(false);
+
+pub fn set_host_pen_touch(pen: bool, touch: bool) {
+	HOST_PEN.store(pen, Ordering::SeqCst);
+	HOST_TOUCH.store(touch, Ordering::SeqCst);
+}
+
+/// Mouse input Windows synthesized from a pen or a finger carries `MI_WP_SIGNATURE`
+/// (0xFF515700) in `dwExtraInfo`; bit 0x80 marks touch. `Some(true)` = touch, `Some(false)` =
+/// pen, `None` = a real mouse.
+fn pen_touch_origin(extra: usize) -> Option<bool> {
+	const MI_WP_SIGNATURE: usize = 0xFF51_5700;
+	((extra & 0xFFFF_FF00) == MI_WP_SIGNATURE).then_some(extra & 0x80 != 0)
+}
+
+/// The renderer's WM_POINTER forwarding covers this synthesized mouse event.
+fn forwarded_as_pen_touch(extra: usize) -> bool {
+	match pen_touch_origin(extra) {
+		Some(true) => HOST_TOUCH.load(Ordering::SeqCst),
+		Some(false) => HOST_PEN.load(Ordering::SeqCst),
+		None => false,
+	}
+}
+
 /// The host's cursor is hidden — a game grabbed the mouse and reads RELATIVE motion
 /// (`DataMsg::PointerLock`). The hook path below positions the host pointer ABSOLUTELY, which
 /// such a game turns into an endless spin; while this is on it sends raw-input deltas instead
@@ -1728,6 +1758,11 @@ unsafe extern "system" fn ll_mouse_proc(ncode: i32, wparam: WPARAM, lparam: LPAR
 	// gesture belongs to the remote.
 	let wheel = matches!(wparam as u32, WM_MOUSEWHEEL | WM_MOUSEHWHEEL);
 	if ms.flags & LLMHF_INJECTED != 0 && !wheel {
+		return CallNextHookEx(std::ptr::null_mut(), ncode, wparam, lparam);
+	}
+	// Mouse synthesized from pen / touch that the renderer already sends as real pen / touch:
+	// leave it alone (the renderer window gets its WM_POINTER either way).
+	if forwarded_as_pen_touch(ms.dwExtraInfo) {
 		return CallNextHookEx(std::ptr::null_mut(), ncode, wparam, lparam);
 	}
 	if handle_mouse_wh(wparam as u32, ms.pt.x, ms.pt.y, ms.mouseData) {
@@ -2365,6 +2400,15 @@ unsafe extern "system" fn ll_keyboard_proc(ncode: i32, wparam: WPARAM, lparam: L
 #[cfg(test)]
 mod chord_tests {
 	use super::*;
+
+	#[test]
+	fn pen_and_touch_synthesized_mouse_is_recognized() {
+		assert_eq!(super::pen_touch_origin(0xFF51_5700), Some(false));
+		assert_eq!(super::pen_touch_origin(0xFF51_5780), Some(true));
+		assert_eq!(super::pen_touch_origin(0xFF51_5781), Some(true));
+		assert_eq!(super::pen_touch_origin(0), None);
+		assert_eq!(super::pen_touch_origin(0x1234_5700), None);
+	}
 
 	fn overlay_combo_while_engaged() {
 		APP_FOCUSED.store(true, Ordering::SeqCst);

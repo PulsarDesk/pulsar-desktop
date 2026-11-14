@@ -210,16 +210,21 @@ fn handle_client(ctx: &Ctx, mut pipe: File) -> std::io::Result<()> {
 		log!("helper: rejected client: {why}");
 		return Ok(());
 	}
-	match proto::read_request(&mut pipe) {
-		Ok(Some(Request::Hello { version })) if version == proto::VERSION => {
+	// Every version from MIN_VERSION up is served; the ack echoes the client's version (a v1
+	// host checks for exactly 1), and only a v2+ client may send pointer frames.
+	let version = match proto::read_request(&mut pipe) {
+		Ok(Some(Request::Hello { version }))
+			if (proto::MIN_VERSION..=proto::VERSION).contains(&version) =>
+		{
 			proto::write_frame(
 				&mut pipe,
 				&Reply::HelloAck {
-					version: proto::VERSION,
+					version,
 					session: ctx.session,
 				}
 				.encode(),
 			)?;
+			version
 		}
 		Ok(Some(Request::Hello { version })) => {
 			log!(
@@ -245,8 +250,8 @@ fn handle_client(ctx: &Ctx, mut pipe: File) -> std::io::Result<()> {
 			);
 			return Ok(());
 		}
-	}
-	log!("helper: client connected");
+	};
+	log!("helper: client connected (protocol v{version})");
 	let mut inj = Injector::new();
 	loop {
 		// Any decode error drops the connection (and releases held input via Drop).
@@ -265,6 +270,12 @@ fn handle_client(ctx: &Ctx, mut pipe: File) -> std::io::Result<()> {
 			Request::ClampCursor(r) => inj.clamp(r),
 			Request::Pinch { phase, scale } => inj.pinch(phase, scale),
 			Request::ReleaseAll => inj.release_all(),
+			Request::Pointer { pen, n, contacts } if version >= proto::VERSION_POINTER => {
+				inj.pointer(pen, &contacts[..n as usize])
+			}
+			Request::Pointer { .. } => {
+				return Err(std::io::Error::other("pointer frame from a v1 client"))
+			}
 			Request::Ping { seq } => {
 				let desktop = inj.desktop();
 				proto::write_frame(&mut pipe, &Reply::Pong { seq, desktop }.encode())?;

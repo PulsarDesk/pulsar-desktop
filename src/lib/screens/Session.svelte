@@ -1162,6 +1162,7 @@
 		onpointerdown={input.onDown}
 		onpointermove={input.onMove}
 		onpointerup={input.onUp}
+		onpointercancel={input.onCancel}
 		onwheel={input.onWheel}
 		onpointerenter={input.onEnter}
 		onpointerleave={input.clearMove}
@@ -1265,6 +1266,9 @@
 	.video {
 		display: none;
 		background: #000;
+		/* Pen and touch belong to the remote (input.svelte.ts forwards them): no local
+		   panning, pinch-zoom or pen-to-scroll on the video. */
+		touch-action: none;
 	}
 	.video.on {
 		display: block;

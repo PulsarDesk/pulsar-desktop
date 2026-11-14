@@ -419,6 +419,9 @@ pub(crate) struct PlaySession {
 	/// The host's static X25519 key (E2E-verified): "reverse direction" pre-authorizes that
 	/// host's connect back to us (`auth::preauth::expect_reverse`).
 	pub(crate) host_pubkey: Option<[u8; 32]>,
+	/// This session's host injects real pen / touch (`FEAT_PEN` / `FEAT_TOUCH`). Per play:
+	/// split-mode panes may talk to hosts of different builds.
+	pub(crate) host_pen_touch: (bool, bool),
 }
 
 /// Host-side stream settings pushed from the UI.

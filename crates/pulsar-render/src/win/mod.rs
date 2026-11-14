@@ -23,6 +23,7 @@ pub mod decode; // Media Foundation DXVA decode (Annex-B AU → NV12 ID3D11Textu
 pub mod egui_paint; // minimal D3D11 painter for the egui overlay
 pub mod present; // NV12 → swapchain RGB via ID3D11VideoProcessor (letterbox)
 mod fsr; // FSR 1 upscale (EASU + RCAS) after the VideoProcessor (present.rs)
+mod pointer; // pen + touch (WM_POINTER) → `pen` / `touch` stdout lines while engaged
 
 // Shared (cross-backend) streaming types + RTP depacketizer.
 use crate::stream::{self, parse_sdp, AccessUnit, Codec};
@@ -397,6 +398,7 @@ fn stdin_control() {
 		let l = l.trim();
 		if l == "open" {
 			OPEN.store(true, Ordering::SeqCst);
+			pointer::release(); // the overlay takes the pointer: lift pen / fingers on the host
 		} else if l == "close" {
 			OPEN.store(false, Ordering::SeqCst);
 		} else if let Some(rest) = l.strip_prefix("stat ") {
@@ -451,7 +453,14 @@ fn stdin_control() {
 		} else if let Some(rest) = l.strip_prefix("engaged ") {
 			// Live engage state (cursor visibility) — app-side edges, like linux.rs.
 			let v = rest.trim();
-			ENGAGED_R.store(v == "1" || v == "on" || v == "true", Ordering::SeqCst);
+			let on = v == "1" || v == "on" || v == "true";
+			ENGAGED_R.store(on, Ordering::SeqCst);
+			if !on {
+				pointer::release();
+			}
+		} else if let Some(rest) = l.strip_prefix("pentouch ") {
+			// Which of pen / touch the host injects (app side: FEAT_PEN / FEAT_TOUCH).
+			pointer::configure(rest);
 		} else if let Some(rest) = l.strip_prefix("audio ") {
 			// Session audio truth from the app (`audio tx=1 mute=0 mic=0`) so the
 			// overlay's Ses toggles highlight the real state — same key=value parse
@@ -914,6 +923,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
 	// reaches us here (the hook isn't running / didn't suppress it) goes to the app as a
 	// `key <vk> <0|1>` line, into the same key handler. Engaged: never let DefWindowProc act
 	// on it (Alt opening a menu, Alt+F4 closing Pulsar, F10).
+	// ---- Pen / touch (WM_POINTER) while engaged: reported to the app, no mouse made of it.
+	if ENGAGED_R.load(Ordering::SeqCst) && !OPEN.load(Ordering::SeqCst) && pointer::on_pointer(hwnd, msg, wp) {
+		return LRESULT(0);
+	}
 	if matches!(msg, WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP) {
 		use std::io::Write as _;
 		let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
@@ -1922,6 +1935,7 @@ impl Renderer {
 			if let Some(f) = self.present.as_ref().map(|p| p.dest_frac()) {
 				if f != self.last_vrect {
 					self.last_vrect = f;
+					pointer::set_video(f);
 					use std::io::Write as _;
 					println!("vidsink-vrect {:.5} {:.5} {:.5} {:.5}", f.0, f.1, f.2, f.3);
 					let _ = std::io::stdout().flush();
