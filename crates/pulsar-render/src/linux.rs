@@ -181,16 +181,17 @@ fn queue_relayed_key(name: Option<&str>) {
 		Some("go") => Some(egui::Key::Enter),
 		_ => None,
 	};
+	let mut mods = egui::Modifiers { shift: shift_mod, ..Default::default() };
+	// Chat composer word editing (`kin k ctrl+backspace`, `home`, …): overlay::relayed_edit_key.
+	let key = key.or_else(|| {
+		let (k, m) = crate::overlay::relayed_edit_key(name?)?;
+		mods = m;
+		Some(k)
+	});
 	if let Some(key) = key {
 		let mut q = KEY_IN.lock().unwrap();
 		for pressed in [true, false] {
-			q.push(egui::Event::Key {
-				key,
-				physical_key: None,
-				pressed,
-				repeat: false,
-				modifiers: egui::Modifiers { shift: shift_mod, ..Default::default() },
-			});
+			q.push(egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers: mods });
 		}
 	}
 }

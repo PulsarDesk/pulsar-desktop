@@ -669,25 +669,18 @@ fn stdin_control() {
 				}
 				Some("k") => {
 					let key = match it.next().map(str::trim) {
-						Some("backspace") => Some(egui::Key::Backspace),
 						Some("enter") => {
 							ENTER_IN.store(true, Ordering::SeqCst);
 							None
 						}
-						Some("left") => Some(egui::Key::ArrowLeft),
-						Some("right") => Some(egui::Key::ArrowRight),
-						_ => None,
+						// backspace / arrows / Ctrl+… word editing (overlay::relayed_edit_key).
+						Some(name) => crate::overlay::relayed_edit_key(name),
+						None => None,
 					};
-					if let Some(key) = key {
+					if let Some((key, modifiers)) = key {
 						let mut q = EGUI_EVENTS.lock().unwrap();
 						for pressed in [true, false] {
-							q.push(egui::Event::Key {
-								key,
-								physical_key: None,
-								pressed,
-								repeat: false,
-								modifiers: egui::Modifiers::default(),
-							});
+							q.push(egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers });
 						}
 					}
 				}

@@ -3400,6 +3400,54 @@ pub const BUBBLE_SECS: f32 = 8.0;
 const BUBBLE_FADE: f32 = 0.8;
 pub const BUBBLE_MAX: usize = 3;
 
+/// A relayed text-editing key for the Chat composer (`kin k <name>`): `[mod+]…key` with mods
+/// `ctrl` / `alt` / `shift` / `meta` and keys `backspace` `delete` `left` `right` `home` `end`
+/// `a` — e.g. `ctrl+backspace` (delete a word), `ctrl+left` (jump a word), `shift+end`. The
+/// platform's "command" modifier is Ctrl, or ⌘ (`meta`) on macOS, as egui expects.
+pub fn relayed_edit_key(name: &str) -> Option<(egui::Key, egui::Modifiers)> {
+	let mut m = egui::Modifiers::default();
+	let mut parts: Vec<&str> = name.trim().split('+').collect();
+	let key = match parts.pop()? {
+		"backspace" => egui::Key::Backspace,
+		"delete" => egui::Key::Delete,
+		"left" => egui::Key::ArrowLeft,
+		"right" => egui::Key::ArrowRight,
+		"home" => egui::Key::Home,
+		"end" => egui::Key::End,
+		"a" => egui::Key::A,
+		_ => return None,
+	};
+	for p in parts {
+		match p {
+			"ctrl" => m.ctrl = true,
+			"alt" => m.alt = true,
+			"shift" => m.shift = true,
+			"meta" => m.mac_cmd = true,
+			_ => return None,
+		}
+	}
+	m.command = if cfg!(target_os = "macos") { m.mac_cmd } else { m.ctrl };
+	Some((key, m))
+}
+
+#[cfg(test)]
+mod edit_key_tests {
+	use super::relayed_edit_key;
+
+	#[test]
+	fn word_editing_chords_parse() {
+		let (k, m) = relayed_edit_key("ctrl+backspace").unwrap();
+		assert_eq!(k, egui::Key::Backspace);
+		assert!(m.ctrl && !m.shift);
+		let (k, m) = relayed_edit_key("ctrl+shift+left").unwrap();
+		assert_eq!(k, egui::Key::ArrowLeft);
+		assert!(m.ctrl && m.shift);
+		assert_eq!(relayed_edit_key("home").unwrap().0, egui::Key::Home);
+		assert!(relayed_edit_key("ctrl+q").is_none());
+		assert!(relayed_edit_key("hyper+left").is_none());
+	}
+}
+
 /// Where the closed-state chat bubbles were last drawn (egui points) and when (a backend that
 /// stops drawing the closed chrome once the bubbles expire leaves the last set behind).
 static BUBBLE_HIT: std::sync::Mutex<(Vec<egui::Rect>, Option<std::time::Instant>)> =

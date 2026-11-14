@@ -791,7 +791,28 @@
 			ArrowRight: 'right',
 			Escape: 'escape'
 		};
+		// Text-editing keys for the composer, with their modifiers: Ctrl+Backspace deletes a
+		// word, Ctrl+←/→ jumps one, Shift selects, Home/End/Delete, Ctrl+A (⌥/⌘ on macOS).
+		const editKeys: Record<string, string> = {
+			Backspace: 'backspace',
+			Delete: 'delete',
+			ArrowLeft: 'left',
+			ArrowRight: 'right',
+			Home: 'home',
+			End: 'end'
+		};
 		const onKey = (e: KeyboardEvent) => {
+			const mods = (e.ctrlKey ? 'ctrl+' : '') + (e.altKey ? 'alt+' : '') + (e.metaKey ? 'meta+' : '');
+			const edit =
+				editKeys[e.key] ?? ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a' ? 'a' : undefined);
+			// Plain ←/→ stay on the nav channel and plain Backspace on its own path (below).
+			const plain = !mods && !e.shiftKey && (edit === 'left' || edit === 'right' || edit === 'backspace');
+			if (edit && !plain) {
+				api.renderKin(playId, 'k', mods + (e.shiftKey ? 'shift+' : '') + edit).catch(() => {});
+				e.preventDefault();
+				e.stopPropagation();
+				return;
+			}
 			if (e.ctrlKey || e.altKey || e.metaKey) return;
 			const dir = navDirs[e.key];
 			if (dir) {
@@ -813,8 +834,19 @@
 			e.preventDefault();
 			e.stopPropagation();
 		};
+		// Ctrl+V: the paste lands here (the keydown above lets the chord through) → the composer.
+		const onPaste = (e: ClipboardEvent) => {
+			const text = e.clipboardData?.getData('text/plain')?.replace(/\s*\r?\n\s*/g, ' ');
+			if (!text) return;
+			api.renderKin(playId, 't', text).catch(() => {});
+			e.preventDefault();
+		};
 		window.addEventListener('keydown', onKey, true);
-		return () => window.removeEventListener('keydown', onKey, true);
+		window.addEventListener('paste', onPaste, true);
+		return () => {
+			window.removeEventListener('keydown', onKey, true);
+			window.removeEventListener('paste', onPaste, true);
+		};
 	});
 
 	// Auto-fade the in-control hint after a couple of seconds (Parsec-style); it

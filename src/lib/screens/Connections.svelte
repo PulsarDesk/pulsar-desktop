@@ -356,7 +356,7 @@
 				{#if sendErr}
 					<div class="merr selectable" role="alert">{sendErr}</div>
 				{/if}
-				<form class="composer" onsubmit={(e) => { e.preventDefault(); if (msgRow) sendMsg(msgRow); }}>
+				<form class="composer" class:typed={!!msgText.trim()} onsubmit={(e) => { e.preventDefault(); if (msgRow) sendMsg(msgRow); }}>
 					<!-- Enter sends, Shift+Enter is a new line; the field grows with the text
 					     (up to ~5 lines) instead of a one-line box. -->
 					<textarea
@@ -383,7 +383,7 @@
 						}}
 					></textarea>
 					<button class="msgsend" type="submit" disabled={!msgText.trim()} title={t('host.msgSend')} aria-label={t('host.msgSend')}>
-						<Icon name="send" size={16} />
+						<Icon name="send" size={17} />
 					</button>
 				</form>
 			</div>
@@ -533,34 +533,36 @@
 		color: var(--danger-text);
 	}
 	/* chat composer: one rounded field with the send button inside it */
+	/* Same look as the client menu's composer: a sunken well, no ring; the outline turns
+	   accent once there is text, and the send button lights up with it. */
 	.composer {
 		display: flex;
 		align-items: flex-end;
-		gap: 6px;
-		padding: 6px 6px 6px 12px;
-		background: var(--surface-2, var(--bg));
-		border: 1px solid var(--border-strong);
+		gap: 8px;
+		padding: 5px 5px 5px 14px;
+		background: var(--bg);
+		border: 1px solid var(--border);
 		border-radius: 14px;
-		transition:
-			border-color 0.12s,
-			box-shadow 0.12s;
+		transition: border-color 0.15s;
 	}
 	.composer:focus-within {
+		border-color: var(--border-strong);
+	}
+	.composer.typed {
 		border-color: var(--accent);
-		box-shadow: 0 0 0 3px var(--accent-ring);
 	}
 	.msgin {
 		flex: 1;
 		min-width: 0;
 		resize: none;
 		font: inherit;
-		font-size: 13.5px;
+		font-size: 14px;
 		line-height: 1.4;
 		color: var(--text);
 		background: transparent;
 		border: none;
 		outline: none;
-		padding: 6px 0;
+		padding: 8px 0;
 		max-height: 112px;
 		overflow-y: auto;
 	}
@@ -569,18 +571,18 @@
 	}
 	.msgsend {
 		flex: none;
-		width: 34px;
-		height: 34px;
+		width: 36px;
+		height: 36px;
 		display: grid;
 		place-items: center;
 		color: var(--text-on-accent, #fff);
 		background: var(--accent);
 		border: none;
-		border-radius: 10px;
+		border-radius: 11px;
 		cursor: pointer;
 		transition:
-			background 0.12s,
-			opacity 0.12s;
+			background 0.15s,
+			color 0.15s;
 	}
 	.msgsend:hover:not(:disabled) {
 		background: var(--accent-hover);
@@ -688,10 +690,11 @@
 	}
 	.mline {
 		max-width: 85%;
-		padding: 6px 10px;
-		border-radius: 10px;
-		background: var(--accent-soft);
-		font-size: 13px;
+		padding: 7px 12px;
+		border-radius: 12px;
+		background: var(--surface-3);
+		color: var(--text);
+		font-size: 13.5px;
 		align-self: flex-start;
 		word-break: break-word;
 	}
@@ -701,7 +704,8 @@
 		color: var(--text-on-accent, #fff);
 	}
 	.msgsend:disabled {
-		opacity: 0.35;
+		background: var(--surface-3);
+		color: var(--text-faint);
 		cursor: default;
 	}
 	.merr {
