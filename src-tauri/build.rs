@@ -1,5 +1,11 @@
 fn main() {
-	tauri_build::build();
+	// Windows: the app manifest (Common-Controls v6) is embedded by the LINKER below instead of
+	// tauri-build's resource file, so the test executables get it too (see there).
+	let attrs = tauri_build::Attributes::new()
+		.windows_attributes(tauri_build::WindowsAttributes::new_without_app_manifest());
+	if let Err(e) = tauri_build::try_build(attrs) {
+		panic!("tauri-build failed: {e:#}");
+	}
 	// NOTE: do NOT link -lEGL/-lGL into THIS binary — doing so perturbs WebKitGTK's own
 	// GL/epoxy loading and wedges its compositor (blank webview). The single-surface
 	// renderer resolves GL getProcAddress from libepoxy at runtime instead (native_view.rs).
@@ -22,6 +28,19 @@ fn main() {
 	// the env var: `#[cfg]` here would be the BUILD host's OS. Untested on macOS hardware.
 	if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
 		println!("cargo:rustc-link-arg=-Wl,-weak_framework,ScreenCaptureKit");
+	}
+
+	// Windows: the app imports TaskDialogIndirect (dialogs), which only the Common-Controls v6
+	// comctl32 exports, and v6 is bound only through an application manifest. tauri-build
+	// embeds its manifest as a resource of the APP only; the test harness got none, so
+	// `cargo test -p pulsar-tauri` died at load with STATUS_ENTRYPOINT_NOT_FOUND. The same
+	// manifest (tauri-build's default, windows-app-manifest.xml) is now embedded by link.exe
+	// into every executable of this package, the app and its tests alike.
+	if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+		let manifest = std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("windows-app-manifest.xml");
+		println!("cargo:rerun-if-changed={}", manifest.display());
+		println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
+		println!("cargo:rustc-link-arg=/MANIFESTINPUT:{}", manifest.display());
 	}
 }
 

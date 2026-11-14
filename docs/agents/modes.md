@@ -244,8 +244,7 @@ the session and closes it back into it — `SessionUi` calls `takeControl` (Sess
 OS capture on Windows native / macOS with Accessibility / game mode, the canvas path otherwise) once the close is
 applied. So does a click on the video beside the menu (`ov control`, client-video.md).
 Escape, the menu's own close and B on the pad leave control released (click-to-control). Tests: `ui.svelte.test.ts`,
-`kbdhook::imp::chord_tests` (the Tauri crate's test binary needs a Common-Controls v6
-manifest next to it to load on Windows — `TaskDialogIndirect`).
+`kbdhook::imp::chord_tests`.
 
 ## Sleep ends the viewed sessions, wake-up connects them again (2026-11-14)
 
