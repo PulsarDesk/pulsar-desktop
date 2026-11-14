@@ -2214,7 +2214,7 @@ pub(crate) async fn bring_online(
 					let app_h = app_h.clone();
 					let peer = peer.clone();
 					let chat_log = tauri::Manager::state::<AppState>(&app_h).chat_log.clone();
-					let chat_active = active.clone();
+					let chat_names = tauri::Manager::state::<AppState>(&app_h).peer_meta.clone();
 					move |text: String| {
 						// Backlog first (the connections window may be CLOSED — events
 						// broadcast only to live windows), then surface the window: the
@@ -2228,21 +2228,25 @@ pub(crate) async fn bring_online(
 								log.drain(..excess);
 							}
 						}
-						// A game session's chat doesn't pop the window over the game (it is
-						// in the backlog; the sidebar button opens it).
-						let game = chat_active
-							.lock()
-							.unwrap()
-							.get(&sid)
-							.is_some_and(|ci| ci.mode == crate::state::ConnMode::Game);
-						crate::connections::open_or_update(
-							&app_h,
-							if game {
-								crate::connections::Surface::Background
-							} else {
-								crate::connections::Surface::Forward
-							},
-						);
+						// The chat is on screen when the connections window (the host chat UI) is
+						// visible and not minimized: the line just appears there. Otherwise a toast
+						// in the bottom-right corner says who wrote what, and the window only opens
+						// in the background (taskbar) — it used to jump to the front over whatever
+						// the host was doing, for a remote session's every line; a game session's
+						// lines went unnoticed. Clicking the toast opens the chat.
+						let chat_on_screen = tauri::Manager::get_webview_window(&app_h, "connections")
+							.is_some_and(|w| w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(true));
+						if !chat_on_screen {
+							let from = chat_names
+								.lock()
+								.unwrap()
+								.get(&peer)
+								.and_then(|m| m.0.clone())
+								.filter(|n| !n.trim().is_empty())
+								.unwrap_or_else(|| peer.clone());
+							crate::toast::chat_received(&app_h, &from, &text);
+						}
+						crate::connections::open_or_update(&app_h, crate::connections::Surface::Background);
 						let _ = app_h.emit(
 							"host-chat",
 							DataPayload {

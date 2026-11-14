@@ -428,6 +428,8 @@
 	"toast.file-del": "Dosya silindi",
 	"toast.file-mod": "Dosya değiştirildi",
 	"toast.pad-off": "Sanal kol oluşturulamadı",
+	"toast.chat-in": "Yeni mesaj",
+	"toast.chat-open": "Sohbeti açmak için tıkla",
 	"toast.from": "{peer} gönderdi",
 	"toast.reveal": "Klasörde göstermek için tıkla",
 	"toast.kbd-perm": "Kısayollar için izin gerekli",

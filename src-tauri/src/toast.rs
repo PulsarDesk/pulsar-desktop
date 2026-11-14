@@ -62,6 +62,22 @@ pub(crate) fn kbd_permission(app: &AppHandle) {
 	push(app, "kbd-perm", String::new(), String::new(), None);
 }
 
+/// A chat line from a connected client while the chat is not on screen here. `from` = the
+/// client's name (its id when it sent none); clicking the notice opens the chat.
+pub(crate) fn chat_received(app: &AppHandle, from: &str, text: &str) {
+	push(app, "chat-in", chat_preview(text), from.to_string(), None);
+}
+
+/// The message as one short line for the notice (the full text is in the chat).
+fn chat_preview(text: &str) -> String {
+	let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+	if one_line.chars().count() <= 140 {
+		one_line
+	} else {
+		one_line.chars().take(139).chain(std::iter::once('…')).collect()
+	}
+}
+
 /// A connected client's controller could not get a virtual pad on this host; `text` is the
 /// localized cause (crate::pad_notice::host_text).
 pub(crate) fn pad_unavailable(app: &AppHandle, text: String) {
@@ -191,6 +207,9 @@ pub(crate) fn toast_open(app: AppHandle, id: u64) {
 	if kind == "kbd-perm" {
 		crate::kbdhook::request_permission();
 	}
+	if kind == "chat-in" {
+		crate::connections::open_or_update(&app, crate::connections::Surface::Forward);
+	}
 	if let Some(p) = path {
 		reveal_in_folder(Path::new(&p));
 	}
@@ -253,4 +272,18 @@ fn file_uri(path: &Path) -> String {
 		}
 	}
 	s
+}
+
+#[cfg(test)]
+mod tests {
+	use super::chat_preview;
+
+	#[test]
+	fn a_chat_line_becomes_one_short_line() {
+		assert_eq!(chat_preview("merhaba\n  nasılsın"), "merhaba nasılsın");
+		let long = "a".repeat(300);
+		let p = chat_preview(&long);
+		assert_eq!(p.chars().count(), 140);
+		assert!(p.ends_with('…'));
+	}
 }

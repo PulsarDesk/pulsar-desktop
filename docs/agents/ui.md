@@ -97,3 +97,13 @@ window is sized with), sent as `play-rtt { rtt, jitter }` and `rtt <ms> <jitter>
 
 Light / dark is a switch in Settings → Genel ("Koyu tema", `theme.svelte.ts` `setDark`). It
 used to be a button in the window title bar; the title bar keeps window and mode controls only.
+
+## Toasts (`toast.rs`, `ToastWindow.svelte`)
+
+Pulsar's own notices, bottom-right of the primary monitor's work area, never taking focus:
+`file-in` (a file arrived), `kbd-perm` (macOS Accessibility), `pad-off` (no virtual pad),
+`chat-in`. **Host chat** (2026-11-15): a client's chat line shows as a `chat-in` toast — the
+client's name (its id when it sent none) as the title, the line under it — when the
+connections window (the host chat UI) is not on screen (absent, hidden or minimized); the
+window then only opens in the background (taskbar). It used to jump to the front for every
+line of a remote session and stay silent in a game session. Clicking the toast opens the chat.

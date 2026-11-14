@@ -428,6 +428,8 @@
 	"toast.file-del": "File deleted",
 	"toast.file-mod": "File changed",
 	"toast.pad-off": "No virtual controller",
+	"toast.chat-in": "New message",
+	"toast.chat-open": "Click to open the chat",
 	"toast.from": "Sent by {peer}",
 	"toast.reveal": "Click to show it in its folder",
 	"toast.kbd-perm": "Permission needed for shortcuts",
