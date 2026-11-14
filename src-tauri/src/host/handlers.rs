@@ -353,25 +353,29 @@ fn spawn_pointer_lock_watch(out: tokio::sync::mpsc::Sender<DataMsg>, epoch: crat
 
 /// Tell the client when this host's monitor list changes mid-stream (a monitor plugged in or
 /// removed, a resolution / refresh / primary change): `DataMsg::Displays` with the fresh list,
-/// so its monitor picker matches without a reconnect. Windows: woken by `WM_DISPLAYCHANGE`
-/// (display_watch.rs), then the list is read again after a short settle (the new layout
-/// lands over a moment); elsewhere: compared every 3 s. Sends only when the list really
-/// differs. Lives as long as this stream generation.
+/// so its monitor picker matches without a reconnect. Woken by the OS display-change event
+/// (display_watch.rs: `WM_DISPLAYCHANGE` on Windows, the CoreGraphics reconfiguration
+/// callback on macOS, Wayland `wl_output` / X11 RandR events on Linux), then the list is read
+/// again after a short settle (the new layout lands over a moment); while no event source is
+/// live: compared every 3 s. Sends only when the list really differs. Lives as long as this
+/// stream generation.
 fn spawn_display_list_watch(out: tokio::sync::mpsc::Sender<DataMsg>, epoch: crate::process::ProcEpoch) {
 	use std::sync::atomic::Ordering;
 	let born = epoch.load(Ordering::SeqCst);
 	let _ = std::thread::Builder::new().name("display-list".into()).spawn(move || {
 		let mut seen = crate::display_watch::generation();
 		let mut last = crate::process::host_displays();
-		// The epoch / channel checks run at least this often even with no display event.
-		let tick = if crate::display_watch::EVENT_DRIVEN {
-			std::time::Duration::from_secs(1)
-		} else {
-			std::time::Duration::from_secs(3)
-		};
 		while epoch.load(Ordering::SeqCst) == born && !out.is_closed() {
+			// Re-read per turn: the macOS / Linux source can arm late or drop out.
+			let event_driven = crate::display_watch::event_driven();
+			// The epoch / channel checks run at least this often even with no display event.
+			let tick = if event_driven {
+				std::time::Duration::from_secs(1)
+			} else {
+				std::time::Duration::from_secs(3)
+			};
 			let g = crate::display_watch::wait_change(seen, tick);
-			if crate::display_watch::EVENT_DRIVEN {
+			if event_driven {
 				if g == seen {
 					continue;
 				}

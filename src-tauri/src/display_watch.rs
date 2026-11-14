@@ -5,8 +5,12 @@
 //! Windows: event-driven — a hidden top-level window (display broadcasts don't reach
 //! message-only windows) hears `WM_DISPLAYCHANGE` and bumps a generation counter. It is its
 //! own window, independent of the UI's dpi_watch, so a headless host gets it too.
-//! Linux / macOS: no event source here yet — [`wait_change`] just times out and the caller
-//! compares the list (a cheap poll).
+//! macOS / Linux: `pulsar_core::displays::watch` — CoreGraphics'
+//! `CGDisplayRegisterReconfigurationCallback` on macOS; on Linux a long-lived Wayland
+//! connection (`wl_output` added / removed / `done`) or X11 RandR notifications. Until that
+//! source is live (macOS arms it on the main queue) or after it dropped out (a lost
+//! connection), [`event_driven`] is false and the caller polls by comparing the list.
+//! The macOS and Linux sources are untested on real hardware.
 
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::Duration;
@@ -21,6 +25,13 @@ fn state() -> &'static Gen {
 	G.get_or_init(|| {
 		#[cfg(windows)]
 		start_listener();
+		#[cfg(not(windows))]
+		{
+			// Not from inside this initializer: the callback runs on the watcher's own
+			// thread (or the macOS main thread) after init returned.
+			let armed = pulsar_core::displays::watch(Box::new(bump));
+			tracing::info!(armed, "display watch: started");
+		}
 		Gen { n: Mutex::new(0), cv: Condvar::new() }
 	})
 }
@@ -38,10 +49,13 @@ pub(crate) fn wait_change(seen: u64, timeout: Duration) -> u64 {
 	*n
 }
 
-/// True where [`wait_change`] is woken by a real OS event (else callers poll).
-pub(crate) const EVENT_DRIVEN: bool = cfg!(windows);
+/// True while [`wait_change`] is woken by a real OS event (else callers poll). Windows: always;
+/// macOS / Linux: while the `pulsar_core::displays` watcher is live.
+pub(crate) fn event_driven() -> bool {
+	let _ = state();
+	cfg!(windows) || pulsar_core::displays::watching()
+}
 
-#[cfg(windows)]
 fn bump() {
 	let g = state();
 	*g.n.lock().unwrap() += 1;

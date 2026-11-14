@@ -71,7 +71,9 @@ pub fn linux_displays() -> Vec<LinuxDisplay> {
 
 /// Host monitors to advertise in `StreamCaps::displays`, primary at idx 0. Windows
 /// uses the DXGI output list (same index the native capture takes); Linux/X11 uses
-/// xrandr. Empty elsewhere / on Wayland — the client then shows no picker.
+/// xrandr; macOS and Linux Wayland use `pulsar_core::displays` (macOS: the
+/// `CGGetActiveDisplayList` order = avfoundation's `Capture screen N`; Wayland: the output
+/// layout — the portal dialog still decides what is captured, see `wayland_wants_repick`).
 pub fn host_displays() -> Vec<pulsar_core::service::DisplayInfo> {
 	use pulsar_core::service::DisplayInfo;
 	#[cfg(windows)]
@@ -96,6 +98,10 @@ pub fn host_displays() -> Vec<pulsar_core::service::DisplayInfo> {
 			.collect();
 	}
 	#[cfg(target_os = "linux")]
+	if pulsar_core::capture::is_wayland() {
+		return core_displays();
+	}
+	#[cfg(target_os = "linux")]
 	{
 		return linux_displays()
 			.into_iter()
@@ -113,10 +119,53 @@ pub fn host_displays() -> Vec<pulsar_core::service::DisplayInfo> {
 			})
 			.collect();
 	}
-	#[cfg(not(any(windows, target_os = "linux")))]
+	#[cfg(target_os = "macos")]
+	{
+		return core_displays();
+	}
+	#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 	{
 		Vec::new()
 	}
+}
+
+/// `pulsar_core::displays::list()` as wire `DisplayInfo`s (index = list position).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn core_displays() -> Vec<pulsar_core::service::DisplayInfo> {
+	let list = pulsar_core::displays::list();
+	tracing::debug!(count = list.len(), ?list, "host_displays (core)");
+	list.into_iter()
+		.enumerate()
+		.map(|(i, m)| pulsar_core::service::DisplayInfo {
+			idx: i as u32,
+			name: m.name,
+			width: m.width,
+			height: m.height,
+			primary: m.primary,
+			modes: m.modes,
+			refresh_hz: m.refresh_hz,
+		})
+		.collect()
+}
+
+/// The ffmpeg avfoundation video input for host monitor `idx` (the `CGGetActiveDisplayList`
+/// index `host_displays` advertised): `Capture screen N` — ffmpeg numbers its screen devices
+/// in that same list order and accepts the device by this name, independent of how many
+/// cameras precede the screens in its device list. Clamped to the screens present.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn avfoundation_screen(idx: u32, screens: usize) -> String {
+	let i = if screens == 0 { 0 } else { idx.min(screens as u32 - 1) };
+	format!("Capture screen {i}")
+}
+
+/// Wayland: should this (re-)stream re-open the portal picker instead of restoring the last
+/// choice? The portal can't be told which monitor to share — its restore token silently
+/// brings back the previous pick — so when the client asks for a DIFFERENT monitor than the
+/// one being streamed, the token is dropped and the person at the host picks again.
+/// `streamed` = the index the running capture actually shows (portal geometry), if known.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn wayland_wants_repick(requested: u32, streamed: Option<u32>, monitors: usize) -> bool {
+	monitors > 1 && streamed.is_some_and(|s| s != requested)
 }
 
 /// Current refresh rate (Hz) of the GDI display `dev_name` ("DISPLAY1"); 0 = unknown.
@@ -1746,4 +1795,27 @@ pub fn apply_render_lib_env(cmd: &mut std::process::Command) {
 pub fn window_hwnd(app: &AppHandle) -> Option<u64> {
 	let w = app.get_webview_window("main")?;
 	w.hwnd().ok().map(|h| h.0 as u64)
+}
+
+#[cfg(test)]
+mod display_pick_tests {
+	use super::{avfoundation_screen, wayland_wants_repick};
+
+	#[test]
+	fn avfoundation_screen_names_and_clamps() {
+		assert_eq!(avfoundation_screen(0, 2), "Capture screen 0");
+		assert_eq!(avfoundation_screen(1, 2), "Capture screen 1");
+		// A monitor that went away since the client picked it: the last one present.
+		assert_eq!(avfoundation_screen(5, 2), "Capture screen 1");
+		assert_eq!(avfoundation_screen(3, 0), "Capture screen 0");
+	}
+
+	#[test]
+	fn wayland_repicks_only_for_a_different_monitor() {
+		assert!(wayland_wants_repick(1, Some(0), 2));
+		assert!(!wayland_wants_repick(0, Some(0), 2));
+		// Unknown streamed monitor (window cast / no geometry) or a single monitor: keep the token.
+		assert!(!wayland_wants_repick(1, None, 2));
+		assert!(!wayland_wants_repick(1, Some(0), 1));
+	}
 }
