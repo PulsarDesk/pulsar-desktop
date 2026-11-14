@@ -10,6 +10,8 @@ pulsar-desktop/
                           #   Duplication (+ WGC) → NVENC SDK → hand-rolled RTP
                           #   (the Sunshine technique, no ffmpeg). Also
                           #   nvenc_codecs() real-silicon probe via nvEncodeAPI64.dll.
+                          #   Linux: only the NVENC SDK encoder on CUDA (NvencCuda,
+                          #   libnvidia-encode + libcuda dlopen) for the X11/Wayland host.
   crates/pulsar-render/   # native renderer PROCESS for ALL platforms: Linux
                           #   rkmpp/EGL, Windows Media Foundation + D3D11 zero-copy
                           #   decode, macOS VideoToolbox + Metal (src/mac/, a panel

@@ -53,6 +53,12 @@ fallback without it. Details and the open hardware checks: modes.md "macOS input
 `pulsar-tauri` itself can't be type-checked for macOS from Windows (objc2-exception-helper
 needs a mac C toolchain); the crate can.
 
+**Linux host RFI (2026-11-14, LOCAL, unpushed, untested on Linux hardware):** an NVIDIA
+Linux host (X11 and Wayland) encodes with the NVENC SDK on CUDA and heals a client-reported
+loss with reference-frame invalidation like the Windows host — see
+[host-encode.md](host-encode.md) "Linux NVENC SDK". Open: the Linux client does not ask for
+RFI yet (`play.rs` `cfg!(windows)`); VA-API / QSV / AMF hosts have no equivalent (keyframe).
+
 **Scaffolded / known gaps:** macOS virtual gamepad (no-op stub); HW encode on
 the Wayland/gst path (software x264 only); media-over-the-session for
 symmetric-NAT (media is a direct UDP RTP flow today — fine for LAN/cone-NAT/

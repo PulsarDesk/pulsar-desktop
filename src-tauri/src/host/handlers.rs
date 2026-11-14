@@ -2607,6 +2607,50 @@ pub(super) fn make_on_stream(
 			let picker_shown = token.is_none();
 			let requested_idx = req.display_idx;
 			let wayland_pick = wayland_pick.clone();
+			// NVIDIA host: the NVENC SDK encoder on the portal's raw frames (reference-frame
+			// invalidation on a client-reported loss); pulsar-core falls back to `fragment` on
+			// the same portal session when it cannot be built. Screen casts only (a window cast
+			// keeps the gst pipeline, which scales it into its box).
+			let sdk_codec = super::libav::sdk_codec(gcodec);
+			// The codec list is only read once the background probe answered (it is cached
+			// then) — never a driver call on this task.
+			let sdk_ready = super::linux_nvenc_sdk();
+			let frames = (!wl_window
+				&& super::nvenc_frames::wanted(
+					sdk_ready,
+					if sdk_ready { pulsar_capture::nvenc_codecs() } else { &[] },
+					genc,
+					&enc_pref,
+					sdk_codec,
+					std::env::var("PULSAR_NVENC_SDK").ok().as_deref(),
+				))
+			.then(|| {
+				super::nvenc_frames::factory(pulsar_capture::NvencCudaParams {
+					width: 0,
+					height: 0,
+					fps,
+					bitrate_kbps: bitrate,
+					dest: format!("{ip}:{port}"),
+					codec: sdk_codec,
+					low_latency: match req.quality {
+						QualityPref::Quality => false,
+						QualityPref::Latency => true,
+						QualityPref::Balanced => req.game_mode,
+					},
+					intra_refresh: req.loss_recovery == pulsar_core::service::LossRecovery::IntraRefresh,
+					rfi: req.rfi,
+					device: std::env::var("PULSAR_CUDA_DEVICE").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
+				})
+			});
+			// The stats line once the SDK encoder took the stream (the one above names the gst pick).
+			let sdk_label = format!(
+				"{} · {} · — · {} · {} {}",
+				vcodec_label(gcodec),
+				HwEncoder::Nvenc.label(),
+				fps_part,
+				(bitrate as f32 / 1000.0).round() as u32,
+				crate::i18n::t("stream.mbitTarget")
+			);
 			// AppImage: an encoder that only validated on the system gst runs there.
 			let system_gst = crate::process::gst_on_system(genc, gcodec);
 			let restore_token = token_slot;
@@ -2644,8 +2688,15 @@ pub(super) fn make_on_stream(
 				// instead of leaving the dialog up — capture.rs's SessionCloseGuard
 				// then closes the portal session and dismisses the picker.
 				let started = {
-					let start_fut =
-						pulsar_core::capture::start_with(&ip, port, &fragment, token, system_gst, source);
+					let start_fut = pulsar_core::capture::start_full(
+						&ip,
+						port,
+						&fragment,
+						token,
+						system_gst,
+						source,
+						frames,
+					);
 					tokio::pin!(start_fut);
 					loop {
 						tokio::select! {
@@ -2691,6 +2742,9 @@ pub(super) fn make_on_stream(
 								);
 								let _ = stats_task.try_send(DataMsg::StreamedDisplay(p));
 							}
+						}
+						if cap.is_raw_frames() {
+							let _ = stats_task.try_send(DataMsg::Stats(sdk_label));
 						}
 						// Store under the slot lock ONLY while still current: a session
 						// that tore down (or re-streamed) during the portal dialog gets
@@ -3743,7 +3797,12 @@ pub(super) fn make_on_stream(
 		// encoder or output) falls back to the CLI chain below, unchanged.
 		#[cfg(target_os = "linux")]
 		let libav_started = if !native_started && !(pulsar_core::capture::is_wayland() && !super::mock_capture()) {
-			match super::libav::Params::from_plan(&plan).map(super::libav::LibavHost::start) {
+			// The client's RFI ask reaches the NVENC SDK encoder (libavcodec ignores it).
+			let params = super::libav::Params::from_plan(&plan).map(|mut p| {
+				p.rfi = req.rfi;
+				p
+			});
+			match params.map(super::libav::LibavHost::start) {
 				Some(Ok(engine)) => {
 					*libav_slot.lock().unwrap() = Some(engine);
 					last_libav_req = Some(req.clone());

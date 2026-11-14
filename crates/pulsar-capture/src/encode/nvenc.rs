@@ -13,7 +13,33 @@
 // ===========================================================================
 
 use std::ffi::c_void;
-use windows_core::GUID;
+#[cfg(windows)]
+pub use windows_core::GUID;
+#[cfg(not(windows))]
+pub use self::guid::GUID;
+
+/// The C `GUID` (nvEncodeAPI.h takes it by value) off Windows: the same 16-byte layout and the
+/// two constructors the bindings use from `windows_core::GUID`.
+#[cfg(not(windows))]
+mod guid {
+	#[repr(C)]
+	#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+	pub struct GUID {
+		pub data1: u32,
+		pub data2: u16,
+		pub data3: u16,
+		pub data4: [u8; 8],
+	}
+	impl GUID {
+		pub const fn from_values(data1: u32, data2: u16, data3: u16, data4: [u8; 8]) -> Self {
+			Self { data1, data2, data3, data4 }
+		}
+		pub const fn zeroed() -> Self {
+			Self { data1: 0, data2: 0, data3: 0, data4: [0; 8] }
+		}
+	}
+	const _: () = assert!(core::mem::size_of::<GUID>() == 16);
+}
 
 pub type NVENCSTATUS = u32;
 pub const NV_ENC_SUCCESS: NVENCSTATUS = 0;
@@ -82,6 +108,9 @@ pub type PFN_ReconfigureEncoder =
 // so OpenSessionEx got a D3D11 device tagged as a CUDA context → NV_ENC_ERR_UNSUPPORTED_DEVICE.)
 pub const NV_ENC_DEVICE_TYPE_DIRECTX: u32 = 0;
 pub const NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX: u32 = 0;
+// Linux: the encode session runs on a CUDA context, the input is CUDA device memory.
+pub const NV_ENC_DEVICE_TYPE_CUDA: u32 = 1;
+pub const NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR: u32 = 1;
 pub const NV_ENC_INPUT_IMAGE: u32 = 0; // NV_ENC_INPUT_RESOURCE_USAGE
 pub const NV_ENC_BUFFER_FORMAT_NV12: u32 = 0x00000001;
 pub const NV_ENC_PIC_STRUCT_FRAME: u32 = 0x01;
@@ -220,7 +249,7 @@ pub type PFN_LockBitstream =
 	unsafe extern "C" fn(*mut c_void, *mut NV_ENC_LOCK_BITSTREAM) -> NVENCSTATUS;
 pub type PFN_UnlockBitstream = unsafe extern "C" fn(*mut c_void, *mut c_void) -> NVENCSTATUS;
 pub type PFN_DestroyEncoder = unsafe extern "C" fn(*mut c_void) -> NVENCSTATUS;
-pub type PFN_GetLastErrorString = unsafe extern "C" fn(*mut c_void) -> *const i8;
+pub type PFN_GetLastErrorString = unsafe extern "C" fn(*mut c_void) -> *const std::ffi::c_char;
 // Which codecs THIS GPU's NVENC can encode: `count` first, then fill an array of that
 // size. Kepler/GM107 report H.264 only; HEVC arrives with GM20x, AV1 with Ada.
 pub type PFN_GetEncodeGUIDCount = unsafe extern "C" fn(*mut c_void, *mut u32) -> NVENCSTATUS;
@@ -228,6 +257,9 @@ pub type PFN_GetEncodeGUIDs =
 	unsafe extern "C" fn(*mut c_void, *mut GUID, u32, *mut u32) -> NVENCSTATUS;
 pub type PFN_GetEncodeCaps =
 	unsafe extern "C" fn(*mut c_void, GUID, *mut NV_ENC_CAPS_PARAM, *mut i32) -> NVENCSTATUS;
+/// `nvEncInvalidateRefFrames(encoder, invalidRefFrameTimeStamp)` — the table slot stays an
+/// opaque pointer (its place in the struct is what matters); callers transmute it to this.
+pub type PFN_InvalidateRefFrames = unsafe extern "C" fn(*mut c_void, u64) -> NVENCSTATUS;
 
 // NV_ENCODE_API_FUNCTION_LIST as laid out in nvEncodeAPI.h (12.x). Slots we don't
 // call are opaque pointers so we never mis-spell a signature; ORDER is what matters.
