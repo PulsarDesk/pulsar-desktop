@@ -72,13 +72,32 @@ pub(crate) fn package_file_name(kind: InstallKind, version: &str, arch: &str) ->
 /// The privileged install command for `pkg` (argv, first = program), or `None` when there is
 /// no `pkexec` to ask for the password (→ open the file in the software installer instead).
 /// `has` reports whether a program is on PATH.
+///
+/// Why not tauri-plugin-updater's own deb/rpm installer: it runs a bare `dpkg -i` / `rpm -U`,
+/// so a release that adds a dependency fails to install. apt-get/dnf/zypper resolve
+/// dependencies, and without pkexec we can still hand the file to the software installer.
+/// pkexec clears the environment and there is no tty, so apt runs with
+/// DEBIAN_FRONTEND=noninteractive and keeps the user's changed conffiles instead of asking.
 pub(crate) fn install_command(kind: InstallKind, pkg: &str, has: impl Fn(&str) -> bool) -> Option<Vec<String>> {
 	if !has("pkexec") {
 		return None;
 	}
 	let argv: Vec<&str> = match kind {
 		// apt-get needs a path with a slash to treat the argument as a file, not a package name.
-		InstallKind::Deb if has("apt-get") => vec!["apt-get", "install", "-y", "--allow-downgrades", pkg],
+		InstallKind::Deb if has("apt-get") => vec![
+			"env",
+			"DEBIAN_FRONTEND=noninteractive",
+			"apt-get",
+			"install",
+			"-y",
+			"--allow-downgrades",
+			"-o",
+			"Dpkg::Options::=--force-confdef",
+			"-o",
+			"Dpkg::Options::=--force-confold",
+			pkg,
+		],
+		InstallKind::Deb => vec!["env", "DEBIAN_FRONTEND=noninteractive", "dpkg", "--force-confdef", "--force-confold", "-i", pkg],
 		InstallKind::Deb => vec!["dpkg", "-i", pkg],
 		InstallKind::Rpm if has("dnf") => vec!["dnf", "install", "-y", pkg],
 		InstallKind::Rpm if has("zypper") => {
@@ -162,8 +181,10 @@ fn detect() -> InstallKind {
 }
 
 /// `update_install_kind`: how the UI should install a found update.
+/// Async (a worker thread, not the main thread): the first call may run `dpkg-query` /
+/// `rpm -qf` to detect the package type.
 #[tauri::command]
-pub(crate) fn update_install_kind() -> InstallKind {
+pub(crate) async fn update_install_kind() -> InstallKind {
 	install_kind()
 }
 
@@ -321,10 +342,26 @@ mod tests {
 		let all = |_: &str| true;
 		assert_eq!(
 			install_command(InstallKind::Deb, "/c/P.deb", all).unwrap(),
-			["pkexec", "apt-get", "install", "-y", "--allow-downgrades", "/c/P.deb"]
+			[
+				"pkexec",
+				"env",
+				"DEBIAN_FRONTEND=noninteractive",
+				"apt-get",
+				"install",
+				"-y",
+				"--allow-downgrades",
+				"-o",
+				"Dpkg::Options::=--force-confdef",
+				"-o",
+				"Dpkg::Options::=--force-confold",
+				"/c/P.deb"
+			]
 		);
 		let no_apt = |p: &str| p != "apt-get";
-		assert_eq!(install_command(InstallKind::Deb, "/c/P.deb", no_apt).unwrap(), ["pkexec", "dpkg", "-i", "/c/P.deb"]);
+		assert_eq!(
+			install_command(InstallKind::Deb, "/c/P.deb", no_apt).unwrap(),
+			["pkexec", "env", "DEBIAN_FRONTEND=noninteractive", "dpkg", "--force-confdef", "--force-confold", "-i", "/c/P.deb"]
+		);
 	}
 
 	#[test]

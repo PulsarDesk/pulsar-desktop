@@ -92,8 +92,15 @@ pub(crate) fn setup(app: &tauri::AppHandle) {
 		if missing.is_empty() || marker.exists() {
 			return;
 		}
-		// Ask once per version, whatever the answer.
-		let _ = std::fs::write(&marker, b"");
+		// Ask once per version, whatever the answer. The config dir may not exist yet on a
+		// first run: create it, and skip the prompt when the marker cannot be written (it
+		// would otherwise come back on every launch).
+		if let Some(dir) = marker.parent() {
+			let _ = std::fs::create_dir_all(dir);
+		}
+		if std::fs::write(&marker, b"").is_err() {
+			return;
+		}
 		let script = admin_script(&missing, crate::i18n::t("fw.macPrompt"));
 		let ok = std::process::Command::new("osascript")
 			.args(["-e", &script])

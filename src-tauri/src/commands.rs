@@ -779,8 +779,9 @@ pub(crate) fn auto_connect_target(app: AppHandle) -> Option<AutoConnect> {
 /// version forever while the updater appears to "run". Detect that here and let the frontend skip
 /// the update with a clear warning instead of silently no-op'ing. Windows/macOS always update the
 /// installed app in place, so they're always capable.
+/// Async so a first-call package detection (`dpkg-query` / `rpm -qf`) stays off the main thread.
 #[tauri::command]
-pub(crate) fn self_update_possible() -> bool {
+pub(crate) async fn self_update_possible() -> bool {
 	// A .deb/.rpm install updates through the package manager instead (pkg_update.rs).
 	crate::pkg_update::install_kind() == crate::pkg_update::InstallKind::InPlace
 }

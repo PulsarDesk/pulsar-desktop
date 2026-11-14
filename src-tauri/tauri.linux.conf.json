@@ -14,7 +14,7 @@
 					"/usr/lib/firewalld/services/pulsar.xml": "linux/firewalld-pulsar.xml"
 				},
 				"postInstallScript": "linux/postinst.sh",
-				"postRemoveScript": "linux/postrm.sh"
+				"preRemoveScript": "linux/prerm.sh"
 			},
 			"rpm": {
 				"depends": ["mpv-libs"],
@@ -27,7 +27,7 @@
 					"/usr/lib/firewalld/services/pulsar.xml": "linux/firewalld-pulsar.xml"
 				},
 				"postInstallScript": "linux/postinst.sh",
-				"postRemoveScript": "linux/postrm.sh"
+				"preRemoveScript": "linux/prerm.sh"
 			}
 		}
 	}

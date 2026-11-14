@@ -20,13 +20,22 @@ fi
 # already admits them. Open 21117/udp only where a firewall is actually ACTIVE (the Windows
 # installer does the same with its allow rules); ufw/firewalld definitions ship in
 # /etc/ufw/applications.d/pulsar and /usr/lib/firewalld/services/pulsar.xml.
-if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
-	ufw allow Pulsar >/dev/null 2>&1 || true
-fi
-if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
-	firewall-cmd --reload >/dev/null 2>&1 || true # pick up the new service definition
-	firewall-cmd --permanent --add-service=pulsar >/dev/null 2>&1 || true
-	firewall-cmd --reload >/dev/null 2>&1 || true
+# Only on the FIRST install (deb: "configure" with no previously configured version in $2;
+# rpm: $1 = 1), so an update never brings back a rule the user removed on purpose.
+first_install=0
+case "$1" in
+configure) [ -z "$2" ] && first_install=1 ;;
+1) first_install=1 ;;
+esac
+if [ "$first_install" = 1 ]; then
+	if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+		ufw allow Pulsar >/dev/null 2>&1 || true
+	fi
+	if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+		firewall-cmd --reload >/dev/null 2>&1 || true # pick up the new service definition
+		firewall-cmd --permanent --add-service=pulsar >/dev/null 2>&1 || true
+		firewall-cmd --reload >/dev/null 2>&1 || true
+	fi
 fi
 
 cat <<'MSG'
