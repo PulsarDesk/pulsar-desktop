@@ -565,7 +565,9 @@ pub fn set_view(id: u64, view: Option<View>) {
 
 /// What the OS layer needs to measure the video rect: the renderer's video fractions and the
 /// armed session's view.
-pub(crate) fn rect_inputs() -> (Option<(f32, f32, f32, f32)>, Option<View>) {
+type Frac = (f32, f32, f32, f32);
+
+pub(crate) fn rect_inputs() -> (Option<Frac>, Option<View>) {
 	let id = LAST_PLAY.load(SeqCst);
 	let view = lock(&VIEWS).iter().find(|(i, _)| *i == id).map(|(_, v)| *v);
 	(*lock(&VIDEO_FRAC), view)
