@@ -93,7 +93,7 @@ mod linux_raise {
 		};
 		match gdk_win.downcast::<gdkx11::X11Window>() {
 			Ok(x) => {
-				let ts = gdkx11::x11_get_server_time(&x);
+				let ts = gdkx11::functions::x11_get_server_time(&x);
 				x.move_to_current_desktop();
 				win.present_with_time(ts);
 				net_active_window(x.xid(), ts);
