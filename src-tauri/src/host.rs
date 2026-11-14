@@ -74,6 +74,9 @@ pub(crate) mod failover;
 /// Desktop injector: SYSTEM helper (UAC / lock screen) first, SendInput fallback.
 mod sysinput;
 pub(crate) mod takeover;
+// Per-window capture off Windows (X11 / Wayland portal / macOS ScreenCaptureKit).
+#[cfg(not(windows))]
+mod window_src;
 #[cfg(target_os = "linux")]
 mod libav;
 
@@ -317,6 +320,9 @@ impl Drop for SessionCleanupGuard {
 		// Release per-session redirect ownership; idempotent if already released
 		// by the normal teardown block.
 		handlers::release_redirect(self.sid);
+		// macOS: this session's ScreenCaptureKit window source (no-op elsewhere).
+		#[cfg(not(windows))]
+		window_src::stop(self.sid);
 		// Same-host co-op pre-auth: drop this session's pre-auth refcount. Done HERE only
 		// (the guard always drops, on both the normal and abort paths) so the decrement
 		// happens exactly once — the normal teardown tail does NOT also remove it. When the
@@ -2379,12 +2385,15 @@ pub(crate) async fn bring_online(
 						}
 					}),
 					// The host's visible top-level windows the client can pick as a per-window
-					// (WGC) capture target (Phase 2b co-op) — answers the client's QueryWindows.
-					// Cheap (one EnumWindows pass), called on demand when the client opens its
-					// window picker. Empty on non-Windows (no per-window source) → no picker.
+					// capture target (Phase 2b co-op) — answers the client's QueryWindows.
+					// Cheap (one EnumWindows / _NET_CLIENT_LIST / SCShareableContent pass), called
+					// on demand when the client opens its window picker. Per OS: WGC windows on
+					// Windows, X11 client windows, ScreenCaptureKit windows on macOS, and on
+					// Wayland ONE entry that opens the portal's window dialog at the host
+					// (`super::window_src::list`).
 					windows: Box::new(|| {
 						// pulsar-capture (and its WGC/EnumWindows window source) is a Windows-only
-						// dependency; off Windows there is no per-window source, so reply empty.
+						// dependency; the other OSes list through pulsar-core.
 						#[cfg(windows)]
 						{
 							pulsar_capture::list_capture_windows()
@@ -2397,7 +2406,7 @@ pub(crate) async fn bring_online(
 						}
 						#[cfg(not(windows))]
 						{
-							Vec::<pulsar_core::service::WindowInfo>::new()
+							super::window_src::list()
 						}
 					}),
 					on_nack: Box::new(on_nack),

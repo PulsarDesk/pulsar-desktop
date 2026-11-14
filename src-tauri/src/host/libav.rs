@@ -28,7 +28,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 
 use ffmpeg_sys_next as ff;
-use pulsar_core::pipeline::{CaptureMethod, HwEncoder, StreamPlan, VCodec};
+use pulsar_core::pipeline::{CaptureMethod, HwEncoder, StreamPlan, VCodec, WindowInput};
 use pulsar_core::service::LossRecovery;
 
 /// Where the frames come from.
@@ -36,6 +36,11 @@ use pulsar_core::service::LossRecovery;
 pub enum Source {
 	/// `x11grab` of `display` (e.g. `:0.0` or `:0.0+1920,0`).
 	X11 { display: String },
+	/// `x11grab -window_id` of ONE window on `display` (the bare display, e.g. `:0.0`): the
+	/// grab is the window's own size (the graph scales it to `width`×`height`). x11grab keeps
+	/// the size it opened with: a window enlarged later is cropped, one shrunk below it (or
+	/// closed / minimized) ends the capture.
+	X11Window { display: String, id: u64 },
 	/// `lavfi testsrc2` — headless, for tests and `PULSAR_MOCK_CAPTURE` (super::mock_capture).
 	Test,
 }
@@ -63,7 +68,14 @@ impl Params {
 		}
 		let dest = plan.dest.strip_prefix("rtp://").unwrap_or(&plan.dest).to_string();
 		Some(Self {
-			source: if super::mock_capture() { Source::Test } else { Source::X11 { display: plan.display.clone() } },
+			source: if super::mock_capture() {
+				Source::Test
+			} else {
+				match plan.window {
+					Some(WindowInput::X11 { id }) => Source::X11Window { display: plan.display.clone(), id },
+					_ => Source::X11 { display: plan.display.clone() },
+				}
+			},
 			width: plan.width.max(2) & !1,
 			height: plan.height.max(2) & !1,
 			fps: plan.fps.max(1),
@@ -92,6 +104,7 @@ pub fn supported(plan: &StreamPlan) -> bool {
 		return false;
 	}
 	plan.capture == CaptureMethod::X11grab
+		&& matches!(plan.window, None | Some(WindowInput::X11 { .. }))
 		&& !plan.hdr
 		&& !plan.yuv444
 		&& matches!(plan.encoder, HwEncoder::Software | HwEncoder::Nvenc)
@@ -264,6 +277,12 @@ unsafe fn open_input(p: &Params) -> Result<(*mut ff::AVFormatContext, c_int), St
 		Source::X11 { display } => {
 			dict_set(&mut opts, "framerate", &p.fps.to_string());
 			dict_set(&mut opts, "video_size", &format!("{}x{}", p.width, p.height));
+			dict_set(&mut opts, "draw_mouse", "1");
+			("x11grab", display.clone())
+		}
+		Source::X11Window { display, id } => {
+			dict_set(&mut opts, "framerate", &p.fps.to_string());
+			dict_set(&mut opts, "window_id", &id.to_string());
 			dict_set(&mut opts, "draw_mouse", "1");
 			("x11grab", display.clone())
 		}
@@ -758,5 +777,44 @@ mod tests {
 		assert!(idrs >= 2, "short-GOP recovery must force keyframes (~every 0.5 s): {idrs}");
 		assert!(host.is_alive());
 		host.stop();
+	}
+
+	/// An X11 window pick becomes a `window_id` grab of the bare display; any other window
+	/// input (macOS raw frames) is not this engine's.
+	#[test]
+	fn window_plan_maps_to_an_x11_window_grab() {
+		if super::super::mock_capture() {
+			return;
+		}
+		let mut plan = StreamPlan {
+			encoder: HwEncoder::Software,
+			codec: VCodec::H264,
+			width: 1280,
+			height: 720,
+			fps: 60,
+			bitrate_kbps: 8000,
+			capture: CaptureMethod::X11grab,
+			display: ":0.0".into(),
+			vaapi_device: String::new(),
+			dest: "rtp://127.0.0.1:9000".into(),
+			low_latency: true,
+			gpu_zerocopy: false,
+			output_idx: 0,
+			hdr: false,
+			yuv444: false,
+			loss_recovery: LossRecovery::Normal,
+			window: Some(WindowInput::X11 { id: 0x3a0_0007 }),
+		};
+		if !supported(&plan) {
+			// PULSAR_LIBAV_HOST=0 in the environment.
+			return;
+		}
+		let p = Params::from_plan(&plan).unwrap();
+		assert_eq!(p.source, Source::X11Window { display: ":0.0".into(), id: 0x3a0_0007 });
+		assert_eq!((p.width, p.height), (1280, 720));
+		plan.window = Some(WindowInput::RawNv12 { url: "tcp://127.0.0.1:1".into() });
+		assert!(!supported(&plan));
+		plan.window = None;
+		assert_eq!(Params::from_plan(&plan).unwrap().source, Source::X11 { display: ":0.0".into() });
 	}
 }

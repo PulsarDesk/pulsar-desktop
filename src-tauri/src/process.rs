@@ -1565,10 +1565,27 @@ pub fn resolve_launched_window(pid: u32) -> Option<i64> {
 	}
 }
 
-/// Non-Windows stub (see [`resolve_launched_window`]) — per-window capture is Windows-only.
+/// Linux X11 / macOS counterpart of the Windows resolver above: the largest window of the
+/// launched PID or a descendant (`pulsar_core::window_capture::find_for_launch`, X window id
+/// / `CGWindowID`), polled the same ~10 s. Always `None` on Wayland (no program can see
+/// other programs' windows there; the client's window pick opens the portal dialog
+/// instead) and on hosts without a per-window source. Untested on Linux / macOS hardware.
 #[cfg(not(windows))]
-pub fn resolve_launched_window(_pid: u32) -> Option<i64> {
-	None
+pub fn resolve_launched_window(pid: u32) -> Option<i64> {
+	use pulsar_core::window_capture::{backend, find_for_launch, Backend};
+	if !matches!(backend(), Backend::X11 | Backend::ScreenCaptureKit) {
+		return None;
+	}
+	let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+	loop {
+		if let Some(id) = find_for_launch(pid) {
+			return i64::try_from(id).ok();
+		}
+		if std::time::Instant::now() >= deadline {
+			return None;
+		}
+		std::thread::sleep(std::time::Duration::from_millis(250));
+	}
 }
 
 /// Resolve a bundled binary by name (`ffmpeg.exe` / `ffplay.exe`), preferring the
