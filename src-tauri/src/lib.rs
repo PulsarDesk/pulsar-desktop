@@ -689,6 +689,22 @@ pub fn run() {
 			}
 			WindowEvent::ScaleFactorChanged { scale_factor, .. } if window.label() == "main" => {
 				crate::process::set_ui_scale(*scale_factor);
+				// Linux: the renderer only read PULSAR_UI_SCALE at spawn — push the new scale to
+				// every live one so its overlay follows a monitor-scale change mid-session.
+				// (Windows' renderer reads its DPI itself; macOS' eframe gets it from winit.)
+				#[cfg(target_os = "linux")]
+				{
+					use std::io::Write;
+					let plays = window.app_handle().state::<AppState>();
+					let stdins: Vec<_> =
+						plays.plays.lock().unwrap().values().map(|p| p.render_stdin.clone()).collect();
+					for si in stdins {
+						if let Some(si) = si.lock().unwrap().as_mut() {
+							let _ = writeln!(si, "uiscale {scale_factor}");
+							let _ = si.flush();
+						}
+					}
+				}
 			}
 			WindowEvent::Focused(focused) => {
 				// Capture/forward keyboard+mouse + the overlay/leave combos ONLY while

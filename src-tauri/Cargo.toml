@@ -77,12 +77,14 @@ sdl3-sys = { version = "0.7", default-features = false, features = ["build-from-
 # in-process — the host's Opus/RTP stream is decoded here and played through SDL3
 # (src/native_audio.rs, Moonlight's model) on every desktop platform.
 opus = "0.4"
+# Native host capture+encode (DXGI Desktop Duplication + NVENC SDK → RTP, Sunshine-technique).
+# Replaces the ffmpeg ddagrab hot path on Windows/NVENC; ffmpeg stays as the fallback. Also on
+# Linux/macOS for its cross-platform parts: the screen-adaptation best-fit + xrandr parser and
+# the macOS CoreGraphics display-mode switch (display_mode.rs).
+pulsar-capture = { path = "../crates/pulsar-capture" }
 
 # Raw Win32 for true taskbar-covering fullscreen (borderless-fullscreen via SetWindowPos).
 [target.'cfg(windows)'.dependencies]
-# Native host capture+encode (DXGI Desktop Duplication + NVENC SDK → RTP, Sunshine-technique).
-# Replaces the ffmpeg ddagrab hot path on Windows/NVENC; ffmpeg stays as the fallback.
-pulsar-capture = { path = "../crates/pulsar-capture" }
 # In-session SYSTEM input helper client (UAC consent / lock screen input) — see
 # docs/agents/system-agent.md. Optional at runtime: without the service it falls back to SendInput.
 pulsar-sysagent = { path = "../crates/pulsar-sysagent" }
@@ -151,7 +153,9 @@ ffmpeg-sys-next = { version = "8", default-features = false, features = ["avcode
 # Host cursor side-channel (cursor.rs): read the X pointer position (XFixes) + shape so the
 # client draws it over the cursorless KMS-captured video (Moonlight model). `xlib` for the
 # display/query-pointer, `xfixes` for the cursor image+hotspot. Same `x11` 2.21 the renderer uses.
-x11 = { version = "2.21", features = ["xlib", "xfixes"] }
+# `xrandr` (libXrandr, part of every GTK3 install): display_watch.rs hears RandR screen/output/CRTC
+# change events, so a monitor or mode change reaches the client's picker without polling.
+x11 = { version = "2.21", features = ["xlib", "xfixes", "xrandr"] }
 # Self-avatar resolution (avatar.rs): decode the account photo / wallpaper, center-crop
 # + downscale to a 96×96 PNG. Decode-only features kept minimal (png/jpeg/webp/bmp cover
 # AccountsService icons, ~/.face and GNOME wallpapers); Windows has its own block above,
