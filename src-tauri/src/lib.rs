@@ -65,6 +65,8 @@ mod pad_wake;
 mod link_hint;
 mod play;
 mod play_notice;
+// Sleep / display off ends the sessions this machine is viewing; waking reconnects them.
+mod power_watch;
 mod process;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod render;
@@ -521,6 +523,7 @@ pub fn run() {
 			instance_unix::spawn_show_listener(app.handle().clone());
 			// The renderer's local-cursor hiding follows the real capture state.
 			crate::session_cmds::spawn_engage_sync(app.handle().clone());
+			crate::power_watch::spawn(app.handle().clone());
 			// Two-way clipboard sync with every open session (on by default).
 			crate::clipboard_sync::spawn_watcher(app.handle().clone());
 			crate::remote_cursor::start(app.handle());

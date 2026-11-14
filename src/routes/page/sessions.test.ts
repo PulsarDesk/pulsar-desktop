@@ -1,7 +1,7 @@
 // @vitest-environment node
 // (SessionManager is pure logic — no DOM needed; avoids jsdom ESM issues with
 // Svelte runes and $state outside a component context.)
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // Stub the event registrations (onPlayReady / onPlayEnded) and the api surface
 // before importing SessionManager so the constructor doesn't blow up in Node.
@@ -41,6 +41,8 @@ vi.mock('#lib/api.js', async () => {
 		onPlayReady: _vi.fn(),
 		onPlayOptimizing: _vi.fn(),
 		onPlayEnded: _vi.fn(),
+		onSystemSleep: _vi.fn(),
+		onSystemWake: _vi.fn(),
 		onPlayError: _vi.fn(),
 		onPlayStats: _vi.fn(),
 		onPeerAvatar: _vi.fn(),
@@ -58,7 +60,7 @@ vi.mock('#lib/peers.svelte.js', () => ({ recordConnection: vi.fn(), setPeerIdent
 vi.mock('#lib/i18n.svelte.js', () => ({ t: (k: string) => k }));
 
 import { api } from '#lib/api.js';
-import { SessionManager } from './sessions.svelte';
+import { SessionManager, RESUME_DELAYS_MS } from './sessions.svelte';
 import { ui } from '#lib/settings.svelte.js';
 
 function makeManager(mode: 'remote' | 'game' = 'remote') {
@@ -266,6 +268,99 @@ describe('SessionManager — window fullscreen after the last session ends', () 
 		mgr.toggleFullscreen();
 		mgr.endSession(mgr.sessions[0].tabId);
 		expect(mgr.fullscreen).toBe(true);
+	});
+});
+
+describe('sleep ends the viewed sessions, wake-up connects them again', () => {
+	// These tests replace the connect mock's behaviour; the suites after them need it back.
+	const connect = vi.mocked(api.startRemotePlay).getMockImplementation()!;
+	beforeEach(() => {
+		vi.clearAllMocks();
+		vi.useFakeTimers();
+		ui.duplicateSessions = false;
+	});
+	afterEach(() => {
+		vi.mocked(api.startRemotePlay).mockReset();
+		vi.mocked(api.startRemotePlay).mockImplementation(connect);
+		vi.useRealTimers();
+	});
+	const settle = async (ms: number) => {
+		await vi.advanceTimersByTimeAsync(ms);
+	};
+
+	it('ends every remote session at sleep and brings it back with its mode and name', async () => {
+		const sm = makeManager();
+		await sm.startConnect(target);
+		await sm.startConnect({ name: 'Console', id: '444 555 666' }, 'game', 'steam');
+		sm.renameTab(sm.sessions[0].tabId, 'Work PC');
+		sm.startHostSession({ title: 'Local game', cmdStop: 'stop' } as never);
+		expect(sm.sessions).toHaveLength(3);
+
+		sm.systemSleep();
+		expect(vi.mocked(api.stopStream)).toHaveBeenCalledTimes(2);
+		// The local host-game tab is not a viewed session: it stays, and its game keeps running.
+		expect(sm.sessions.map((s) => s.target.name)).toEqual(['Local game']);
+		expect(vi.mocked(api.runCommand)).not.toHaveBeenCalled();
+
+		vi.mocked(api.startRemotePlay).mockClear();
+		const wake = sm.systemWake();
+		await settle(RESUME_DELAYS_MS[0] - 1);
+		expect(vi.mocked(api.startRemotePlay)).not.toHaveBeenCalled(); // the network needs a moment
+		await settle(1);
+		await wake;
+		expect(vi.mocked(api.startRemotePlay)).toHaveBeenCalledTimes(2);
+		const back = sm.sessions.filter((s) => s.target.name !== 'Local game');
+		expect(back.map((s) => [s.target.id, s.mode, s.gameId, s.label])).toEqual([
+			['111 222 333', 'remote', undefined, 'Work PC'],
+			['444 555 666', 'game', 'steam', undefined]
+		]);
+	});
+
+	it('tries again while the network is not back, and gives up after the last round', async () => {
+		const sm = makeManager();
+		await sm.startConnect(target);
+		sm.systemSleep();
+		vi.mocked(api.startRemotePlay).mockClear();
+		vi.mocked(api.startRemotePlay).mockRejectedValueOnce(new Error('peer offline'));
+		const wake = sm.systemWake();
+		await settle(RESUME_DELAYS_MS[0]);
+		expect(sm.sessions).toHaveLength(0); // first try failed
+		await settle(RESUME_DELAYS_MS[1]);
+		await wake;
+		expect(vi.mocked(api.startRemotePlay)).toHaveBeenCalledTimes(2);
+		expect(sm.sessions).toHaveLength(1);
+
+		// Never reachable again: every round tries once, then it stops asking.
+		sm.systemSleep();
+		vi.mocked(api.startRemotePlay).mockClear();
+		vi.mocked(api.startRemotePlay).mockRejectedValue(new Error('peer offline'));
+		const wake2 = sm.systemWake();
+		await settle(RESUME_DELAYS_MS.reduce((a, b) => a + b, 0));
+		await wake2;
+		expect(vi.mocked(api.startRemotePlay)).toHaveBeenCalledTimes(RESUME_DELAYS_MS.length);
+		await sm.systemWake(); // nothing remembered any more
+		expect(vi.mocked(api.startRemotePlay)).toHaveBeenCalledTimes(RESUME_DELAYS_MS.length);
+	});
+
+	it('a lid that closes again before the reconnect keeps the session remembered', async () => {
+		const sm = makeManager();
+		vi.mocked(api.startRemotePlay).mockImplementation(() =>
+			Promise.resolve({ id: 7, transport: 'direct', ws_port: 0, local: false, native: false, embedded: false, host_codecs: [], host_encoders: [], host_displays: [] } as never)
+		);
+		await sm.startConnect(target);
+		sm.systemSleep();
+		vi.mocked(api.startRemotePlay).mockClear();
+		const first = sm.systemWake(); // lid opened …
+		await settle(1000);
+		sm.systemSleep(); // … and closed again a second later
+		await settle(RESUME_DELAYS_MS[0]);
+		await first;
+		expect(vi.mocked(api.startRemotePlay)).not.toHaveBeenCalled();
+		const second = sm.systemWake();
+		await settle(RESUME_DELAYS_MS[0]);
+		await second;
+		expect(vi.mocked(api.startRemotePlay)).toHaveBeenCalledTimes(1);
+		expect(sm.sessions).toHaveLength(1);
 	});
 });
 

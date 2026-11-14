@@ -54,6 +54,8 @@ export {
 	onOverlayCmd,
 	onOverlayEnd,
 	onOverlayClose,
+	onSystemSleep,
+	onSystemWake,
 	onOverlayControl,
 	onOverlayChat,
 	onOverlayFs,

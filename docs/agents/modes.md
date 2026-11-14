@@ -142,6 +142,31 @@ Escape, the menu's own close and B on the pad leave control released (click-to-c
 `kbdhook::imp::chord_tests` (the Tauri crate's test binary needs a Common-Controls v6
 manifest next to it to load on Windows — `TaskDialogIndirect`).
 
+## Sleep ends the viewed sessions, wake-up connects them again (2026-11-14)
+
+A connected session keeps the CLIENT machine awake — its audio stream alone holds Windows
+out of Modern Standby — and keeps the host encoding (a laptop left connected streamed into a
+dark screen all night). So when the machine that VIEWS goes into a sleep-like state, its
+sessions end, and they come back by themselves afterwards:
+
+- **Sleep-like** = the system suspends, or its display turns off (on a Modern Standby machine
+  that is its sleep; no suspend event comes while audio plays). An automatic resume with the
+  display still off does not count as awake.
+- `src-tauri/src/power_watch.rs` (Windows: `PowerRegisterSuspendResumeNotification` +
+  `PowerSettingRegisterNotification(GUID_CONSOLE_DISPLAY_STATE)`, callbacks, no window) emits
+  `system-sleep`, then stops every play itself — the webview may be throttled with the
+  display off, so the UI is not trusted to do it — and emits `system-wake` on the way back.
+- `SessionManager.systemSleep` remembers each remote session (target, mode, game, monitor,
+  tab name) and ends it; `systemWake` connects them again in rounds (`RESUME_DELAYS_MS`:
+  the network returns after the screen), stops if the machine sleeps again, and gives up after
+  the last round (the error shows on Home like any failed connect). A local host-game tab is
+  not a viewed session and stays. A reconnect goes through the host's normal access rules
+  (password / approval prompt again where the host asks for one). Split panes come back as
+  tabs.
+- The HOST's own sleep is not handled here (its clients see it go silent).
+- **Linux / macOS: not implemented** (`spawn` is a no-op). A real suspend freezes the app and
+  the host times the session out; a display that only turns off is not noticed.
+
 ## Free cursor ("Serbest imleç", remote mode, all desktop platforms)
 
 Parsec-style handover, issue #3. Settings → Görüntü + the session menu's Görüntü view

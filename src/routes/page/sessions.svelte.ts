@@ -4,7 +4,7 @@
 // markup stays small; behavior is identical to the inline version it replaced.
 
 import { savedStreamPicks } from '#lib/streamPicks.js';
-import { api, isTauri, onHostDisplays, onPeerAvatar, onPeerName, onPlayEnded, onPlayError, onPlayStats, onPlayOptimizing, onPlayReady, setFullscreen } from '#lib/api.js';
+import { api, isTauri, onHostDisplays, onPeerAvatar, onPeerName, onPlayEnded, onPlayError, onPlayStats, onPlayOptimizing, onPlayReady, onSystemSleep, onSystemWake, setFullscreen } from '#lib/api.js';
 import { recordConnection, setPeerIdentity } from '#lib/peers.svelte.js';
 import { ui, saveUi } from '#lib/settings.svelte.js';
 import { t } from '#lib/i18n.svelte.js';
@@ -105,6 +105,19 @@ type Deps = {
 	 * dismiss THAT target's password prompt (others may still be pending). */
 	onAuthDone: (targetId: string) => void;
 };
+
+/** A session the machine's sleep ended: what it takes to connect it again. */
+type Resume = {
+	target: Target;
+	mode: 'remote' | 'game';
+	gameId: string;
+	displayIdx?: number;
+	windowHwnd?: number;
+	label?: string;
+};
+/** After wake-up the network is rarely back at once: wait this long, then try again a few
+ * times (ms after the previous try). */
+export const RESUME_DELAYS_MS = [2500, 5000, 10_000, 20_000];
 
 export class SessionManager {
 	// Multiple concurrent host connections, each a tab. `activeTab` is 'home' or a
@@ -401,6 +414,11 @@ export class SessionManager {
 
 	#nextTab = 0;
 	#deps: Deps;
+	// Sessions the machine's sleep ended, to connect again when it is back (systemSleep /
+	// systemWake), and a counter that every sleep and wake bumps so a reconnect round that was
+	// overtaken stops.
+	#resume: Resume[] = [];
+	#powerGen = 0;
 	// Targets (despaced peer id) for which interactive auth (password prompt or
 	// host Allow/Deny) is currently in progress. The connect timeout is paused
 	// while the target is in this set — auth time must not count against the
@@ -439,6 +457,8 @@ export class SessionManager {
 			const s = this.sessions.find((x) => x.playId === playId);
 			if (s) this.endSession(s.tabId);
 		});
+		onSystemSleep(() => this.systemSleep());
+		onSystemWake(() => void this.systemWake());
 		// Why a session ended / can't start, shown on Home instead of the tab just vanishing:
 		// the host stopped answering, or (still connecting) the host reports a stream error
 		// ("!…" stats, e.g. it can't capture its screen).
@@ -454,6 +474,68 @@ export class SessionManager {
 			this.endSession(s.tabId);
 		});
 	}
+
+	/** The machine goes to sleep (suspend, display off): every session it is viewing ends —
+	 * a connected session keeps the machine awake (its audio stream) and the host encoding —
+	 * and is remembered for `systemWake`. Rust ends the plays too (the webview may be throttled
+	 * with the display off); ending them here as well is harmless. A local host-game tab (no
+	 * peer) stays. */
+	systemSleep = () => {
+		this.#powerGen++;
+		for (const s of [...this.sessions]) {
+			const remote = s.playId >= 0 || s.phase === 'connecting';
+			if (!remote) continue;
+			this.#remember({
+				target: s.target,
+				mode: s.mode,
+				gameId: s.gameId ?? '',
+				displayIdx: s.displayIdx,
+				windowHwnd: s.windowHwnd,
+				label: s.label
+			});
+			this.endSession(s.tabId);
+		}
+	};
+
+	#remember(r: Resume) {
+		const same = (x: Resume) =>
+			x.target.id === r.target.id && x.mode === r.mode && x.gameId === r.gameId && x.displayIdx === r.displayIdx && x.windowHwnd === r.windowHwnd;
+		if (!this.#resume.some(same)) this.#resume.push(r);
+	}
+
+	/** The machine is back: connect the sessions sleep ended again, in a few rounds
+	 * (`RESUME_DELAYS_MS`) because the network usually returns after the screen. A round stops
+	 * when the machine sleeps again (the sessions already back are remembered again by
+	 * `systemSleep`, the rest stay remembered). What still fails after the last round is given
+	 * up; its error stays on Home like any failed connect. */
+	systemWake = async () => {
+		const gen = ++this.#powerGen;
+		for (const delay of RESUME_DELAYS_MS) {
+			if (this.#resume.length === 0) return;
+			await new Promise((r) => setTimeout(r, delay));
+			if (gen !== this.#powerGen) return;
+			const todo = this.#resume;
+			this.#resume = [];
+			for (let i = 0; i < todo.length; i++) {
+				const r = todo[i];
+				const before = new Set(this.sessions.map((s) => s.tabId));
+				await this.startConnect(r.target, r.mode, r.gameId, {
+					...(r.displayIdx !== undefined ? { displayIdx: r.displayIdx } : {}),
+					...(r.windowHwnd !== undefined ? { windowHwnd: r.windowHwnd } : {})
+				});
+				const tab = this.sessions.find((s) => !before.has(s.tabId));
+				if (tab && r.label) this.renameTab(tab.tabId, r.label);
+				if (gen !== this.#powerGen) {
+					// Asleep again mid-round: what was not tried yet stays remembered (a session
+					// that did come back is in `sessions`, so `systemSleep` took it).
+					for (const rest of todo.slice(tab ? i + 1 : i)) this.#remember(rest);
+					return;
+				}
+				if (!tab) this.#remember(r);
+			}
+		}
+		this.#resume = [];
+	};
 
 	#activateByPlayId(playId: number) {
 		this.sessions = this.sessions.map((s) =>

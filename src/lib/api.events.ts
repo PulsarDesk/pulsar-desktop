@@ -195,6 +195,11 @@ export const onPlayOptimizing = (cb: (id: number) => void) =>
  * release any input grab and drop the tab — otherwise the native path freezes on mpv's last
  * frame with the keyboard/mouse still captured (you'd be stuck). Payload is the play id. */
 export const onPlayEnded = (cb: (id: number) => void) => listenTo<number>('play-ended', (e) => cb(e));
+/** This machine is going into a sleep-like state (suspend, display off): the sessions it is
+ * viewing are being ended (power_watch.rs). */
+export const onSystemSleep = (cb: () => void) => listenTo<string>('system-sleep', () => cb());
+/** …and it is back: the sessions sleep ended can be connected again. */
+export const onSystemWake = (cb: () => void) => listenTo<string>('system-wake', () => cb());
 
 /** Host: a controlling client asked to reverse direction — connect back to `id`. */
 export const onReverseRequest = (cb: (e: { id: string }) => void) =>
