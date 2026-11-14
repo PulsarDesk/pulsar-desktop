@@ -14,7 +14,9 @@ Both are **bundled and auto-installed** (GPLv3 build is license-clear):
   (`handle_key`). Interception: LGPL-3.0 non-commercial w/ redistribution — fine
   for GPLv3; commercial Pulsar would need their commercial license.
 - **Virtual gamepad** (pulsar-core `input`, `vigem.rs`): **ViGEmBus** (X360 + DS4
-  via the vendored `vigem-client` fork). Linux uses uinput; macOS is a no-op stub.
+  via the vendored `vigem-client` fork). Linux uses uinput; macOS an `IOHIDUserDevice`
+  virtual HID pad (`mac_hid.rs`, needs the virtual-HID entitlement — see status.md). No
+  ViGEmBus → the client gets a `PadUnavailable` notice (`vigem_missing`) and the host a toast.
 - **Virtual DualSense** (pulsar-core `input::ds5`): **usbip-win2** — see below.
 
 **Bundling:** `interception.dll` ships next to the exe; the NSIS installer runs

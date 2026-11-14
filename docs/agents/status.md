@@ -27,7 +27,20 @@ sizes FEC parity from the client's `Stats` and encodes with intra-refresh / shor
 reorder wait (`maxdelay`), and on Windows/macOS has a reorder buffer. Test with
 `scripts/netem.sh` + `scripts/validate-log.mjs`. Do not push behaviour changes untested.
 
-**Scaffolded / known gaps:** macOS virtual gamepad (no-op stub); HW encode on
+**macOS host virtual gamepad (2026-11-14, untested on macOS hardware):** pulsar-core
+`input/mac_hid.rs` creates an `IOHIDUserDevice` virtual HID pad (Xbox target = Xbox Wireless
+over Bluetooth 045E:0B13, DS4 target = DualShock 4 USB 054C:09CC) with rumble back to the
+client, like ViGEm/uinput. It needs the restricted entitlement
+`com.apple.developer.hid.virtual.device` (Developer ID + provisioning profile;
+`src-tauri/entitlements/virtual-hid.plist`, used by release.yml only when the `APPLE_*`
+secrets exist — none are set today, so released Mac builds fall back). Any host that cannot
+create a pad (Mac without the entitlement, Windows without ViGEmBus, Linux without
+`/dev/uinput`) now sends `DataMsg::PadUnavailable`: the client shows "Oyuncu N kolu karşı
+tarafta çalışmıyor: …" in-session (`pad_notice.rs` → `play_notice`), the host a `pad-off`
+toast. Whether GameController / SDL accept a virtual (non-USB/BT) device with these VID/PIDs
+is unverified.
+
+**Scaffolded / known gaps:** HW encode on
 the Wayland/gst path (software x264 only); media-over-the-session for
 symmetric-NAT (media is a direct UDP RTP flow today — fine for LAN/cone-NAT/
 relay-direct). The Windows↔Windows black-screen work (probe-validated caps, encoder
