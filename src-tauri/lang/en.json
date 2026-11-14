@@ -49,5 +49,6 @@
 	"ds5.headset.off": "Headphones unplugged: audio plays on this device again",
 	"ds5.headset.player": "Player",
 	"hint.wifi24": "Wi-Fi is on 2.4 GHz: latency may rise and a Bluetooth controller suffers. Use a 5/6 GHz network if you can",
-	"hint.wlanPowerSave": "Wi-Fi power saving is on while on battery: the stream may stall. Plug in, or set the wireless adapter to \"Maximum Performance\" in the power plan"
+	"hint.wlanPowerSave": "Wi-Fi power saving is on while on battery: the stream may stall. Plug in, or set the wireless adapter to \"Maximum Performance\" in the power plan",
+	"fw.macPrompt": "Pulsar wants to allow itself and its streaming programs through the firewall so remote connections can reach it."
 }
