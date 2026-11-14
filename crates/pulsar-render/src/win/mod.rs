@@ -318,6 +318,75 @@ fn lparam_xy(lp: LPARAM) -> egui::Pos2 {
 	egui::pos2(x, y)
 }
 
+/// AU-backlog overflow reports, at most one line per [`OVERFLOW_LOG_EVERY`] with what happened
+/// since the last one. Every overflow used to print its own line: a renderer that decoded
+/// nothing (its D3D device gone while the display was off) wrote one per arriving frame —
+/// 2.6 million lines, 415 MB of app log, in one night (2026-11-14).
+#[derive(Default)]
+struct OverflowLog {
+	/// Stale AUs dropped ahead of a queued keyframe since the last line.
+	skipped: u32,
+	/// Oldest AUs shed with no keyframe to skip to (each asks for an IDR) since the last line.
+	shed: u32,
+	last: Option<std::time::Instant>,
+}
+
+const OVERFLOW_LOG_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+
+impl OverflowLog {
+	/// Count one overflow — `dropped` AUs, `shed` = the oldest one went with no keyframe queued
+	/// — and return the line to print when one is due (the first at once).
+	fn note(&mut self, dropped: u32, shed: bool, now: std::time::Instant) -> Option<String> {
+		if shed {
+			self.shed += dropped;
+		} else {
+			self.skipped += dropped;
+		}
+		if self.last.is_some_and(|t| now.duration_since(t) < OVERFLOW_LOG_EVERY) {
+			return None;
+		}
+		self.last = Some(now);
+		let (skipped, shed) = (std::mem::take(&mut self.skipped), std::mem::take(&mut self.shed));
+		let mut parts = Vec::new();
+		if skipped > 0 {
+			parts.push(format!("dropped {skipped} stale AU(s) ahead of newest keyframe"));
+		}
+		if shed > 0 {
+			parts.push(format!("no keyframe queued; dropped the oldest AU {shed} time(s), keyframe requested"));
+		}
+		Some(format!("pulsar-render(win): AU backlog overflow — {}", parts.join("; ")))
+	}
+}
+
+#[cfg(test)]
+mod overflow_log_tests {
+	use super::*;
+
+	#[test]
+	fn one_line_per_two_seconds_with_the_counts_since_the_last() {
+		let t0 = std::time::Instant::now();
+		let at = |ms: u64| t0 + std::time::Duration::from_millis(ms);
+		let mut log = OverflowLog::default();
+		// The first overflow is reported at once.
+		assert_eq!(
+			log.note(40, false, at(0)).as_deref(),
+			Some("pulsar-render(win): AU backlog overflow — dropped 40 stale AU(s) ahead of newest keyframe")
+		);
+		// A frame every 8 ms shed for two seconds: silent, then one line with the count.
+		let mut lines = Vec::new();
+		for i in 1..=250u64 {
+			lines.extend(log.note(1, true, at(i * 8)));
+		}
+		assert_eq!(lines.len(), 1, "{lines:?}");
+		assert!(lines[0].contains("dropped the oldest AU 250 time(s), keyframe requested"), "{lines:?}");
+		// Both kinds within one window share a line.
+		assert_eq!(log.note(63, false, at(2100)), None);
+		assert_eq!(log.note(1, true, at(2200)), None);
+		let line = log.note(1, true, at(4100)).unwrap();
+		assert!(line.contains("dropped 63 stale AU(s)") && line.contains("2 time(s)"), "{line}");
+	}
+}
+
 /// stdin reader (same protocol as linux.rs/desktop.rs): `open`/`close` toggle the overlay,
 /// `stat …` feeds the HUD, `pace 0|1` toggles frame pacing, `chat`/`fsjson`/`kin` feed the
 /// overlay's Chat + Files views (the app sends these platform-agnostically).
@@ -1112,6 +1181,40 @@ struct Renderer {
 }
 
 impl Renderer {
+	/// Give the window back before a rebuild: release everything that holds the swapchain,
+	/// then clear and flush the context. D3D11 destroys a released flip-model swapchain only
+	/// at the next flush, and until it is really gone `CreateSwapChainForHwnd` on the same
+	/// window fails with "Access is denied" — which is what the rebuild after a device loss
+	/// got (2026-11-14), every time. Returns what the next renderer takes over: the overlay
+	/// state and the surface size.
+	fn retire(self) -> (crate::overlay::OverlayState, crate::overlay::UiState, u32, u32) {
+		let Renderer {
+			context,
+			swap,
+			rtv,
+			decoder,
+			present,
+			last_nv12,
+			held_back,
+			painter,
+			cursor_tex,
+			ostate,
+			ov_ui,
+			width,
+			height,
+			..
+		} = self;
+		// Views and textures of the back buffer first, the swapchain last.
+		drop((painter, cursor_tex, present, decoder, last_nv12, held_back, rtv));
+		drop(swap);
+		// SAFETY: the immediate context of this thread's device; both calls take no arguments.
+		unsafe {
+			context.ClearState();
+			context.Flush();
+		}
+		(ostate, ov_ui, width.max(1), height.max(1))
+	}
+
 	/// Create the D3D11 device (BGRA + VIDEO support for the later VideoProcessor) and a
 	/// flip-model swapchain bound to the child window.
 	unsafe fn new(
@@ -2109,6 +2212,7 @@ unsafe fn event_loop(
 	// `AU_HARD_CAP` (~0.5 s at 120 fps) and is caught up by decoding without presenting.
 	const AU_SOFT_CAP: usize = 8;
 	const AU_HARD_CAP: usize = 64;
+	let mut overflow_log = OverflowLog::default();
 	let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 	{
 		let q = queue.clone();
@@ -2144,9 +2248,9 @@ unsafe fn event_loop(
 						match g.iter().rposition(|au| au.key) {
 							Some(k) if k > 0 => {
 								g.drain(..k);
-								eprintln!(
-									"pulsar-render(win): AU backlog overflow — dropped {k} stale AU(s) ahead of newest keyframe"
-								);
+								if let Some(line) = overflow_log.note(k as u32, false, std::time::Instant::now()) {
+									eprintln!("{line}");
+								}
 							}
 							_ if g.len() < AU_HARD_CAP => {}
 							_ => {
@@ -2155,9 +2259,9 @@ unsafe fn event_loop(
 								// picture stays broken until the host's periodic keyframe).
 								g.pop_front();
 								stream::rtp::NEED_IDR.store(true, Ordering::Relaxed);
-								eprintln!(
-									"pulsar-render(win): AU backlog overflow — no keyframe queued; dropped the oldest AU, keyframe requested"
-								);
+								if let Some(line) = overflow_log.note(1, true, std::time::Instant::now()) {
+									eprintln!("{line}");
+								}
 							}
 						}
 					}
@@ -2200,6 +2304,25 @@ unsafe fn event_loop(
 	// The first AU of this renderer announces a live stream too: a renderer respawned while
 	// the old one was stalled (codec switch) must lift the app's stopped-stream lock.
 	let mut live_announced = false;
+	// A lost D3D device (see the top of the loop): the overlay state of the renderer that was
+	// dropped, kept until a rebuild succeeds; when the last rebuild was tried; how many failed.
+	let mut lost: Option<(crate::overlay::OverlayState, crate::overlay::UiState, u32, u32)> = None;
+	let mut rebuild_at: Option<std::time::Instant> = None;
+	let mut rebuild_fails: u32 = 0;
+	/// Pause between two rebuild attempts.
+	const REBUILD_EVERY: std::time::Duration = std::time::Duration::from_millis(500);
+	/// A failing rebuild is logged once, then every this many attempts (= once a minute).
+	const REBUILD_LOG_EVERY: u32 = 120;
+	// Test hook `PULSAR_TEST_DEVICE_LOSS=<after_s>,<failed_attempts>`: once, `<after_s>` s in,
+	// the renderer is dropped as if its D3D device was removed, and the first
+	// `<failed_attempts>` rebuilds fail like they do while the display is off.
+	let mut test_loss: Option<(std::time::Instant, u32)> =
+		std::env::var("PULSAR_TEST_DEVICE_LOSS").ok().and_then(|v| {
+			let (after, fails) = v.split_once(',')?;
+			let after = std::time::Duration::from_secs_f32(after.trim().parse().ok()?);
+			Some((std::time::Instant::now() + after, fails.trim().parse().ok()?))
+		});
+	let mut test_fails_left: u32 = 0;
 	loop {
 		// GPU device-loss recovery (driver TDR / reset / update mid-session — common while
 		// gaming): a removed D3D11 device makes every VideoProcessorBlt / Present / decode fail
@@ -2208,44 +2331,78 @@ unsafe fn event_loop(
 		// so exiting is not a recovery — rebuild the whole D3D stack in place instead.
 		// GetDeviceRemovedReason is the authoritative, cheap check and catches every device-loss
 		// source (blt/present/decode/resize) at a single point.
+		let test_loss_now = test_loss.is_some_and(|(at, _)| std::time::Instant::now() >= at);
 		if renderer
 			.as_ref()
-			.is_some_and(|r| unsafe { r.device.GetDeviceRemovedReason() }.is_err())
+			.is_some_and(|r| test_loss_now || unsafe { r.device.GetDeviceRemovedReason() }.is_err())
 		{
+			if test_loss_now {
+				test_fails_left = test_loss.take().map_or(0, |(_, fails)| fails);
+			}
 			eprintln!("pulsar-render(win): D3D device removed — rebuilding renderer");
 			std::thread::sleep(std::time::Duration::from_millis(200)); // let the driver settle
 			// Drop the old renderer FIRST (its swapchain must release the HWND — DXGI permits
-			// only one flip-model swapchain per HWND), carrying the overlay UI state across so
-			// the user's selections / conn label survive the rebuild.
-			let (ostate, ov_ui, cw, ch) = match renderer
-				.take()
-				.map(|r| (r.ostate, r.ov_ui, r.width.max(1), r.height.max(1)))
-			{
-				Some((o, u, w, h)) => (Some(o), Some(u), w, h),
-				None => (None, None, w0, h0),
+			// only one flip-model swapchain per HWND), keeping the overlay UI state for the
+			// fresh one so the user's selections / conn label survive — through every attempt.
+			if let Some(r) = renderer.take() {
+				lost = Some(r.retire());
+			}
+			rebuild_at = None;
+			rebuild_fails = 0;
+		}
+		// The rebuild, tried until it works. It can fail for hours: while the display is off
+		// (the laptop's screen-off / Modern Standby) creating the swapchain is refused with
+		// "Access is denied". The first version tried ONCE — a failed attempt left `renderer`
+		// at None, which the check above never saw again, so the renderer stayed dead for good:
+		// a frozen picture after wake-up, and the app hung with it (below). 2026-11-14.
+		if renderer.is_none() && rebuild_at.is_none_or(|t| t.elapsed() >= REBUILD_EVERY) {
+			rebuild_at = Some(std::time::Instant::now());
+			let (cw, ch) = lost.as_ref().map_or((w0, h0), |l| (l.2, l.3));
+			let built = if test_fails_left > 0 {
+				test_fails_left -= 1;
+				Err(windows::core::Error::from(windows::Win32::Foundation::E_ACCESSDENIED))
+			} else {
+				Renderer::new(hwnd, parent, cw, ch, codec, mode)
 			};
-			match Renderer::new(hwnd, parent, cw, ch, codec, mode) {
+			match built {
 				Ok(mut fresh) => {
-					if let Some(o) = ostate {
+					if let Some((o, u, _, _)) = lost.take() {
 						fresh.ostate = o;
-					}
-					if let Some(u) = ov_ui {
 						fresh.ov_ui = u;
 					}
+					if rebuild_fails > 0 {
+						eprintln!("pulsar-render(win): renderer rebuilt after {rebuild_fails} failed attempt(s)");
+					}
+					rebuild_fails = 0;
 					// The decoder + VideoProcessor rebuild lazily on the next AU / frame against
-					// the fresh device (decoder=None, src_w/h=0). Reset the stall timer.
+					// the fresh device (decoder=None, src_w/h=0). Everything that arrived
+					// meanwhile was dropped, so the picture restarts from a keyframe: ask for one.
+					stream::rtp::NEED_IDR.store(true, Ordering::Relaxed);
 					renderer = Some(fresh);
 					last_au_at = std::time::Instant::now();
 				}
 				Err(e) => {
-					eprintln!("pulsar-render(win): renderer rebuild failed: {e} — retrying");
-					// renderer stays None; retry on the next iteration.
+					rebuild_fails += 1;
+					if rebuild_fails == 1 || rebuild_fails % REBUILD_LOG_EVERY == 0 {
+						eprintln!(
+							"pulsar-render(win): renderer rebuild failed: {e} — retrying (attempt {rebuild_fails})"
+						);
+					}
 				}
 			}
 		}
 		let Some(r) = renderer.as_mut() else {
-			// Rebuild failed (device still gone) — wait a beat and retry without spinning.
-			std::thread::sleep(std::time::Duration::from_millis(200));
+			// No device for now. The window must stay alive meanwhile: it is a child in the
+			// app's window tree (shared input queue), so a message it does not answer hangs the
+			// APP's UI thread — Windows reported "pulsar.exe stopped interacting" on
+			// pulsar-render.exe and the user had to kill it. And nothing can decode: drop what
+			// arrives (it used to pile up to the cap and overflow once per frame, all night).
+			while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+				let _ = TranslateMessage(&msg);
+				DispatchMessageW(&msg);
+			}
+			queue.lock().unwrap().clear();
+			std::thread::sleep(std::time::Duration::from_millis(40));
 			continue;
 		};
 		while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {

@@ -164,6 +164,35 @@ overflows the renderer's 8-AU queue and drops the recovery frame.
 - **Knobs:**
   - `PULSAR_RFI=0` (client) turns RFI off.
   - `PULSAR_TEST_DROP=N` (renderer) drops 1 of every N packets.
+  - `PULSAR_TEST_DEVICE_LOSS=<after_s>,<failed_attempts>` (Windows renderer) drops the renderer
+    once as if its D3D device was removed and fails the first rebuilds (see "Device loss").
+
+## Device loss on the Windows renderer (screen off, driver reset)
+
+`win/mod.rs` `event_loop` checks `GetDeviceRemovedReason` every pass and rebuilds the whole
+D3D stack in place (the app does not respawn the renderer). What went wrong on 2026-11-14 — a
+laptop whose screen turned off at night with a session connected — and the rules since:
+
+- **Release the swapchain for real before the new one** (`Renderer::retire`): drop every view
+  of the back buffer, the swapchain, then `ClearState` + `Flush`. D3D11 destroys a released
+  flip-model swapchain only at a flush; until then `CreateSwapChainForHwnd` on the same
+  window returns "Access is denied" — the rebuild failed every time.
+- **Retry until it works** (every 500 ms, logged once and then once a minute). The first
+  version tried once; a failure left `renderer` at `None`, which the removed-device check
+  never looked at again — the renderer stayed dead until the app was killed.
+- **Keep pumping window messages without a device.** The renderer's window is a child in the
+  app's window tree (shared input queue): an unanswered message hangs the APP's UI thread
+  (Windows: "pulsar.exe stopped interacting", hang on `pulsar-render.exe`).
+- **Drop arriving AUs without a device**, and report backlog overflows at most once per 2 s
+  with counts (`OverflowLog`): one line per frame made 2.6 million lines / 415 MB in a night.
+- After a rebuild the picture restarts from a keyframe (`NEED_IDR`).
+
+Try it: `PULSAR_TEST_DEVICE_LOSS=6,8` (see Knobs) in a test window — the window keeps
+answering, the log shows "renderer rebuilt after 8 failed attempt(s)", the picture returns.
+
+Still open (not a renderer matter): a connected session keeps the client's audio stream
+running, so Windows never enters Modern Standby while one is up (sleep study: "Audio Active"
+100 %), and the stream goes on all night with the screen off.
 
 ## Poor-link client behaviour (2026-11-09, LOCAL, unpushed, untested on the field link)
 
