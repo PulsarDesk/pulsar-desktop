@@ -15,6 +15,9 @@ pulsar-desktop/
                           #   decode, egui in-session overlay, `--probe` decoder probe.
   crates/pulsar-setup/    # egui branded Windows bootstrapper installer
                           #   (Discord-style, embedded payload, silent/uninstall).
+  crates/pulsar-machine/  # Linux/macOS shared (machine-wide) mode plumbing: root-owned
+                          #   machine dir checks, admin group, flock host lease, session
+                          #   active, pkexec/osascript setup (libc only; mac-checkable).
   src-tauri/              # `pulsar-tauri` crate (bin name `pulsar`)
     src/lib.rs            #   command registration / glue
     src/host.rs,host/     #   host side; handlers.rs = capture/encode/audio spawn

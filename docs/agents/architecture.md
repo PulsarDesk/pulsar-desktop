@@ -27,7 +27,8 @@ through `util::data_dir` (`config_path`, `identity_path`, known peers, `pairing.
 
 ## Shared (machine-wide) mode — "Kullanıcılar arası ortak Pulsar"
 
-`src-tauri/src/shared_mode.rs`, Settings → Genel. Windows only (hidden elsewhere).
+`src-tauri/src/shared_mode.rs`, Settings → Genel. Windows, Linux and macOS (the Unix side is
+`crates/pulsar-machine`, see "Linux / macOS" below; **untested on Linux and macOS hardware**).
 
 | | **ON — one Pulsar per PC** | **OFF — per-user (the old behaviour)** |
 | - | - | - |
@@ -77,6 +78,49 @@ through `util::data_dir` (`config_path`, `identity_path`, known peers, `pairing.
   the SYSTEM sysagent launches `pulsar.exe` in the active session, Parsec/Sunshine-style); Duo
   multi-seat with shared ON = first Active seat hosts; the toggle doesn't notify other users'
   running Pulsar.
+
+### Linux / macOS (`crates/pulsar-machine`, 2026-11-14 — untested on Linux and macOS hardware)
+
+Same model, same `shared_mode.rs` code paths (`decide`, `migration_plan`, lease thread,
+`SHARED_*` codes); the Unix plumbing is its own libc-only crate so its macOS code type-checks
+from a non-Mac (`cargo check --target aarch64-apple-darwin -p pulsar-machine`).
+
+| Windows | Linux / macOS |
+| - | - |
+| `%ProgramData%\Pulsar` (Users read) | `/var/lib/pulsar` · `/Library/Application Support/Pulsar`, `root:root 0755` (holds `mode.json`, 0644) |
+| `…\shared` SYSTEM + Administrators only | `…/shared` `root:<admin group> 2770`, files 0660 |
+| owner SYSTEM/Administrators, no reparse point | `lstat`: not a symlink, a real dir, owner uid 0, no group/other write on the machine dir, no "other" bits + group = an admin group on the shared dir (`check_machine_dir` / `check_shared_dir`, unit-tested); `mode.json` is only believed from a root-owned regular file |
+| elevated token | root or a member of an admin group: `sudo`/`wheel`/`admin` on Linux, `admin` on macOS |
+| DPAPI machine scope (`device_creds.json`) | none: the admin-group-only dir IS the protection; passwords stay `"plain"` (as in per-user mode on Unix), the file is written 0660 in shared mode |
+| `Global\PulsarSharedHost` mutex | `flock(LOCK_EX\|LOCK_NB)` on `…/shared/host.lock` (opened `O_NOFOLLOW`; released by the kernel on exit/crash = abandoned mutex) |
+| WTS session `WTSActive` | logind `loginctl show-session $XDG_SESSION_ID -p Active` · `CGSessionCopyCurrentDictionary` `kCGSSessionOnConsoleKey` (locked = still active; unknown = active) |
+| elevated Pulsar creates the dirs + writes the marker | Pulsar never runs as root: the toggle runs ONE setup script as root behind the system's own password prompt — `pkexec /bin/sh -c …` (polkit) · `osascript -e 'do shell script … with administrator privileges'` |
+
+- **Setup script (`setup_script`, unit-tested; run end-to-end as root in a test that only
+  runs under root — done in WSL):** refuses a machine/shared path that is a symlink or not a
+  dir (exit 3) or not owned by root (exit 4) — it never re-owns a dir someone else created;
+  re-applies `chown`/`chmod`; gives regular files already in the shared dir the admin group +
+  0660; writes `mode.json` atomically. Group name is validated before it is spliced in.
+- **Toggle (`set_shared_mode`, async):** not in an admin group → `SHARED_ELEVATION`; prompt
+  dismissed → `SHARED_CANCELLED`; polkit says no → `SHARED_DENIED`; script refused →
+  `SHARED_DIR:<reason>`. Then (ON) migrate this user's files if the shared dir is usable, and
+  restart. A group membership granted after login isn't in the process yet → after the restart
+  Settings shows "no access" until the user logs in again.
+- **Default:** Pulsar can't create the machine dir by itself, so an undecided machine stays
+  per-user and the data is marked provisional (it migrates when someone turns the setting on);
+  there is no "fresh machine → ON" without the password prompt, by design (no prompt at start).
+- **File modes:** `identity.key` (pulsar-core writes 0600), atomic rewrites (umask 0644) and
+  `host.lock` are fixed to 0660 by `harden_dir` at start, after migration and on every lease
+  tick (2 s); only files this user owns, decided on the `O_NOFOLLOW` fd (no symlink chmod).
+  Files inside are never readable by other users anyway (the dir is 2770).
+- **Why no systemd system unit / LaunchDaemon:** the host captures the user's graphical
+  session — XDG portal + PipeWire / X11 on Linux, ScreenCaptureKit under the user's TCC
+  Screen Recording grant on macOS — and injects input into it. A system service (root, no
+  session) has neither: no Wayland portal, no TCC grant, no WindowServer session. So, like
+  Windows, the host runs in the active user's Pulsar and the lease hands it over; the
+  "session whose user never started Pulsar" gap is the same as on Windows.
+- `main.rs`'s "always elevate in shared mode" stays Windows-only (`requires_admin()` is false
+  on Unix: group membership can't be gained by relaunching).
 
 ## Auth: saved device passwords + pairing
 

@@ -36,6 +36,16 @@ merged (2026-09-02); AMD-on-Windows, macOS and Windows ARM64 are CI-built but **
 on hardware** — read [host-encode.md](host-encode.md) before touching encoder/decoder
 selection.
 
+**Shared (machine-wide) mode on Linux + macOS (2026-11-14, untested on Linux and macOS
+hardware):** `crates/pulsar-machine` + the Unix branches of `shared_mode.rs` — see
+[architecture.md](architecture.md) "Linux / macOS". Unit tests for every rule (dir checks,
+group pick, script text, exit-code mapping, per-user paths); `flock` lease + `harden` tested on
+Linux (WSL); the setup script ran end-to-end as root in WSL on a scratch dir. **Never run:**
+the real `pkexec` / macOS administrator prompt, the toggle + restart in the app, two users'
+Pulsar handing the lease over (logind `Active`, CGSession on-console), macOS at all (only
+`cargo check --target aarch64-apple-darwin -p pulsar-machine`; `pulsar-tauri` can't be
+mac-checked from Windows).
+
 **Host-only / headless host / Pulsar Split seat host (2026-11-13, not run on hardware):**
 `--host-only`, `--headless-host`, `--headless-stop`, `--split-seat` — see
 [modes.md](modes.md) "Host-only and headless host". Unit-tested (argv parsing, pipe protocol
