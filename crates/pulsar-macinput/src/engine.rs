@@ -893,8 +893,10 @@ fn handle_key_locked(g: &mut State, evdev: u32, down: bool, sigs: &mut Vec<Signa
 pub(crate) enum MouseEv {
 	/// Moved / dragged: the new location and the device delta.
 	Move { x: f64, y: f64, dx: f64, dy: f64 },
-	/// `hit_ours` = the topmost window under the point is Pulsar's or a renderer child's.
-	Button { button: u8, down: bool, x: f64, y: f64, hit_ours: bool },
+	/// `hit_ours` = the topmost window under the point is Pulsar's or a renderer child's;
+	/// `hit_video` = it is the window the video rect belongs to (the renderer window, or the
+	/// session's Pulsar window) — not a Pulsar dialog lying over the video.
+	Button { button: u8, down: bool, x: f64, y: f64, hit_ours: bool, hit_video: bool },
 	/// Browser wheel pixels.
 	Scroll { dx: f64, dy: f64 },
 }
@@ -920,12 +922,12 @@ pub(crate) fn mouse(ev: MouseEv) -> Verdict {
 	if !ENGAGED.load(SeqCst) {
 		match ev {
 			MouseEv::Move { .. } if free_mode() => queue(Job::Hover),
-			MouseEv::Button { button: 0, down: true, x, y, hit_ours } => {
+			MouseEv::Button { button: 0, down: true, x, y, hit_video, .. } => {
 				// Click-to-engage: a left click on the video while Pulsar owns that spot. The
 				// click itself still acts locally (it activates the window); its release is
 				// passed too (an up whose down was never forwarded), so it never reaches the host.
 				let inside = video_rect().is_some_and(|r| geom::contains(r, x, y));
-				if hit_ours && inside && !over_ovbtn(x, y) && TAP_OK.load(SeqCst) && !STREAM_STALLED.load(SeqCst) {
+				if hit_video && inside && !over_ovbtn(x, y) && TAP_OK.load(SeqCst) && !STREAM_STALLED.load(SeqCst) {
 					queue(Job::ClickEngage(x, y));
 				}
 			}
@@ -978,7 +980,7 @@ pub(crate) fn mouse(ev: MouseEv) -> Verdict {
 					Verdict::Pass // no video on screen to map onto
 				}
 			}
-			MouseEv::Button { button, down, x, y, hit_ours } => {
+			MouseEv::Button { button, down, x, y, hit_ours, .. } => {
 				if button > 2 {
 					// No host injector knows back/forward buttons: never act locally while
 					// controlling, never forward.
@@ -1294,7 +1296,7 @@ pub(crate) mod tests {
 		assert_eq!(mouse(MouseEv::Move { x: 400.0, y: 150.0, dx: 9.0, dy: 0.0 }), Verdict::Clamp(200.0, 150.0));
 		assert_eq!(rec.take_out(), vec![Out::Motion { x: 1.0, y: 0.5 }]);
 		// Buttons and wheel act on the host only.
-		let click = |down| MouseEv::Button { button: 0, down, x: 150.0, y: 150.0, hit_ours: true };
+		let click = |down| MouseEv::Button { button: 0, down, x: 150.0, y: 150.0, hit_ours: true, hit_video: true };
 		assert_eq!(mouse(click(true)), Verdict::Swallow);
 		assert_eq!(mouse(click(false)), Verdict::Swallow);
 		assert_eq!(
@@ -1302,14 +1304,14 @@ pub(crate) mod tests {
 			vec![Out::Button { button: 0, down: true }, Out::Button { button: 0, down: false }]
 		);
 		// An up whose down was never forwarded (the engaging click) stays local.
-		assert_eq!(mouse(MouseEv::Button { button: 1, down: false, x: 150.0, y: 150.0, hit_ours: true }), Verdict::Pass);
+		assert_eq!(mouse(MouseEv::Button { button: 1, down: false, x: 150.0, y: 150.0, hit_ours: true, hit_video: true }), Verdict::Pass);
 		assert!(rec.take_out().is_empty());
 		// Back/forward buttons: swallowed, not forwarded.
-		assert_eq!(mouse(MouseEv::Button { button: 3, down: true, x: 150.0, y: 150.0, hit_ours: true }), Verdict::Swallow);
+		assert_eq!(mouse(MouseEv::Button { button: 3, down: true, x: 150.0, y: 150.0, hit_ours: true, hit_video: true }), Verdict::Swallow);
 		assert_eq!(mouse(MouseEv::Scroll { dx: 0.0, dy: 30.0 }), Verdict::Swallow);
 		assert_eq!(rec.take_out(), vec![Out::Scroll { dx: 0.0, dy: 30.0 }]);
 		// A held drag is released on the host when control drops.
-		mouse(MouseEv::Button { button: 1, down: true, x: 150.0, y: 150.0, hit_ours: true });
+		mouse(MouseEv::Button { button: 1, down: true, x: 150.0, y: 150.0, hit_ours: true, hit_video: true });
 		rec.take_out();
 		release("test");
 		assert_eq!(rec.take_out(), vec![Out::Button { button: 1, down: false }]);
@@ -1320,7 +1322,7 @@ pub(crate) mod tests {
 	fn click_outside_releases_and_passes() {
 		let _s = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
 		let rec = engaged_session(true, false);
-		let v = mouse(MouseEv::Button { button: 0, down: true, x: 900.0, y: 900.0, hit_ours: false });
+		let v = mouse(MouseEv::Button { button: 0, down: true, x: 900.0, y: 900.0, hit_ours: false, hit_video: false });
 		assert_eq!(v, Verdict::Pass);
 		assert!(!ENGAGED.load(SeqCst));
 		assert_eq!(rec.take_sig(), vec![Signal::Released]);
@@ -1334,16 +1336,35 @@ pub(crate) mod tests {
 		let rec = arm(9, false, false);
 		// Click-to-engage on the video: engages, the click stays local, the host pointer
 		// starts at the clicked spot.
-		let v = mouse(MouseEv::Button { button: 0, down: true, x: 120.0, y: 180.0, hit_ours: true });
+		let v = mouse(MouseEv::Button { button: 0, down: true, x: 120.0, y: 180.0, hit_ours: true, hit_video: true });
 		assert_eq!(v, Verdict::Pass);
 		assert!(ENGAGED.load(SeqCst));
 		assert_eq!(rec.take_sig(), vec![Signal::Engaged]);
 		assert_eq!(rec.take_out(), vec![Out::Motion { x: 0.2, y: 0.8 }]);
-		assert_eq!(mouse(MouseEv::Button { button: 0, down: false, x: 120.0, y: 180.0, hit_ours: true }), Verdict::Pass);
+		assert_eq!(mouse(MouseEv::Button { button: 0, down: false, x: 120.0, y: 180.0, hit_ours: true, hit_video: true }), Verdict::Pass);
 		// Moves: relative deltas, the event dropped, the cursor kept at the anchor.
 		let v = mouse(MouseEv::Move { x: 125.0, y: 180.0, dx: 5.0, dy: -2.0 });
 		assert_eq!(v, Verdict::Anchor(120.0, 180.0));
 		assert_eq!(rec.take_out(), vec![Out::Relative { dx: 5.0, dy: -2.0 }]);
+		disable();
+	}
+
+	#[test]
+	fn a_click_on_a_pulsar_dialog_over_the_video_does_not_engage() {
+		let _s = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+		let rec = arm(12, true, false);
+		let v = mouse(MouseEv::Button { button: 0, down: true, x: 150.0, y: 150.0, hit_ours: true, hit_video: false });
+		assert_eq!(v, Verdict::Pass);
+		assert!(!is_engaged());
+		// Outside the video rect neither, even on the video's own window.
+		mouse(MouseEv::Button { button: 0, down: true, x: 50.0, y: 150.0, hit_ours: true, hit_video: true });
+		assert!(!is_engaged());
+		// The video itself does; a right click does not.
+		mouse(MouseEv::Button { button: 1, down: true, x: 150.0, y: 150.0, hit_ours: true, hit_video: true });
+		assert!(!is_engaged());
+		mouse(MouseEv::Button { button: 0, down: true, x: 150.0, y: 150.0, hit_ours: true, hit_video: true });
+		assert!(is_engaged());
+		assert_eq!(rec.take_sig(), vec![Signal::Engaged]);
 		disable();
 	}
 
@@ -1413,7 +1434,7 @@ pub(crate) mod tests {
 		assert_eq!(mouse(MouseEv::Move { x: 400.0, y: 150.0, dx: 5.0, dy: 0.0 }), Verdict::Pass);
 		assert!(rec.take_out().is_empty());
 		// A drag that started inside keeps driving the host, pinned to the edge.
-		mouse(MouseEv::Button { button: 0, down: true, x: 150.0, y: 150.0, hit_ours: true });
+		mouse(MouseEv::Button { button: 0, down: true, x: 150.0, y: 150.0, hit_ours: true, hit_video: true });
 		rec.take_out();
 		assert_eq!(mouse(MouseEv::Move { x: 400.0, y: 150.0, dx: 5.0, dy: 0.0 }), Verdict::Pass);
 		assert_eq!(rec.take_out(), vec![Out::Motion { x: 1.0, y: 0.5 }]);

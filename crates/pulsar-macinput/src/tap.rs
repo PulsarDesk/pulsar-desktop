@@ -11,7 +11,7 @@ use crate::geom::{self, Rect};
 use crate::keymap;
 use crate::sys::*;
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering::SeqCst};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicPtr, AtomicU64, Ordering::SeqCst};
 use std::sync::Mutex;
 
 /// The tap's mach port (null until created). Re-enabled from the callback when macOS
@@ -31,6 +31,8 @@ struct Win {
 }
 /// Layer-0 windows of the last poll (front to back): the click hit test reads them.
 static WINDOWS: Mutex<Vec<Win>> = Mutex::new(Vec::new());
+/// Quartz number of the window the video rect was measured on (0 = none).
+static VIDEO_WIN: AtomicI64 = AtomicI64::new(0);
 
 /// Keys whose DOWN the tap swallowed (one bit per virtual key code < 128): their UP is
 /// swallowed too; an up whose down acted locally is let through to the local app.
@@ -273,14 +275,16 @@ unsafe fn flags_event(ev: CGEventRef) -> bool {
 	engaged
 }
 
-/// The topmost layer-0 window at the point is Pulsar's or a renderer child's. Unknown (no
-/// window there in the last poll) counts as ours: never release on missing data.
-fn hit_ours(x: f64, y: f64) -> bool {
+/// The topmost layer-0 window at the point: (Pulsar's or a renderer child's, the video's own
+/// window). Unknown (no window there in the last poll) counts as ours — never release on
+/// missing data — but not as the video window — never engage on it either.
+fn hit(x: f64, y: f64) -> (bool, bool) {
 	let wins = WINDOWS.lock().unwrap_or_else(|e| e.into_inner());
+	let video = VIDEO_WIN.load(SeqCst);
 	wins.iter()
 		.find(|w| geom::contains(w.rect, x, y))
-		.map(|w| w.ours)
-		.unwrap_or(true)
+		.map(|w| (w.ours, video != 0 && w.number == video))
+		.unwrap_or((true, false))
 }
 
 unsafe fn mouse_event(ty: u32, ev: CGEventRef) -> CGEventRef {
@@ -288,7 +292,10 @@ unsafe fn mouse_event(ty: u32, ev: CGEventRef) -> CGEventRef {
 		return ev;
 	}
 	let p = CGEventGetLocation(ev);
-	let button = |b: u8, down: bool| MouseEv::Button { button: b, down, x: p.x, y: p.y, hit_ours: hit_ours(p.x, p.y) };
+	let button = |b: u8, down: bool| {
+		let (hit_ours, hit_video) = hit(p.x, p.y);
+		MouseEv::Button { button: b, down, x: p.x, y: p.y, hit_ours, hit_video }
+	};
 	let mev = match ty {
 		kCGEventMouseMoved | kCGEventLeftMouseDragged | kCGEventRightMouseDragged | kCGEventOtherMouseDragged => {
 			MouseEv::Move {
@@ -390,13 +397,18 @@ unsafe fn geometry() {
 				.partial_cmp(&(under(b), area(b.rect)))
 				.unwrap_or(std::cmp::Ordering::Equal)
 		})
-		.map(|w| w.rect);
-	let video = render.and_then(|r| geom::video_rect(r, frac)).or_else(|| {
-		let v = view?;
-		let w = layer0.iter().find(|w| w.number == v.window && w.pid == me)?;
-		geom::sub_rect(w.rect, v.rect.0, v.rect.1, v.rect.2, v.rect.3)
-	});
-	engine::set_geo(Geo { video, render });
+		.copied();
+	let (video, video_win) = match render.and_then(|w| geom::video_rect(w.rect, frac).map(|r| (r, w.number))) {
+		Some((r, n)) => (Some(r), n),
+		None => view
+			.and_then(|v| {
+				let w = layer0.iter().find(|w| w.number == v.window && w.pid == me)?;
+				geom::sub_rect(w.rect, v.rect.0, v.rect.1, v.rect.2, v.rect.3).map(|r| (r, w.number))
+			})
+			.map_or((None, 0), |(r, n)| (Some(r), n)),
+	};
+	VIDEO_WIN.store(video_win, SeqCst);
+	engine::set_geo(Geo { video, render: render.map(|w| w.rect) });
 	*WINDOWS.lock().unwrap_or_else(|e| e.into_inner()) = layer0;
 }
 
