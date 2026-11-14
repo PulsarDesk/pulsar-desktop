@@ -6,9 +6,16 @@
 //! its multitouch contacts with `pinch::TouchTracker`, and forwards a recognised two-finger
 //! pinch while the session is controlled (`input_active`). One reader per capture generation;
 //! it exits when `enable()`/`disable()` bump the generation. Untested on Linux hardware.
+//!
+//! The same reader recognises 3 / 4-finger swipes and taps (`crate::gesture`: MT slots +
+//! BTN_TOOL_TRIPLETAP / QUADTAP for pads that track fewer slots) and forwards them as
+//! `InputEvent::Gesture` while controlled. Not grabbing the touchpad means the compositor
+//! (GNOME / KDE) ALSO performs its own gesture locally — there is no way to keep a gesture
+//! from the compositor without taking the whole touchpad away from it.
 
 use super::input_active;
 use super::linux::GEN;
+use crate::gesture::{MtSlots, Recognizer};
 use crate::pinch::{Gesture, PinchForwarder, TouchTracker};
 use evdev::{AbsoluteAxisCode, EventSummary, KeyCode, PropType, SynchronizationCode};
 use pulsar_core::service::InputEvent;
@@ -26,31 +33,54 @@ fn is_touchpad(d: &evdev::Device) -> bool {
 	mt && finger && !d.properties().contains(PropType::DIRECT)
 }
 
-/// ABS_MT_POSITION_X / _Y resolution (units per mm; 0 when the driver reports none).
-fn resolution(d: &evdev::Device) -> (i32, i32) {
-	let (mut rx, mut ry) = (0, 0);
+/// ABS_MT_POSITION_X / _Y resolution (units per mm; 0 when the driver reports none) and
+/// (min, max) ranges.
+fn axes(d: &evdev::Device) -> ((i32, i32), (i32, i32), (i32, i32)) {
+	let (mut res, mut x, mut y) = ((0, 0), (0, 0), (0, 0));
 	if let Ok(abs) = d.get_absinfo() {
 		for (code, info) in abs {
 			if code == AbsoluteAxisCode::ABS_MT_POSITION_X {
-				rx = info.resolution();
+				res.0 = info.resolution();
+				x = (info.minimum(), info.maximum());
 			} else if code == AbsoluteAxisCode::ABS_MT_POSITION_Y {
-				ry = info.resolution();
+				res.1 = info.resolution();
+				y = (info.minimum(), info.maximum());
 			}
 		}
 	}
-	(rx, ry)
+	(res, x, y)
+}
+
+/// BTN_TOOL_* → finger count.
+fn tool_fingers(code: KeyCode) -> Option<usize> {
+	Some(match code {
+		KeyCode::BTN_TOOL_FINGER => 1,
+		KeyCode::BTN_TOOL_DOUBLETAP => 2,
+		KeyCode::BTN_TOOL_TRIPLETAP => 3,
+		KeyCode::BTN_TOOL_QUADTAP => 4,
+		KeyCode::BTN_TOOL_QUINTTAP => 5,
+		_ => return None,
+	})
 }
 
 struct Pad {
 	dev: evdev::Device,
 	node: std::path::PathBuf,
 	track: TouchTracker,
+	/// 3 / 4-finger swipes and taps (`crate::gesture`).
+	mt: MtSlots,
+	rec: Recognizer,
 }
 
 pub(super) fn spawn(gen: u64, tx: Sender<InputEvent>) {
 	let _ = std::thread::Builder::new()
 		.name("pulsar-pinch-rd".into())
 		.spawn(move || run(gen, tx));
+}
+
+fn gesture_clock() -> u64 {
+	static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+	T0.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
 }
 
 fn send(tx: &Sender<InputEvent>, evs: Vec<InputEvent>) {
@@ -72,9 +102,15 @@ fn run(gen: u64, tx: Sender<InputEvent>) {
 				if pads.iter().any(|p| p.node == node) || !is_touchpad(&dev) {
 					continue;
 				}
-				let (rx, ry) = resolution(&dev);
-				tracing::info!(name = dev.name().unwrap_or("?"), rx, ry, "pinch: reading touchpad");
-				pads.push(Pad { dev, node, track: TouchTracker::new(rx, ry) });
+				let ((rx, ry), x, y) = axes(&dev);
+				tracing::info!(name = dev.name().unwrap_or("?"), rx, ry, ?x, ?y, "pinch/gesture: reading touchpad");
+				pads.push(Pad {
+					dev,
+					node,
+					track: TouchTracker::new(rx, ry),
+					mt: MtSlots::new(x, y),
+					rec: Recognizer::new(),
+				});
 			}
 			if pads.is_empty() && !logged {
 				logged = true;
@@ -118,16 +154,50 @@ fn run(gen: u64, tx: Sender<InputEvent>) {
 				let g = match ev.destructure() {
 					EventSummary::AbsoluteAxis(_, code, v) => {
 						match code {
-							AbsoluteAxisCode::ABS_MT_SLOT => pad.track.set_slot(v),
-							AbsoluteAxisCode::ABS_MT_TRACKING_ID => pad.track.set_tracking_id(v),
-							AbsoluteAxisCode::ABS_MT_POSITION_X => pad.track.set_x(v),
-							AbsoluteAxisCode::ABS_MT_POSITION_Y => pad.track.set_y(v),
+							AbsoluteAxisCode::ABS_MT_SLOT => {
+								pad.track.set_slot(v);
+								pad.mt.set_slot(v);
+							}
+							AbsoluteAxisCode::ABS_MT_TRACKING_ID => {
+								pad.track.set_tracking_id(v);
+								pad.mt.set_tracking_id(v);
+							}
+							AbsoluteAxisCode::ABS_MT_POSITION_X => {
+								pad.track.set_x(v);
+								pad.mt.set_x(v);
+							}
+							AbsoluteAxisCode::ABS_MT_POSITION_Y => {
+								pad.track.set_y(v);
+								pad.mt.set_y(v);
+							}
 							_ => {}
 						}
 						None
 					}
-					EventSummary::Synchronization(_, SynchronizationCode::SYN_REPORT, _) => pad.track.frame(),
-					EventSummary::Synchronization(_, SynchronizationCode::SYN_DROPPED, _) => pad.track.reset(),
+					EventSummary::Key(_, code, v) => {
+						if let Some(n) = tool_fingers(code) {
+							pad.mt.set_tool(n, v != 0);
+						}
+						None
+					}
+					EventSummary::Synchronization(_, SynchronizationCode::SYN_REPORT, _) => {
+						let t = gesture_clock();
+						if let Some((fingers, kind)) = pad.rec.frame(t, &pad.mt.contacts()) {
+							// Only while the session is controlled; the compositor still performs
+							// the gesture locally too (the touchpad is read, not grabbed).
+							let forward = input_active() && crate::gesture::forwarding();
+							tracing::info!(fingers, ?kind, forward, "touchpad gesture");
+							if forward {
+								send(&tx, vec![crate::gesture::event(fingers, kind)]);
+							}
+						}
+						pad.track.frame()
+					}
+					EventSummary::Synchronization(_, SynchronizationCode::SYN_DROPPED, _) => {
+						pad.mt.reset();
+						pad.rec.reset();
+						pad.track.reset()
+					}
 					_ => None,
 				};
 				match g {

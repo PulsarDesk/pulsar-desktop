@@ -13,8 +13,8 @@
 //! - macOS: the CGEventTap sees the Dock swipe gesture events instead (no raw contacts there)
 //!   and swallows them while engaged (`kbdhook::mac`).
 
-// The recognizer is fed by the Windows / Linux readers only.
-#![cfg_attr(target_os = "macos", allow(dead_code))]
+// The recognizer is fed by the Windows / Linux readers, the MT slots by the Linux one only.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
 use pulsar_core::input::gesture::GestureKind;
 use pulsar_core::service::InputEvent;
@@ -129,10 +129,120 @@ impl Recognizer {
 	}
 }
 
+/// Multitouch (evdev protocol B) contacts of one touchpad as [`Recognizer`] input: positions
+/// normalized by the axes' ranges. Many touchpads track fewer slots than fingers (2 slots +
+/// `BTN_TOOL_TRIPLETAP` / `QUADTAP` for the count): the missing fingers are filled in at the
+/// tracked fingers' centroid, so the count is right and the centroid unchanged.
+#[derive(Debug)]
+pub struct MtSlots {
+	slots: Vec<(i32, f64, f64)>,
+	cur: usize,
+	x: (i32, i32),
+	y: (i32, i32),
+	/// Finger count from the BTN_TOOL_* keys (0 = none reported).
+	tool: usize,
+}
+
+const MT_SLOTS: usize = 16;
+
+impl MtSlots {
+	/// `x` / `y`: ABS_MT_POSITION_X / _Y (min, max).
+	pub fn new(x: (i32, i32), y: (i32, i32)) -> Self {
+		let fix = |(lo, hi): (i32, i32)| if hi > lo { (lo, hi) } else { (0, 1) };
+		Self { slots: vec![(-1, 0.0, 0.0); MT_SLOTS], cur: 0, x: fix(x), y: fix(y), tool: 0 }
+	}
+	pub fn set_slot(&mut self, slot: i32) {
+		self.cur = (slot.max(0) as usize).min(MT_SLOTS - 1);
+	}
+	pub fn set_tracking_id(&mut self, id: i32) {
+		self.slots[self.cur].0 = id;
+	}
+	pub fn set_x(&mut self, v: i32) {
+		self.slots[self.cur].1 = ((v - self.x.0) as f64 / (self.x.1 - self.x.0) as f64).clamp(0.0, 1.0);
+	}
+	pub fn set_y(&mut self, v: i32) {
+		self.slots[self.cur].2 = ((v - self.y.0) as f64 / (self.y.1 - self.y.0) as f64).clamp(0.0, 1.0);
+	}
+	/// A BTN_TOOL_* key edge: `fingers` = 1 (FINGER) .. 5 (QUINTTAP).
+	pub fn set_tool(&mut self, fingers: usize, down: bool) {
+		if down {
+			self.tool = fingers;
+		} else if self.tool == fingers {
+			self.tool = 0;
+		}
+	}
+	/// SYN_DROPPED: the contact state is unknown.
+	pub fn reset(&mut self) {
+		for s in &mut self.slots {
+			s.0 = -1;
+		}
+		self.tool = 0;
+	}
+	/// The contacts at a SYN_REPORT.
+	pub fn contacts(&self) -> Vec<(f64, f64)> {
+		let mut c: Vec<(f64, f64)> = self.slots.iter().filter(|s| s.0 >= 0).map(|s| (s.1, s.2)).collect();
+		if !c.is_empty() && self.tool > c.len() {
+			let n = c.len() as f64;
+			let (sx, sy) = c.iter().fold((0.0, 0.0), |(a, b), (x, y)| (a + x, b + y));
+			c.resize(self.tool, (sx / n, sy / n));
+		}
+		c
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
 	use GestureKind::*;
+
+	#[test]
+	fn mt_slots_normalize_and_fill_untracked_fingers() {
+		let mut m = MtSlots::new((0, 1000), (0, 500));
+		m.set_slot(0);
+		m.set_tracking_id(5);
+		m.set_x(200);
+		m.set_y(250);
+		m.set_slot(1);
+		m.set_tracking_id(6);
+		m.set_x(400);
+		m.set_y(250);
+		assert_eq!(m.contacts(), vec![(0.2, 0.5), (0.4, 0.5)]);
+		// A 2-slot pad reporting three fingers.
+		m.set_tool(2, false);
+		m.set_tool(3, true);
+		let c = m.contacts();
+		assert_eq!(c.len(), 3);
+		assert!((c[2].0 - 0.3).abs() < 1e-9 && (c[2].1 - 0.5).abs() < 1e-9);
+		m.set_slot(1);
+		m.set_tracking_id(-1);
+		m.set_slot(0);
+		m.set_tracking_id(-1);
+		assert!(m.contacts().is_empty(), "no tracked finger, no contacts");
+		m.set_slot(99); // clamped
+		m.set_x(5000);
+		m.reset();
+		assert!(m.contacts().is_empty());
+	}
+
+	#[test]
+	fn mt_slots_feed_a_swipe() {
+		let mut m = MtSlots::new((0, 100), (0, 100));
+		let mut r = Recognizer::new();
+		let mut out = Vec::new();
+		for (i, slot) in [0, 1, 2].iter().enumerate() {
+			m.set_slot(*slot);
+			m.set_tracking_id(10 + i as i32);
+			m.set_x(20 + 10 * i as i32);
+		}
+		for step in 0..=10 {
+			for slot in 0..3 {
+				m.set_slot(slot);
+				m.set_y(80 - step * 5);
+			}
+			out.extend(r.frame(step as u64 * 8, &m.contacts()));
+		}
+		assert_eq!(out, vec![(3, SwipeUp)]);
+	}
 
 	/// `n` fingers in a row around (x, y), 0.08 apart.
 	fn fingers(n: usize, x: f64, y: f64) -> Vec<(f64, f64)> {
