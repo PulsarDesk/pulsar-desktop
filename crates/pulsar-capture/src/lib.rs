@@ -1,4 +1,4 @@
-//! Pulsar native host capture+encode crate (Windows-only).
+//! Pulsar native host capture+encode crate (Windows; on Linux the NVENC SDK encoder only).
 //!
 //! Replaces the host `ddagrab → h264_nvenc` ffmpeg path with native DXGI Desktop
 //! Duplication capture → the NVENC SDK → a hand-rolled RTP packetizer (the Sunshine
@@ -380,10 +380,17 @@ pub use window::{
 // ===========================================================================
 #[cfg(windows)]
 pub(crate) mod dxgi;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 mod encode;
 #[cfg(windows)]
-pub use encode::{gpu_vendors, nvenc_codecs, nvenc_supported};
+pub use encode::gpu_vendors;
+#[cfg(any(windows, target_os = "linux"))]
+pub use encode::{nvenc_codecs, nvenc_supported};
+// Linux: the NVENC SDK on a CUDA context, fed system-memory NV12 frames (the host's x11grab /
+// PipeWire capture) — the path that heals a client-reported loss with reference-frame
+// invalidation instead of a keyframe.
+#[cfg(target_os = "linux")]
+pub use encode::cuda_enc::{NvencCuda, NvencCudaParams, Nv12Frame};
 /// Rare diagnostic lines (capture source picks, probe verdicts) — the encoder's init log file.
 #[cfg(windows)]
 pub(crate) use encode::cap_dbg as encode_log;
@@ -396,12 +403,12 @@ mod gpu_sched;
 // Glass-to-encode measurement hooks for the capbench example (inert unless PULSAR_BENCH_PIXEL=1).
 #[cfg(windows)]
 pub mod bench;
-/// Off-Windows stubs — the native NVENC SDK path is Windows-only.
-#[cfg(not(windows))]
+/// macOS stubs — there is no NVENC there.
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn nvenc_supported() -> bool {
 	false
 }
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn nvenc_codecs() -> &'static [Codec] {
 	&[]
 }

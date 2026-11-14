@@ -94,3 +94,9 @@ windows-core = "0.62"
 # NvEncodeAPICreateInstance and fills the fn-pointer table; a missing DLL / driver
 # is just an Err → the host falls back to ffmpeg.
 libloading = "0.9"
+
+# Linux: the same NVENC SDK through libnvidia-encode.so.1 on a CUDA context (libcuda.so.1) —
+# both runtime-loaded (src/encode/cuda.rs, cuda_enc.rs), nothing linked at build time; a
+# machine without the NVIDIA driver just gets an Err and the host keeps libavcodec's NVENC.
+[target.'cfg(target_os = "linux")'.dependencies]
+libloading = "0.9"

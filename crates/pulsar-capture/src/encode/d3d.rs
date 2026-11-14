@@ -5,7 +5,6 @@
 //! NVENC status check. Behaviour is unchanged from the original `encode.rs`.
 
 use std::ffi::c_void;
-use std::net::{SocketAddr, ToSocketAddrs};
 use std::ptr;
 
 use windows::Win32::Foundation::HMODULE;
@@ -29,44 +28,8 @@ use windows::Win32::Graphics::Dxgi::{
 use windows_core::Interface; // for `.cast::<T>()` and `.as_raw()`
 
 use super::{cap_dbg, nvenc, VENDOR_NVIDIA};
-
-/// RAII guard that destroys a half-built NVENC session if `new()` bails between
-/// `nvEncOpenEncodeSessionEx` and the final `Ok`. Holds a copy of the destroy fn
-/// pointer (not a borrow of the fn table) so the table can be moved into the
-/// returned `Encoder` once `disarm()` is called.
-pub(super) struct SessionGuard {
-	pub(super) destroy: Option<nvenc::PFN_DestroyEncoder>,
-	pub(super) enc: *mut c_void,
-}
-impl SessionGuard {
-	pub(super) fn disarm(&mut self) {
-		self.enc = ptr::null_mut();
-	}
-}
-impl Drop for SessionGuard {
-	fn drop(&mut self) {
-		if !self.enc.is_null() {
-			if let Some(f) = self.destroy {
-				unsafe {
-					let _ = f(self.enc);
-				}
-			}
-		}
-	}
-}
-
-/// Parse an `"rtp://host:port"` (or bare `"host:port"`) destination into a
-/// `SocketAddr`, resolving the host via `to_socket_addrs()`.
-pub(super) fn parse_rtp_dest(dest: &str) -> Result<SocketAddr, String> {
-	let hostport = dest.strip_prefix("rtp://").unwrap_or(dest);
-	// Strip any trailing path/query the URL form might carry (rtp URLs normally don't).
-	let hostport = hostport.split('/').next().unwrap_or(hostport);
-	hostport
-		.to_socket_addrs()
-		.map_err(|e| format!("rtp dest resolve '{hostport}': {e}"))?
-		.next()
-		.ok_or_else(|| format!("rtp dest '{hostport}' resolved to no address"))
-}
+// The NVENC helpers that need no D3D11 live in `nvsession` (shared with the Linux encoder).
+pub(super) use super::nvsession::{chk, parse_rtp_dest, SessionGuard};
 
 /// Create OUR own NV12 `ID3D11Texture2D` (DEFAULT usage, BIND_RENDER_TARGET only —
 /// the VideoProcessor output view + NVENC input register both accept that). One
@@ -335,33 +298,5 @@ impl CrossAdapterBridge {
 			kept_amd_device: amd_device.clone(),
 			kept_amd_context: amd_ctx.clone(),
 		})
-	}
-}
-
-/// Map a non-success NVENC status to an error string, appending the driver's last
-/// error message when available.
-pub(super) unsafe fn chk(
-	s: nvenc::NVENCSTATUS,
-	fns: &nvenc::NV_ENCODE_API_FUNCTION_LIST,
-	enc: *mut c_void,
-) -> Result<(), String> {
-	if s == nvenc::NV_ENC_SUCCESS {
-		return Ok(());
-	}
-	// nvEncGetLastErrorString(enc) → const char*; only meaningful once a session exists.
-	let mut msg = String::new();
-	if !enc.is_null() {
-		if let Some(f) = fns.nvEncGetLastErrorString {
-			let p = f(enc);
-			if !p.is_null() {
-				let cstr = std::ffi::CStr::from_ptr(p);
-				msg = cstr.to_string_lossy().into_owned();
-			}
-		}
-	}
-	if msg.is_empty() {
-		Err(format!("nvenc status {s}"))
-	} else {
-		Err(format!("nvenc status {s} ({msg})"))
 	}
 }

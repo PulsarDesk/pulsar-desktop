@@ -74,29 +74,49 @@
 //! - [`submit`] — `Encoder::submit` (one paced tick) + the BGRA→NV12 Blt.
 //! - [`d3d`] — free D3D11/DXGI helpers + the cross-adapter bridge + the NVENC status check.
 //! - [`nvenc`] — the hand-rolled NVENC FFI bindings.
+//! - [`nvsession`] — the session pieces that need no graphics API (config + init, status
+//!   check), shared with Linux.
+//!
+//! ## Linux
+//! The same NVENC SDK runs on Linux through `libnvidia-encode.so.1` on a CUDA context
+//! ([`cuda`] = the CUDA driver API via dlopen, [`cuda_enc`] = the encoder that uploads a
+//! system-memory NV12 frame to CUDA memory and encodes it). It exists for what libavcodec's
+//! `h264_nvenc` cannot do: reference-frame invalidation on a client-reported loss.
 
 #![allow(clippy::missing_safety_doc)]
 #![allow(non_snake_case, non_camel_case_types, non_upper_case_globals)]
-#![cfg(windows)]
+#![cfg(any(windows, target_os = "linux"))]
 
 use crate::Codec;
 
+#[cfg(target_os = "linux")]
+mod cuda;
+#[cfg(target_os = "linux")]
+pub(crate) mod cuda_enc;
+#[cfg(windows)]
 mod d3d;
+#[cfg(windows)]
 mod encoder;
 // The display GPU's own hardware encoder via Media Foundation (measured against NVENC).
+#[cfg(windows)]
 pub(crate) mod mf;
+#[cfg(windows)]
 mod new;
 pub(crate) mod nvenc;
+mod nvsession;
 // GPU-free encoder decisions (reference-buffer depth, RFI vs keyframe, keyframe schedule).
 mod policy;
+#[cfg(windows)]
 mod submit;
 
 // Re-export the public API at the original `crate::encode::*` paths. `lib.rs` uses
 // `encode::Encoder` and `encode::EncParams`; `Encoder` lives in the `encoder` submodule.
+#[cfg(windows)]
 pub use encoder::Encoder;
 
 /// PCI vendor ID of an NVIDIA adapter (the only vendor whose D3D11 device NVENC will
 /// accept in `nvEncOpenEncodeSessionEx`). 0x1002 = AMD, 0x8086 = Intel (display owners).
+#[cfg(windows)]
 const VENDOR_NVIDIA: u32 = 0x10DE;
 
 /// Which codecs THIS machine's NVENC can actually encode — asked of the NVENC SDK itself
@@ -112,7 +132,11 @@ const VENDOR_NVIDIA: u32 = 0x10DE;
 pub fn nvenc_codecs() -> &'static [Codec] {
 	use std::sync::OnceLock;
 	static CACHE: OnceLock<Vec<Codec>> = OnceLock::new();
-	CACHE.get_or_init(|| match unsafe { probe_nvenc_codecs() } {
+	#[cfg(target_os = "linux")]
+	let probe = || unsafe { cuda_enc::probe_codecs() };
+	#[cfg(windows)]
+	let probe = || unsafe { probe_nvenc_codecs() };
+	CACHE.get_or_init(|| match probe() {
 		Ok(c) => {
 			cap_dbg(&format!("nvenc_codecs: {c:?}"));
 			c
@@ -130,6 +154,7 @@ pub fn nvenc_supported() -> bool {
 }
 
 /// PCI vendor ids of this machine's hardware GPUs (see `d3d::hardware_gpu_vendors`).
+#[cfg(windows)]
 pub fn gpu_vendors() -> Vec<u32> {
 	d3d::hardware_gpu_vendors()
 }
@@ -137,6 +162,7 @@ pub fn gpu_vendors() -> Vec<u32> {
 /// Open one NVENC session on a fresh NVIDIA D3D11 device, enumerate the encode GUIDs it
 /// supports, close it. Err = no usable NVENC (no NVIDIA adapter, no driver DLL, or no
 /// encode silicon).
+#[cfg(windows)]
 unsafe fn probe_nvenc_codecs() -> Result<Vec<Codec>, String> {
 	use windows_core::Interface;
 	// Keep the device alive for the whole session — NVENC does not AddRef it.
@@ -201,12 +227,17 @@ unsafe fn probe_nvenc_codecs() -> Result<Vec<Codec>, String> {
 }
 
 /// Diagnostic log to a fixed file (the native encoder runs in the GUI host with no console).
+/// Windows: `C:\Users\Public\pulsar-capture-dbg.txt`; Linux: `$TMPDIR/pulsar-capture-dbg.txt`.
 pub(crate) fn cap_dbg(msg: &str) {
 	use std::io::Write;
+	#[cfg(windows)]
+	let path = std::path::PathBuf::from("C:\\Users\\Public\\pulsar-capture-dbg.txt");
+	#[cfg(not(windows))]
+	let path = std::env::temp_dir().join("pulsar-capture-dbg.txt");
 	if let Ok(mut f) = std::fs::OpenOptions::new()
 		.create(true)
 		.append(true)
-		.open("C:\\Users\\Public\\pulsar-capture-dbg.txt")
+		.open(path)
 	{
 		let _ = writeln!(f, "{msg}");
 	}
@@ -215,6 +246,7 @@ pub(crate) fn cap_dbg(msg: &str) {
 // ===========================================================================
 // Tunables the host derives 1:1 from `on_stream` (see `lib.rs` adapter).
 // ===========================================================================
+#[cfg(windows)]
 pub struct EncParams {
 	/// Encode (output) size — may be downscaled from native (auto caps at 1080p).
 	pub width: u32,
