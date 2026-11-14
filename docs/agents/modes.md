@@ -211,8 +211,25 @@ pointer input back for 1.2 s), the client marks the host's pointer and shows its
 - **Host** (`host/handlers.rs` `spawn_host_pointer_watch`, remote sessions only): ~30 Hz
   `DataMsg::HostPointer { active: true, x, y }` while `takeover::active()`, one `active: false`
   when idle. Position = the pointer within the streamed monitor (Windows: GetCursorPos vs
-  `display_rect`); `-1` = unknown (Linux host — takeover reads evdev deltas only —, a window
-  capture, the pointer on another monitor). macOS hosts don't detect takeover → nothing.
+  `display_rect`; Linux X11: XQueryPointer vs the captured monitor, `takeover::PointerPos`;
+  macOS: the main display, `pulsar_core::input::local_pointer_macos::pointer_on_main_display`);
+  `-1` = unknown (Wayland, a window capture, the pointer on another monitor).
+- **Takeover detection per OS** (`host/takeover.rs`): Windows `WH_MOUSE_LL` minus
+  `LLMHF_INJECTED`. Linux: evdev read of every `/dev/input` pointer except `Pulsar*` uinput
+  devices (needs the `input` group) **plus**, on X11, an XInput2 raw-event listener (RawMotion /
+  RawButton* on the root, no permission needed) that skips `Pulsar*` and `XTEST` slave devices
+  (`is_synthetic_device`). Wayland without `/dev/input` access: not detectable — Wayland gives a
+  client no global pointer events and no portal exposes them. macOS: listen-only `CGEventTap`
+  (`pulsar_core::input::local_pointer_macos::watch_local_pointer`); every event Pulsar's
+  injector posts carries `kCGEventSourceUserData = "PULS"` and is skipped (plus our own pid).
+  The tap needs the Accessibility / Input Monitoring grant; without it a warning is logged and
+  remote input always applies. **Linux X11 and macOS untested on hardware.**
+- **Host-side ghost** (`remote_cursor.rs`, the client's pointer while held back): Linux = GTK
+  popup; Windows/macOS = transparent click-through webview. On macOS it is made a system-wide
+  overlay (`pulsar_core::overlay_macos::make_overlay_window`: status-window level, joins every
+  Space incl. full-screen apps) and kept out of the avfoundation capture by
+  `content_protected` (`NSWindowSharingNone`). Untested on macOS hardware; mixed-DPI monitor
+  layouts may misplace it (Tauri physical coordinates).
 - **Desktop client**: `play/hold.rs` → renderer `hostptr 1 x y` / `hostptr 0`, `hostname <name>`
   (from `PeerName`), `hostptrshow 0|1` (setting). `overlay.rs` `draw_host_pointer`: amber ring +
   "Host · name" label at the mapped point (Windows `video_point`, Linux `VIDEO_RECT`, macOS the

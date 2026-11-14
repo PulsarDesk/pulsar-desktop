@@ -59,3 +59,11 @@ self-pipe instead of an inherited blocked mask, and the stop event grants the sa
 `EVENT_MODIFY_STATE` with a Medium label (`--headless-stop` exit 7 = access denied).
 Unverified: the elevated-GUI / elevated-host cases (needs an elevated run), the Unix signal
 path (not compiled on Linux here), and `--headless-host` on Linux needs a display.
+
+**Host takeover + host pointer marker parity (2026-11-14, not run on hardware):** the
+"host user takes the mouse back" detection and the client's "Host" pointer marker now exist on
+Windows, Linux (evdev + X11 XInput2 raw events; X11 pointer position) and macOS (listen-only
+CGEventTap, Pulsar's injected events tagged via `kCGEventSourceUserData`; main-display pointer
+position), and the macOS remote-cursor ghost is a system-wide overlay. Wayland without
+`/dev/input` access cannot detect it (OS limit). See [modes.md](modes.md) "Host pointer marker".
+Linux X11 and macOS paths are **untested on hardware**.
