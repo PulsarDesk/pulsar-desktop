@@ -167,7 +167,8 @@ overflows the renderer's 8-AU queue and drops the recovery frame.
   - `PULSAR_TEST_DEVICE_LOSS=<after_s>,<failed_attempts>` (Windows + Linux renderers) drops
     the renderer once as if its D3D device was removed / its GL context was lost, and fails the
     first rebuilds (see "Device loss" and "GL context loss").
-  - `PULSAR_GL_ROBUST=0` (Linux renderer) makes a plain GL context, no reset notification.
+  - `PULSAR_GL_ROBUST=0|1` (Linux renderer) forces the reset-notification GL context off / on
+    (default: on, except off on the Mali blob driver until the Orange Pi is hardware-tested).
 
 ## Frame pacing on the Windows renderer ("Kare eşitleme")
 
@@ -216,22 +217,35 @@ in WSL and unit-tested only). `linux.rs` keeps everything that lives on the GL c
 FSR/CUDA/dmabuf state, and a fresh `egui::Context`) and rebuilds it IN PLACE on the same X
 window; the overlay state (`OverlayState`, `UiState`) lives outside it and survives.
 
-- **Detection.** The context is made with `EGL_EXT_create_context_robustness`
-  (robust access + `EGL_LOSE_CONTEXT_ON_RESET`, plus `EGL_NV_robustness_video_memory_purge`
-  on NVIDIA, whose driver drops video memory on suspend/resume and VT switches); every pass
-  reads `glGetGraphicsResetStatus`. Drivers without the extension get the old plain ES2
-  context (attribute lists tried most-robust first, `context_attrib_lists`). An
+- **Detection.** The context is made with `EGL_EXT_create_context_robustness`, asking ONLY
+  for the reset-notification strategy `EGL_LOSE_CONTEXT_ON_RESET` (plus
+  `EGL_NV_robustness_video_memory_purge` on NVIDIA, whose driver drops video memory on
+  suspend/resume and VT switches). Robust buffer access is deliberately NOT requested: it is
+  not needed for detection and can cost speed or move a driver off its dmabuf/EGLImage
+  zero-copy path. Every pass reads `glGetGraphicsResetStatus`, looked up only when the
+  context really has it (`GL_EXT_robustness` / `GL_KHR_robustness`, or the core name on
+  ES 3.2+; glvnd hands out a dummy stub for any `gl*` name, `reset_status_names`). Drivers
+  without the extension get the old plain ES2 context (attribute lists tried most-robust
+  first, `context_attrib_lists`). On the Mali blob driver (`egl_is_mali`: EGL_VENDOR "ARM" /
+  a Mali/Valhall/Bifrost/Midgard EGL_VERSION) the robust context is OFF by default
+  (`PULSAR_GL_ROBUST=1` turns it on) until the Orange Pi 5B is hardware-tested. An
   `eglSwapBuffers` failing with CONTEXT_LOST / BAD_CONTEXT / BAD_SURFACE /
-  BAD_NATIVE_WINDOW also counts as a loss.
+  BAD_NATIVE_WINDOW also counts as a loss, unless the video window or its parent no longer
+  exists (`window_alive`): then the renderer stops instead of retrying forever.
 - **Teardown** (`retire_context`): release the KMS lease, delete the presenter's GL objects
   (`Presenter::destroy_gl`, `GlFsr::destroy`; no-ops on a dead context), drop queued frames,
   destroy the context. A Mali context is leaked instead (destroying it corrupted WebKit's
-  shared Mali GL on the RK3588, see `IDLE`). The window surface is kept and reused by the
-  rebuild; when it no longer binds a new one is made.
+  shared Mali GL on the RK3588, see `IDLE`); Mali is known from EGL before any context is
+  made, so the failure paths of `build_gl` never destroy a Mali context either. The window
+  surface is kept (in a slot outside the GL stack) and reused by the rebuild; when it no
+  longer binds it is destroyed, the slot is cleared at once, and a new one is made, so a
+  failed attempt never leaves a dangling `EGLSurface` for the next one.
 - **Retry until it works**, every 500 ms, logged once and then once a minute (shared with
   Windows: `stream/recovery.rs` `REBUILD_EVERY`, `rebuild_fail_logged`).
 - **Keep answering X meanwhile**: the loop keeps reading X events (resize, WM close), follows
-  the parent's size, drops decoded frames (`video::drop_frames`). An X child window cannot
+  the parent's size, unmaps the window when the session goes IDLE (so the app UI is not left
+  covered by a dead video window), drops decoded frames (`video::drop_frames`). A rebuild
+  that fails while the window or its parent is gone stops the renderer. An X child window cannot
   hang the app's UI the way a Windows child window can, but the connection must not back up.
 - **After the rebuild**: the host cursor texture is uploaded again (new egui context), a
   keyframe is requested (`NEED_IDR`) and the decode thread reopens a hardware decoder on a

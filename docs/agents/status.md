@@ -62,7 +62,8 @@ path (not compiled on Linux here), and `--headless-host` on Linux needs a displa
 
 **Renderer GPU-loss recovery (2026-11-14):** Windows rebuilds a lost D3D device in place
 (screen off, driver reset); Linux rebuilds a lost GL context in place (GPU reset, NVIDIA
-suspend/resume purge; robust EGL context + `glGetGraphicsResetStatus`) and reopens the HW
+suspend/resume purge; reset-notification EGL context + `glGetGraphicsResetStatus`, off by
+default on the Mali blob driver) and reopens the HW
 decoder. Both rate-limit AU-overflow / present-stall logs and take
 `PULSAR_TEST_DEVICE_LOSS`. **Linux path untested on Linux hardware** (WSL type-check + unit
 tests only); macOS renderer has no equivalent yet (Metal device loss is a separate task).
