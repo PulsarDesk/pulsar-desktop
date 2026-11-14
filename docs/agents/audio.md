@@ -130,7 +130,41 @@ opened *into* a muted endpoint latches **pure silence** (verified live, −91 dB
 fixed 2026-06-13). Never force-mute the captured endpoint; user-set `mute_host`
 is still honored (mid-session muting is safe). Windows mute = endpoint **mute
 flag**, NOT volume-0. Un-muted on teardown.
-Mic/voice-call side-channel PCM lives in `src-tauri/src/audio_io.rs`.
+Mic/voice-call side-channel PCM: the host plays it with `src-tauri/src/audio_io.rs`; the
+client captures it with `src-tauri/src/mic_capture.rs` (below).
+
+## Client mic + output device picks (2026-11-15, LOCAL, untested on hardware)
+
+In-session menu → Ses: "Mikrofon cihazı" (which mic goes to the host) and "Ses çıkışı" (where
+the session plays). Both default to the system default.
+
+- **Capture:** `mic_capture.rs`, in-process SDL3 recording (s16le 48 kHz mono, 20 ms
+  `DataMsg::Audio` chunks — the host side is unchanged). Replaced the ffmpeg (`-f wasapi`,
+  `-f avfoundation :0`) / parecord recorder process, which is now only the fallback when SDL's
+  audio subsystem cannot start (default device only). macOS: `src-tauri/Info.plist` carries
+  `NSMicrophoneUsageDescription` (merged into the bundle, embedded into the dev binary). A
+  hardened-runtime (signed) build would also need the `com.apple.security.device.audio-input`
+  entitlement — not added.
+- **Picks:** by device NAME (SDL ids are per run), `audio_devices/` (`set_pref`). Saved as
+  `ui.micDevice` / `ui.speakerDevice` (webview), pushed with `set_audio_devices` at start and on
+  every change; the renderer's `ov set micdev|spkdev <token>` is applied Rust-side in
+  `render_stats.rs` and echoed to the webview to save.
+- **Renderer protocol:** `micdevs <pick> <dev>…` / `spkdevs <pick> <dev>…`, names
+  percent-encoded (`audio_devices::encode` = `overlay::dev_encode`), `*` = system default. The
+  1 Hz `audio_devices::start_watcher` thread sends them to every session's renderer when they
+  (or the pick) change; respawn seeds send `seed_lines()`. The rows stay hidden until a list
+  arrives; a pick that is not connected is listed as "(bağlı değil)".
+- **Fallback rules** (`audio_devices/pick.rs`, unit-tested: `resolve`, `needs_reopen`, `Retry`):
+  the pick while it is present, else the default; checked every 500 ms. Picked device gone →
+  reopen on the default; back (any new SDL id, same name) → move back. A stream on the default
+  is left to SDL, which migrates it when the OS default changes or the default is unplugged.
+  Nothing opens → silent, retried every 1 s (logged once per streak). Stall: playback whose
+  queue does not drain for 1.5 s, or a mic stream that delivers nothing for 1.5 s → reopened.
+  Playback no longer ends the player thread when the first open fails.
+- DS4 headset jack target (`ds4_headset::target`) still wins over the output pick.
+- `cargo test -p pulsar-tauri --lib` does not start on this Windows dev box
+  (STATUS_ENTRYPOINT_NOT_FOUND, see status.md); `pick.rs` is std-only so its tests can run in
+  a scratch crate (`#[path]` include).
 
 ## DS4 headset jack (client, experimental, USB; Windows / Linux / macOS)
 

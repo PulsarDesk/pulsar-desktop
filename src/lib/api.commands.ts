@@ -367,6 +367,10 @@ export const api = {
 	setPointerFree: (on: boolean) => invoke<void>('set_pointer_free', { on }),
 	setHostCursor: (on: boolean) => invoke<void>('set_host_cursor', { on }),
 	setDs4Headset: (on: boolean) => invoke<void>('set_ds4_headset', { on }),
+	/** This computer's mic sent to the host + the output the session plays on, by device name
+	 * ('' = system default). Process-wide; running sessions move within half a second. */
+	setAudioDevices: (mic: string, speaker: string) =>
+		invoke<void>('set_audio_devices', { mic, speaker }),
 	/** Change the session's audio quality live (a re-stream): auto/standard/high/raw. */
 	setPlayAudioQuality: (id: number, quality: string) =>
 		invoke<void>('set_play_audio_quality', { id, quality }),

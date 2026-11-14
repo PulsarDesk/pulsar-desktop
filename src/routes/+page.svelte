@@ -1156,6 +1156,12 @@
 		api.setHostCursor(ui.hostCursor).catch(() => {});
 	});
 
+	// Client mic / output device picks (session menu → Ses) follow the setting.
+	$effect(() => {
+		if (isPopup) return;
+		api.setAudioDevices(ui.micDevice ?? '', ui.speakerDevice ?? '').catch(() => {});
+	});
+
 	// Experimental DS4 headset jack (Windows USB) follows the setting.
 	$effect(() => {
 		if (isPopup) return;

@@ -955,6 +955,16 @@
 					if (['auto', 'standard', 'high', 'raw'].includes(val)) controls.setAudioQuality(val as AudioQuality);
 					break;
 				case 'mic': if ((val === 'on') !== sidechan.micOn) sidechan.toggleMic(); break;
+				// Ses → Mikrofon cihazı / Ses çıkışı: already applied Rust-side (render_stats
+				// decodes the name); saved here so the next start and session use it too.
+				case 'micdev':
+					ui.micDevice = val;
+					saveUi();
+					break;
+				case 'spkdev':
+					ui.speakerDevice = val;
+					saveUi();
+					break;
 				// Voice call: pair mic (us → host) with host audio (host → us) in one switch;
 				// turning it off only drops the mic (host audio stays as the user had it).
 				case 'call': {
