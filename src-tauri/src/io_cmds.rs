@@ -391,6 +391,10 @@ pub(crate) async fn set_active_session(
 ) -> Result<(), String> {
 	use std::sync::atomic::Ordering;
 	let prev = state.focused_session.swap(play_id, Ordering::SeqCst);
+	// The mouse hook's pen / touch exemption follows the focused pane's host.
+	if let Some((pen, touch)) = state.plays.lock().unwrap().get(&play_id).map(|p| p.host_pen_touch) {
+		crate::kbdhook::set_host_pen_touch(pen, touch);
+	}
 	let split_on = state.split_pane_count.load(Ordering::SeqCst) > 1;
 	if split_on && prev != play_id {
 		// Release+flush held keys/buttons from the previously-focused pane so nothing sticks on

@@ -227,12 +227,9 @@ pub fn set_host_pen_touch(pen: bool, touch: bool) {
 #[cfg(not(windows))]
 pub fn set_host_pen_touch(_pen: bool, _touch: bool) {}
 /// The renderer's `pentouch <pen> <touch>` stdin line: which of pen / touch its window
-/// forwards as WM_POINTER (Windows; the other renderers ignore the line).
-pub fn pen_touch_line() -> String {
-	#[cfg(windows)]
-	let (pen, touch) = imp::host_pen_touch();
-	#[cfg(not(windows))]
-	let (pen, touch) = (false, false);
+/// forwards as WM_POINTER (Windows; the other renderers ignore the line). From the play's
+/// own host features (`PlaySession::host_pen_touch`), never another pane's.
+pub fn pen_touch_line(pen: bool, touch: bool) -> String {
 	format!("pentouch {} {}", pen as u8, touch as u8)
 }
 #[cfg(windows)]

@@ -344,10 +344,11 @@ async fn respawn_render_for_codec(
 					p.render_stdin.clone(),
 					p.caps_line.clone(),
 					p.render_seed.clone(),
+					p.host_pen_touch,
 				)
 			})
 		};
-		if let Some((stdin, caps_line, render_seed)) = chans {
+		if let Some((stdin, caps_line, render_seed, (host_pen, host_touch))) = chans {
 			// Re-seed the fresh renderer's overlay: take the last caps line, update its
 			// codec=… field to the new codec, store + send it.
 			let mut line = caps_line.lock().unwrap().clone();
@@ -401,7 +402,7 @@ async fn respawn_render_for_codec(
 					let _ = writeln!(si, "audio clip={}", if crate::clipboard_sync::enabled() { 1 } else { 0 });
 					let _ = writeln!(si, "msens {}", crate::kbdhook::mouse_sensitivity());
 					let _ = writeln!(si, "ptrfree {}", if crate::kbdhook::pointer_free() { 1 } else { 0 });
-					let _ = writeln!(si, "{}", crate::kbdhook::pen_touch_line());
+					let _ = writeln!(si, "{}", crate::kbdhook::pen_touch_line(host_pen, host_touch));
 					let _ = writeln!(si, "upscale {}", crate::native_view::upscale_mode());
 					let _ = writeln!(si, "hostptrshow {}", if crate::kbdhook::host_cursor() { 1 } else { 0 });
 					if let Some((tx, mute, mic)) = seed.audio {

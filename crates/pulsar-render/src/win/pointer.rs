@@ -48,7 +48,11 @@ pub(super) fn set_video(f: (f32, f32, f32, f32)) {
 	*VIDEO.lock().unwrap() = f;
 }
 
-/// A client point → 0..1 of the video (the letterbox bars clamp to the edge).
+/// A client point → 0..1 of the video (the letterbox bars clamp to the edge). `video` is the
+/// presented picture's rect, which is already UPRIGHT for a rotated host display (the Blt
+/// rotates it), and the host injects in its logical — upright — desktop coordinates: no
+/// inverse rotation belongs here (it would double-correct, see host.rs). The mouse path
+/// (`vidsink-vrect` → the app's hook) maps over the same rect.
 pub(crate) fn to_video(client: (f32, f32), size: (f32, f32), video: (f32, f32, f32, f32)) -> (f32, f32) {
 	let (fx, fy) = (client.0 / size.0.max(1.0), client.1 / size.1.max(1.0));
 	let (x0, y0, x1, y1) = video;
@@ -120,16 +124,25 @@ pub(super) fn on_pointer(hwnd: HWND, msg: u32, wp: WPARAM) -> bool {
 	}
 	if ty == PT_TOUCH && TOUCH_ON.load(Ordering::SeqCst) {
 		let mut n: u32 = 16;
-		let mut buf = [POINTER_TOUCH_INFO::default(); 16];
+		let mut buf = vec![POINTER_TOUCH_INFO::default(); 16];
 		// SAFETY: `buf` holds `n` entries; the call writes at most that many.
 		if unsafe { GetPointerFrameTouchInfo(id, &mut n, Some(buf.as_mut_ptr())) }.is_err() {
-			return msg != WM_POINTERCAPTURECHANGED;
+			// More contacts than the buffer (ERROR_INSUFFICIENT_BUFFER sets `n` to the frame's
+			// count): once more with room for all of them.
+			if (n as usize) <= buf.len() || n > 256 {
+				return msg != WM_POINTERCAPTURECHANGED;
+			}
+			buf = vec![POINTER_TOUCH_INFO::default(); n as usize];
+			// SAFETY: as above, `buf` now holds `n` entries.
+			if unsafe { GetPointerFrameTouchInfo(id, &mut n, Some(buf.as_mut_ptr())) }.is_err() {
+				return msg != WM_POINTERCAPTURECHANGED;
+			}
 		}
 		let frame = buf.first().map(|t| t.pointerInfo.frameId).unwrap_or(0);
 		if frame == LAST_FRAME.swap(frame, Ordering::SeqCst) && msg != WM_POINTERCAPTURECHANGED {
 			return true; // this frame was already reported for another of its contacts
 		}
-		let live: Vec<(u32, f32, f32, f32)> = buf[..(n as usize).min(16)]
+		let live: Vec<(u32, f32, f32, f32)> = buf[..(n as usize).min(buf.len())]
 			.iter()
 			.filter(|t| {
 				let f = t.pointerInfo.pointerFlags.0;

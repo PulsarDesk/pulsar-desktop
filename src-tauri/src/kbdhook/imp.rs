@@ -1394,19 +1394,17 @@ pub fn set_host_pinch(on: bool) {
 	HOST_PINCH.store(on, Ordering::SeqCst);
 }
 
-/// Connected host injects real pen / touch (`FEAT_PEN` / `FEAT_TOUCH`); set per session by
-/// play.rs. The renderer then forwards WM_POINTER pen / touch itself (`pen` / `touch` stdout
-/// lines), so the mouse Windows synthesizes from that input must not be forwarded as well.
+/// The FOCUSED session's host injects real pen / touch (`FEAT_PEN` / `FEAT_TOUCH`): set by
+/// play.rs at start and by `set_active_session` on a split-mode focus change, from that
+/// play's own `host_pen_touch`. The renderer then forwards WM_POINTER pen / touch itself
+/// (`pen` / `touch` stdout lines), so the mouse Windows synthesizes from that input must not
+/// be forwarded as well.
 static HOST_PEN: AtomicBool = AtomicBool::new(false);
 static HOST_TOUCH: AtomicBool = AtomicBool::new(false);
 
 pub fn set_host_pen_touch(pen: bool, touch: bool) {
 	HOST_PEN.store(pen, Ordering::SeqCst);
 	HOST_TOUCH.store(touch, Ordering::SeqCst);
-}
-
-pub fn host_pen_touch() -> (bool, bool) {
-	(HOST_PEN.load(Ordering::SeqCst), HOST_TOUCH.load(Ordering::SeqCst))
 }
 
 /// Mouse input Windows synthesized from a pen or a finger carries `MI_WP_SIGNATURE`

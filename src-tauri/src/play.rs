@@ -535,7 +535,7 @@ pub(crate) async fn start_remote_play(
 									);
 									let _ = writeln!(si, "msens {}", crate::kbdhook::mouse_sensitivity());
 									let _ = writeln!(si, "ptrfree {}", if crate::kbdhook::pointer_free() { 1 } else { 0 });
-									let _ = writeln!(si, "{}", crate::kbdhook::pen_touch_line());
+									let _ = writeln!(si, "{}", crate::kbdhook::pen_touch_line(host_pen, host_touch));
 									let _ = writeln!(si, "upscale {}", crate::native_view::upscale_mode());
 									let _ = writeln!(si, "hostptrshow {}", if crate::kbdhook::host_cursor() { 1 } else { 0 });
 								}
@@ -784,7 +784,7 @@ pub(crate) async fn start_remote_play(
 										);
 										let _ = writeln!(si, "msens {}", crate::kbdhook::mouse_sensitivity());
 										let _ = writeln!(si, "ptrfree {}", if crate::kbdhook::pointer_free() { 1 } else { 0 });
-										let _ = writeln!(si, "{}", crate::kbdhook::pen_touch_line());
+										let _ = writeln!(si, "{}", crate::kbdhook::pen_touch_line(host_pen, host_touch));
 										let _ = writeln!(si, "upscale {}", crate::native_view::upscale_mode());
 										let _ = writeln!(si, "hostptrshow {}", if crate::kbdhook::host_cursor() { 1 } else { 0 });
 									}
@@ -934,7 +934,7 @@ pub(crate) async fn start_remote_play(
 										);
 										let _ = writeln!(si, "msens {}", crate::kbdhook::mouse_sensitivity());
 										let _ = writeln!(si, "ptrfree {}", if crate::kbdhook::pointer_free() { 1 } else { 0 });
-										let _ = writeln!(si, "{}", crate::kbdhook::pen_touch_line());
+										let _ = writeln!(si, "{}", crate::kbdhook::pen_touch_line(host_pen, host_touch));
 										let _ = writeln!(si, "upscale {}", crate::native_view::upscale_mode());
 										let _ = writeln!(si, "hostptrshow {}", if crate::kbdhook::host_cursor() { 1 } else { 0 });
 									}
@@ -2212,6 +2212,7 @@ pub(crate) async fn start_remote_play(
 			respawn_lock: Arc::new(tokio::sync::Mutex::new(())),
 			windows_query_tx,
 			host_pubkey,
+			host_pen_touch: (host_pen, host_touch),
 		},
 	);
 	Ok(PlayInfo {
