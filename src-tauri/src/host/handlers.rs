@@ -2346,9 +2346,12 @@ pub(super) fn make_on_stream(
 			// invalidation on a client-reported loss); pulsar-core falls back to `fragment` on
 			// the same portal session when it cannot be built.
 			let sdk_codec = super::libav::sdk_codec(gcodec);
+			// The codec list is only read once the background probe answered (it is cached
+			// then) — never a driver call on this task.
+			let sdk_ready = super::linux_nvenc_sdk();
 			let frames = super::nvenc_frames::wanted(
-				super::linux_nvenc_sdk(),
-				pulsar_capture::nvenc_codecs(),
+				sdk_ready,
+				if sdk_ready { pulsar_capture::nvenc_codecs() } else { &[] },
 				genc,
 				&enc_pref,
 				sdk_codec,
