@@ -27,10 +27,18 @@ static ENABLED: AtomicBool = AtomicBool::new(true);
 
 pub fn set_host_gesture(on: bool) {
 	HOST_GESTURE.store(on, Ordering::SeqCst);
+	flags_changed();
 }
 
 pub fn set_enabled(on: bool) {
 	ENABLED.store(on, Ordering::SeqCst);
+	flags_changed();
+}
+
+/// The macOS event tap decides on its own thread whether to swallow a Dock swipe.
+fn flags_changed() {
+	#[cfg(target_os = "macos")]
+	pulsar_macinput::gesture::set_forward_gestures(forwarding());
 }
 
 pub fn enabled() -> bool {

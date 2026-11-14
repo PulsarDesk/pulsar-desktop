@@ -57,6 +57,7 @@ impl mi::Sink for TauriSink {
 			mi::Out::Relative { dx, dy } => InputEvent::PointerRelative { dx, dy },
 			mi::Out::Button { button, down } => InputEvent::PointerButton { button, down },
 			mi::Out::Scroll { dx, dy } => InputEvent::Scroll { dx, dy },
+			mi::Out::Swipe { horizontal, dir } => swipe_event(horizontal, dir),
 		};
 		fwd(&self.tx, ev);
 	}
@@ -75,6 +76,23 @@ impl mi::Sink for TauriSink {
 	fn scale(&self, dx: f64, dy: f64) -> (f64, f64) {
 		super::scale_relative(dx, dy)
 	}
+}
+
+/// A swallowed Dock swipe → the wire gesture. The event has no finger count: it is the count
+/// this Mac's user set for that swipe (System Settings → Trackpad), read from the prefs.
+fn swipe_event(horizontal: bool, dir: mi::gesture::SwipeDir) -> InputEvent {
+	use mi::gesture::SwipeDir;
+	use pulsar_core::input::gesture::{mac, GestureKind};
+	let prefs = mac::read().unwrap_or_default();
+	let fingers = mac::dock_swipe_fingers(&prefs, horizontal);
+	let kind = match dir {
+		SwipeDir::Up => GestureKind::SwipeUp,
+		SwipeDir::Down => GestureKind::SwipeDown,
+		SwipeDir::Left => GestureKind::SwipeLeft,
+		SwipeDir::Right => GestureKind::SwipeRight,
+	};
+	tracing::info!(fingers, ?kind, "touchpad gesture (Dock swipe)");
+	crate::gesture::event(fingers, kind)
 }
 
 /// Ask for the permission at most once per run (macOS shows its own prompt only once per
