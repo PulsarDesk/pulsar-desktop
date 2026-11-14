@@ -2234,8 +2234,13 @@ pub(crate) async fn bring_online(
 						// in the background (taskbar) — it used to jump to the front over whatever
 						// the host was doing, for a remote session's every line; a game session's
 						// lines went unnoticed. Clicking the toast opens the chat.
-						let chat_on_screen = tauri::Manager::get_webview_window(&app_h, "connections")
-							.is_some_and(|w| w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(true));
+						// (On screen = the host is looking at it: visible, not minimized and focused.
+						// A window behind other windows gets the toast + taskbar flash too.)
+						let chat_on_screen = tauri::Manager::get_webview_window(&app_h, "connections").is_some_and(|w| {
+							w.is_visible().unwrap_or(false)
+								&& !w.is_minimized().unwrap_or(true)
+								&& w.is_focused().unwrap_or(false)
+						});
 						if !chat_on_screen {
 							let from = chat_names
 								.lock()
@@ -2244,9 +2249,9 @@ pub(crate) async fn bring_online(
 								.and_then(|m| m.0.clone())
 								.filter(|n| !n.trim().is_empty())
 								.unwrap_or_else(|| peer.clone());
-							crate::toast::chat_received(&app_h, &from, &text);
+							crate::toast::chat_received(&app_h, &peer, &from, &text);
+							crate::connections::notify_chat(&app_h);
 						}
-						crate::connections::open_or_update(&app_h, crate::connections::Surface::Background);
 						let _ = app_h.emit(
 							"host-chat",
 							DataPayload {

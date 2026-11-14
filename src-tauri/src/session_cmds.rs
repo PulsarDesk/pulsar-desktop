@@ -1222,6 +1222,22 @@ pub(crate) async fn render_nav(
 	Ok(())
 }
 
+/// Client: a chat bubble's webview hotspot was clicked (Linux embedded, where the closed
+/// renderer is input pass-through): the next overlay open lands on the Chat. The frontend
+/// opens the overlay right after.
+#[tauri::command]
+pub(crate) fn render_chat_open(state: State<'_, AppState>, id: u64) -> Result<(), String> {
+	let stdin = state.plays.lock().unwrap().get(&id).map(|p| p.render_stdin.clone());
+	if let Some(stdin) = stdin {
+		use std::io::Write;
+		if let Some(si) = stdin.lock().unwrap().as_mut() {
+			let _ = writeln!(si, "chatopen");
+			let _ = si.flush();
+		}
+	}
+	Ok(())
+}
+
 /// Client: show a free-text toast on the native renderer (bottom-center, ~6 s with
 /// fade). The webview is occluded by the video, so inbound chat etc. surfaces here.
 #[tauri::command]

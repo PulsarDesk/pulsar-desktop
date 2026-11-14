@@ -99,6 +99,42 @@ pub(crate) fn open_or_update(app: &AppHandle, surface: Surface) {
 	});
 }
 
+/// A chat line arrived while the chat is not on screen: make sure the window exists (a new one
+/// opens minimized, never over what the host is doing) and flash its taskbar button until the
+/// host looks at it. The toast (toast::chat_received) says who wrote what.
+pub(crate) fn notify_chat(app: &AppHandle) {
+	open_or_update(app, Surface::Background);
+	let handle = app.clone();
+	// Queued after the build above (same main-thread queue), so the window exists by now.
+	let _ = app.run_on_main_thread(move || {
+		if let Some(win) = handle.get_webview_window(LABEL) {
+			if !win.is_focused().unwrap_or(false) {
+				let _ = win.request_user_attention(Some(tauri::UserAttentionType::Informational));
+			}
+		}
+	});
+}
+
+/// The chat to open when the window (re)appears: the toast's sender, until the window takes it.
+static PENDING_CHAT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// A chat toast was clicked: bring the window forward on `peer`'s chat. A window that is not
+/// listening yet (just built) takes it with [`take_pending_chat`] on mount.
+pub(crate) fn open_chat(app: &AppHandle, peer: Option<String>) {
+	*PENDING_CHAT.lock().unwrap() = peer.clone();
+	open_or_update(app, Surface::Forward);
+	if let Some(p) = peer {
+		use tauri::Emitter;
+		let _ = app.emit_to(LABEL, "open-chat", p);
+	}
+}
+
+/// The connections window asks which chat to open (see [`open_chat`]); taken once.
+#[tauri::command]
+pub(crate) fn take_pending_chat() -> Option<String> {
+	PENDING_CHAT.lock().unwrap().take()
+}
+
 /// Close the connections window if it exists (called when the last connection ends).
 /// Runs on the main thread (see `open_or_update`).
 pub(crate) fn close(app: &AppHandle) {

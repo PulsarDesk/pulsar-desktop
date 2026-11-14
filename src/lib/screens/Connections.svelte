@@ -5,7 +5,7 @@
 	// Opens forward for a Remote connection, hidden for a Game one (decided host-side).
 	import { onMount } from 'svelte';
 	import Icon from '#lib/Icon.svelte';
-	import { api, onHostChat, onPeerAvatar, onPeerName, onPeerId, onSessionEvent } from '#lib/api.js';
+	import { api, onHostChat, onOpenChat, onPeerAvatar, onPeerName, onPeerId, onSessionEvent } from '#lib/api.js';
 	import { fmtPeerId } from '#lib/peers.svelte.js';
 	import { t } from '#lib/i18n.svelte.js';
 	import { closeOnEscape } from '#lib/escapeStack.js';
@@ -107,6 +107,16 @@
 			// Don't badge a device whose chat modal is currently open (history keyed by peer).
 			if (msgRow?.peer !== e.peer) unread = { ...unread, [e.peer]: (unread[e.peer] ?? 0) + 1 };
 		}).then(track);
+		// A clicked chat toast: open that client's chat (a window built for it asks on mount).
+		onOpenChat((peer) => {
+			wantChat = peer;
+		}).then(track);
+		api
+			.takePendingChat()
+			.then((p) => {
+				if (p) wantChat = p;
+			})
+			.catch(() => {});
 		return () => {
 			dead = true;
 			unlistens.forEach((u) => u());
@@ -204,6 +214,17 @@
 		newFrom = u > 0 ? Math.max(0, (history[r.peer]?.length ?? 0) - u) : null;
 		unread = { ...unread, [r.peer]: 0 };
 	}
+	// The chat a clicked toast asked for, opened once its row is known (a freshly built window
+	// gets the rows asynchronously).
+	let wantChat = $state<string | null>(null);
+	$effect(() => {
+		const peer = wantChat;
+		if (!peer) return;
+		const r = rows.find((x) => x.peer === peer);
+		if (!r) return;
+		wantChat = null;
+		if (msgRow?.peer !== peer) openMsg(r);
+	});
 	function closeMsg() {
 		msgRow = null;
 		sendErr = null;

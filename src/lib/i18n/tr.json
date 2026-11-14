@@ -698,6 +698,7 @@
 	"approve.allow": "İzin Ver",
 	"approve.allowViewOnly": "İzin ver, kontrol edemesin",
 	"modal.close": "Kapat",
+	"session.openChat": "Sohbeti aç",
 	"session.overlayBtn": "Overlay menüsünü aç",
 	"settings.autoUpdate": "Güncellemeleri otomatik kur",
 	"settings.autoUpdateDesc": "Yeni sürümü sormadan kurar ve yeniden başlatır. Kapalıyken önce sorulur.",

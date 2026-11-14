@@ -885,13 +885,19 @@ pub fn draw(ctx: &egui::Context, st: &OverlayState, ui_state: &mut UiState) -> V
 		ui_state.sel = 0;
 		ui_state.nav_active = false;
 		// A fresh open always lands on the hub (main page), never the section it was closed
-		// on — for every backend (Windows used not to reset it).
+		// on — for every backend (Windows used not to reset it). (A chat-bubble click lands in
+		// the Chat: below.)
 		ui_state.view = View::Root;
 		ui_state.sub_sel = 0;
 		ui_state.pending = None;
 		ui_state.hp_sel = None;
 		ui_state.picker = None;
 		ui_state.tab_focus = false;
+	}
+	// A chat bubble was clicked: show the Chat. Checked on every open frame, not only the open
+	// edge — on Linux the app's `chatopen` (stdin) can arrive after the open (a signal).
+	if OPEN_TO_CHAT.swap(false, std::sync::atomic::Ordering::SeqCst) {
+		ui_state.view = View::Chat;
 	}
 	// B / Escape steps back one level: an options page returns to its rows, a sub-view to the
 	// Root menu; from Root it closes the overlay. (The pad's B button is relayed as Escape —
@@ -3394,12 +3400,47 @@ pub const BUBBLE_SECS: f32 = 8.0;
 const BUBBLE_FADE: f32 = 0.8;
 pub const BUBBLE_MAX: usize = 3;
 
+/// Where the closed-state chat bubbles were last drawn (egui points) and when (a backend that
+/// stops drawing the closed chrome once the bubbles expire leaves the last set behind).
+static BUBBLE_HIT: std::sync::Mutex<(Vec<egui::Rect>, Option<std::time::Instant>)> =
+	std::sync::Mutex::new((Vec::new(), None));
+/// The next overlay open lands on the Chat instead of the hub (a bubble was clicked).
+static OPEN_TO_CHAT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The closed-state chat bubbles on screen now (egui points; drawn within the last second).
+pub fn bubble_rects() -> Vec<egui::Rect> {
+	let g = BUBBLE_HIT.lock().unwrap();
+	if g.1.is_some_and(|at| at.elapsed().as_secs_f32() < 1.0) {
+		g.0.clone()
+	} else {
+		Vec::new()
+	}
+}
+
+/// A closed-state click at `pos` (egui points) landed on a chat bubble.
+pub fn bubble_at(pos: egui::Pos2) -> bool {
+	bubble_rects().iter().any(|r| r.contains(pos))
+}
+
+/// A chat bubble was clicked: the caller asks the app to open the overlay (`ov toggle`), and
+/// the open lands on the Chat. (On Linux embedded the webview takes the click and the app
+/// sends `chatopen` before opening.)
+pub fn open_to_chat() {
+	OPEN_TO_CHAT.store(true, std::sync::atomic::Ordering::SeqCst);
+	BUBBLE_HIT.lock().unwrap().0.clear();
+}
+
 /// Incoming chat while the overlay is CLOSED: message-sized bubbles next to the open
 /// button — on its right when the button sits in the left half of the screen, on its left
 /// otherwise; stacked downward from a button in the top half, upward from one in the
 /// bottom half (oldest farthest from the button's edge). They slide in, then fade out
-/// after [`BUBBLE_SECS`]. Display-only (the closed container is input pass-through).
+/// after [`BUBBLE_SECS`]. A click on one opens the overlay on the Chat: the backends that get
+/// the closed-state clicks hit-test [`bubble_at`] (where each bubble was last drawn).
 pub fn draw_chat_bubbles(ctx: &egui::Context, st: &OverlayState) {
+	let mut hit_guard = BUBBLE_HIT.lock().unwrap();
+	hit_guard.1 = Some(std::time::Instant::now());
+	let hit = &mut hit_guard.0;
+	hit.clear();
 	if st.chat_toasts.is_empty() {
 		return;
 	}
@@ -3436,6 +3477,9 @@ pub fn draw_chat_bubbles(ctx: &egui::Context, st: &OverlayState) {
 		let x = if right_side { btn.right() + gap } else { btn.left() - gap - size.x } + slide;
 		let top = if downward { y } else { y - size.y };
 		let rect = egui::Rect::from_min_size(egui::pos2(x, top), size);
+		if alpha > 0.2 {
+			hit.push(rect);
+		}
 		let painter = ctx.layer_painter(egui::LayerId::new(
 			egui::Order::Foreground,
 			egui::Id::new(("pulsar_chat_bubble", i)),

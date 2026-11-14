@@ -121,7 +121,7 @@ use commands::{
 	set_disabled_controllers, set_host_serving, set_language, set_pad_background, set_pad_wake, set_stream_settings, set_tray,
 	steam_path, test_controller_rumble, webview_sw_painted,
 };
-use connections::{list_connections, set_view_only, show_connections};
+use connections::{list_connections, set_view_only, show_connections, take_pending_chat};
 use files_window::open_files_window;
 use fs_browse::local_ls;
 use host::go_online;
@@ -136,7 +136,7 @@ use io_cmds::{
 use play::{start_remote_play, stop_stream};
 use session_cmds::{
 	fs_get, fs_list, host_window_list, render_banner, render_chat, render_fs, render_hint,
-	render_kin, render_nav, render_toast, reverse_play, set_cursor_label, set_frame_pacing, set_overlay,
+	render_chat_open, render_kin, render_nav, render_toast, reverse_play, set_cursor_label, set_frame_pacing, set_overlay,
 	set_overlay_button, set_overlay_button_pos, set_mouse_sensitivity, set_pointer_free, set_host_cursor, set_ds4_headset, set_play_adapt, set_play_audio, set_play_audio_quality, set_play_bitrate,
 	set_play_codec, set_play_encoder, set_play_fps, set_play_monitor, set_play_quality,
 	set_play_resolution, set_play_window, set_stats_hud,
@@ -857,6 +857,7 @@ pub fn run() {
 			render_hint,
 			render_banner,
 			render_toast,
+			render_chat_open,
 			render_chat,
 			render_fs,
 			render_kin,
@@ -889,6 +890,7 @@ pub fn run() {
 			disconnect_all_peers,
 			list_connections,
 			show_connections,
+			take_pending_chat,
 			open_files_window,
 			tabwin::tab_strip_rect,
 			tabwin::tab_drop_target,

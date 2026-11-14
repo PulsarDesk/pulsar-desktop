@@ -41,6 +41,9 @@ pub(crate) struct Toast {
 	peer: String,
 	/// Full path, for "open the folder with the file selected".
 	path: Option<String>,
+	/// `chat-in`: the sender's peer key, so a click opens that client's chat.
+	#[serde(skip)]
+	chat_peer: Option<String>,
 }
 
 static TOASTS: Mutex<Vec<Toast>> = Mutex::new(Vec::new());
@@ -62,10 +65,11 @@ pub(crate) fn kbd_permission(app: &AppHandle) {
 	push(app, "kbd-perm", String::new(), String::new(), None);
 }
 
-/// A chat line from a connected client while the chat is not on screen here. `from` = the
-/// client's name (its id when it sent none); clicking the notice opens the chat.
-pub(crate) fn chat_received(app: &AppHandle, from: &str, text: &str) {
-	push(app, "chat-in", chat_preview(text), from.to_string(), None);
+/// A chat line from a connected client while the chat is not on screen here. `peer` = the
+/// client's peer key, `from` = its name (its id when it sent none); clicking the notice opens
+/// that client's chat.
+pub(crate) fn chat_received(app: &AppHandle, peer: &str, from: &str, text: &str) {
+	push_with(app, "chat-in", chat_preview(text), from.to_string(), None, Some(peer.to_string()));
 }
 
 /// The message as one short line for the notice (the full text is in the chat).
@@ -85,6 +89,17 @@ pub(crate) fn pad_unavailable(app: &AppHandle, text: String) {
 }
 
 fn push(app: &AppHandle, kind: &'static str, name: String, peer: String, path: Option<PathBuf>) {
+	push_with(app, kind, name, peer, path, None);
+}
+
+fn push_with(
+	app: &AppHandle,
+	kind: &'static str,
+	name: String,
+	peer: String,
+	path: Option<PathBuf>,
+	chat_peer: Option<String>,
+) {
 	let id = NEXT.fetch_add(1, Ordering::Relaxed);
 	{
 		let mut g = TOASTS.lock().unwrap_or_else(|e| e.into_inner());
@@ -94,6 +109,7 @@ fn push(app: &AppHandle, kind: &'static str, name: String, peer: String, path: O
 			name,
 			peer,
 			path: path.map(|p| p.to_string_lossy().into_owned()),
+			chat_peer,
 		});
 		let over = g.len().saturating_sub(MAX_VISIBLE);
 		g.drain(..over);
@@ -197,18 +213,18 @@ pub(crate) fn toast_close(app: AppHandle, id: u64) {
 /// permission notice the permission's settings; any notice is then dismissed.
 #[tauri::command]
 pub(crate) fn toast_open(app: AppHandle, id: u64) {
-	let (kind, path) = TOASTS
+	let (kind, path, chat_peer) = TOASTS
 		.lock()
 		.unwrap_or_else(|e| e.into_inner())
 		.iter()
 		.find(|t| t.id == id)
-		.map(|t| (t.kind, t.path.clone()))
-		.unwrap_or(("", None));
+		.map(|t| (t.kind, t.path.clone(), t.chat_peer.clone()))
+		.unwrap_or(("", None, None));
 	if kind == "kbd-perm" {
 		crate::kbdhook::request_permission();
 	}
 	if kind == "chat-in" {
-		crate::connections::open_or_update(&app, crate::connections::Surface::Forward);
+		crate::connections::open_chat(&app, chat_peer);
 	}
 	if let Some(p) = path {
 		reveal_in_folder(Path::new(&p));

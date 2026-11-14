@@ -698,6 +698,7 @@
 	"approve.allow": "Разрешить",
 	"approve.allowViewOnly": "Разрешить без управления",
 	"modal.close": "Закрыть",
+	"session.openChat": "Открыть чат",
 	"session.overlayBtn": "Открыть меню оверлея",
 	"settings.autoUpdate": "Устанавливать обновления автоматически",
 	"settings.autoUpdateDesc": "Ставит новую версию без вопросов и перезапускается. Выключено — сначала спросит.",

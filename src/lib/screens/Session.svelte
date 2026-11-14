@@ -35,6 +35,7 @@
 		onPeerAvatar,
 		onPeerName,
 		onChatMsg,
+		onChatBubbles,
 		onPlayDims,
 		onHostPointer,
 		onHostDisplayStreamed,
@@ -266,6 +267,8 @@
 
 	// The HOST's pushed identity (image + display name): shown in the session menu
 	// AND cached against the target id so recents/LAN/devices keep the face+name.
+	/** Where the renderer's closed-state chat bubbles are (client fractions; Linux only). */
+	let chatBubbles = $state<[number, number, number, number][]>([]);
 	let peerAvatar = $state('');
 	let peerName = $state('');
 	const displayTarget = $derived(peerName ? { name: peerName, id: target.id } : target);
@@ -289,6 +292,12 @@
 				const who = peerName || target.name;
 				api.renderToast(playId, `${who}: ${e.text}`).catch(() => {});
 				api.renderChat(playId, 'in', e.text).catch(() => {});
+			}),
+			// Linux: the renderer's closed-state chat bubbles (the video container is input
+			// pass-through there, so the webview puts click hotspots over them).
+			onChatBubbles((e) => {
+				if (e.id !== playId) return;
+				chatBubbles = e.rects;
 			})
 		);
 		return scope.dispose;
@@ -1208,6 +1217,22 @@
 		></button>
 	{/if}
 
+	<!-- Chat bubble hotspots (Linux: the video container is input pass-through): a click on a
+	     bubble the renderer draws opens the overlay on the Chat. -->
+	{#if native && !dock.overlayOpen}
+		{#each chatBubbles as r, i (i)}
+			<button
+				class="bubble-hotspot"
+				aria-label={t('session.openChat')}
+				style="left:{r[0] * 100}%; top:{r[1] * 100}%; width:{r[2] * 100}%; height:{r[3] * 100}%"
+				onclick={() => {
+					chatBubbles = [];
+					api.renderChatOpen(playId).catch(() => {}).finally(() => dock.toggleOverlay());
+				}}
+			></button>
+		{/each}
+	{/if}
+
 	<!-- Codec/encoder switch veil: the Rust side hides the native video container for
 	     the restart window, so this brief loading screen is what the user sees. -->
 	{#if controls.switching}
@@ -1332,6 +1357,13 @@
 		cursor: pointer;
 		z-index: 6;
 		touch-action: none;
+	}
+	.bubble-hotspot {
+		position: absolute;
+		border: none;
+		background: transparent;
+		cursor: pointer;
+		z-index: 6;
 	}
 	.switchveil {
 		position: absolute;

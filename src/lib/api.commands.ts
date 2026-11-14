@@ -135,6 +135,8 @@ export const api = {
 		>('list_connections'),
 	/** Host: reveal/focus the dedicated connections window (sidebar button). */
 	showConnections: () => invoke<void>('show_connections'),
+	/** Connections window: the chat a clicked toast asked for (taken once; null = none). */
+	takePendingChat: () => invoke<string | null>('take_pending_chat'),
 	/** Client: open (or focus) the per-session file-manager window for play `id`;
 	 * `peer` decorates the title/header so multi-session windows stay tellable apart. */
 	openFilesWindow: (id: number, peer: string) => invoke<void>('open_files_window', { id, peer }),
@@ -341,6 +343,8 @@ export const api = {
 	/** Free-text toast on the native renderer (bottom-center, ~6 s) — inbound chat
 	 * surfaces here because the video occludes the webview. */
 	renderToast: (id: number, text: string) => invoke<void>('render_toast', { id, text }),
+	/** A chat bubble's hotspot was clicked: the next overlay open shows the Chat. */
+	renderChatOpen: (id: number) => invoke<void>('render_chat_open', { id }),
 	/** Path of the app log directory. */
 	logDirPath: () => invoke<string>('log_dir_path'),
 	/** Open the app log directory in the file manager; resolves to its path. */

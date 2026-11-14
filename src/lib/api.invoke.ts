@@ -248,6 +248,8 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 		case 'respond_request':
 		case 'submit_password':
 		case 'disconnect_peer':
+		case 'take_pending_chat':
+			return Promise.resolve(null as unknown as T);
 		case 'show_connections':
 		case 'relaunch_to_home':
 			return Promise.resolve(undefined as unknown as T);
@@ -284,6 +286,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 		case 'set_cursor_label':
 		case 'set_overlay_button':
 		case 'set_overlay_button_pos':
+		case 'render_chat_open':
 		case 'reverse_play':
 		case 'set_window_fullscreen':
 		case 'input_pointer':

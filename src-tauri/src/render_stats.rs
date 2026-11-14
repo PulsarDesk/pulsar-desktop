@@ -239,6 +239,12 @@ pub(crate) fn start_render_reader(
 				if v.len() == 4 {
 					crate::kbdhook::set_video_frac(v[0], v[1], v[2], v[3]);
 				}
+			} else if let Some(rest) = line.strip_prefix("vidsink-bubbles ") {
+				// Closed-state chat bubbles (client fractions x y w h each, `-` = none; Linux
+				// renderer): the session puts click hotspots over them (click = open the Chat).
+				let v: Vec<f32> = rest.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+				let rects: Vec<[f32; 4]> = v.chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]).collect();
+				let _ = app.emit("chat-bubbles", serde_json::json!({ "id": cur_id, "rects": rects }));
 			} else if let Some(rest) = line.strip_prefix("vidsink-ovbtn ") {
 				// The overlay-open button (client fractions, `-` = hidden): the free-cursor
 				// handover keeps it clickable by counting it as outside the video.

@@ -698,6 +698,7 @@
 	"approve.allow": "Рұқсат ету",
 	"approve.allowViewOnly": "Басқарусыз рұқсат ету",
 	"modal.close": "Жабу",
+	"session.openChat": "Чатты ашу",
 	"session.overlayBtn": "Оверлей мәзірін ашу",
 	"settings.autoUpdate": "Жаңартуларды автоматты орнату",
 	"settings.autoUpdateDesc": "Жаңа нұсқаны сұрамай орнатып, қайта іске қосады. Өшірулі болса, алдымен сұралады.",

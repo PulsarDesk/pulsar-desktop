@@ -407,6 +407,9 @@ pub fn run() {
 				// Overlay open/close, the race-free twin of SIGUSR1/SIGUSR2 — used right after a
 				// respawn, when a signal could arrive before the handler above is installed.
 				Some("open") => OPEN.store(true, Ordering::SeqCst),
+				// A chat bubble's webview hotspot was clicked: the next open lands on the Chat
+				// (the app sends this right before `open`).
+				Some("chatopen") => overlay::open_to_chat(),
 				Some("close") => OPEN.store(false, Ordering::SeqCst),
 				Some("show") => {
 					IDLE.store(false, Ordering::SeqCst);
@@ -1832,6 +1835,14 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 							),
 						)
 						.contains(pos);
+					// A chat bubble opens the overlay on the Chat (like the button, no engage).
+					let on_btn = on_btn || {
+						let b = overlay::bubble_at(pos);
+						if b {
+							overlay::open_to_chat();
+						}
+						b
+					};
 					// Looked up per click: the container may have moved to another app window
 					// (a session tab dragged out), so the toplevel can change.
 					let focus_top = if standalone { 0 } else { toplevel_of(xd, parent) };
@@ -2247,6 +2258,36 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 			}
 		}
 
+		// Embedded, the closed container is input pass-through: tell the app where the chat
+		// bubbles are (client fractions, `-` = none) so the webview puts click hotspots there.
+		{
+			static LAST: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+			let (sw, sh) = (w as f32 / ppp, h as f32 / ppp);
+			let rects = if open || sw <= 0.0 || sh <= 0.0 { Vec::new() } else { overlay::bubble_rects() };
+			let line = if rects.is_empty() {
+				"vidsink-bubbles -".to_string()
+			} else {
+				let mut s = String::from("vidsink-bubbles");
+				for r in &rects {
+					use std::fmt::Write as _;
+					let _ = write!(
+						s,
+						" {:.4} {:.4} {:.4} {:.4}",
+						r.min.x / sw,
+						r.min.y / sh,
+						r.width() / sw,
+						r.height() / sh
+					);
+				}
+				s
+			};
+			let mut last = LAST.lock().unwrap();
+			if *last != line {
+				println!("{line}");
+				let _ = std::io::stdout().flush();
+				*last = line;
+			}
+		}
 		if kms.active() {
 			// KMS-LEASE: atomic commit to the planes; paces the loop on the page flip (any
 			// failure hands the output back and the next iteration draws through X again).

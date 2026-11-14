@@ -110,7 +110,13 @@ export const onRelayE2e = (cb: (required: boolean) => void) =>
 	listenTo<boolean>('relay-e2e', cb);
 /** Client: a chat line arrived from the host (`peer` = play id as string). */
 export const onChatMsg = (cb: (e: DataText) => void) => listenTo<DataText>('chat-msg', cb);
+/** Client (Linux renderer): where the closed-state chat bubbles are, as client fractions
+ * `[x, y, w, h]` of the renderer window (`id` = play id; empty = none shown). */
+export const onChatBubbles = (cb: (e: { id: number; rects: [number, number, number, number][] }) => void) =>
+	listenTo<{ id: number; rects: [number, number, number, number][] }>('chat-bubbles', cb);
 /** Host: a chat line arrived from a connected client. */
+/** Connections window: open this client's chat (peer key; a chat toast was clicked). */
+export const onOpenChat = (cb: (peer: string) => void) => listenTo<string>('open-chat', cb);
 export const onHostChat = (cb: (e: DataText) => void) => listenTo<DataText>('host-chat', cb);
 /** Host: a client pushed clipboard text. */
 export const onClipboardIn = (cb: (e: DataText) => void) => listenTo<DataText>('clipboard', cb);

@@ -1014,7 +1014,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
 				by = by.clamp(0.0, (sh - bs).max(0.0));
 				hit_btn = p.x >= bx && p.x <= bx + bs && p.y >= by && p.y <= by + bs;
 			}
-			if hit_btn {
+			if !hit_btn && crate::overlay::bubble_at(p) {
+				// A chat bubble: open the overlay on the Chat (not click-to-engage).
+				crate::overlay::open_to_chat();
+				println!("ov toggle");
+				let _ = std::io::stdout().flush();
+			} else if hit_btn {
 				// Click vs drag is decided on the UP edge (≤3 pt = click → toggle).
 				use windows::Win32::UI::Input::KeyboardAndMouse::SetCapture;
 				unsafe { SetCapture(hwnd) };

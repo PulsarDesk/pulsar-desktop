@@ -698,6 +698,7 @@
 	"approve.allow": "Allow",
 	"approve.allowViewOnly": "Allow without control",
 	"modal.close": "Close",
+	"session.openChat": "Open the chat",
 	"session.overlayBtn": "Open the overlay menu",
 	"settings.autoUpdate": "Install updates automatically",
 	"settings.autoUpdateDesc": "Installs new versions without asking and restarts. When off, you're asked first.",

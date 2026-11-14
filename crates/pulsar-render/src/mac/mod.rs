@@ -1004,11 +1004,17 @@ fn handle_mouse(ev: &NSEvent, win: &window::Panel) {
 	let ppp = overlay_ppp();
 	let (sw, sh) = (win.size_px.0 as f32 / ppp, win.size_px.1 as f32 / ppp);
 	if !OPEN.load(Ordering::SeqCst) {
-		if t == NSEventType::LeftMouseDown && OVERLAY_BTN.load(Ordering::SeqCst) {
+		let on_btn = |pos: egui::Pos2| {
 			let (bx, by, bs) = ovbtn_rect(sw, sh);
-			if pos.x >= bx && pos.x <= bx + bs && pos.y >= by && pos.y <= by + bs {
-				*BTN_DRAG.lock().unwrap() = Some((pos.x, pos.y, bx, by, false));
-			}
+			OVERLAY_BTN.load(Ordering::SeqCst) && pos.x >= bx && pos.x <= bx + bs && pos.y >= by && pos.y <= by + bs
+		};
+		if t == NSEventType::LeftMouseDown && !on_btn(pos) && crate::overlay::bubble_at(pos) {
+			// A chat bubble: open the overlay on the Chat.
+			crate::overlay::open_to_chat();
+			out_line("ov toggle");
+		} else if t == NSEventType::LeftMouseDown && on_btn(pos) {
+			let (bx, by, _) = ovbtn_rect(sw, sh);
+			*BTN_DRAG.lock().unwrap() = Some((pos.x, pos.y, bx, by, false));
 		} else if t == NSEventType::LeftMouseDragged {
 			if let Some((dx0, dy0, bx0, by0, moved)) = BTN_DRAG.lock().unwrap().as_mut() {
 				let (dx, dy) = (pos.x - *dx0, pos.y - *dy0);
@@ -1081,13 +1087,20 @@ fn wants_mouse(win: &window::Panel) -> bool {
 	if OPEN.load(Ordering::SeqCst) || BTN_DRAG.lock().unwrap().is_some() {
 		return true;
 	}
-	if !OVERLAY_BTN.load(Ordering::SeqCst) || !win.shown {
+	if !win.shown {
 		return false;
 	}
 	let Some((x, y)) = win.pointer() else { return false };
 	let ppp = overlay_ppp();
 	let k = win.scale as f32 / ppp;
 	let (px, py) = (x as f32 * k, y as f32 * k);
+	// A closed-state chat bubble takes the click too (it opens the Chat).
+	if crate::overlay::bubble_at(egui::pos2(px, py)) {
+		return true;
+	}
+	if !OVERLAY_BTN.load(Ordering::SeqCst) {
+		return false;
+	}
 	let (sw, sh) = (win.size_px.0 as f32 / ppp, win.size_px.1 as f32 / ppp);
 	let (bx, by, bs) = ovbtn_rect(sw, sh);
 	px >= bx && px <= bx + bs && py >= by && py <= by + bs
