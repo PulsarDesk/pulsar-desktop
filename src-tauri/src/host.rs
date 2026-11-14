@@ -732,9 +732,10 @@ pub(crate) async fn bring_online(
 			// Stream generation for THIS session's children — see `process::drain_procs`.
 			let proc_epoch: crate::process::ProcEpoch =
 				Arc::new(std::sync::atomic::AtomicU64::new(0));
-			// Native DXGI+NVENC capture handle for this session (Windows), when the native path
-			// is used instead of ffmpeg. Stopped at the same drain sites as `procs`.
-			#[cfg(windows)]
+			// Native capture handle for this session (Windows DXGI/WGC+NVENC, macOS
+			// ScreenCaptureKit+VideoToolbox), when the native path is used instead of ffmpeg.
+			// Stopped at the same drain sites as `procs`.
+			#[cfg(any(windows, target_os = "macos"))]
 			let native_slot: Arc<Mutex<Option<pulsar_capture::CaptureHandle>>> = Arc::new(Mutex::new(None));
 			let password_store = password_store.clone();
 			let pending = pending.clone();
@@ -1443,7 +1444,7 @@ pub(crate) async fn bring_online(
 					since_ms,
 					sid,
 					self_name.clone(),
-					#[cfg(windows)]
+					#[cfg(any(windows, target_os = "macos"))]
 					native_slot.clone(),
 					#[cfg(windows)]
 					cur_display.clone(),
@@ -2279,7 +2280,7 @@ pub(crate) async fn bring_online(
 				// NACK requests from the client → the active video forwarder's channel.
 				let on_nack = {
 					let nack_slot = nack_slot.clone();
-					#[cfg(windows)]
+					#[cfg(any(windows, target_os = "macos"))]
 					let native_idr = native_slot.clone();
 					// Wayland (in-process GStreamer): a keyframe request forces a key unit on the
 					// live pipeline — no restart.
@@ -2300,8 +2301,8 @@ pub(crate) async fn bring_online(
 						// GOP). seq 0 is ~never in the retransmit ring, so before this the sentinel
 						// was a silent no-op.
 						if seqs.contains(&0) {
-							// Native (NVENC) path: force an immediate IDR on the live encoder.
-							#[cfg(windows)]
+							// Native (NVENC / VideoToolbox) path: force an immediate IDR on the live encoder.
+							#[cfg(any(windows, target_os = "macos"))]
 							if let Some(h) = native_idr.lock().unwrap().as_ref() {
 								h.request_idr();
 							}
@@ -2346,10 +2347,11 @@ pub(crate) async fn bring_online(
 				// NVENC capture can act on it; any other path ignores it, and the client asks for
 				// a keyframe itself if the repair fails (so a repaired hole never costs one).
 				let on_rfi = {
-					#[cfg(windows)]
+					#[cfg(any(windows, target_os = "macos"))]
 					let native = native_slot.clone();
 					move |first: u16, last: u16| {
-						#[cfg(windows)]
+						// macOS: VideoToolbox declines it (counted); the client's repair heals.
+						#[cfg(any(windows, target_os = "macos"))]
 						if let Some(h) = native.lock().unwrap().as_ref() {
 							h.request_rfi(first, last);
 						}
@@ -2580,7 +2582,7 @@ pub(crate) async fn bring_online(
 				// The host display-mode watcher is aborted by SessionCleanupGuard::drop
 				// (both on the normal path here and on the abort() path from go_online).
 				// Stop the native capture thread (releases the NVENC session + DXGI duplication).
-				#[cfg(windows)]
+				#[cfg(any(windows, target_os = "macos"))]
 				if let Some(h) = native_slot.lock().unwrap().take() {
 					h.stop();
 				}

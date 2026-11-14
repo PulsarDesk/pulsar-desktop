@@ -8,8 +8,9 @@ use super::*;
 /// Wire pacer shared by the video forwarder's video, parity and retransmit datagrams.
 mod pacer;
 
-/// In-process Opus/RTP encoder for the process-loopback audio (no ffmpeg in the audio path).
-#[cfg(windows)]
+/// In-process Opus/RTP encoder for the system-mix audio (Windows process loopback, macOS
+/// ScreenCaptureKit) — no ffmpeg in the audio path.
+#[cfg(any(windows, target_os = "macos"))]
 mod opus_rtp;
 
 /// DualSense-aware capture: the default endpoint's loopback while a virtual pad is plugged, so
@@ -318,6 +319,125 @@ pub(super) fn spawn_process_loopback_audio(
 	true
 }
 
+/// macOS: stream the host's **system mix** — every app except Pulsar — captured by
+/// ScreenCaptureKit (macOS 13+, `pulsar_core::audio::run_system_audio_capture`), the
+/// counterpart of Windows' process loopback in `Exclude` mode. No BlackHole-style virtual device
+/// needed. Stereo (SCK delivers at most two channels): a surround request gets stereo here.
+/// Encoded in-process (Opus, or L16 for `AudioQuality::Raw`); an ffmpeg reading the PCM on its
+/// stdin is the fallback should that encoder not come up. Returns `true` only once the capture is
+/// live, so the caller can fall back to the ffmpeg AVFoundation input. Untested on macOS hardware.
+#[cfg(target_os = "macos")]
+pub(super) fn spawn_system_audio_mac(
+	procs: &Arc<Mutex<Vec<Child>>>,
+	ffmpeg: &str,
+	dest: &str,
+	req_layout: pulsar_core::audio::ChannelLayout,
+	quality: pulsar_core::audio::AudioQuality,
+	epoch: &crate::process::ProcEpoch,
+) -> bool {
+	use std::process::Stdio;
+	let fmt = pulsar_core::audio::system_audio_format();
+	let cap_layout = {
+		let delivered = pulsar_core::audio::ChannelLayout::Stereo;
+		if req_layout.channels() < delivered.channels() {
+			req_layout
+		} else {
+			delivered
+		}
+	};
+	let codec = opus_rtp::Codec::for_quality(quality);
+	let in_process = if cap_layout == pulsar_core::audio::ChannelLayout::Stereo {
+		opus_rtp::rtp_dest(dest).and_then(|addr| {
+			opus_rtp::RtpAudioSink::new(addr, codec, epoch.clone())
+				.map_err(|e| tracing::warn!("audio: in-process encoder unavailable ({e}) — using ffmpeg"))
+				.ok()
+		})
+	} else {
+		None
+	};
+	let encoder = if let Some(sink) = in_process {
+		if !start_system_audio_capture(sink) {
+			return false;
+		}
+		match codec {
+			opus_rtp::Codec::Opus { .. } => "in-process Opus",
+			opus_rtp::Codec::L16 => "in-process raw PCM (L16)",
+		}
+	} else {
+		let mut args: Vec<String> = vec![
+			"-hide_banner".into(),
+			"-loglevel".into(),
+			"error".into(),
+			"-fflags".into(),
+			"nobuffer".into(),
+			"-probesize".into(),
+			"32".into(),
+			"-analyzeduration".into(),
+			"0".into(),
+			"-f".into(),
+			fmt.ffmpeg_sample_fmt().into(),
+			"-ar".into(),
+			fmt.rate.to_string(),
+			"-ac".into(),
+			fmt.channels.to_string(),
+			"-i".into(),
+			"pipe:0".into(),
+		];
+		args.extend(pulsar_core::audio::opus_rtp_output_quality(dest, cap_layout, quality));
+		let mut cmd = std::process::Command::new(ffmpeg);
+		cmd.args(&args).stdin(Stdio::piped());
+		let mut child = match cmd.spawn() {
+			Ok(c) => c,
+			Err(_) => return false,
+		};
+		let Some(stdin) = child.stdin.take() else {
+			let _ = child.kill();
+			return false;
+		};
+		if !start_system_audio_capture(stdin) {
+			let _ = child.kill();
+			let _ = child.wait();
+			return false;
+		}
+		procs.lock().unwrap().push(child);
+		"ffmpeg"
+	};
+	tracing::info!(encoder, "audio: system mix via ScreenCaptureKit (all apps but Pulsar)");
+	true
+}
+
+/// Run the ScreenCaptureKit system-audio capture into `sink` on its own thread until the sink
+/// stops taking data (the encoder's stream generation was retired / ffmpeg's pipe broke) or SCK
+/// stops the stream. Waits for the stream to be live (SCK's content query + start, usually well
+/// under a second) so a failure falls back instead of leaving the session silent.
+#[cfg(target_os = "macos")]
+fn start_system_audio_capture<W: std::io::Write + Send + 'static>(sink: W) -> bool {
+	let (live_tx, live_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+	let abandoned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+	let sink = AbandonableSink { inner: sink, abandoned: abandoned.clone() };
+	let spawned = std::thread::Builder::new().name("sck-audio".into()).spawn(move || {
+		let started = live_tx.clone();
+		let r = pulsar_core::audio::run_system_audio_capture(sink, 0, move || {
+			let _ = started.send(Ok(()));
+		});
+		if let Err(e) = r {
+			tracing::warn!("audio: ScreenCaptureKit system audio ended: {e}");
+			let _ = live_tx.send(Err(e));
+		}
+	});
+	if spawned.is_err() {
+		return false;
+	}
+	match live_rx.recv_timeout(std::time::Duration::from_secs(6)) {
+		Ok(Ok(())) => true,
+		other => {
+			abandoned.store(true, std::sync::atomic::Ordering::SeqCst);
+			tracing::warn!(?other, "audio: ScreenCaptureKit system audio did not start");
+			false
+		}
+	}
+}
+
 /// Windows: tell the client whether the cursor is hidden — a game that grabbed the mouse hides
 /// it and reads RELATIVE motion, which a client positioning the pointer absolutely turns into an
 /// endless spin (`DataMsg::PointerLock`). Polled (100 ms, a change must hold for two polls);
@@ -451,6 +571,16 @@ fn spawn_host_pointer_watch(
 	});
 }
 
+/// macOS: the native capture was refused for want of the Screen Recording permission. Tell the
+/// host's UI (it shows how to grant it) and the client (its stream-error line), since the ffmpeg
+/// fallback then sees only the wallpaper and the menu bar.
+#[cfg(target_os = "macos")]
+fn notify_screen_permission(app_h: &AppHandle, out: &tokio::sync::mpsc::Sender<DataMsg>) {
+	let _ = tauri::Emitter::emit(app_h, "host-screen-permission", false);
+	let msg = crate::i18n::t("host.screenPermission").to_string();
+	let _ = out.try_send(DataMsg::Stats(format!("!{msg}")));
+}
+
 /// Run the process-loopback capture into `sink` on its own thread, until the sink stops taking
 /// data (ffmpeg's pipe broke / the in-process encoder's stream was retired) or WASAPI errors.
 /// Waits for the activation (milliseconds) so a failure falls back instead of leaving the
@@ -493,13 +623,13 @@ fn start_process_capture<W: std::io::Write + Send + 'static>(
 
 /// A capture sink that refuses writes once its capture was abandoned (see
 /// [`start_process_capture`]), so a late-starting capture ends instead of doubling the stream.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 struct AbandonableSink<W> {
 	inner: W,
 	abandoned: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 impl<W: std::io::Write> std::io::Write for AbandonableSink<W> {
 	fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
 		if self.abandoned.load(std::sync::atomic::Ordering::Relaxed) {
@@ -1140,7 +1270,7 @@ fn start_audio_and_mute(
 	#[cfg_attr(not(windows), allow(unused_variables))] target_pid: Option<u32>,
 	// The session's stream generation: an in-process audio encoder stops when it moves on
 	// (re-stream / teardown), as an ffmpeg encoder dies with the `procs` drain.
-	#[cfg_attr(not(windows), allow(unused_variables))] epoch: &crate::process::ProcEpoch,
+	#[cfg_attr(not(any(windows, target_os = "macos")), allow(unused_variables))] epoch: &crate::process::ProcEpoch,
 ) {
 	// Audio: a second ffmpeg streams Opus/RTP to `audio_dest` — the client's audio
 	// port directly (legacy), or the local media-over-session intake (the forwarder
@@ -1270,7 +1400,17 @@ fn start_audio_and_mute(
 				|| ((pinned_active || acfg.audio_loopback())
 					&& spawn_loopback_audio(procs, ffmpeg, &dest, pinned, neg_layout, req.audio_quality))
 		};
-		#[cfg(not(windows))]
+		// macOS: the system mix through ScreenCaptureKit (all apps but Pulsar) whenever the user
+		// did not name an AVFoundation device — also with a host-silent redirect armed (SCK taps
+		// the apps, not the output device, so the redirected-to virtual output does not matter).
+		// Stereo only; a surround request, macOS < 13 or a refused start keep the ffmpeg
+		// AVFoundation input below.
+		#[cfg(target_os = "macos")]
+		let started_audio = (acfg.audio_loopback() || UNIX_SILENT_SOURCE.lock().unwrap().is_some())
+			&& neg_layout.channels() <= 2
+			&& pulsar_core::audio::system_audio_supported()
+			&& spawn_system_audio_mac(procs, ffmpeg, &dest, neg_layout, req.audio_quality, epoch);
+		#[cfg(not(any(windows, target_os = "macos")))]
 		let started_audio = false;
 		if !started_audio {
 			// Direct-capture (dshow / pulse `.monitor` / avfoundation) fallback. Honor the
@@ -1670,7 +1810,7 @@ fn spawn_media_forwarders(
 #[cfg(windows)]
 /// A native capture thread whose encoded-frame count stays flat this long is treated as wedged
 /// (an in-thread monitor switch rebuild takes well under this).
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 const NATIVE_WEDGED_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
 /// A native capture thread that is alive but has encoded nothing for this long is stuck inside
 /// a GPU call. Longer than [`NATIVE_WEDGED_AFTER`] on purpose: a DXGI re-init after a display
@@ -1686,7 +1826,7 @@ const NATIVE_DRY_TICKS: u32 = (NATIVE_WEDGED_AFTER.as_millis() / 500) as u32;
 #[cfg(windows)]
 const NATIVE_STUCK_TICKS: u32 = (NATIVE_STUCK_AFTER.as_millis() / 500) as u32;
 /// How long a restream waits for the previous native capture thread to exit before detaching it.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 const NATIVE_STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 
 fn live_change(prev: &StreamReq, req: &StreamReq) -> Option<(bool, bool)> {
@@ -1831,7 +1971,7 @@ pub(super) fn make_on_stream(
 	since_ms: u64,
 	sid: u64,
 	self_name: String,
-	#[cfg(windows)] native_slot: Arc<Mutex<Option<pulsar_capture::CaptureHandle>>>,
+	#[cfg(any(windows, target_os = "macos"))] native_slot: Arc<Mutex<Option<pulsar_capture::CaptureHandle>>>,
 	// The monitor (`display_idx`) the current stream captures, published for the input path so an
 	// absolute (webview) pointer lands on the streamed screen, not always the primary. Windows-only.
 	#[cfg(windows)] cur_display: Arc<std::sync::atomic::AtomicU32>,
@@ -1908,12 +2048,13 @@ pub(super) fn make_on_stream(
 	// The previous request that started a LIVE native (DXGI+NVENC) capture, kept so a re-stream
 	// that only changed `display_idx` can switch the monitor IN PLACE (CaptureHandle::switch_output)
 	// instead of tearing the whole pipeline down. `None` whenever the current stream isn't native
-	// (ffmpeg fallback) — then a monitor change falls through to the normal restart.
-	#[cfg(windows)]
+	// (ffmpeg fallback) — then a monitor change falls through to the normal restart. macOS: the
+	// same for the ScreenCaptureKit + VideoToolbox capture.
+	#[cfg(any(windows, target_os = "macos"))]
 	let mut last_native_req: Option<StreamReq> = None;
 	// How long the native capture thread's encoded-frame count has been flat, sampled on every
 	// request (the client re-sends one every ~2 s, and keeps asking while its video is silent).
-	#[cfg(windows)]
+	#[cfg(any(windows, target_os = "macos"))]
 	let mut native_watch = pulsar_capture::ProgressWatch::default();
 	// Set when THIS session's native path stalled, to `process::nvenc_back_epoch()` at that
 	// moment: the session keeps off NVENC until the driver has come back since (the count
@@ -1932,7 +2073,7 @@ pub(super) fn make_on_stream(
 	// the PRIOR reporter before a new one starts — binding the reporter to its stream generation
 	// instead of leaking one detached 2 Hz thread per restream (each re-pushing the OLD stream's
 	// now-frozen encode-ms label for the rest of the session).
-	#[cfg(windows)]
+	#[cfg(any(windows, target_os = "macos"))]
 	let mut stats_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>> = None;
 	// The video target the media forwarder's wire pacer paces against. Shared with the running
 	// forwarder and refreshed on EVERY request below, before any fast path returns: an ABR step
@@ -2119,6 +2260,60 @@ pub(super) fn make_on_stream(
 			}
 			// The native handle is gone (a prior restream fell back to ffmpeg) — fall through to
 			// the normal restart below.
+		}
+		// macOS native (ScreenCaptureKit + VideoToolbox): the same two steps as above without the
+		// NVENC driver bookkeeping. A thread that died or stopped encoding (it re-encodes the last
+		// frame on a still screen, so a healthy one never goes flat) is retired and this request
+		// takes the full restart below; otherwise a monitor switch / bitrate step is applied live.
+		#[cfg(target_os = "macos")]
+		{
+			let mut slot = native_slot.lock().unwrap();
+			let verdict = slot
+				.as_ref()
+				.map(|h| (h.is_alive(), native_watch.observe(h.frames_encoded(), std::time::Instant::now())));
+			if let Some((alive, flat)) = verdict {
+				if !alive || flat >= NATIVE_WEDGED_AFTER {
+					let h = slot.take().expect("checked above");
+					drop(slot);
+					let joined = h.stop_within(std::time::Duration::from_millis(1500));
+					tracing::warn!(
+						alive,
+						flat_ms = flat.as_millis() as u64,
+						joined,
+						"macOS native capture is not encoding → full restart"
+					);
+					native_watch.reset();
+					last_native_req = None;
+				}
+			}
+		}
+		#[cfg(target_os = "macos")]
+		if let Some((disp, bitrate)) =
+			last_native_req.as_ref().and_then(|prev| live_change(prev, &req))
+		{
+			let handled = {
+				let slot = native_slot.lock().unwrap();
+				match slot.as_ref() {
+					Some(h) => {
+						if bitrate && req.bitrate_kbps > 0 {
+							h.set_bitrate(req.bitrate_kbps);
+						}
+						if disp {
+							h.switch_output(req.display_idx);
+						}
+						// Baseline = the display actually streamed (a failed switch reverts).
+						let mut confirmed_req = req.clone();
+						confirmed_req.display_idx = h.current_output();
+						last_native_req = Some(confirmed_req);
+						true
+					}
+					None => false,
+				}
+			};
+			if handled {
+				tracing::info!(display_idx = req.display_idx, disp, bitrate, "macOS native live restream (fast path)");
+				return;
+			}
 		}
 		// FFMPEG BITRATE-ONLY: restart only for a large step (≥ 30 % down / 40 % up) and at most
 		// once per 6 s; anything else keeps the running encode at its rate. A deferred step is not
@@ -2512,11 +2707,18 @@ pub(super) fn make_on_stream(
 			}
 			native_watch.reset();
 		}
+		#[cfg(target_os = "macos")]
+		if let Some(h) = native_slot.lock().unwrap().take() {
+			if !h.stop_within(NATIVE_STOP_WAIT) {
+				tracing::warn!("macOS native capture thread did not stop in time — detached, restarting anyway");
+			}
+			native_watch.reset();
+		}
 		// Stop the prior stream's G2 encode-stats reporter (bound to that now-stopped capture)
 		// so it doesn't linger past this restream re-pushing the old, now-frozen encode-ms label
 		// — one leaked thread per restream otherwise. (Full session teardown is handled instead by
 		// the shared out_tx closing, which the reporter treats as its other exit condition.)
-		#[cfg(windows)]
+		#[cfg(any(windows, target_os = "macos"))]
 		if let Some(c) = stats_cancel.take() {
 			c.store(true, std::sync::atomic::Ordering::Relaxed);
 		}
@@ -3078,7 +3280,7 @@ pub(super) fn make_on_stream(
 		let mut native_enc_us: Option<std::sync::Arc<std::sync::atomic::AtomicU32>> = None;
 		// The native capture's live numbers (source DXGI/WGC, encode tick, fresh fps), logged by
 		// the same reporter thread every 30 s.
-		#[cfg(windows)]
+		#[cfg(any(windows, target_os = "macos"))]
 		let mut native_stats: Option<std::sync::Arc<pulsar_capture::LiveStats>> = None;
 		// Effective per-window (WGC) capture target for THIS stream (Phase 2b co-op): the client's
 		// explicit pick (`req.window_hwnd`, from its window picker) wins; otherwise the window the
@@ -3191,7 +3393,66 @@ pub(super) fn make_on_stream(
 		} else {
 			false
 		};
-		#[cfg(not(windows))]
+		// NATIVE macOS path: ScreenCaptureKit + VideoToolbox in-process (pulsar-capture `mac/`):
+		// live bitrate, keyframe on request, live display switch — what the ffmpeg CLI cannot do.
+		// Taken when the resolved encoder is VideoToolbox; the ffmpeg avfoundation chain below
+		// stays the fallback (macOS < 12.3, no Screen Recording permission, a codec VideoToolbox
+		// refuses, HDR / 4:4:4). PULSAR_FFMPEG_CAPTURE=1 forces ffmpeg. Untested on macOS hardware.
+		#[cfg(target_os = "macos")]
+		let native_started = if encoder == HwEncoder::VideoToolbox
+			&& capture == CaptureMethod::AvFoundation
+			&& codec != pipeline::VCodec::Av1
+			&& !req.hdr
+			&& !req.yuv444
+			&& std::env::var_os("PULSAR_FFMPEG_CAPTURE").is_none()
+		{
+			let display_count = pulsar_capture::list_displays().len() as u32;
+			let clamped_display_idx = if display_count > 0 {
+				req.display_idx.min(display_count - 1)
+			} else {
+				0
+			};
+			match pulsar_capture::start_capture_encode(pulsar_capture::CaptureConfig {
+				width: eff_w,
+				height: eff_h,
+				fps: eff_fps,
+				bitrate_kbps: eff_bitrate,
+				dest: format!("rtp://{vdest}"),
+				codec: if codec == pipeline::VCodec::H265 {
+					pulsar_capture::Codec::H265
+				} else {
+					pulsar_capture::Codec::H264
+				},
+				output_idx: clamped_display_idx,
+				low_latency: plan.low_latency,
+				// VideoToolbox has no periodic intra refresh / reference invalidation: keyframes
+				// on request heal a loss instead.
+				intra_refresh: false,
+				rfi: req.rfi,
+				draw_mouse: true,
+				window_hwnd: None,
+			}) {
+				Ok(h) => {
+					native_enc_us = Some(h.encode_us_arc());
+					native_stats = Some(h.stats_arc());
+					*native_slot.lock().unwrap() = Some(h);
+					true
+				}
+				Err(e) => {
+					tracing::warn!(
+						error = %e,
+						"macOS native capture (ScreenCaptureKit + VideoToolbox) failed — falling back to ffmpeg"
+					);
+					if e.kind() == std::io::ErrorKind::PermissionDenied {
+						notify_screen_permission(&app_h, &stats_out);
+					}
+					false
+				}
+			}
+		} else {
+			false
+		};
+		#[cfg(not(any(windows, target_os = "macos")))]
 		let native_started = false;
 
 		// Publish the per-window capture state for the input path (Bug 0): the current stream routes
@@ -3210,7 +3471,7 @@ pub(super) fn make_on_stream(
 		// Remember this request for the in-place monitor-switch fast path — but ONLY when the
 		// native capture actually started. If we fell back to ffmpeg there's no CaptureHandle to
 		// switch_output on, so a later monitor change must take the full restart path.
-		#[cfg(windows)]
+		#[cfg(any(windows, target_os = "macos"))]
 		{
 			last_native_req = if native_started { Some(req.clone()) } else { None };
 		}
@@ -3304,9 +3565,9 @@ pub(super) fn make_on_stream(
 			if let Some(enc_us) = native_enc_us.clone() {
 				let stats_enc = stats_out.clone();
 				let label_enc = base_label.clone();
-				#[cfg(windows)]
+				#[cfg(any(windows, target_os = "macos"))]
 				let cap_stats = native_stats.clone();
-				#[cfg(windows)]
+				#[cfg(any(windows, target_os = "macos"))]
 				let mut ticks: u32 = 0;
 				// For the stall watchdog below: the request to restart with, and how long the
 				// encoded-frame count has been standing.
@@ -3315,20 +3576,20 @@ pub(super) fn make_on_stream(
 				// Bind this reporter to the stream generation: a slow-path restream/teardown flips
 				// this flag (above) so THIS thread exits instead of lingering and re-pushing the old
 				// stream's now-frozen encode-ms label. Store it so the next restream can cancel us.
-				#[cfg(windows)]
+				#[cfg(any(windows, target_os = "macos"))]
 				let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-				#[cfg(windows)]
+				#[cfg(any(windows, target_os = "macos"))]
 				{
 					stats_cancel = Some(cancel.clone());
 				}
 				std::thread::spawn(move || loop {
 					std::thread::sleep(std::time::Duration::from_millis(500));
 					// Exit once this stream generation is gone (restreamed / native handle stopped).
-					#[cfg(windows)]
+					#[cfg(any(windows, target_os = "macos"))]
 					if cancel.load(std::sync::atomic::Ordering::Relaxed) {
 						break;
 					}
-					#[cfg(windows)]
+					#[cfg(any(windows, target_os = "macos"))]
 					{
 						ticks = ticks.wrapping_add(1);
 					}
@@ -3362,7 +3623,7 @@ pub(super) fn make_on_stream(
 					// 7 s in and not one frame encoded (both capture sources dry — the capture
 					// thread's no-frame watchdog already tried the other one): tell the client
 					// ("!" = stream error) instead of leaving it on "preparing stream".
-					#[cfg(windows)]
+					#[cfg(any(windows, target_os = "macos"))]
 					if let Some(cs) = cap_stats.as_ref().filter(|_| ticks == 14) {
 						let c = cs.snapshot();
 						if c.encoded == 0 {
@@ -3371,7 +3632,7 @@ pub(super) fn make_on_stream(
 							let _ = stats_enc.try_send(DataMsg::Stats(format!("!{msg}")));
 						}
 					}
-					#[cfg(windows)]
+					#[cfg(any(windows, target_os = "macos"))]
 					if let Some(cs) = cap_stats.as_ref().filter(|_| ticks % 60 == 4) {
 						let c = cs.snapshot();
 						tracing::info!(

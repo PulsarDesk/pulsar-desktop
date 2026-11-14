@@ -30,6 +30,7 @@
 	"host.captureFailed": "Ekran yakalama başlatılamadı",
 	"host.captureStopped": "Ekran yakalama durdu",
 	"host.captureNoFrames": "Ekran yakalanamıyor: host ekran kartından görüntü alamıyor. Host'taki Pulsar'ı yeniden başlatmayı deneyin.",
+	"host.screenPermission": "Ekran yakalanamıyor: host'taki Mac, Pulsar'a Ekran Kaydı izni vermemiş (Sistem Ayarları → Gizlilik ve Güvenlik → Ekran ve Sistem Sesi Kaydı). İzin verilip Pulsar yeniden başlatılmalı.",
 	"err.identityChanged": "Bu cihazın kimliği değişti. Yeni kimliği kabul edip yeniden bağlanmak ister misiniz?",
 	"err.localRelayBind": "Yerel relay başlatılamadı (port kullanımda olabilir)",
 	"splash.start": "Başlatılıyor…",
