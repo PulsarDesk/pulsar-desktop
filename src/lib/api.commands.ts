@@ -153,6 +153,12 @@ export const api = {
 		invoke<void>('set_autostart', { enabled, background }),
 	/** [registered, background] — what the OS has, for the settings toggles. */
 	autostartStatus: () => invoke<[boolean, boolean]>('autostart_status'),
+	/** macOS Screen Recording permission (ScreenCaptureKit video + system audio): 'na' elsewhere.
+	 * `request` shows the system dialog (once per app); a grant needs a restart of Pulsar. */
+	screenPermission: (request: boolean) =>
+		invoke<'na' | 'granted' | 'denied'>('screen_permission', { request }),
+	/** System Settings → Privacy & Security → Screen Recording (macOS). */
+	openScreenPermissionSettings: () => invoke<void>('open_screen_permission_settings'),
 	/** A line into the app log (frontend steps of multi-window flows). */
 	uiLog: (msg: string) => invoke<void>('ui_log', { msg }),
 	/** Is play `id`'s stream already up (its `play-ready` may have gone out before this window

@@ -1,5 +1,6 @@
 <script lang="ts">
 	import Icon from '#lib/Icon.svelte';
+	import ScreenPermissionNotice from './ScreenPermissionNotice.svelte';
 	import { api, copyText } from '#lib/api.js';
 	import { fmtPeerId } from '#lib/peers.svelte.js';
 	import { t } from '#lib/i18n.svelte.js';
@@ -150,6 +151,7 @@
 			</div>
 		</div>
 	{/if}
+	<ScreenPermissionNotice />
 	<div class="sep"></div>
 	<div class="connhdr">{t('home.connectedHdr')}</div>
 	{#if hostSessions.length === 0}

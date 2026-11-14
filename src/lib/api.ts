@@ -89,6 +89,7 @@ export {
 	onControllerConnected,
 	onNodeId,
 	onNodeVersionError,
+	onHostScreenPermission,
 	onSharedHost,
 	onSessionPassword,
 	onRelayE2e

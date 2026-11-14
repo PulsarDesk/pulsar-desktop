@@ -92,6 +92,10 @@ export const onNodeId = (cb: (id: string) => void) => listenTo<string>('node-id'
 /** Shared mode: this Pulsar took (`held`) or handed over the PC's machine-wide host lease. */
 export const onSharedHost = (cb: (e: { held: boolean; holder: string | null }) => void) =>
 	listenTo<{ held: boolean; holder: string | null }>('shared-host', cb);
+/** Host (macOS): a stream's native capture was refused for want of the Screen Recording
+ * permission — the home screen shows how to grant it. */
+export const onHostScreenPermission = (cb: () => void) =>
+	listenTo<boolean>('host-screen-permission', () => cb());
 export const onNodeVersionError = (cb: () => void) => listenTo<null>('node-version-error', () => cb());
 /** Host: the one-time connect password was rotated (after a successful auth) — the
  * Home SelfCard updates instantly instead of waiting for the next poll. */

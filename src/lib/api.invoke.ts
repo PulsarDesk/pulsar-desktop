@@ -304,6 +304,10 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 		case 'mic_stop':
 		case 'set_language':
 			return Promise.resolve(undefined as unknown as T);
+		case 'screen_permission':
+			return Promise.resolve('na' as unknown as T);
+		case 'open_screen_permission_settings':
+			return Promise.resolve(undefined as unknown as T);
 		case 'local_ls':
 			// Deterministic sample listing so the file panel is browsable in the
 			// browser preview (dirs first, alphabetical — like the real command).
