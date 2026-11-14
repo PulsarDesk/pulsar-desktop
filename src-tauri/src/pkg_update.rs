@@ -98,7 +98,6 @@ pub(crate) fn install_command(kind: InstallKind, pkg: &str, has: impl Fn(&str) -
 			pkg,
 		],
 		InstallKind::Deb => vec!["env", "DEBIAN_FRONTEND=noninteractive", "dpkg", "--force-confdef", "--force-confold", "-i", pkg],
-		InstallKind::Deb => vec!["dpkg", "-i", pkg],
 		InstallKind::Rpm if has("dnf") => vec!["dnf", "install", "-y", pkg],
 		InstallKind::Rpm if has("zypper") => {
 			vec!["zypper", "--non-interactive", "install", "--allow-unsigned-rpm", pkg]
