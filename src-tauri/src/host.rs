@@ -1567,6 +1567,9 @@ pub(crate) async fn bring_online(
 					// ffmpeg stream is un-rotated by the client), and Windows SendInput addresses the same
 					// logical desktop coordinate space the upright video shows — coords inject as-is.
 					// (Rotating here would DOUBLE-correct vs the baked-upright video → 180°-mirrored clicks.)
+					// The pen as last injected for this session: in contact (tip down). The
+					// takeover gate lets only real lift edges of a pen that was down through.
+					let mut pen_down = false;
 					move |ev: InputEvent| {
 						// View-only: drop EVERY input event for this session (gamepad too)
 						// while the host user has control revoked.
@@ -1645,10 +1648,13 @@ pub(crate) async fn bring_online(
 						// (button releases still go through, so nothing stays pressed) and show
 						// where it points instead. Remote-desktop sessions only.
 						if pointer && remote_mode {
-							// Lifts go through too: a pen leaving contact, the last finger up.
+							// Lifts go through too: a pen that was down leaving contact (or range),
+							// a pen leaving range, the last finger up. A hovering pen (in range, no
+							// contact) is held back like PointerMotion — the client re-sends it every
+							// KEEPALIVE and it would move the host cursor under the host user.
 							let release = match &ev {
 								InputEvent::PointerButton { down, .. } => !down,
-								InputEvent::Pen(p) => !p.contact,
+								InputEvent::Pen(p) => !p.in_range || (pen_down && !p.contact),
 								InputEvent::Touch(f) => f.is_empty(),
 								_ => false,
 							};
@@ -1657,6 +1663,9 @@ pub(crate) async fn bring_online(
 								return;
 							}
 							crate::remote_cursor::applied(sid);
+						}
+						if let InputEvent::Pen(p) = &ev {
+							pen_down = p.in_range && p.contact;
 						}
 						// Maximum virtual gamepads per session: matches the client's play.rs
 						// append_idx.min(3) ceiling so an authenticated peer cannot create more
