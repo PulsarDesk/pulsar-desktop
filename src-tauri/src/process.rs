@@ -1747,3 +1747,49 @@ pub fn window_hwnd(app: &AppHandle) -> Option<u64> {
 	let w = app.get_webview_window("main")?;
 	w.hwnd().ok().map(|h| h.0 as u64)
 }
+
+/// macOS: the main window's `windowNumber`, which `pulsar-render` keeps its video panel over
+/// (`--wid`; macOS has no cross-process child windows — see pulsar-render's `mac/window.rs`).
+#[cfg(target_os = "macos")]
+pub fn window_hwnd(app: &AppHandle) -> Option<u64> {
+	window_number(&app.get_webview_window("main")?)
+}
+
+/// The handle `pulsar-render` embeds into for `w`: the HWND on Windows, the `windowNumber` on
+/// macOS (`--wid` / `reparent`).
+#[cfg(any(windows, target_os = "macos"))]
+pub fn render_parent(w: &tauri::WebviewWindow) -> Option<u64> {
+	#[cfg(windows)]
+	{
+		w.hwnd().ok().map(|h| h.0 as u64)
+	}
+	#[cfg(target_os = "macos")]
+	{
+		window_number(w)
+	}
+}
+
+#[cfg(target_os = "macos")]
+fn window_number(w: &tauri::WebviewWindow) -> Option<u64> {
+	let ptr = w.ns_window().ok()? as usize;
+	if ptr == 0 {
+		return None;
+	}
+	let read = move || -> isize {
+		// SAFETY: tauri hands out the live NSWindow (kept alive by the window we were given);
+		// `windowNumber` is a plain NSInteger getter, called on the main thread.
+		unsafe { objc2::msg_send![&*(ptr as *mut objc2::runtime::AnyObject), windowNumber] }
+	};
+	// AppKit wants the main thread. Sync commands already run there; elsewhere hop over.
+	let n = if objc2::MainThreadMarker::new().is_some() {
+		read()
+	} else {
+		let (tx, rx) = std::sync::mpsc::channel();
+		w.run_on_main_thread(move || {
+			let _ = tx.send(read());
+		})
+		.ok()?;
+		rx.recv_timeout(std::time::Duration::from_secs(2)).ok()?
+	};
+	(n > 0).then_some(n as u64)
+}

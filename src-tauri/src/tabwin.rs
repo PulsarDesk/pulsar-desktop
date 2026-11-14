@@ -8,7 +8,8 @@
 //!   up with `tab_take_handoff`. Later arrivals come as a `tab-adopt` event.
 //! * Each play's video follows its window (`move_video`): Windows re-parents the renderer's
 //!   child HWND (`reparent` on its stdin), Linux re-parents the GDK container the renderer
-//!   is embedded in. macOS plays its video in mpv's own window, so nothing moves there.
+//!   is embedded in, macOS moves the renderer's panel over the other window (`reparent`
+//!   with its window number).
 //! * Every window reports where its tab strip is (`tab_strip_rect`); a drop is matched
 //!   against those rects at the cursor (`tab_drop_target`).
 //! * Closing a tab window ends its sessions, like closing those tabs — their video is moved
@@ -126,9 +127,11 @@ fn move_video(app: &AppHandle, id: u64, label: &str) {
 			m.insert(id, label.to_string());
 		}
 	}
-	#[cfg(windows)]
+	#[cfg(any(windows, target_os = "macos"))]
 	{
-		let Some(hwnd) = app.get_webview_window(label).and_then(|w| w.hwnd().ok()) else {
+		// Windows: the HWND the render child moves into. macOS: the window number the
+		// renderer's panel moves over.
+		let Some(hwnd) = app.get_webview_window(label).and_then(|w| crate::process::render_parent(&w)) else {
 			return;
 		};
 		let state = app.state::<crate::state::AppState>();
@@ -140,14 +143,12 @@ fn move_video(app: &AppHandle, id: u64, label: &str) {
 		if let Some(stdin) = stdin {
 			use std::io::Write as _;
 			if let Some(si) = stdin.lock().unwrap().as_mut() {
-				let _ = writeln!(si, "reparent 0x{:x}", hwnd.0 as u64);
+				let _ = writeln!(si, "reparent 0x{hwnd:x}");
 			}
 		}
 	}
 	#[cfg(all(unix, not(target_os = "macos")))]
 	crate::render::reparent_native_container(app, id, label.to_string());
-	#[cfg(target_os = "macos")]
-	let _ = app;
 }
 
 /// A tab window is closing: its sessions end (like closing their tabs). Their video goes
