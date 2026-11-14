@@ -36,6 +36,12 @@ merged (2026-09-02); AMD-on-Windows, macOS and Windows ARM64 are CI-built but **
 on hardware** — read [host-encode.md](host-encode.md) before touching encoder/decoder
 selection.
 
+**Picture upscaling parity (2026-11-14, untested on hardware):** Windows = NVIDIA/Intel VSR,
+FSR, SGSR; Linux pulsar-render = FSR, SGSR (`gl_fsr.rs` + `sgsr1.glsl`; not on the KMS lease
+path, which bypasses GL); mpv (macOS / Linux fallback) = FSR. SGSR is hidden in the settings on
+every OS (`PULSAR_UPSCALE=sgsr` reaches it) until the 2025-math fix is A/B'd — see
+[client-video.md](client-video.md#picture-upscaling-settings--görüntü--görüntü-iyileştirme).
+
 **Host-only / headless host / Pulsar Split seat host (2026-11-13, not run on hardware):**
 `--host-only`, `--headless-host`, `--headless-stop`, `--split-seat` — see
 [modes.md](modes.md) "Host-only and headless host". Unit-tested (argv parsing, pipe protocol
