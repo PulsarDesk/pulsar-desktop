@@ -69,6 +69,31 @@ Part of the pulsar-desktop agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
 
 All paths emit **RTP/H.264(+HEVC/AV1) over UDP**.
 
+## Host monitor picker + live display-change watch (per OS, 2026-11-14, untested on macOS / Wayland hardware)
+
+`process::host_displays()` fills `StreamCaps::displays`; the index travels back in
+`StreamReq::display_idx`. `host/handlers.rs::spawn_display_list_watch` re-reads the list after a
+display-change event (`display_watch.rs`) and sends `DataMsg::Displays` when it differs; while no
+event source is live it polls every 3 s (`display_watch::event_driven()`).
+
+| OS | List | Index → capture | Change events |
+| --- | --- | --- | --- |
+| Windows | DXGI outputs (`pulsar_capture::list_displays`) | DXGI output / ddagrab `output_idx` | `WM_DISPLAYCHANGE` (hidden window) |
+| Linux X11 | `xrandr` (`process::linux_displays`) | x11grab `DISPLAY+x,y` / ximagesrc region | RandR notify (`pulsar_core::displays`, x11rb) |
+| Linux Wayland | `wl_output` + `zxdg_output_v1` over a short-lived Wayland connection (`pulsar_core::displays::list`), origin output first | the **ScreenCast portal dialog decides** — no portal lets an app pre-select a monitor. Per session (beside the restore token) the host remembers the request the picker was last answered for and the monitor that pick streams (`process::WaylandPick`, from `WaylandCapture::stream_rect` → `displays::index_of_rect`). The token is dropped (picker opens again) only for a NEW request — one that differs from both (`process::wayland_wants_repick`); reconnects / codec / ABR restreams of the same request restore silently. A pick that differs from the request is sent to the client as `DataMsg::StreamedDisplay(idx)`: the client (`play/hold.rs`) moves `cur_display`, the renderer overlay (`display N` on stdin), the webview menu (`host-display-streamed` event) and the pane's `displayIdx` there | long-lived Wayland connection: `wl_output` global added / removed, `wl_output.done` |
+| macOS | `CGGetActiveDisplayList` (main first) + pixel mode + `CGDisplayCopyAllDisplayModes`; names from `NSScreen.localizedName` (cached, refreshed on the main queue) | avfoundation `Capture screen N` (`process::avfoundation_screen`; ffmpeg numbers screens in the same list order); absolute pointer goes to that display's `CGDirectDisplayID` bounds (`DesktopInput::set_display`; the id is re-resolved on an index change, a display-change generation change and at least every second). The host-pointer marker maps the pointer into the same display (`displays::pointer_in`), but macOS has no host-takeover detection yet, so it is not sent | `CGDisplayRegisterReconfigurationCallback` (registered on the main queue) |
+
+Watcher notes: `pulsar_core::displays::watch` never blocks (macOS registers on the main queue,
+Linux connects on its own thread); `display_watch::event_driven()` restarts a Linux watcher whose
+connection dropped, at most every 30 s. The Wayland watcher releases `wl_output` proxies on
+`GlobalRemove`. Nameless monitors (macOS before the AppKit name cache fills, a Wayland output with
+no name / description / make) come from core with an empty name + `builtin` flag and are labelled
+in the host's UI language (`process::display_label`, keys `display.builtin` / `display.numbered`
+in `src-tauri/lang/{tr,en}.json`).
+
+Not possible: on Wayland the host cannot choose the captured monitor itself — the portal shows
+its own dialog to the person at the host (the restore token can only bring back an earlier pick).
+
 ## Poor-link host path (2026-11-09, LOCAL, unpushed, untested on a GPU / the field link)
 
 - **Wire pacer** (`src-tauri/src/host/handlers/pacer.rs`, in the media-over-session video

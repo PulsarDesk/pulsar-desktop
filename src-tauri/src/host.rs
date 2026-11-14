@@ -750,6 +750,10 @@ pub(crate) async fn bring_online(
 			// (resolution/codec/monitor changes) so those don't re-prompt.
 			#[cfg(target_os = "linux")]
 			let restore_token: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+			// Per-session too: which client request the portal picker was last answered for
+			// and which monitor that pick streams (the repick decision, process.rs).
+			#[cfg(target_os = "linux")]
+			let wayland_pick: Arc<Mutex<crate::process::WaylandPick>> = Arc::new(Mutex::new(Default::default()));
 			let app_h = app_h.clone();
 			let peer = {
 				let id = session.peer();
@@ -1296,8 +1300,9 @@ pub(crate) async fn bring_online(
 				// The monitor (`display_idx`) the current stream is capturing, so the input path
 				// can map an absolute (webview) pointer onto the streamed screen instead of always
 				// the primary. `on_stream` publishes the selected idx here; `on_input` reads it.
-				// Windows-only (the native multi-monitor absolute-pointer mapping).
-				#[cfg(windows)]
+				// Windows (the native multi-monitor absolute-pointer mapping) and macOS (the
+				// avfoundation `Capture screen N` monitor → its CGDirectDisplayID bounds).
+				#[cfg(any(windows, target_os = "macos"))]
 				let cur_display: Arc<std::sync::atomic::AtomicU32> =
 					Arc::new(std::sync::atomic::AtomicU32::new(0));
 				// On the native (DXGI+NVENC) path the input closure reads the capture thread's OWN
@@ -1446,7 +1451,7 @@ pub(crate) async fn bring_online(
 					self_name.clone(),
 					#[cfg(windows)]
 					native_slot.clone(),
-					#[cfg(windows)]
+					#[cfg(any(windows, target_os = "macos"))]
 					cur_display.clone(),
 					#[cfg(windows)]
 					native_out_arc.clone(),
@@ -1465,6 +1470,8 @@ pub(crate) async fn bring_online(
 					media_sent.clone(),
 					#[cfg(target_os = "linux")]
 					restore_token.clone(),
+					#[cfg(target_os = "linux")]
+					wayland_pick.clone(),
 					#[cfg(target_os = "linux")]
 					cap_slot.clone(),
 					#[cfg(target_os = "linux")]
@@ -1529,8 +1536,17 @@ pub(crate) async fn bring_online(
 					// Which monitor's geometry is currently applied to the desktop injector, so we
 					// only re-resolve the virtual-desktop rect when the streamed monitor changes.
 					// `u32::MAX` = "none applied yet" (forces the first resolve).
-					#[cfg(windows)]
+					#[cfg(any(windows, target_os = "macos"))]
 					let cur_display = cur_display.clone();
+					// macOS: the streamed monitor index last applied to the injector.
+					#[cfg(target_os = "macos")]
+					let mut applied_mac_display: u32 = u32::MAX;
+					// ... and the display-change generation / time it was resolved at: an unplug
+					// or rearrangement can keep the index but move it to another display.
+					#[cfg(target_os = "macos")]
+					let mut applied_mac_gen: u64 = u64::MAX;
+					#[cfg(target_os = "macos")]
+					let mut applied_mac_at = std::time::Instant::now();
 					#[cfg(windows)]
 					let native_out_arc = native_out_arc.clone();
 					#[cfg(windows)]
@@ -1905,6 +1921,24 @@ pub(crate) async fn bring_online(
 											d.set_region(
 												input_cap.lock().unwrap().as_ref().and_then(|c| c.pointer_region()),
 											);
+											// macOS: aim at the streamed monitor's CGDirectDisplayID, re-resolved
+											// when the streamed index changes, on a display-change event, and at
+											// least every second (covers a watcher that is not live yet).
+											// Untested on macOS hardware.
+											#[cfg(target_os = "macos")]
+											{
+												let idx = cur_display.load(std::sync::atomic::Ordering::Relaxed);
+												let gen = crate::display_watch::generation();
+												if idx != applied_mac_display
+													|| gen != applied_mac_gen
+													|| applied_mac_at.elapsed() >= std::time::Duration::from_secs(1)
+												{
+													applied_mac_display = idx;
+													applied_mac_gen = gen;
+													applied_mac_at = std::time::Instant::now();
+													d.set_display(pulsar_core::displays::platform_id(idx as usize));
+												}
+											}
 											d.pointer(x, y)
 										}
 										InputEvent::PointerRelative { dx, dy } => {

@@ -21,6 +21,13 @@ Linux (logind + screen saver + X11 DPMS) and macOS (NSWorkspace) — all unteste
 hardware; Linux/macOS details and the one gap (display-off on bare wlroots Wayland) in
 [modes.md](modes.md) "Sleep ends the viewed sessions".
 
+**Host monitor picker parity (2026-11-14, branch `parity/host-displays`, untested on macOS and
+Wayland hardware):** macOS and Linux Wayland now advertise the host's monitors and watch for
+display changes like Windows does — see host-encode.md "Host monitor picker". On Wayland the
+portal dialog still picks the monitor; the client's picker follows what it picked
+(`DataMsg::StreamedDisplay`). macOS host-pointer marker position is wired but the macOS host has
+no takeover detection, so it is never sent yet.
+
 **Adaptive streaming (shipped 2026-09-03 in v0.11.0, refined in v0.12.0 — still awaiting the
 maintainer's real-session test):** the shared
 controller is `pulsar_core::adapt` (design + status in `../pulsar-core/docs/adaptive-streaming.md`).

@@ -233,6 +233,11 @@ export const onPlayDecoder = (cb: (e: { id: number; name: string; hw: string }) 
  * mode change) — payload tuple (play id, fresh list). Refreshes the monitor picker. */
 export const onHostDisplays = (cb: (e: { id: number; displays: HostDisplay[] }) => void) =>
 	listenTo<[number, HostDisplay[]]>('host-displays', (p) => cb({ id: p[0], displays: p[1] }));
+/** Client: the host streams another monitor than the client asked for (Linux Wayland host:
+ * the person there picked it in the screen-share dialog) — payload tuple (play id, host
+ * monitor idx). The monitor picker moves its selection there. */
+export const onHostDisplayStreamed = (cb: (e: { id: number; idx: number }) => void) =>
+	listenTo<[number, number]>('host-display-streamed', (p) => cb({ id: p[0], idx: p[1] }));
 /** Client: the person at the host is on their own mouse (`active`), remote mode (issue #7). */
 export const onHostPointer = (cb: (e: { id: number; active: boolean }) => void) =>
 	listenTo<[number, boolean]>('host-pointer', (p) => cb({ id: p[0], active: p[1] }));

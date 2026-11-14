@@ -4,7 +4,7 @@
 // markup stays small; behavior is identical to the inline version it replaced.
 
 import { savedStreamPicks } from '#lib/streamPicks.js';
-import { api, isTauri, onHostDisplays, onPeerAvatar, onPeerName, onPlayEnded, onPlayError, onPlayStats, onPlayOptimizing, onPlayReady, onSystemSleep, onSystemWake, setFullscreen } from '#lib/api.js';
+import { api, isTauri, onHostDisplays, onHostDisplayStreamed, onPeerAvatar, onPeerName, onPlayEnded, onPlayError, onPlayStats, onPlayOptimizing, onPlayReady, onSystemSleep, onSystemWake, setFullscreen } from '#lib/api.js';
 import { recordConnection, setPeerIdentity } from '#lib/peers.svelte.js';
 import { ui, saveUi } from '#lib/settings.svelte.js';
 import { t } from '#lib/i18n.svelte.js';
@@ -448,6 +448,11 @@ export class SessionManager {
 		// The host's monitors changed mid-session → the session menu's monitor picker follows.
 		onHostDisplays((e) => {
 			this.sessions = this.sessions.map((s) => (s.playId === e.id ? { ...s, hostDisplays: e.displays } : s));
+		});
+		// The host streams another monitor than asked (Wayland portal pick): the pane's monitor
+		// (free-monitor choice for a second pane, reconnect) follows what is really shown.
+		onHostDisplayStreamed((e) => {
+			this.sessions = this.sessions.map((s) => (s.playId === e.id ? { ...s, displayIdx: e.idx } : s));
 		});
 		// A session can die during the connecting-hold window (after start_remote_play
 		// resolves but before play-ready) — Session.svelte isn't mounted yet to see

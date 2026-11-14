@@ -37,6 +37,7 @@
 		onChatMsg,
 		onPlayDims,
 		onHostPointer,
+		onHostDisplayStreamed,
 		onPlayEnded
 	} from '#lib/api.js';
 	import { listenScope } from '#lib/api.events.js';
@@ -331,6 +332,19 @@
 			clearTimeout(idle);
 			scope.dispose();
 		};
+	});
+
+	// The host streams another monitor than this menu asked for (Wayland host: the person
+	// there chose it in the screen-share dialog): show that one as selected.
+	$effect(() => {
+		if (playId < 0) return;
+		const scope = listenScope();
+		scope.add(
+			onHostDisplayStreamed((e) => {
+				if (e.id === playId) controls.streamDisplay = e.idx;
+			})
+		);
+		return () => scope.dispose();
 	});
 
 	// Live engage state of the native capture (drives the status hint): a video click

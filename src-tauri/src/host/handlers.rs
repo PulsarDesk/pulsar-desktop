@@ -353,25 +353,29 @@ fn spawn_pointer_lock_watch(out: tokio::sync::mpsc::Sender<DataMsg>, epoch: crat
 
 /// Tell the client when this host's monitor list changes mid-stream (a monitor plugged in or
 /// removed, a resolution / refresh / primary change): `DataMsg::Displays` with the fresh list,
-/// so its monitor picker matches without a reconnect. Windows: woken by `WM_DISPLAYCHANGE`
-/// (display_watch.rs), then the list is read again after a short settle (the new layout
-/// lands over a moment); elsewhere: compared every 3 s. Sends only when the list really
-/// differs. Lives as long as this stream generation.
+/// so its monitor picker matches without a reconnect. Woken by the OS display-change event
+/// (display_watch.rs: `WM_DISPLAYCHANGE` on Windows, the CoreGraphics reconfiguration
+/// callback on macOS, Wayland `wl_output` / X11 RandR events on Linux), then the list is read
+/// again after a short settle (the new layout lands over a moment); while no event source is
+/// live: compared every 3 s. Sends only when the list really differs. Lives as long as this
+/// stream generation.
 fn spawn_display_list_watch(out: tokio::sync::mpsc::Sender<DataMsg>, epoch: crate::process::ProcEpoch) {
 	use std::sync::atomic::Ordering;
 	let born = epoch.load(Ordering::SeqCst);
 	let _ = std::thread::Builder::new().name("display-list".into()).spawn(move || {
 		let mut seen = crate::display_watch::generation();
 		let mut last = crate::process::host_displays();
-		// The epoch / channel checks run at least this often even with no display event.
-		let tick = if crate::display_watch::EVENT_DRIVEN {
-			std::time::Duration::from_secs(1)
-		} else {
-			std::time::Duration::from_secs(3)
-		};
 		while epoch.load(Ordering::SeqCst) == born && !out.is_closed() {
+			// Re-read per turn: the macOS / Linux source can arm late or drop out.
+			let event_driven = crate::display_watch::event_driven();
+			// The epoch / channel checks run at least this often even with no display event.
+			let tick = if event_driven {
+				std::time::Duration::from_secs(1)
+			} else {
+				std::time::Duration::from_secs(3)
+			};
 			let g = crate::display_watch::wait_change(seen, tick);
-			if crate::display_watch::EVENT_DRIVEN {
+			if event_driven {
 				if g == seen {
 					continue;
 				}
@@ -393,13 +397,15 @@ fn spawn_display_list_watch(out: tokio::sync::mpsc::Sender<DataMsg>, epoch: crat
 /// mouse (`takeover::active`, Windows + Linux detection), so it can show the host pointer
 /// labelled "Host" next to its own one (issue #7). ~30 Hz while active (only on movement, plus
 /// a 500 ms refresh), one `active: false` when it goes idle. Position = the host pointer within
-/// the streamed monitor, 0..1 — Windows only (GetCursorPos against the captured output); `-1`
-/// = unknown (Linux, a window capture, the pointer on another monitor): the client then shows
-/// only the "host is using the mouse" notice. Lives as long as this stream generation.
+/// the streamed monitor, 0..1 — Windows (GetCursorPos against the captured output) and macOS
+/// (the pointer against the streamed CGDirectDisplayID's bounds; no takeover detection there
+/// yet, so it is not sent today); `-1` = unknown (Linux, a window capture, the pointer on
+/// another monitor): the client then shows only the "host is using the mouse" notice. Lives as
+/// long as this stream generation.
 fn spawn_host_pointer_watch(
 	out: tokio::sync::mpsc::Sender<DataMsg>,
 	epoch: crate::process::ProcEpoch,
-	#[cfg(windows)] display: Arc<std::sync::atomic::AtomicU32>,
+	#[cfg(any(windows, target_os = "macos"))] display: Arc<std::sync::atomic::AtomicU32>,
 	window_capture: bool,
 ) {
 	use std::sync::atomic::Ordering;
@@ -420,6 +426,12 @@ fn spawn_host_pointer_watch(
 							return (nx, ny);
 						}
 					}
+				}
+			}
+			#[cfg(target_os = "macos")]
+			if !window_capture {
+				if let Some(p) = pulsar_core::displays::pointer_in(display.load(Ordering::Relaxed) as usize) {
+					return p;
 				}
 			}
 			let _ = window_capture;
@@ -1834,8 +1846,9 @@ pub(super) fn make_on_stream(
 	self_name: String,
 	#[cfg(windows)] native_slot: Arc<Mutex<Option<pulsar_capture::CaptureHandle>>>,
 	// The monitor (`display_idx`) the current stream captures, published for the input path so an
-	// absolute (webview) pointer lands on the streamed screen, not always the primary. Windows-only.
-	#[cfg(windows)] cur_display: Arc<std::sync::atomic::AtomicU32>,
+	// absolute (webview) pointer lands on the streamed screen, not always the primary. Windows +
+	// macOS.
+	#[cfg(any(windows, target_os = "macos"))] cur_display: Arc<std::sync::atomic::AtomicU32>,
 	// Live-confirmed output Arc from the active CaptureHandle (C4): the input closure reads from
 	// this instead of cur_display on the native path so it sees the monitor the capture thread is
 	// ACTUALLY streaming — not the optimistically-requested value written before the rebuild completes.
@@ -1866,6 +1879,9 @@ pub(super) fn make_on_stream(
 	fec_n: Arc<std::sync::atomic::AtomicU16>,
 	media_sent: Arc<pulsar_core::service::media::MediaSendStats>,
 	#[cfg(target_os = "linux")] restore_token: Arc<Mutex<Option<String>>>,
+	// Wayland: the request the portal picker was last answered for + the monitor it streams
+	// (per session, beside `restore_token`).
+	#[cfg(target_os = "linux")] wayland_pick: Arc<Mutex<crate::process::WaylandPick>>,
 	#[cfg(target_os = "linux")] cap_slot: Arc<Mutex<Option<pulsar_core::capture::WaylandCapture>>>,
 	#[cfg(target_os = "linux")] libav_slot: Arc<Mutex<Option<super::libav::LibavHost>>>,
 	#[cfg(target_os = "linux")] cap_gen: Arc<std::sync::atomic::AtomicU64>,
@@ -2343,7 +2359,30 @@ pub(super) fn make_on_stream(
 				(bitrate as f32 / 1000.0).round() as u32,
 				crate::i18n::t("stream.mbitTarget")
 			)));
-			let token = restore_token.lock().unwrap().clone();
+			// The portal can't be told which monitor to share: its restore token silently
+			// brings the last pick back. When the client asks for a different monitor than the
+			// one the last portal pick showed, drop the token so the picker opens again and
+			// the person at the host chooses (the dialog decides). Only for a NEW request: a
+			// re-stream of the request already answered restores silently even when the host
+			// person picked another monitor. Untested on Wayland hardware.
+			let token = {
+				let monitors = pulsar_core::displays::count();
+				let last = *wayland_pick.lock().unwrap();
+				if crate::process::wayland_wants_repick(req.display_idx, last, monitors) {
+					tracing::info!(
+						requested = req.display_idx,
+						?last,
+						"wayland: another monitor requested — re-opening the portal picker"
+					);
+					None
+				} else {
+					restore_token.lock().unwrap().clone()
+				}
+			};
+			// No token = the picker dialog shows: its answer belongs to THIS request.
+			let picker_shown = token.is_none();
+			let requested_idx = req.display_idx;
+			let wayland_pick = wayland_pick.clone();
 			// AppImage: an encoder that only validated on the system gst runs there.
 			let system_gst = crate::process::gst_on_system(genc, gcodec);
 			let restore_token = restore_token.clone();
@@ -2399,6 +2438,31 @@ pub(super) fn make_on_stream(
 					Ok((cap, new_token)) => {
 						if let Some(t) = new_token {
 							*restore_token.lock().unwrap() = Some(t);
+						}
+						// Which monitor the portal pick actually streams (its geometry in the
+						// output layout), for the next re-stream's repick decision.
+						let picked = cap
+							.stream_rect()
+							.and_then(|(x, y, w, h)| {
+								pulsar_core::displays::index_of_rect(&pulsar_core::displays::list(), x, y, w, h)
+							})
+							.map(|p| p as u32);
+						{
+							let mut pick = wayland_pick.lock().unwrap();
+							if picker_shown || pick.requested.is_none() {
+								pick.requested = Some(requested_idx);
+							}
+							pick.picked = picked;
+						}
+						if let Some(p) = picked.filter(|p| *p != requested_idx) {
+							// The person at the host shared another monitor than the client
+							// asked for: move the client's picker (and its next requests) there.
+							tracing::warn!(
+								requested = requested_idx,
+								picked = p,
+								"wayland: the portal pick streams another monitor than the client asked for"
+							);
+							let _ = stats_task.try_send(DataMsg::StreamedDisplay(p));
 						}
 						// Store under the slot lock ONLY while still current: a session
 						// that tore down (or re-streamed) during the portal dialog gets
@@ -3002,8 +3066,16 @@ pub(super) fn make_on_stream(
 		// origin. Also clamp eff_w/eff_h to the SELECTED monitor (not the root screen) so
 		// the capture region never overflows that monitor's bounds. Single-monitor / primary
 		// at (0,0) keeps the plain display string (no change in behavior).
-		#[cfg(not(target_os = "linux"))]
+		#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 		let cap_display = cfg.display.clone();
+		// macOS: avfoundation's `Capture screen N` for the client-picked monitor — the same
+		// `CGGetActiveDisplayList` index `host_displays` advertised (pulsar_core::displays).
+		// Untested on macOS hardware.
+		#[cfg(target_os = "macos")]
+		let cap_display = crate::process::avfoundation_screen(
+			req.display_idx,
+			pulsar_core::displays::count(),
+		);
 		#[cfg(target_os = "linux")]
 		let (cap_display, eff_w, eff_h) = {
 			let displays = crate::process::linux_displays();
@@ -3225,6 +3297,14 @@ pub(super) fn make_on_stream(
 		#[cfg(windows)]
 		if !native_started {
 			cur_display.store(ffmpeg_display_idx, std::sync::atomic::Ordering::Relaxed);
+		}
+		// macOS: the monitor avfoundation captures (`cap_display` = `Capture screen N`, clamped
+		// the same way) is what absolute pointer moves map onto.
+		#[cfg(target_os = "macos")]
+		{
+			let n = pulsar_core::displays::count();
+			let idx = if n == 0 { 0 } else { req.display_idx.min(n as u32 - 1) };
+			cur_display.store(idx, std::sync::atomic::Ordering::Relaxed);
 		}
 
 		// Remember the latest request so the host-side display-mode watcher can re-issue it
@@ -3636,7 +3716,7 @@ pub(super) fn make_on_stream(
 			spawn_host_pointer_watch(
 				stats_out.clone(),
 				proc_epoch.clone(),
-				#[cfg(windows)]
+				#[cfg(any(windows, target_os = "macos"))]
 				cur_display.clone(),
 				target_hwnd.is_some(),
 			);
