@@ -32,6 +32,8 @@ mod commands;
 mod connections;
 mod local_relay;
 mod logging;
+#[cfg(target_os = "macos")]
+mod mac_activate;
 // Host-side "screen adaptation" (Parsec-style): switch a captured monitor to the
 // best-fit display mode for a client split-pane and revert on teardown. Windows-only
 // implementation; no-op stubs elsewhere.

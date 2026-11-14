@@ -21,6 +21,9 @@
 //! split out and unit-tested on every OS; only the process spawning is Linux-only.
 //! Untested on Linux hardware (written 2026-11-14).
 
+// The decisions are Linux-only at runtime but compiled (and unit-tested) everywhere.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+
 use serde::Serialize;
 
 /// How this install can be updated.
