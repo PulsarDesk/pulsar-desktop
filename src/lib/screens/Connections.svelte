@@ -335,15 +335,35 @@
 				{#if sendErr}
 					<div class="merr selectable" role="alert">{sendErr}</div>
 				{/if}
-				<form class="msgrow" onsubmit={(e) => { e.preventDefault(); if (msgRow) sendMsg(msgRow); }}>
-					<input
+				<form class="composer" onsubmit={(e) => { e.preventDefault(); if (msgRow) sendMsg(msgRow); }}>
+					<!-- Enter sends, Shift+Enter is a new line; the field grows with the text
+					     (up to ~5 lines) instead of a one-line box. -->
+					<textarea
 						class="msgin"
+						rows="1"
 						bind:value={msgText}
 						placeholder={t('host.msgPlaceholder')}
 						aria-label={t('host.msgPlaceholder')}
 						{@attach (el) => el.focus()}
-					/>
-					<button class="msgsend" type="submit" disabled={!msgText.trim()}>{t('host.msgSend')}</button>
+						{@attach (el) => {
+							const fit = () => {
+								el.style.height = 'auto';
+								el.style.height = Math.min(el.scrollHeight, 112) + 'px';
+							};
+							fit();
+							el.addEventListener('input', fit);
+							return () => el.removeEventListener('input', fit);
+						}}
+						onkeydown={(e) => {
+							if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+								e.preventDefault();
+								if (msgRow && msgText.trim()) sendMsg(msgRow);
+							}
+						}}
+					></textarea>
+					<button class="msgsend" type="submit" disabled={!msgText.trim()} title={t('host.msgSend')} aria-label={t('host.msgSend')}>
+						<Icon name="send" size={16} />
+					</button>
 				</form>
 			</div>
 		</div>
@@ -491,34 +511,55 @@
 		background: color-mix(in oklch, var(--danger, red) 10%, transparent);
 		color: var(--danger-text);
 	}
-	/* inline message composer under the row */
-	.msgrow {
+	/* chat composer: one rounded field with the send button inside it */
+	.composer {
 		display: flex;
+		align-items: flex-end;
 		gap: 6px;
-		margin-top: 8px;
+		padding: 6px 6px 6px 12px;
+		background: var(--surface-2, var(--bg));
+		border: 1px solid var(--border-strong);
+		border-radius: 14px;
+		transition:
+			border-color 0.12s,
+			box-shadow 0.12s;
+	}
+	.composer:focus-within {
+		border-color: var(--accent);
+		box-shadow: 0 0 0 3px var(--accent-ring);
 	}
 	.msgin {
 		flex: 1;
 		min-width: 0;
+		resize: none;
 		font: inherit;
-		font-size: 12.5px;
+		font-size: 13.5px;
+		line-height: 1.4;
 		color: var(--text);
-		background: var(--surface);
-		border: 1px solid var(--border-strong);
-		border-radius: var(--r-sm);
-		padding: 6px 9px;
+		background: transparent;
+		border: none;
+		outline: none;
+		padding: 6px 0;
+		max-height: 112px;
+		overflow-y: auto;
+	}
+	.msgin::placeholder {
+		color: var(--text-faint);
 	}
 	.msgsend {
 		flex: none;
-		font: inherit;
-		font-size: 12px;
-		font-weight: 600;
-		color: var(--text-on-accent);
+		width: 34px;
+		height: 34px;
+		display: grid;
+		place-items: center;
+		color: var(--text-on-accent, #fff);
 		background: var(--accent);
 		border: none;
-		border-radius: var(--r-sm);
-		padding: 6px 11px;
+		border-radius: 10px;
 		cursor: pointer;
+		transition:
+			background 0.12s,
+			opacity 0.12s;
 	}
 	.msgsend:hover:not(:disabled) {
 		background: var(--accent-hover);
@@ -639,8 +680,8 @@
 		color: var(--text-on-accent, #fff);
 	}
 	.msgsend:disabled {
-		opacity: 0.55;
-		cursor: not-allowed;
+		opacity: 0.35;
+		cursor: default;
 	}
 	.merr {
 		font-size: 12px;

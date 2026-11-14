@@ -2075,28 +2075,69 @@ fn draw_chat(
 				ui.add_space(2.0);
 			}
 		});
-	ui.add_space(6.0);
+	ui.add_space(8.0);
 	let send_now = st.chat_enter && !input.trim().is_empty();
-	ui.horizontal(|ui| {
-		let resp = ui.add_sized(
-			egui::vec2(ui.available_width() - 76.0, 28.0),
-			egui::TextEdit::singleline(input)
-				.hint_text(t("chat.placeholder"))
-				// egui 0.29's text placement (top-left, 5×3 incl. the 1 px stroke); 0.37
-				// centres single-line text in the box with a theme margin instead.
-				.margin(egui::Margin::symmetric(5, 3))
-				.align(egui::Align2::LEFT_TOP),
-		);
-		// Keep the composer focused while this view is up so relayed Text events land.
-		resp.request_focus();
-		let clicked = ui
-			.add(egui::Button::new(t("chat.send")).min_size(egui::vec2(68.0, 28.0)))
-			.clicked();
-		if (clicked || send_now) && !input.trim().is_empty() {
-			cmds.push(OverlayCmd::Chat(input.trim().to_string()));
-			input.clear();
-		}
+	// The composer: one rounded well (the same as the menu's value wells) holding the text and
+	// a round send button — it was a black single-line box with its text stuck to the top edge
+	// and a plain gray "Gönder" button beside it.
+	let h = row_h(ui.ctx());
+	let empty = input.trim().is_empty();
+	let mut clicked = false;
+	let frame = egui::Frame::NONE
+		.fill(SEG_BG)
+		.corner_radius(12.0)
+		.inner_margin(egui::Margin { left: 14, right: 5, top: 5, bottom: 5 });
+	let out = frame.show(ui, |ui| {
+		ui.set_width(ui.available_width());
+		ui.horizontal_centered(|ui| {
+			let btn = h - 10.0;
+			let resp = ui.add_sized(
+				egui::vec2(ui.available_width() - btn - 8.0, btn),
+				egui::TextEdit::singleline(input)
+					.hint_text(egui::RichText::new(t("chat.placeholder")).color(egui::Color32::from_gray(120)))
+					.font(egui::FontId::proportional(14.0))
+					.frame(egui::Frame::NONE)
+					.margin(egui::Margin::ZERO)
+					.vertical_align(egui::Align::Center),
+			);
+			// Keep the composer focused while this view is up so relayed Text events land.
+			resp.request_focus();
+			let (r, b) = ui.allocate_exact_size(egui::vec2(btn, btn), egui::Sense::click());
+			let lit = !empty && b.hovered();
+			let fill = if empty {
+				egui::Color32::from_rgb(44, 47, 62)
+			} else if lit {
+				ACCENT
+			} else {
+				ACCENT_DIM
+			};
+			ui.painter().rect_filled(r, 9.0, fill);
+			ui.painter().text(
+				r.center(),
+				egui::Align2::CENTER_CENTER,
+				icon::PAPER_PLANE_RIGHT,
+				egui::FontId::proportional(17.0),
+				if empty { egui::Color32::from_gray(120) } else { egui::Color32::WHITE },
+			);
+			if !empty {
+				b.clone().on_hover_cursor(egui::CursorIcon::PointingHand);
+			}
+			clicked = b.clicked();
+		});
 	});
+	// Focus ring: the well's edge lights while there is text to send.
+	if !empty {
+		ui.painter().rect_stroke(
+			out.response.rect,
+			12.0,
+			egui::Stroke::new(1.0, ACCENT.gamma_multiply(0.6)),
+			egui::StrokeKind::Inside,
+		);
+	}
+	if (clicked || send_now) && !input.trim().is_empty() {
+		cmds.push(OverlayCmd::Chat(input.trim().to_string()));
+		input.clear();
+	}
 }
 
 /// "———— New ————" above the first message that was unread when the Chat view opened.

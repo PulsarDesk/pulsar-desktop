@@ -23,6 +23,7 @@
 		download: '<path d="M12 3v12M7 10l5 5 5-5"/><path d="M4 20h16"/>',
 		upload: '<path d="M12 15V3M7 8l5-5 5 5"/><path d="M4 20h16"/>',
 		chat: '<path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>',
+		send: '<path d="M21 3L10 14"/><path d="M21 3l-6.5 18-3.5-7-7-3.5L21 3z"/>',
 		mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0014 0M12 18v3"/>',
 		shield: '<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/>',
 		bolt: '<path d="M13 2L4 14h7l-1 8 9-12h-7z"/>',
