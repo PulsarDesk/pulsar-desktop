@@ -296,7 +296,7 @@ showed ~600 ms head-of-line holds, "stream stopped" over a live session and a lo
 
 ## Picture upscaling (Settings → Görüntü → Görüntü iyileştirme)
 
-`ui.upscale` = off (default) | auto | fsr | ai → `set_upscale` → renderer stdin `upscale <mode>`
+`ui.upscale` = off (default) | auto | fsr | ai | sgsr → `set_upscale` → renderer stdin `upscale <mode>`
 (seeded with the other renderer lines at spawn / respawn).
 
 - **Windows** (`crates/pulsar-render/src/win/present.rs`, `fsr.rs`): only when the Blt scales
@@ -304,7 +304,10 @@ showed ~600 ms head-of-line holds, "stream stopped" over a live session and a lo
   VideoProcessor stream extension (NVIDIA RTX VSR, Intel VSR — the Moonlight technique);
   `fsr` or any other GPU = AMD FSR 1: the VideoProcessor converts into a source-sized texture,
   EASU scales it, RCAS sharpens into the back buffer. Shader failure → plain scaling, never
-  black. `cargo test -p pulsar-render fsr` compiles the HLSL.
+  black. `cargo test -p pulsar-render fsr` compiles the HLSL. `sgsr` = Snapdragon GSR 1
+  (`win/sgsr1.hlsl`, one pass) — NOT offered in the settings since the 2026-11-13 A/B (dark
+  halos on desktop text, Adreno); reachable via `PULSAR_UPSCALE=sgsr` (diagnostic override of
+  the mode, both Windows and Linux) or a saved `upscale=sgsr`.
 - **macOS pulsar-render** (`crates/pulsar-render/src/mac/metal.rs`, `metalfx.rs`; choice =
   `view::pick`, unit-tested): only when the picture is scaled UP. `ai` / `auto` = Apple's
   **MetalFX spatial scaler** (`MTLFXSpatialScaler`, macOS 13+) when the system has MetalFX and
@@ -322,7 +325,22 @@ showed ~600 ms head-of-line holds, "stream stopped" over a live session and a lo
 - **Linux pulsar-render** (`crates/pulsar-render/src/gl_fsr.rs`): the presenter's draw (any
   decode path) is redirected into a stream-sized FBO texture, EASU scales it into a second one,
   RCAS sharpens onto the screen; GLSL ES 1.00 (guarded divisions instead of bit-cast
-  reciprocals). Not on the KMS zero-copy (game-mode lease) path, which bypasses GL.
+  reciprocals). `sgsr` runs Snapdragon GSR 1 in one pass instead (`crates/pulsar-render/src/
+  sgsr1.glsl`, GLSL ES 1.00, bilinear source, `textureGather` emulated with 4 texel-centre
+  fetches); if its shader does not build, FSR runs. `auto` / `fsr` / `ai` = FSR (no vendor AI
+  upscaler on Linux). The menu's stream line names the one really running (`FSR` / `SGSR`).
+  Not on the KMS zero-copy (game-mode lease) path, which bypasses GL: the decoded dmabuf goes
+  straight to a plane and the display controller scales it — a shader pass there would need a
+  GL composite into a scanout buffer, i.e. no longer zero-copy (by design, not done).
+- **SGSR math** (both `sgsr1.glsl` and `win/sgsr1.hlsl`): the 2025 revision of upstream's GLSL
+  mobile shader — std = 2.181818 / sum, distance weight 0.55, luma change limited to ±23/255.
+  Upstream's HLSL still has the 2023 math (std = (10.14185 / sum)², weight 0.5, no limit), which
+  over-sharpens edges; that was the likely cause of the halos. Untested on hardware with the new
+  math (Windows and Linux): A/B it on desktop text before offering SGSR in the settings again
+  (add `<option value="sgsr">` back in `DisplayTab.svelte`, the native menu row in
+  `overlay.rs`, and accept `sgsr` in `Session.svelte`'s `upscale` case). macOS: the mac renderer
+  can reuse `sgsr1.glsl` as is (GLSL ES 1.00 body; needs the prelude `gl_fsr.rs` PRE provides:
+  `uv`, `tex`, `con0`) or translate it to Metal.
 - ABR: with an upscaler on, game mode uses `min_kbps_scale = 1.25` (gives resolution up earlier).
 
 ## macOS renderer (`crates/pulsar-render/src/mac/`, 2026-11-14, UNTESTED on Mac hardware)
