@@ -78,7 +78,10 @@ A second Opus/RTP stream parallel to video. Implementation lives in
   armed (SCK taps the apps, not the output device). Encoded by the same in-process Opus/L16
   encoder as Windows (`handlers/opus_rtp.rs`, `spawn_system_audio_mac`), ffmpeg on its stdin as
   the fallback. Stereo only: a surround request, macOS < 13 or a start failure keep the
-  AVFoundation input below (`AvFoundation(0)` is usually the microphone).
+  AVFoundation input below (`AvFoundation(0)` is usually the microphone). The idle silence
+  follows the wall clock (frames owed since the idle stretch began minus frames written). A
+  `system` / `loopback` / `wasapi` sentinel is never passed to ffmpeg as a device name:
+  `audio_input()` maps it to the OS default.
 - **dshow / Pulse `.monitor` / AVFoundation** on Linux/macOS, or when the user
   names a device (`Config::audio_input` non-empty → `audio_loopback()` false).
 

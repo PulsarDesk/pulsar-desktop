@@ -41,9 +41,11 @@ Mac — only `cargo check --target aarch64-apple-darwin` of pulsar-capture and p
 src-tauri wiring is reviewed by hand, it cannot be checked off a Mac):** ScreenCaptureKit →
 VideoToolbox → RTP with live bitrate / keyframe / display switch (see host-encode.md), and the
 system mix without Pulsar via ScreenCaptureKit audio (see audio.md); Screen Recording
-permission notice on the home screen. Parity gaps that remain on macOS: RFI and intra refresh
-(VideoToolbox has no API), surround system audio (SCK gives stereo), per-window capture,
-absolute pointer on a non-main display, ffmpeg fallback on a non-main display.
+permission notice on the home screen; the absolute pointer and the ffmpeg fallback follow the
+picked display. Not possible on macOS: RFI and intra refresh (VideoToolbox has no API),
+surround system audio (SCK gives at most stereo). Possible but not done: per-window capture
+(SCK `initWithDesktopIndependentWindow:`), the ghost-pointer region, per-session (not
+process-wide) display mapping.
 
 **Host-only / headless host / Pulsar Split seat host (2026-11-13, not run on hardware):**
 `--host-only`, `--headless-host`, `--headless-stop`, `--split-seat` — see

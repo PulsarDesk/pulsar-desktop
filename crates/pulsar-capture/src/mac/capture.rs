@@ -69,6 +69,24 @@ struct Built {
 	stream: ScStream,
 	enc: VtEncoder,
 	slot: Arc<FrameSlot>,
+	display_id: u32,
+}
+
+/// Publishes the streamed display for the macOS input injector (absolute pointer mapping) and
+/// withdraws it on drop, unless a newer capture published its own since.
+struct StreamedDisplay(u32);
+
+impl StreamedDisplay {
+	fn publish(display_id: u32) -> Self {
+		sck::set_streamed_display(display_id);
+		Self(display_id)
+	}
+}
+
+impl Drop for StreamedDisplay {
+	fn drop(&mut self) {
+		sck::clear_streamed_display(self.0);
+	}
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -150,7 +168,7 @@ fn build(
 		low_latency_rc = enc.low_latency_rc,
 		"macOS native capture built (ScreenCaptureKit + VideoToolbox)"
 	);
-	Ok(Built { stream, enc, slot })
+	Ok(Built { stream, enc, slot, display_id })
 }
 
 /// Keeps the displays awake while streaming (`IOPMAssertion` "PreventUserIdleDisplaySleep").
@@ -270,6 +288,9 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 		let mut announced = false;
 		let mut rebuilds = 0u32;
 		let mut last_pts: Option<i64> = None;
+		// Lives until the thread ends; replaced after every build (the old one is dropped
+		// first, so a rebuild on the same display does not clear what it just published).
+		let mut published: Option<StreamedDisplay> = None;
 		'build: loop {
 			if stop_t.load(Ordering::SeqCst) {
 				return;
@@ -303,7 +324,9 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 				announced = true;
 				let _ = init_tx.send(Ok(()));
 			}
-			let Built { stream, enc, slot } = built;
+			let Built { stream, enc, slot, display_id } = built;
+			drop(published.take());
+			published = Some(StreamedDisplay::publish(display_id));
 			let mut last_kbps = kbps;
 			let mut last_frame: Option<VideoFrame> = None;
 			// A fresh encoder starts on a keyframe; the client needs one after a switch too.

@@ -45,10 +45,20 @@ Part of the pulsar-desktop agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
   missing **Screen Recording permission** (the host's home screen shows a notice with "İzin
   iste" / "Sistem Ayarlarını aç" — `screen_permission.rs`, `ScreenPermissionNotice.svelte` —
   and the client gets a `!` stats line `host.screenPermission`), or a session VideoToolbox
-  refuses. `host_displays()` on macOS = the CoreGraphics list, main first (the index the native
-  capture takes). Open: the ffmpeg fallback still captures the main display only, and the
-  absolute pointer is not mapped onto a non-main captured display (`display_rect` exists on
-  macOS, in global points, but host.rs's input mapping is Windows-only).
+  refuses (a low-latency-rate-control session that refuses its setup is retried without it
+  first). `host_displays()` on macOS = the CoreGraphics list, main first (the index the native
+  capture takes). The frame is **stretched** to the requested size (`preservesAspectRatio = NO`
+  on macOS 14+, like ffmpeg's scale), never letterboxed. **Multi-display pointer:** the capture
+  publishes the display it streams (pulsar-core `macos_capture::set_streamed_display`; the
+  native thread on every build, the ffmpeg fallback at start) and the macOS injector maps the
+  absolute pointer onto that display's bounds (main display when none / gone). The ffmpeg
+  fallback captures the picked display too (`"Capture screen N"`, N = place in CoreGraphics'
+  active list — a bare index would count the cameras first). A 7 s no-frame notice on macOS uses
+  `host.captureNoFramesMac` (no GPU wording). Open (possible, not done): per-window capture
+  (`window_hwnd` → `SCContentFilter initWithDesktopIndependentWindow:` + a macOS window list for
+  the client's picker + window-relative pointer mapping); the client's labelled ghost pointer
+  region (`ghost_region`) is still None on macOS. The streamed display is process-wide: two
+  sessions streaming different displays map the pointer onto the one published last.
 - **Linux X11** — the ffmpeg **libraries in-process** (`src-tauri/src/host/libav.rs`:
   x11grab → libavfilter → libavcodec x264/x265/SVT-AV1/NVENC → libavformat RTP; live
   bitrate, forced IDR on request, short-GOP recovery; `PULSAR_LIBAV_HOST=0` disables).

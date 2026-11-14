@@ -407,9 +407,37 @@ impl VtEncoder {
 				}
 			},
 		};
-		let enc = Self { session, ctx, spec, low_latency_rc };
-		enc.configure()?;
-		Ok(enc)
+		// Configure a fresh session; on failure the session is torn down (not `ctx`, which the
+		// next attempt reuses) and the error comes back.
+		let setup = |session: VTSessionRef, low_latency_rc: bool| -> Result<Self, String> {
+			let enc = std::mem::ManuallyDrop::new(Self { session, ctx, spec, low_latency_rc });
+			match enc.configure() {
+				Ok(()) => Ok(std::mem::ManuallyDrop::into_inner(enc)),
+				Err(e) => {
+					// SAFETY: this session is ours and is used nowhere else.
+					unsafe { discard_session(session) };
+					Err(e)
+				}
+			}
+		};
+		let result = match setup(session, low_latency_rc) {
+			Err(e) if low_latency_rc => {
+				// The low-latency rate controller took the session but refused a property this
+				// path needs (frame reordering off, prepare-to-encode, …): retry with the classic
+				// rate control before giving the whole native path up for ffmpeg.
+				tracing::warn!("VideoToolbox: low-latency session refused its setup ({e}) — retrying without");
+				match create(false) {
+					Ok(s) => setup(s, false),
+					Err(st) => Err(format!("VTCompressionSessionCreate failed ({st})")),
+				}
+			}
+			r => r,
+		};
+		if result.is_err() {
+			// SAFETY: every session that referred to it was discarded above.
+			drop(unsafe { Box::from_raw(ctx) });
+		}
+		result
 	}
 
 	fn set(&self, name: &CStr, value: CFTypeRef) -> bool {
@@ -505,6 +533,14 @@ impl VtEncoder {
 		// SAFETY: `ctx` lives as long as `self`.
 		unsafe { (*self.ctx).errors.load(std::sync::atomic::Ordering::Relaxed) }
 	}
+}
+
+/// Flush and tear down a session that never became (or no longer is) a [`VtEncoder`]; the
+/// output context it pointed to is left alone.
+unsafe fn discard_session(session: VTSessionRef) {
+	VTCompressionSessionCompleteFrames(session, CMTime::invalid());
+	VTCompressionSessionInvalidate(session);
+	CFRelease(session as CFTypeRef);
 }
 
 impl Drop for VtEncoder {

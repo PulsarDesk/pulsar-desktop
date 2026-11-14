@@ -3,7 +3,10 @@
 
 /// The output size for a requested `want_w × want_h` on a display of `native_w × native_h`
 /// pixels: 0 means native; never larger than the display; even (NV12 + the encoders need it);
-/// at least 2×2.
+/// at least 2×2. Each axis is clamped on its own, so the size may not have the display's aspect
+/// ratio: the capture STRETCHES the display into it (ScreenCaptureKit with
+/// `preservesAspectRatio = NO`, like ffmpeg's scale), never letterboxes, so a normalized
+/// pointer position maps onto the whole display.
 pub fn output_size(want_w: u32, want_h: u32, native_w: u32, native_h: u32) -> (u32, u32) {
 	let pick = |want: u32, native: u32| {
 		let v = if want == 0 { native } else if native > 0 { want.min(native) } else { want };
@@ -68,6 +71,15 @@ mod tests {
 		assert_eq!(output_size(1281, 721, 2560, 1440), (1280, 720));
 		assert_eq!(output_size(1, 1, 0, 0), (2, 2));
 		assert_eq!(output_size(1920, 1080, 0, 0), (1920, 1080));
+	}
+
+	#[test]
+	fn output_size_does_not_fit_the_display_aspect() {
+		// A 3024×1964 (≈1.54) panel asked for 16:9: the frame is 1920×1080 (stretched), not a
+		// 1663×1080 pillarbox, so x = 0..1 of the frame is x = 0..1 of the display.
+		let (w, h) = output_size(1920, 1080, 3024, 1964);
+		assert_eq!((w, h), (1920, 1080));
+		assert_ne!(w * 1964, h * 3024);
 	}
 
 	#[test]

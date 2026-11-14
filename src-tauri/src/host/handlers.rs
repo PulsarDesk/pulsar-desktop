@@ -3203,8 +3203,33 @@ pub(super) fn make_on_stream(
 		// origin. Also clamp eff_w/eff_h to the SELECTED monitor (not the root screen) so
 		// the capture region never overflows that monitor's bounds. Single-monitor / primary
 		// at (0,0) keeps the plain display string (no change in behavior).
-		#[cfg(not(target_os = "linux"))]
+		#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 		let cap_display = cfg.display.clone();
+		// macOS ffmpeg fallback: avfoundation names its screens "Capture screen N" in
+		// CoreGraphics' active-list order (a bare index would count the cameras first), so
+		// map the client's display pick (main display first) onto that number, and publish
+		// the display for the input injector's absolute pointer mapping. Untested on macOS
+		// hardware.
+		#[cfg(target_os = "macos")]
+		let cap_display = {
+			let displays = pulsar_core::macos_capture::displays();
+			let picked = displays
+				.get(req.display_idx as usize)
+				.or_else(|| displays.first())
+				.map(|d| d.id);
+			let number = picked
+				.and_then(|id| {
+					pulsar_core::macos_capture::avfoundation_screen_number(
+						&pulsar_core::macos_capture::active_display_ids(),
+						id,
+					)
+				})
+				.unwrap_or(0);
+			if let Some(id) = picked {
+				pulsar_core::macos_capture::set_streamed_display(id);
+			}
+			format!("Capture screen {number}")
+		};
 		#[cfg(target_os = "linux")]
 		let (cap_display, eff_w, eff_h) = {
 			let displays = crate::process::linux_displays();
@@ -3628,7 +3653,13 @@ pub(super) fn make_on_stream(
 						let c = cs.snapshot();
 						if c.encoded == 0 {
 							tracing::error!(source = c.source, "native capture delivered no frame in 7 s");
-							let msg = crate::i18n::t("host.captureNoFrames").to_string();
+							// macOS: no GPU is involved in the wording — the usual cause there is
+							// ScreenCaptureKit / the Screen Recording grant.
+							#[cfg(target_os = "macos")]
+							let key = "host.captureNoFramesMac";
+							#[cfg(not(target_os = "macos"))]
+							let key = "host.captureNoFrames";
+							let msg = crate::i18n::t(key).to_string();
 							let _ = stats_enc.try_send(DataMsg::Stats(format!("!{msg}")));
 						}
 					}
