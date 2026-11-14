@@ -13,6 +13,9 @@ pulsar-desktop/
   crates/pulsar-render/   # native renderer PROCESS for ALL platforms: Linux
                           #   rkmpp/EGL, Windows Media Foundation + D3D11 zero-copy
                           #   decode, egui in-session overlay, `--probe` decoder probe.
+  crates/pulsar-macinput/ # macOS client input capture (CGEventTap): engine (combos,
+                          #   held keys, engage lifecycle, mouse rules - tested on every
+                          #   OS), key map, rect math, the tap thread (macOS only).
   crates/pulsar-setup/    # egui branded Windows bootstrapper installer
                           #   (Discord-style, embedded payload, silent/uninstall).
   src-tauri/              # `pulsar-tauri` crate (bin name `pulsar`)
@@ -22,7 +25,8 @@ pulsar-desktop/
     src/process.rs        #   ffmpeg spawning, ffmpeg_bin(), encoder validation
     src/viewer.rs         #   UDP→WebSocket relay (now audio-only path to webview)
     src/native_view*/     #   embedded native video (spawn.rs: spawn_mpv & co.)
-    src/kbdhook.rs,kbdhook/ # OS-key capture: Windows Interception/LL-hook, Linux evdev
+    src/kbdhook.rs,kbdhook/ # OS-key capture: Windows Interception/LL-hook (imp.rs), Linux
+                          #   evdev (linux.rs), macOS CGEventTap glue (mac.rs -> pulsar-macinput)
     src/relay_mode.rs     #   `pulsar --relay …` — the app can run as a relay
     src/{auth,avatar,connections,files,fs_browse,audio_io,io_cmds,…}.rs
     tauri.conf.json       #   frameless 1200×780 window; updater plugin (minisign)

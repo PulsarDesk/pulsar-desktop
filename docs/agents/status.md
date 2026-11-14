@@ -27,6 +27,14 @@ sizes FEC parity from the client's `Stats` and encodes with intra-refresh / shor
 reorder wait (`maxdelay`), and on Windows/macOS has a reorder buffer. Test with
 `scripts/netem.sh` + `scripts/validate-log.mjs`. Do not push behaviour changes untested.
 
+**macOS client input capture (2026-11-14, untested on macOS hardware):** CGEventTap in
+`crates/pulsar-macinput` + `kbdhook/mac.rs`: system keys and combos to the host, relative
+mouse (game mode / host pointer lock), absolute mouse confined to the video, free cursor,
+click-to-engage, focus-loss release, held-key flush; Accessibility prompt + toast, webview
+fallback without it. Details and the open hardware checks: modes.md "macOS input capture".
+`pulsar-tauri` itself can't be type-checked for macOS from Windows (objc2-exception-helper
+needs a mac C toolchain); the crate can.
+
 **Scaffolded / known gaps:** macOS virtual gamepad (no-op stub); HW encode on
 the Wayland/gst path (software x264 only); media-over-the-session for
 symmetric-NAT (media is a direct UDP RTP flow today — fine for LAN/cone-NAT/
