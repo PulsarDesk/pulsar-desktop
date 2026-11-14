@@ -91,7 +91,20 @@ features = [
     "Win32_Media_MediaFoundation",
 ]
 
-# macOS still uses egui's winit+wgpu stack (Metal) for the overlay; native VideoToolbox→Metal
-# child-NSView video is a later phase (Task 10). Same overlay.rs UI.
+# macOS: native zero-copy renderer, the analogue of the Windows one. VideoToolbox HW decode
+# (VTDecompressionSession → IOSurface-backed CVPixelBuffer NV12/P010) → CVMetalTextureCache
+# (no copy) → a Metal YUV→RGB pass (+ FSR 1 EASU/RCAS) → CAMetalLayer, the egui overlay painted
+# by our own minimal Metal painter (`mac/metal.rs`, like `win/egui_paint.rs`) on the same
+# drawable. Cross-process NSView embedding does not exist on macOS, so the layer lives in a
+# borderless non-activating NSPanel owned by this process that tracks the session tab's rect
+# over the Tauri window (see `mac/window.rs`). The plain C frameworks (CoreFoundation,
+# CoreMedia, CoreVideo, VideoToolbox, CoreGraphics window list) are called through our own
+# small FFI (`mac/ffi.rs`); the Objective-C ones through the objc2 framework crates. No objc2
+# `exception` feature (its helper needs a mac C toolchain to build).
 [target.'cfg(target_os = "macos")'.dependencies]
-eframe = { version = "0.37", default-features = false, features = ["wgpu"] }
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSGeometry", "NSDate", "NSObject", "NSRunLoop", "NSError"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "objc2-quartz-core", "objc2-core-foundation", "NSApplication", "NSColor", "NSEvent", "NSGraphics", "NSPanel", "NSResponder", "NSRunningApplication", "NSScreen", "NSView", "NSWindow"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFCGTypes"] }
+objc2-metal = { version = "0.3", default-features = false, features = ["std", "MTLAllocation", "MTLBuffer", "MTLCommandBuffer", "MTLCommandEncoder", "MTLCommandQueue", "MTLDevice", "MTLDrawable", "MTLLibrary", "MTLPixelFormat", "MTLRenderCommandEncoder", "MTLRenderPass", "MTLRenderPipeline", "MTLResource", "MTLSampler", "MTLTexture", "MTLTypes"] }
+objc2-quartz-core = { version = "0.3", default-features = false, features = ["std", "objc2-metal", "objc2-core-foundation", "CALayer", "CAMetalLayer"] }
