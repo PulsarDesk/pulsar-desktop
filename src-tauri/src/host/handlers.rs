@@ -3512,10 +3512,10 @@ pub(super) fn make_on_stream(
 			// Off Windows: the window picked above (Windows' own window capture is WGC on the
 			// native path below; its ffmpeg fallback streams the monitor).
 			#[cfg(not(windows))]
-			window: match host_window {
-				Some((super::window_src::Target::X11(id), ..)) => Some(pipeline::WindowInput::X11 { id }),
+			window: match &host_window {
+				Some((super::window_src::Target::X11(id), ..)) => Some(pipeline::WindowInput::X11 { id: *id }),
 				Some((super::window_src::Target::Mac(_), _, Some(url))) => {
-					Some(pipeline::WindowInput::RawNv12 { url })
+					Some(pipeline::WindowInput::RawNv12 { url: url.clone() })
 				}
 				_ => None,
 			},

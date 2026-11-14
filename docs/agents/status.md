@@ -163,9 +163,12 @@ Notes per platform:
   The eraser end stays sticky while a pen hovers (`#penEraser`). Unverified: that macOS lets a
   listen-only tap see tablet events without a TCC prompt (if refused, pens stay a mouse), and
   which pointerType WebKitGTK gives.
-- **macOS host**: absolute pointer, pen and touch land on the display behind the avfoundation
-  device the host captures (`process::macos_streamed_display` → `avf_screens`), not on the
-  main display.
+- **macOS host**: absolute pointer, pen and touch land on the streamed display, not on the
+  main display. Since the `parity/all` merge that is the client's picked monitor
+  (`cur_display` → `pulsar_core::displays::platform_id` → `DesktopInput::set_display`,
+  re-resolved before every input event in `host.rs`); the branch's own avfoundation-device
+  lookup (`process::macos_streamed_display`, an ffmpeg device listing on the input path) was
+  dropped. `pulsar_core::input::avf_screens` stays in core, unused by the app.
 - **Linux host (Wayland, multi-monitor)**: assumption, unverified — Xorg and wlroots map the
   direct uinput devices over the whole layout (the streamed-monitor region applies); GNOME and
   KDE Wayland map them to one output, so the region is skipped there. Explicit association

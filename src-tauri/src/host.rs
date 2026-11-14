@@ -1627,10 +1627,6 @@ pub(crate) async fn bring_online(
 					let mut coop = crate::coop::SessionRouter::new(sid);
 					#[cfg(windows)]
 					let coop_app = app_h.clone();
-					// macOS: which display the avfoundation capture streams (pointer / pen / touch
-					// land there, not on the main display).
-					#[cfg(target_os = "macos")]
-					let mac_app = app_h.clone();
 					// Virtual pads the host can't create are reported (create_pad_or_tell).
 					let pad_app = app_h.clone();
 					let mut pad_told = false;
@@ -1977,12 +1973,6 @@ pub(crate) async fn bring_online(
 										Ok(d) => desktop = Some(d),
 										Err(e) => tracing::warn!("desktop input unavailable: {e}"),
 									}
-									#[cfg(target_os = "macos")]
-									if let Some(d) = desktop.as_mut() {
-										let id = crate::process::macos_streamed_display(&mac_app);
-										tracing::info!(display = ?id, "input: streamed display (avfoundation)");
-										d.set_display(id);
-									}
 								}
 								// Windows: resolve the streamed monitor's rect for pen / touch (a pen-only
 								// client never sends PointerMotion, which is where the pointer resolves it).
@@ -2015,6 +2005,26 @@ pub(crate) async fn bring_online(
 											}
 										}
 									}};
+								}
+								// macOS: aim pointer / pen / touch at the streamed monitor's
+								// CGDirectDisplayID (`cur_display`, the client's pick), re-resolved when the
+								// streamed index changes, on a display-change event, and at least every
+								// second (covers a watcher that is not live yet). Before any event kind, so
+								// a pen-only client lands on the right display too. Untested on macOS
+								// hardware.
+								#[cfg(target_os = "macos")]
+								if let Some(d) = desktop.as_mut() {
+									let idx = cur_display.load(std::sync::atomic::Ordering::Relaxed);
+									let gen = crate::display_watch::generation();
+									if idx != applied_mac_display
+										|| gen != applied_mac_gen
+										|| applied_mac_at.elapsed() >= std::time::Duration::from_secs(1)
+									{
+										applied_mac_display = idx;
+										applied_mac_gen = gen;
+										applied_mac_at = std::time::Instant::now();
+										d.set_display(pulsar_core::displays::platform_id(idx as usize));
+									}
 								}
 								if let Some(d) = desktop.as_mut() {
 									match other {
@@ -2086,26 +2096,10 @@ pub(crate) async fn bring_online(
 											d.set_region(window_src::input_area(sid).or_else(|| {
 												input_cap.lock().unwrap().as_ref().and_then(|c| c.pointer_region())
 											}));
-											// macOS: aim at the streamed monitor's CGDirectDisplayID, re-resolved
-											// when the streamed index changes, on a display-change event, and at
-											// least every second (covers a watcher that is not live yet).
-											// A streamed window's frame wins over the display (set_window_rect).
-											// Untested on macOS hardware.
+											// macOS: the streamed display was resolved above (every event); a
+											// streamed window's frame wins over it. Untested on macOS hardware.
 											#[cfg(target_os = "macos")]
-											{
-												let idx = cur_display.load(std::sync::atomic::Ordering::Relaxed);
-												let gen = crate::display_watch::generation();
-												if idx != applied_mac_display
-													|| gen != applied_mac_gen
-													|| applied_mac_at.elapsed() >= std::time::Duration::from_secs(1)
-												{
-													applied_mac_display = idx;
-													applied_mac_gen = gen;
-													applied_mac_at = std::time::Instant::now();
-													d.set_display(pulsar_core::displays::platform_id(idx as usize));
-												}
-												d.set_window_rect(window_src::input_area(sid));
-											}
+											d.set_window_rect(window_src::input_area(sid));
 											d.pointer(x, y)
 										}
 										InputEvent::PointerRelative { dx, dy } => {
