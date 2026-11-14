@@ -139,6 +139,12 @@ fn media_features() -> Vec<String> {
 	// a keyframe (other paths answer MediaRfi with a keyframe).
 	#[cfg(windows)]
 	v.push(pulsar_core::service::media::FEAT_RFI.to_string());
+	// Linux: the x11grab host's NVENC SDK encoder (pulsar_capture::NvencCuda) — advertised once
+	// the background probe found NVENC on a CUDA device (see `linux_nvenc_sdk`).
+	#[cfg(target_os = "linux")]
+	if linux_nvenc_sdk() {
+		v.push(pulsar_core::service::media::FEAT_RFI.to_string());
+	}
 	// The session-start bandwidth probe (pulsar-core serve loop answers it on every platform).
 	v.push(pulsar_core::service::media::FEAT_PROBE.to_string());
 	// DualSense passthrough: a virtual wired DualSense over USB/IP (usbip-win2 / vhci-hcd).
@@ -150,6 +156,28 @@ fn media_features() -> Vec<String> {
 	#[cfg(windows)]
 	v.push(pulsar_core::service::media::FEAT_AUDIO_RAW.to_string());
 	v
+}
+
+/// Whether this Linux host can encode with the NVENC SDK on CUDA (and so heal a loss with
+/// reference-frame invalidation). The probe opens a CUDA context and an NVENC session, so it
+/// runs once on its own thread (started by `go_online`); until it answered this is `false` —
+/// a caps answer never waits on the driver.
+#[cfg(target_os = "linux")]
+fn linux_nvenc_sdk() -> bool {
+	use std::sync::atomic::{AtomicU8, Ordering};
+	// 0 = not started, 1 = probing, 2 = no, 3 = yes.
+	static STATE: AtomicU8 = AtomicU8::new(0);
+	if STATE.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+		let spawned = std::thread::Builder::new().name("nvenc-sdk-probe".into()).spawn(|| {
+			let ok = pulsar_capture::nvenc_supported() && std::env::var("PULSAR_NVENC_SDK").map(|v| v != "0").unwrap_or(true);
+			tracing::info!(codecs = ?pulsar_capture::nvenc_codecs(), ok, "Linux NVENC SDK (CUDA) probe");
+			STATE.store(if ok { 3 } else { 2 }, Ordering::SeqCst);
+		});
+		if spawned.is_err() {
+			STATE.store(2, Ordering::SeqCst);
+		}
+	}
+	STATE.load(Ordering::SeqCst) == 3
 }
 
 /// RAII guard that ensures per-session resources are released when the session task
@@ -396,6 +424,9 @@ pub(crate) async fn go_online(
 	relay_totp: Option<String>,
 ) -> Result<String, String> {
 	crate::headless::note_ui_call();
+	// Start the NVENC SDK probe early, so the first client's caps already know about RFI.
+	#[cfg(target_os = "linux")]
+	let _ = linux_nvenc_sdk();
 	// One go_online at a time (see AppState::go_online_lock).
 	let _online_guard = state.go_online_lock.lock().await;
 	let creds_empty = [&relay_password, &relay_totp]
@@ -2348,10 +2379,18 @@ pub(crate) async fn bring_online(
 				let on_rfi = {
 					#[cfg(windows)]
 					let native = native_slot.clone();
+					// Linux X11: the in-process encode's NVENC SDK encoder (a libavcodec encode
+					// drops it).
+					#[cfg(target_os = "linux")]
+					let libav = libav_slot.clone();
 					move |first: u16, last: u16| {
 						#[cfg(windows)]
 						if let Some(h) = native.lock().unwrap().as_ref() {
 							h.request_rfi(first, last);
+						}
+						#[cfg(target_os = "linux")]
+						if let Some(e) = libav.lock().unwrap().as_ref() {
+							e.request_rfi(first, last);
 						}
 						let _ = (first, last);
 					}

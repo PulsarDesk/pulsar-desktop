@@ -3280,7 +3280,12 @@ pub(super) fn make_on_stream(
 		// encoder or output) falls back to the CLI chain below, unchanged.
 		#[cfg(target_os = "linux")]
 		let libav_started = if !native_started && !(pulsar_core::capture::is_wayland() && !super::mock_capture()) {
-			match super::libav::Params::from_plan(&plan).map(super::libav::LibavHost::start) {
+			// The client's RFI ask reaches the NVENC SDK encoder (libavcodec ignores it).
+			let params = super::libav::Params::from_plan(&plan).map(|mut p| {
+				p.rfi = req.rfi;
+				p
+			});
+			match params.map(super::libav::LibavHost::start) {
 				Some(Ok(engine)) => {
 					*libav_slot.lock().unwrap() = Some(engine);
 					last_libav_req = Some(req.clone());

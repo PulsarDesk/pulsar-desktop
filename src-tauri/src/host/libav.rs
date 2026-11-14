@@ -18,6 +18,14 @@
 //! via ffmpeg, SDR 4:2:0. Everything else (VA-API/Vulkan hw frames, HDR, 4:4:4, Windows
 //! and macOS) stays on the ffmpeg CLI path — the same library build is not bundled there yet.
 //! A `lavfi testsrc` input (`Source::Test`) lets the engine run headless in tests.
+//!
+//! **NVENC through the SDK** (`pulsar_capture::NvencCuda`): an NVENC plan encodes with the NVENC
+//! SDK on a CUDA context instead of libavcodec's `h264_nvenc`/`hevc_nvenc` — the scaled NV12
+//! frames are uploaded to CUDA memory and packetized by pulsar-capture's own RTP sender. That is
+//! what lets a client-reported loss be healed by reference-frame invalidation (`request_rfi`,
+//! the Windows host's mechanism) instead of a keyframe. No NVIDIA driver / CUDA / NVENC API 12.2
+//! → libavcodec as before. `PULSAR_NVENC_SDK=0` forces libavcodec; `PULSAR_CUDA_DEVICE=N` picks
+//! the CUDA device (default 0). Untested on Linux hardware.
 
 #![cfg(target_os = "linux")]
 
@@ -54,6 +62,9 @@ pub struct Params {
 	pub recovery: LossRecovery,
 	/// `host:port` of the RTP destination (UDP).
 	pub dest: String,
+	/// The client asked for reference-frame invalidation (`StreamReq::rfi`): an NVENC SDK
+	/// encoder keeps a deep reference buffer and answers `request_rfi`.
+	pub rfi: bool,
 }
 
 impl Params {
@@ -73,12 +84,51 @@ impl Params {
 			low_latency: plan.low_latency,
 			recovery: plan.loss_recovery,
 			dest,
+			rfi: false,
+		})
+	}
+
+	/// The NVENC SDK encoder's parameters for this stream, when it is an NVENC stream from the
+	/// real capture (the test pattern always encodes in software) and not disabled.
+	fn sdk_params(&self) -> Option<pulsar_capture::NvencCudaParams> {
+		let wanted = self.encoder == HwEncoder::Nvenc
+			&& matches!(self.source, Source::X11 { .. })
+			&& sdk_enabled(std::env::var("PULSAR_NVENC_SDK").ok().as_deref());
+		wanted.then(|| pulsar_capture::NvencCudaParams {
+			width: self.width,
+			height: self.height,
+			fps: self.fps,
+			bitrate_kbps: self.bitrate_kbps,
+			dest: self.dest.clone(),
+			codec: sdk_codec(self.codec),
+			low_latency: self.low_latency,
+			intra_refresh: self.recovery == LossRecovery::IntraRefresh,
+			rfi: self.rfi,
+			device: std::env::var("PULSAR_CUDA_DEVICE").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
 		})
 	}
 
 	fn encoder_name(&self) -> Option<&'static str> {
 		self.encoder.ffmpeg_name(self.codec)
 	}
+}
+
+/// `PULSAR_NVENC_SDK` = `0` / `false` / `off` keeps NVENC on libavcodec.
+fn sdk_enabled(env: Option<&str>) -> bool {
+	!matches!(env.map(str::trim), Some("0") | Some("false") | Some("off"))
+}
+
+fn sdk_codec(c: VCodec) -> pulsar_capture::Codec {
+	match c {
+		VCodec::H264 => pulsar_capture::Codec::H264,
+		VCodec::H265 => pulsar_capture::Codec::H265,
+		VCodec::Av1 => pulsar_capture::Codec::Av1,
+	}
+}
+
+/// A capture instant as an RTP 90 kHz timestamp (wrapping), counted from the stream's start.
+fn rtp_ts_90k(since_start: std::time::Duration) -> u32 {
+	(since_start.as_micros() * 9 / 100) as u64 as u32
 }
 
 /// Can the in-process path take this plan? (X11 capture, a software or NVENC encoder that
@@ -102,6 +152,8 @@ enum Cmd {
 	Bitrate(u32),
 	Keyframe,
 	Recovery(LossRecovery),
+	/// Reference-frame invalidation for the lost RTP packets `first..=last`.
+	Rfi(u16, u16),
 	Stop,
 }
 
@@ -164,6 +216,14 @@ impl LibavHost {
 	/// Force the next frame to be an IDR.
 	pub fn request_keyframe(&self) {
 		let _ = self.ctrl.send(Cmd::Keyframe);
+	}
+
+	/// The client lost the video packets `first..=last` (reported at once, while its NACK
+	/// repair still runs): the NVENC SDK encoder invalidates the frames they carried as
+	/// references and tags the next frame as the recovery point. libavcodec cannot; there the
+	/// report is dropped and the client asks for a keyframe if its repair fails.
+	pub fn request_rfi(&self, first: u16, last: u16) {
+		let _ = self.ctrl.send(Cmd::Rfi(first, last));
 	}
 
 	/// Loss-recovery mode: `ShortGop` / `IntraRefresh` force a keyframe every ~0.5 s from
@@ -516,6 +576,7 @@ unsafe fn run(p: &Params, rx: Receiver<Cmd>, ready: Sender<Result<(), String>>) 
 		octx: ptr::null_mut(),
 		header_written: false,
 	};
+	let mut sdk: Option<pulsar_capture::NvencCuda> = None;
 	let setup = (|| -> Result<(c_int, *mut ff::AVStream), String> {
 		let (ictx, vs) = open_input(p)?;
 		cx.ictx = ictx;
@@ -528,6 +589,17 @@ unsafe fn run(p: &Params, rx: Receiver<Cmd>, ready: Sender<Result<(), String>>) 
 		cx.graph = graph;
 		cx.src = src;
 		cx.sink = sink;
+		// NVENC: the SDK encoder first (reference-frame invalidation); libavcodec if it cannot
+		// open (no NVIDIA driver / CUDA, an older NVENC API, no free session).
+		if let Some(sp) = p.sdk_params() {
+			match pulsar_capture::NvencCuda::new(&sp) {
+				Ok(e) => {
+					sdk = Some(e);
+					return Ok((vs, ptr::null_mut()));
+				}
+				Err(e) => tracing::warn!("NVENC SDK (CUDA) encoder unavailable, using libavcodec NVENC: {e}"),
+			}
+		}
 		cx.enc = open_encoder(p, pix_fmt)?;
 		let (octx, ost) = open_output(p, cx.enc)?;
 		cx.octx = octx;
@@ -545,7 +617,8 @@ unsafe fn run(p: &Params, rx: Receiver<Cmd>, ready: Sender<Result<(), String>>) 
 		}
 	};
 	tracing::info!(
-		encoder = p.encoder_name().unwrap_or("?"),
+		encoder = if sdk.is_some() { "nvenc-sdk-cuda" } else { p.encoder_name().unwrap_or("?") },
+		rfi = sdk.as_ref().is_some_and(|e| e.rfi_enabled()),
 		w = p.width,
 		h = p.height,
 		fps = p.fps,
@@ -565,12 +638,26 @@ unsafe fn run(p: &Params, rx: Receiver<Cmd>, ready: Sender<Result<(), String>>) 
 	let mut stats_frames = 0u32;
 	let mut stats_bytes = 0u64;
 	let mut enc_us_acc = 0u128;
-	let ost_tb = (*ost).time_base;
-	let enc_tb = (*cx.enc).time_base;
+	// Only the libavcodec path has these (the SDK path sends its own RTP).
+	let ost_tb = if ost.is_null() { ff::AVRational { num: 1, den: 90_000 } } else { (*ost).time_base };
+	let enc_tb = if cx.enc.is_null() { ff::AVRational { num: 1, den: p.fps as c_int } } else { (*cx.enc).time_base };
+	let t_start = std::time::Instant::now();
 	'main: loop {
 		// Commands from the app (non-blocking).
 		loop {
 			match rx.try_recv() {
+				Ok(Cmd::Bitrate(kbps)) if sdk.is_some() => {
+					if let Some(Err(e)) = sdk.as_mut().map(|s| s.set_bitrate(kbps)) {
+						tracing::warn!(kbps, "NVENC SDK bitrate change refused: {e}");
+					} else {
+						tracing::info!(kbps, "libav host (NVENC SDK): bitrate applied live");
+					}
+				}
+				Ok(Cmd::Rfi(first, last)) => match sdk.as_mut().map(|s| s.invalidate_lost(first, last)) {
+					Some(Ok(n)) => tracing::debug!(first, last, frames = n, "RFI: references invalidated"),
+					Some(Err(why)) => tracing::debug!(first, last, "RFI declined: {why}"),
+					None => {}
+				},
 				Ok(Cmd::Bitrate(kbps)) => {
 					let br = kbps as i64 * 1000;
 					(*cx.enc).bit_rate = br;
@@ -588,6 +675,8 @@ unsafe fn run(p: &Params, rx: Receiver<Cmd>, ready: Sender<Result<(), String>>) 
 			}
 		}
 		let r = ff::av_read_frame(cx.ictx, pkt);
+		// The capture instant of this frame (its RTP timestamp on the SDK path).
+		let cap_at = std::time::Instant::now();
 		if r < 0 {
 			if r == ff::AVERROR_EOF {
 				break;
@@ -618,7 +707,8 @@ unsafe fn run(p: &Params, rx: Receiver<Cmd>, ready: Sender<Result<(), String>>) 
 				// `pict_type = I` is what libx264 / NVENC read (with `forced-idr` it becomes a
 				// real IDR); no frame flag needed — and `AV_FRAME_FLAG_KEY` only exists from
 				// FFmpeg 6.1 (the Linux release builds use Ubuntu 22.04's 4.4).
-				if force_key || frames_since_key >= cadence {
+				let key = force_key || frames_since_key >= cadence;
+				if key {
 					(*filt).pict_type = ff::AVPictureType::AV_PICTURE_TYPE_I;
 					force_key = false;
 					frames_since_key = 0;
@@ -627,6 +717,35 @@ unsafe fn run(p: &Params, rx: Receiver<Cmd>, ready: Sender<Result<(), String>>) 
 					frames_since_key += 1;
 				}
 				let t0 = std::time::Instant::now();
+				if let Some(enc) = sdk.as_mut() {
+					// The SDK keeps its own keyframe schedule (frame 0, a fresh encoder's catch-up
+					// IDRs, the safety GOP); the client's request and the recovery cadence come
+					// from here.
+					if key && pts > 1 {
+						enc.request_idr();
+					}
+					let h = (*filt).height.max(0) as usize;
+					let (ly, luv) = ((*filt).linesize[0], (*filt).linesize[1]);
+					let r = if ly > 0 && luv > 0 && !(*filt).data[0].is_null() && !(*filt).data[1].is_null() {
+						let frame = pulsar_capture::Nv12Frame {
+							y: std::slice::from_raw_parts((*filt).data[0], ly as usize * h),
+							y_pitch: ly as usize,
+							uv: std::slice::from_raw_parts((*filt).data[1], luv as usize * (h / 2)),
+							uv_pitch: luv as usize,
+						};
+						enc.encode(&frame, rtp_ts_90k(cap_at - t_start))
+					} else {
+						Err("filter output is not a packed NV12 frame".to_string())
+					};
+					ff::av_frame_unref(filt);
+					match r {
+						Ok(n) => stats_bytes += n as u64,
+						Err(e) => tracing::warn!("NVENC SDK encode failed: {e}"),
+					}
+					enc_us_acc += t0.elapsed().as_micros();
+					stats_frames += 1;
+					continue;
+				}
 				let r = ff::avcodec_send_frame(cx.enc, filt);
 				ff::av_frame_unref(filt);
 				if r < 0 {
@@ -649,6 +768,7 @@ unsafe fn run(p: &Params, rx: Receiver<Cmd>, ready: Sender<Result<(), String>>) 
 		}
 		if stats_t.elapsed().as_secs() >= 2 && stats_frames > 0 {
 			tracing::debug!(
+				rfi = ?sdk.as_ref().map(|e| e.rfi_counts()),
 				fps = stats_frames / 2,
 				mbit = (stats_bytes * 8) as f32 / 2.0 / 1_000_000.0,
 				enc_ms = (enc_us_acc / stats_frames as u128) as f32 / 1000.0,
@@ -660,10 +780,13 @@ unsafe fn run(p: &Params, rx: Receiver<Cmd>, ready: Sender<Result<(), String>>) 
 			enc_us_acc = 0;
 		}
 	}
-	// Flush the encoder.
-	ff::avcodec_send_frame(cx.enc, ptr::null());
-	while ff::avcodec_receive_packet(cx.enc, pkt) == 0 {
-		ff::av_packet_unref(pkt);
+	// Flush the encoder (libavcodec; the SDK encoder is synchronous and drops with `sdk`).
+	drop(sdk);
+	if !cx.enc.is_null() {
+		ff::avcodec_send_frame(cx.enc, ptr::null());
+		while ff::avcodec_receive_packet(cx.enc, pkt) == 0 {
+			ff::av_packet_unref(pkt);
+		}
 	}
 	let mut pkt = pkt;
 	let mut frame = frame;
@@ -698,6 +821,39 @@ mod tests {
 	/// flow, a keyframe request produces an IDR within a few frames, and a live bitrate
 	/// change is accepted without breaking the stream.
 	#[test]
+	fn nvenc_sdk_switch_and_helpers() {
+		assert!(sdk_enabled(None));
+		assert!(sdk_enabled(Some("1")));
+		assert!(!sdk_enabled(Some("0")));
+		assert!(!sdk_enabled(Some(" off ")));
+		assert_eq!(sdk_codec(VCodec::H265), pulsar_capture::Codec::H265);
+		assert_eq!(rtp_ts_90k(Duration::from_secs(1)), 90_000);
+		assert_eq!(rtp_ts_90k(Duration::from_micros(100)), 9);
+		let mut p = Params {
+			source: Source::X11 { display: ":0".into() },
+			width: 1920,
+			height: 1080,
+			fps: 60,
+			bitrate_kbps: 20_000,
+			encoder: HwEncoder::Nvenc,
+			codec: VCodec::H264,
+			low_latency: true,
+			recovery: LossRecovery::IntraRefresh,
+			dest: "127.0.0.1:5000".into(),
+			rfi: true,
+		};
+		if std::env::var("PULSAR_NVENC_SDK").is_err() {
+			let sp = p.sdk_params().expect("an NVENC X11 plan takes the SDK path");
+			assert!(sp.rfi && sp.intra_refresh && sp.low_latency);
+		}
+		p.encoder = HwEncoder::Software;
+		assert!(p.sdk_params().is_none());
+		p.encoder = HwEncoder::Nvenc;
+		p.source = Source::Test;
+		assert!(p.sdk_params().is_none());
+	}
+
+	#[test]
 	fn testsrc_x264_rtp_end_to_end_with_live_controls() {
 		let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
 		sock.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
@@ -713,6 +869,7 @@ mod tests {
 			low_latency: true,
 			recovery: LossRecovery::Normal,
 			dest: format!("127.0.0.1:{port}"),
+			rfi: false,
 		};
 		let host = match LibavHost::start(p) {
 			Ok(h) => h,
