@@ -68,7 +68,7 @@ Exit codes (`headless_host.rs`): 0 ok, 2 bad argv, 3 already running (session / 
   (`lease::may_host` Ok, `util::data_dir` = `--data-dir`, never `%ProgramData%\Pulsar`).
 - Logs to `--log` only (append, no stdout, no own rotation, `RUST_LOG` ignored).
 - Opens `\\.\pipe\PulsarSplit\seat\<id>\pulsar-host` (retries 5 s), checks the server is
-  `pulsar-split-service.exe` as SYSTEM in session 0, then speaks protocol 1 (`seat/proto.rs`):
+  `pulsar-seat-service.exe` (or the pre-merge `pulsar-split-service.exe`) as SYSTEM in session 0, then speaks protocol 1 (`seat/proto.rs`):
   `hello` (capabilities `approve`, `connect_password`, `otp`, `trust_store`), `secrets.load`
   (identity via `Identity::from_secret_bytes`, never `identity.key`; connect password and
   relay key in memory only), `config.apply` (→ `Config`, never saved; `display_name` is the

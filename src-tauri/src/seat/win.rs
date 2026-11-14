@@ -14,8 +14,15 @@ pub(crate) fn pipe_name(seat_id: &str) -> String {
 	format!(r"\\.\pipe\PulsarSplit\seat\{seat_id}\pulsar-host")
 }
 
-/// The service's image name; the pipe server must be it, as SYSTEM in session 0.
-const SERVICE_EXE: &str = "pulsar-split-service.exe";
+/// The service's image names; the pipe server must be one of them, as SYSTEM in session 0.
+/// `pulsar-seat-service.exe` since Pulsar Split merged into Pulsar Seat (2026-11-14);
+/// `pulsar-split-service.exe` is the pre-merge name, still accepted.
+const SERVICE_EXES: [&str; 2] = ["pulsar-seat-service.exe", "pulsar-split-service.exe"];
+
+/// Whether `file` (the image file name, no directory) is one of [`SERVICE_EXES`].
+fn is_service_image(file: &str) -> bool {
+	SERVICE_EXES.iter().any(|n| file.eq_ignore_ascii_case(n))
+}
 
 fn wide(s: &str) -> Vec<u16> {
 	s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -100,7 +107,7 @@ pub(crate) async fn connect(seat_id: &str) -> Result<NamedPipeClient, String> {
 }
 
 /// §3.1 server check: `GetNamedPipeServerProcessId` = a SYSTEM process in session 0 whose
-/// image is `pulsar-split-service.exe`.
+/// image is one of [`SERVICE_EXES`].
 fn verify_server(pipe: HANDLE) -> Result<(), String> {
 	use windows_sys::Win32::Security::{
 		GetTokenInformation, IsWellKnownSid, TokenUser, WinLocalSystemSid, TOKEN_QUERY, TOKEN_USER,
@@ -133,8 +140,11 @@ fn verify_server(pipe: HANDLE) -> Result<(), String> {
 			}
 			let path = String::from_utf16_lossy(&buf[..len as usize]);
 			let file = path.rsplit('\\').next().unwrap_or_default();
-			if !file.eq_ignore_ascii_case(SERVICE_EXE) {
-				return Err(format!("pipe server is {file}, not {SERVICE_EXE}"));
+			if !is_service_image(file) {
+				return Err(format!(
+					"pipe server is {file}, not one of {}",
+					SERVICE_EXES.join(", ")
+				));
 			}
 			let mut tok: HANDLE = std::ptr::null_mut();
 			if OpenProcessToken(proc, TOKEN_QUERY, &mut tok) == 0 {
@@ -161,5 +171,19 @@ fn verify_server(pipe: HANDLE) -> Result<(), String> {
 		})();
 		CloseHandle(proc);
 		check
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::is_service_image;
+
+	#[test]
+	fn accepts_both_service_names_case_insensitive() {
+		assert!(is_service_image("pulsar-seat-service.exe"));
+		assert!(is_service_image("PULSAR-SEAT-SERVICE.EXE"));
+		assert!(is_service_image("pulsar-split-service.exe"));
+		assert!(!is_service_image("pulsar-seat-service.exe.bak"));
+		assert!(!is_service_image("svchost.exe"));
 	}
 }
