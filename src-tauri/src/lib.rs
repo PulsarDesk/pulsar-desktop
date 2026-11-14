@@ -63,6 +63,7 @@ mod seat;
 mod shared_mode;
 mod pad_wake;
 mod link_hint;
+mod pinch;
 mod play;
 mod play_notice;
 // Sleep / display off ends the sessions this machine is viewing; waking reconnects them.
@@ -116,7 +117,7 @@ use fs_browse::local_ls;
 use host::go_online;
 use io_cmds::{
 	chat_log, confine_pointer, host_send_chat, input_button, input_char, input_key, input_pointer,
-	input_scroll, kbd_capture_start, kbd_capture_stop, kbd_engage, kbd_web_key, list_input_devices, mic_start,
+	input_pinch, input_scroll, kbd_capture_start, kbd_capture_stop, kbd_engage, kbd_web_key, list_input_devices, mic_start,
 	mic_stop, native_view_rect, read_clipboard_text, send_chat, send_clipboard, send_file,
 	send_file_path, set_active_session, set_controller_lock, set_kbm_lock, set_pane_count,
 	set_window_fullscreen, write_clipboard_text,
@@ -878,6 +879,7 @@ pub fn run() {
 			input_pointer,
 			input_button,
 			input_scroll,
+			input_pinch,
 			input_key,
 			input_char,
 			confine_pointer,

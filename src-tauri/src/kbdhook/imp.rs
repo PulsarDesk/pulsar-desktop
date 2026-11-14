@@ -1378,8 +1378,6 @@ fn handle_mouse(state: u16, flags: u16, rolling: i16, x: i32, y: i32) -> bool {
 /// pointer path is dead too), leaving the viewer unable to control the remote. `msg` is the
 /// WM_* message; `data` is MSLLHOOKSTRUCT.mouseData (wheel delta in the high word). Returns
 /// true to SUPPRESS the event locally (engaged → the cursor only drives the remote).
-/// Connected host injects real pinch gestures (`FEAT_PINCH`); set per session by play.rs.
-static HOST_PINCH: AtomicBool = AtomicBool::new(false);
 /// A touchpad pinch is being forwarded as `InputEvent::Pinch`.
 static PINCH_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Cumulative pinch scale (f64 bits) and when its last step arrived (ms, `now_ms`).
@@ -1389,10 +1387,6 @@ static PINCH_LAST_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 const PINCH_STEP: f64 = 1.12;
 /// No pinch step for this long (and the synthesized Ctrl released) = the gesture ended.
 const PINCH_IDLE_MS: u64 = 200;
-
-pub fn set_host_pinch(on: bool) {
-	HOST_PINCH.store(on, Ordering::SeqCst);
-}
 
 /// The host's cursor is hidden — a game grabbed the mouse and reads RELATIVE motion
 /// (`DataMsg::PointerLock`). The hook path below positions the host pointer ABSOLUTELY, which
@@ -1693,7 +1687,7 @@ fn handle_mouse_wh(msg: u32, x: i32, y: i32, data: u32) -> bool {
 			drop(g);
 			// Host injects real pinch gestures: forward the pinch itself (begin / scale / end)
 			// instead of Ctrl + wheel. The end is detected by hook_thread's pinch timer.
-			if wrap_ctrl && msg == WM_MOUSEWHEEL && HOST_PINCH.load(Ordering::SeqCst) {
+			if wrap_ctrl && msg == WM_MOUSEWHEEL && crate::pinch::host_pinch() {
 				let factor = PINCH_STEP.powf(raw / 120.0);
 				let was = PINCH_ACTIVE.swap(true, Ordering::SeqCst);
 				let prev = if was { f64::from_bits(PINCH_SCALE_BITS.load(Ordering::SeqCst)) } else { 1.0 };
