@@ -160,6 +160,23 @@ describe('SessionInput pen and touch', () => {
 		stop();
 	});
 
+	it('a hovering eraser stays an eraser until the pen leaves', () => {
+		const { input, stop } = controlling();
+		input.onDown(pt('pen', { buttons: 32, button: 5, pressure: 0.3 }));
+		input.onUp(pt('pen', { buttons: 0, button: 5 }));
+		expect(vi.mocked(api.inputPen).mock.calls.at(-1)![1]).toMatchObject({ eraser: true, contact: false, inRange: true });
+		const sent = vi.mocked(api.inputPen).mock.calls.length;
+		// Hover moves carry no buttons: no tool-switch edge goes out.
+		input.onMove(pt('pen', { buttons: 0, button: -1, clientX: 60 }));
+		expect(vi.mocked(api.inputPen).mock.calls.length).toBe(sent);
+		input.clearMove(pt('pen', { button: -1 }));
+		expect(vi.mocked(api.inputPen).mock.calls.at(-1)![1]).toMatchObject({ inRange: false, eraser: true });
+		// Back in range with the tip end: a plain pen again.
+		input.onMove(pt('pen', { buttons: 0, button: -1 }));
+		expect(vi.mocked(api.inputPen).mock.calls.at(-1)![1]).toMatchObject({ inRange: true, eraser: false });
+		stop();
+	});
+
 	it('fingers go out as one frame; a lift sends the rest at once', () => {
 		const { input, stop } = controlling();
 		input.onDown(pt('touch', { pointerId: 1 }));

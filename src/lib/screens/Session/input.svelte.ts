@@ -100,6 +100,9 @@ export class SessionInput {
 	// touch-down / lift and pen contact edges go out at once.
 	#pen: PenSample | null = null;
 	#penDirty = false;
+	// Which end of each pen (pointerId) last touched: a hovering pen reports no buttons, so
+	// the eraser would flip to false on every hover move (a tool switch on the host).
+	#penEraser = new Map<number, boolean>();
 	#touches = new Map<number, TouchSample>();
 	#touchDirty = false;
 	#flushQueued = false;
@@ -192,12 +195,18 @@ export class SessionInput {
 		}
 		return [Math.min(1, Math.max(0, x)), Math.min(1, Math.max(0, y))];
 	}
-	/** Pen state from a PointerEvent (buttons: 1 = tip, 2 = barrel, 32 = eraser). */
-	#penSample(e: PointerEvent, inRange: boolean): PenSample | null {
+	/** Pen state from a PointerEvent (buttons: 1 = tip, 2 = barrel, 32 = eraser). The eraser
+	 * flag is only reliable in contact and on the lift (button 5); while the pen hovers it
+	 * keeps the end that last touched, until the pen leaves. */
+	#penSample(e: PointerEvent, kind: 'down' | 'move' | 'up' | 'leave'): PenSample | null {
 		const p = this.#videoXY(e);
-		if (!p) return null;
-		const eraser = (e.buttons & 32) !== 0 || e.button === 5;
+		const inRange = kind !== 'leave';
 		const contact = inRange && (e.buttons & (1 | 32)) !== 0;
+		let eraser = (e.buttons & 32) !== 0 || e.button === 5;
+		if (contact || kind === 'up') this.#penEraser.set(e.pointerId, eraser);
+		else eraser = eraser || (this.#penEraser.get(e.pointerId) ?? false);
+		if (!inRange) this.#penEraser.delete(e.pointerId);
+		if (!p) return null;
 		return {
 			x: p[0],
 			y: p[1],
@@ -284,7 +293,7 @@ export class SessionInput {
 	/** A pen / touch event while controlling: forwarded as pen / touch, never as the mouse. */
 	#penTouch(e: PointerEvent, kind: 'down' | 'move' | 'up' | 'leave'): boolean {
 		if (e.pointerType === 'pen') {
-			const s = this.#penSample(e, kind !== 'leave');
+			const s = this.#penSample(e, kind);
 			if (s) this.#sendPen(s);
 			return true;
 		}
