@@ -16,6 +16,11 @@ Games library + folder scan, gamepad-driven UI nav (`gamepadNav.svelte.ts`),
 auto-updater, relay mode, VNC-mode client path (`io_cmds.rs`), the SvelteKit UI
 and the Tauri bridge.
 
+**Host monitor picker parity (2026-11-14, branch `parity/host-displays`, untested on macOS and
+Wayland hardware):** macOS and Linux Wayland now advertise the host's monitors and watch for
+display changes like Windows does — see host-encode.md "Host monitor picker". On Wayland the
+portal dialog still picks the monitor.
+
 **Adaptive streaming (shipped 2026-09-03 in v0.11.0, refined in v0.12.0 — still awaiting the
 maintainer's real-session test):** the shared
 controller is `pulsar_core::adapt` (design + status in `../pulsar-core/docs/adaptive-streaming.md`).
