@@ -14,8 +14,13 @@
 //! the display turning off IS the sleep (there is no suspend event while audio plays); on any
 //! machine nobody is looking at a stream on a dark screen.
 //!
-//! Windows only for now. Elsewhere a real suspend freezes the app, the host times the session
-//! out by itself (its 6 s liveness), and a display that only turns off is not noticed.
+//! Per platform (all untested on real hardware except Windows):
+//! - Windows: `PowerRegisterSuspendResumeNotification` + `GUID_CONSOLE_DISPLAY_STATE` (below).
+//! - Linux (`power_watch/linux.rs`): logind `PrepareForSleep` with a delay inhibitor (the
+//!   sessions end BEFORE the suspend), the desktop's screen saver `ActiveChanged`
+//!   (org.freedesktop / org.gnome), and the X server's DPMS state on X11.
+//! - macOS (`power_watch/macos.rs`): NSWorkspace will-sleep / did-wake and
+//!   screens-did-sleep / screens-did-wake, delivered on the main thread's run loop.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -23,39 +28,95 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::state::AppState;
 
-/// The display is off / the system is suspended. Asleep = either.
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
+
+/// The display is off / the system is suspended / the desktop's screen saver (blank or lock
+/// screen) is up. Asleep = any of them. `SCREEN_SAVER` is only ever set on Linux.
 static DISPLAY_OFF: AtomicBool = AtomicBool::new(false);
 static SUSPENDED: AtomicBool = AtomicBool::new(false);
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+static SCREEN_SAVER: AtomicBool = AtomicBool::new(false);
 /// What the UI was last told.
 static ASLEEP: AtomicBool = AtomicBool::new(false);
 
-/// One of the two inputs changed: tell the UI (and end the sessions) on an edge of "asleep".
-fn update(app: &AppHandle, why: &'static str) {
-	let asleep = DISPLAY_OFF.load(Ordering::SeqCst) || SUSPENDED.load(Ordering::SeqCst);
+/// The sessions sleep is ending (awaitable: Linux holds the suspend until they are done).
+type Stops = Vec<tauri::async_runtime::JoinHandle<()>>;
+
+/// Set one of the inputs and act on the resulting edge (if any).
+#[cfg_attr(windows, allow(dead_code))]
+fn set(app: &AppHandle, flag: &AtomicBool, value: bool, why: &'static str) -> Stops {
+	flag.store(value, Ordering::SeqCst);
+	update(app, why)
+}
+
+/// "Asleep" from the inputs: any one of them.
+fn asleep_from(display_off: bool, suspended: bool, screen_saver: bool) -> bool {
+	display_off || suspended || screen_saver
+}
+
+/// One of the inputs changed: tell the UI (and end the sessions) on an edge of "asleep".
+fn update(app: &AppHandle, why: &'static str) -> Stops {
+	let asleep = asleep_from(
+		DISPLAY_OFF.load(Ordering::SeqCst),
+		SUSPENDED.load(Ordering::SeqCst),
+		SCREEN_SAVER.load(Ordering::SeqCst),
+	);
 	if ASLEEP.swap(asleep, Ordering::SeqCst) == asleep {
-		return;
+		return Vec::new();
 	}
 	if !asleep {
 		tracing::info!(why, "power: awake again — the UI reconnects the sessions sleep ended");
 		let _ = app.emit("system-wake", why);
-		return;
+		return Vec::new();
 	}
 	// The UI first (it notes what to bring back), then the sessions.
 	let _ = app.emit("system-sleep", why);
 	let ids: Vec<u64> = app.state::<AppState>().plays.lock().unwrap().keys().copied().collect();
 	tracing::info!(why, sessions = ids.len(), "power: going to sleep — ending the viewed sessions");
-	for id in ids {
-		let app = app.clone();
-		tauri::async_runtime::spawn(async move {
-			let state = app.state::<AppState>();
-			if let Err(e) = crate::play::stop_stream(app.clone(), state, id).await {
-				tracing::warn!(id, "power: stopping a session for sleep failed: {e}");
-			}
-		});
-	}
+	ids.into_iter()
+		.map(|id| {
+			let app = app.clone();
+			tauri::async_runtime::spawn(async move {
+				let state = app.state::<AppState>();
+				if let Err(e) = crate::play::stop_stream(app.clone(), state, id).await {
+					tracing::warn!(id, "power: stopping a session for sleep failed: {e}");
+				}
+			})
+		})
+		.collect()
 }
 
-#[cfg(not(windows))]
+/// Local keyboard/mouse input was just forwarded to a session (Linux evdev capture). The
+/// grab hides it from the desktop's idle timer; the Linux watcher reports it as user activity
+/// so the screen saver / DPMS does not blank a screen someone is playing on (which would
+/// end the session). No-op elsewhere.
+#[cfg(target_os = "linux")]
+pub(crate) fn note_input() {
+	linux::note_input();
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn spawn(app: AppHandle) {
+	linux::spawn(app);
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn spawn(app: AppHandle) {
+	macos::watch(move |ev| {
+		use macos::Event::*;
+		let _ = match ev {
+			WillSleep => set(&app, &SUSPENDED, true, "suspend"),
+			DidWake => set(&app, &SUSPENDED, false, "resume"),
+			ScreensDidSleep => set(&app, &DISPLAY_OFF, true, "display off"),
+			ScreensDidWake => set(&app, &DISPLAY_OFF, false, "display on"),
+		};
+	});
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub(crate) fn spawn(_app: AppHandle) {}
 
 #[cfg(windows)]
@@ -107,13 +168,13 @@ pub(crate) fn spawn(app: AppHandle) {
 		match kind {
 			PBT_APMSUSPEND => {
 				SUSPENDED.store(true, Ordering::SeqCst);
-				update(app, "suspend");
+				let _ = update(app, "suspend");
 			}
 			// An automatic resume (a wake for background work) comes with the display still
 			// off: `DISPLAY_OFF` keeps the sessions closed until someone is there.
 			PBT_APMRESUMEAUTOMATIC | PBT_APMRESUMESUSPEND => {
 				SUSPENDED.store(false, Ordering::SeqCst);
-				update(app, "resume");
+				let _ = update(app, "resume");
 			}
 			PBT_POWERSETTINGCHANGE if !setting.is_null() => {
 				// SAFETY: for this notification `setting` points at a POWERBROADCAST_SETTING.
@@ -130,11 +191,11 @@ pub(crate) fn spawn(app: AppHandle) {
 					match state {
 						0 => {
 							DISPLAY_OFF.store(true, Ordering::SeqCst);
-							update(app, "display off");
+							let _ = update(app, "display off");
 						}
 						1 => {
 							DISPLAY_OFF.store(false, Ordering::SeqCst);
-							update(app, "display on");
+							let _ = update(app, "display on");
 						}
 						_ => {} // dimmed
 					}
@@ -160,5 +221,18 @@ pub(crate) fn spawn(app: AppHandle) {
 	};
 	if a != 0 || b != 0 {
 		tracing::warn!(suspend = a, display = b, "power: sleep notifications not registered");
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::asleep_from;
+
+	#[test]
+	fn any_input_means_asleep() {
+		assert!(!asleep_from(false, false, false));
+		assert!(asleep_from(true, false, false));
+		assert!(asleep_from(false, true, false));
+		assert!(asleep_from(false, false, true));
 	}
 }
