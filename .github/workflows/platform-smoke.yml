@@ -87,7 +87,9 @@ jobs:
         run: |
           set -e
           cargo test --locked -p pulsar-render
-          cargo test --locked -p pulsar-tauri --lib
+          # One test at a time: a crash then names the test that was running (x86-64 Linux
+          # crashed with SIGSEGV in parallel; aarch64 Linux and the other OSes pass).
+          cargo test --locked -p pulsar-tauri --lib -- --test-threads=1
           for c in pulsar-macinput pulsar-machine; do
             if cargo metadata --format-version 1 --no-deps | grep -q "\"name\":\"$c\""; then cargo test --locked -p "$c"; fi
           done
@@ -134,7 +136,11 @@ jobs:
           wid=$(head -1 win.out); echo "window number $wid"
           printf 'v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=Pulsar\r\nc=IN IP4 0.0.0.0\r\nt=0 0\r\nm=video 59876 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\na=fmtp:96 packetization-mode=1\r\n' > t.sdp
           ffmpeg -hide_banner -loglevel error -re -f lavfi -i testsrc2=size=1280x720:rate=30 -c:v libx264 -preset ultrafast -tune zerolatency -g 15 -pix_fmt yuv420p -f rtp -payload_type 96 rtp://127.0.0.1:59876 & ffpid=$!
-          ( sleep 2; echo "viewrect 0 0 1280 720"; sleep 20 ) | ./target/debug/pulsar-render t.sdp --wid "$wid" --mode remote > render.out 2> render.err || true
+          # The renderer does not exit when its stdin closes: run it for 22 s, then stop it.
+          ( sleep 2; echo "viewrect 0 0 1280 720"; sleep 30 ) | ./target/debug/pulsar-render t.sdp --wid "$wid" --mode remote > render.out 2> render.err &
+          sleep 22
+          pkill -f "pulsar-render t.sdp" || true
+          sleep 1
           kill $ffpid $winpid 2>/dev/null || true
           echo "--- stdout"; grep -E "vidsink-(fps|dims|dec)" render.out | tail -8 || true
           echo "--- stderr"; tail -40 render.err
