@@ -1848,7 +1848,8 @@ pub(super) fn make_on_stream(
 	// to `None` on every other outcome (whole-monitor ddagrab, ffmpeg fallback, HDR/4:4:4, or a
 	// capture-start error). `on_input` gates its per-window PostMessage routing on THIS — never on
 	// the raw `launched_hwnd`, which can point at a window the stream isn't actually showing.
-	#[cfg(windows)] win_capture_hwnd: Arc<Mutex<Option<i64>>>,
+	// The id is per OS (HWND / X11 XID / CGWindowID), matching `pulsar_core::input::WindowInput`.
+	win_capture_hwnd: Arc<Mutex<Option<i64>>>,
 	// Per-window (WGC) capture target discovered when THIS session launched a game in game mode
 	// (Phase 2b co-op): `on_launch`'s resolver thread stores the launched app's top-level HWND
 	// here. When the StreamReq does NOT itself carry a `window_hwnd`, this is used so a game-mode
@@ -3205,6 +3206,14 @@ pub(super) fn make_on_stream(
 			// Same-host co-op: which window this session captures (another pane may play a
 			// second instance of the same game — see coop.rs).
 			crate::coop::set_capture(sid, if native_started { target_hwnd } else { None });
+		}
+		// Linux / macOS: no capture path here captures a single window yet, so the stream always
+		// shows a whole monitor and the input must stay global. A per-window capture path (X11
+		// XID / CGWindowID) publishes its CONFIRMED target here when it started, exactly as the
+		// Windows WGC path does above; the input side (`WindowInput`) is already in place.
+		#[cfg(not(windows))]
+		{
+			*win_capture_hwnd.lock().unwrap() = None;
 		}
 
 		// Remember this request for the in-place monitor-switch fast path — but ONLY when the
