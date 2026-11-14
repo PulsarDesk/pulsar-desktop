@@ -2,8 +2,12 @@
 //! helper (server). Pure + cross-platform so it is unit-tested everywhere.
 //!
 //! Framing: `[u16 LE body length][body]`, body = `[u8 tag][payload]`, all integers
-//! little-endian. Bodies are tiny (≤ 17 bytes today); anything above [`MAX_BODY`] is a
-//! protocol violation and the helper drops the connection.
+//! little-endian. Bodies are tiny (≤ 17 bytes, a v2 pointer frame ≤ 203); anything above
+//! [`MAX_BODY`] is a protocol violation and the helper drops the connection.
+//!
+//! Versions: v1 = mouse / keyboard / pinch. v2 adds [`Request::Pointer`] (synthetic pen /
+//! touch frames). A v2 helper accepts v1 and v2 clients and acks the client's version; a v2
+//! client that a v1 helper rejects reconnects as v1 and keeps pen / touch in-process.
 //!
 //! The helper is a deliberately DUMB injector: the client resolves keycodes, pointer
 //! geometry and scroll accumulation, and sends raw `SendInput`-level events. The helper only
@@ -14,10 +18,14 @@ use std::io::{self, Read, Write};
 
 /// First four payload bytes of [`Request::Hello`].
 pub const MAGIC: [u8; 4] = *b"PSAG";
-/// Bumped on any incompatible change. The helper rejects a different version.
-pub const VERSION: u16 = 1;
+/// This build's protocol version (see the module docs for what each adds).
+pub const VERSION: u16 = 2;
+/// Oldest client version the helper still serves.
+pub const MIN_VERSION: u16 = 1;
+/// First version with [`Request::Pointer`].
+pub const VERSION_POINTER: u16 = 2;
 /// Largest body either side accepts.
-pub const MAX_BODY: usize = 64;
+pub const MAX_BODY: usize = 256;
 
 // `SendInput` flag values (stable Win32 ABI), duplicated here so the protocol stays
 // cross-platform and testable without windows-sys.
@@ -50,6 +58,52 @@ pub const KEYEVENTF_EXTENDEDKEY: u32 = 0x0001;
 pub const KEYEVENTF_KEYUP: u32 = 0x0002;
 pub const KEYEVENTF_UNICODE: u32 = 0x0004;
 pub const KEY_FLAGS_ALLOWED: u32 = KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP | KEYEVENTF_UNICODE;
+
+// Synthetic pointer flags (`POINTER_FLAG_*` / `PEN_FLAG_*`, stable Win32 ABI).
+pub const POINTER_FLAG_INRANGE: u32 = 0x0002;
+pub const POINTER_FLAG_INCONTACT: u32 = 0x0004;
+pub const POINTER_FLAG_FIRSTBUTTON: u32 = 0x0010;
+pub const POINTER_FLAG_SECONDBUTTON: u32 = 0x0020;
+pub const POINTER_FLAG_DOWN: u32 = 0x0001_0000;
+pub const POINTER_FLAG_UPDATE: u32 = 0x0002_0000;
+pub const POINTER_FLAG_UP: u32 = 0x0004_0000;
+/// Every pointer flag the helper will inject.
+pub const POINTER_FLAGS_ALLOWED: u32 = POINTER_FLAG_INRANGE
+	| POINTER_FLAG_INCONTACT
+	| POINTER_FLAG_FIRSTBUTTON
+	| POINTER_FLAG_SECONDBUTTON
+	| POINTER_FLAG_DOWN
+	| POINTER_FLAG_UPDATE
+	| POINTER_FLAG_UP;
+pub const PEN_FLAG_BARREL: u8 = 0x1;
+pub const PEN_FLAG_INVERTED: u8 = 0x2;
+pub const PEN_FLAG_ERASER: u8 = 0x4;
+pub const PEN_FLAGS_ALLOWED: u8 = PEN_FLAG_BARREL | PEN_FLAG_INVERTED | PEN_FLAG_ERASER;
+/// Touch contacts per frame (the synthetic touch device's size).
+pub const MAX_CONTACTS: usize = 10;
+/// Wire size of one [`PointerContact`].
+const CONTACT_LEN: usize = 20;
+
+/// One contact of a synthetic pointer frame, in physical virtual-desktop pixels (the host
+/// resolved the geometry; the helper only injects it).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PointerContact {
+	/// Pen: 0. Touch: the slot, 0..[`MAX_CONTACTS`].
+	pub id: u8,
+	/// `POINTER_FLAG_*` within [`POINTER_FLAGS_ALLOWED`].
+	pub flags: u32,
+	pub x: i32,
+	pub y: i32,
+	/// 0..=1024.
+	pub pressure: u16,
+	/// Pen rotation 0..360 (touch: 0).
+	pub rotation: u16,
+	/// Pen tilt -90..=90 (touch: 0).
+	pub tilt_x: i8,
+	pub tilt_y: i8,
+	/// `PEN_FLAG_*` (touch: 0).
+	pub pen_flags: u8,
+}
 
 /// A rectangle in virtual-desktop pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,8 +171,15 @@ pub enum Request {
 	ClampCursor(Rect),
 	/// Touch pinch at the cursor: phase 0 begin / 1 update / 2 end, cumulative scale.
 	Pinch { phase: u8, scale: f64 },
-	/// Release every key/button this connection holds down.
+	/// Release every key/button this connection holds down (and lift its pen / fingers).
 	ReleaseAll,
+	/// v2: one synthetic pointer frame — the pen device (`pen`, one contact) or the touch
+	/// device (`n` contacts). Build it with [`Request::pointer`].
+	Pointer {
+		pen: bool,
+		n: u8,
+		contacts: [PointerContact; MAX_CONTACTS],
+	},
 	/// Liveness + desktop query; answered with [`Reply::Pong`].
 	Ping { seq: u32 },
 }
@@ -150,6 +211,7 @@ const T_CLAMP: u8 = 0x04;
 const T_PINCH: u8 = 0x05;
 const T_RELEASE_ALL: u8 = 0x06;
 const T_PING: u8 = 0x07;
+const T_POINTER: u8 = 0x08;
 const T_HELLO_ACK: u8 = 0x81;
 const T_REJECT: u8 = 0x82;
 const T_PONG: u8 = 0x83;
@@ -222,6 +284,35 @@ fn expect_len(tag: u8, payload: &[u8], n: usize) -> Result<(), DecodeError> {
 	}
 }
 
+/// Range checks of one pointer contact (flags whitelist, pen-only fields on the pen only).
+fn validate_contact(pen: bool, p: &PointerContact) -> Result<(), DecodeError> {
+	let edges = p.flags & (POINTER_FLAG_DOWN | POINTER_FLAG_UPDATE | POINTER_FLAG_UP);
+	if p.flags & !POINTER_FLAGS_ALLOWED != 0 || edges.count_ones() != 1 {
+		return Err(DecodeError::Invalid("pointer flags"));
+	}
+	if p.pressure > 1024 {
+		return Err(DecodeError::Invalid("pointer pressure"));
+	}
+	if pen {
+		if p.id != 0
+			|| p.rotation >= 360
+			|| !(-90..=90).contains(&p.tilt_x)
+			|| !(-90..=90).contains(&p.tilt_y)
+			|| p.pen_flags & !PEN_FLAGS_ALLOWED != 0
+		{
+			return Err(DecodeError::Invalid("pen contact"));
+		}
+	} else if p.id as usize >= MAX_CONTACTS
+		|| p.rotation != 0
+		|| p.tilt_x != 0
+		|| p.tilt_y != 0
+		|| p.pen_flags != 0
+	{
+		return Err(DecodeError::Invalid("touch contact"));
+	}
+	Ok(())
+}
+
 /// Prefix a body with its u16 length.
 fn frame(body: Vec<u8>) -> Vec<u8> {
 	debug_assert!(body.len() <= MAX_BODY);
@@ -232,6 +323,20 @@ fn frame(body: Vec<u8>) -> Vec<u8> {
 }
 
 impl Request {
+	/// A [`Request::Pointer`]; `None` when `contacts` is empty or too long.
+	pub fn pointer(pen: bool, contacts: &[PointerContact]) -> Option<Self> {
+		if contacts.is_empty() || contacts.len() > if pen { 1 } else { MAX_CONTACTS } {
+			return None;
+		}
+		let mut all = [PointerContact::default(); MAX_CONTACTS];
+		all[..contacts.len()].copy_from_slice(contacts);
+		Some(Request::Pointer {
+			pen,
+			n: contacts.len() as u8,
+			contacts: all,
+		})
+	}
+
 	/// Encode as a complete frame (length prefix included).
 	pub fn encode(&self) -> Vec<u8> {
 		let mut b = Vec::with_capacity(20);
@@ -274,6 +379,22 @@ impl Request {
 			Request::Ping { seq } => {
 				b.push(T_PING);
 				b.extend_from_slice(&seq.to_le_bytes());
+			}
+			Request::Pointer { pen, n, contacts } => {
+				b.push(T_POINTER);
+				b.push(pen as u8);
+				b.push(n);
+				for c in &contacts[..(n as usize).min(MAX_CONTACTS)] {
+					b.push(c.id);
+					b.extend_from_slice(&c.flags.to_le_bytes());
+					b.extend_from_slice(&c.x.to_le_bytes());
+					b.extend_from_slice(&c.y.to_le_bytes());
+					b.extend_from_slice(&c.pressure.to_le_bytes());
+					b.extend_from_slice(&c.rotation.to_le_bytes());
+					b.push(c.tilt_x as u8);
+					b.push(c.tilt_y as u8);
+					b.push(c.pen_flags);
+				}
 			}
 		}
 		frame(b)
@@ -351,6 +472,46 @@ impl Request {
 			T_PING => {
 				expect_len(tag, payload, 4)?;
 				Request::Ping { seq: c.u32() }
+			}
+			T_POINTER => {
+				if payload.len() < 2 {
+					return Err(DecodeError::BadLength {
+						tag,
+						len: payload.len(),
+					});
+				}
+				let (pen, n) = (c.u8(), c.u8() as usize);
+				expect_len(tag, payload, 2 + n * CONTACT_LEN)?;
+				if pen > 1 || n == 0 || n > if pen == 1 { 1 } else { MAX_CONTACTS } {
+					return Err(DecodeError::Invalid("pointer count"));
+				}
+				let mut contacts = [PointerContact::default(); MAX_CONTACTS];
+				for slot in contacts.iter_mut().take(n) {
+					let p = PointerContact {
+						id: c.u8(),
+						flags: c.u32(),
+						x: c.i32(),
+						y: c.i32(),
+						pressure: c.u16(),
+						rotation: c.u16(),
+						tilt_x: c.u8() as i8,
+						tilt_y: c.u8() as i8,
+						pen_flags: c.u8(),
+					};
+					validate_contact(pen == 1, &p)?;
+					*slot = p;
+				}
+				// Contact ids within a frame are unique.
+				for i in 0..n {
+					if contacts[..i].iter().any(|o| o.id == contacts[i].id) {
+						return Err(DecodeError::Invalid("pointer id"));
+					}
+				}
+				Request::Pointer {
+					pen: pen == 1,
+					n: n as u8,
+					contacts,
+				}
 			}
 			t => return Err(DecodeError::UnknownTag(t)),
 		};
@@ -725,6 +886,80 @@ mod tests {
 			assert_eq!(read_request(&mut cur).unwrap(), Some(r));
 		}
 		assert_eq!(read_request(&mut cur).unwrap(), None);
+	}
+
+	fn pen(flags: u32) -> PointerContact {
+		PointerContact {
+			id: 0,
+			flags,
+			x: -1920,
+			y: 1079,
+			pressure: 512,
+			rotation: 359,
+			tilt_x: -90,
+			tilt_y: 45,
+			pen_flags: PEN_FLAG_INVERTED | PEN_FLAG_ERASER,
+		}
+	}
+
+	fn finger(id: u8, flags: u32) -> PointerContact {
+		PointerContact {
+			id,
+			flags,
+			x: 100 + id as i32,
+			y: 200,
+			pressure: 512,
+			..Default::default()
+		}
+	}
+
+	#[test]
+	fn pointer_frames_roundtrip() {
+		let down = POINTER_FLAG_DOWN | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT;
+		roundtrip_req(Request::pointer(true, &[pen(down | POINTER_FLAG_FIRSTBUTTON)]).unwrap());
+		let all: Vec<_> = (0..MAX_CONTACTS as u8).map(|i| finger(i, down)).collect();
+		let r = Request::pointer(false, &all).unwrap();
+		assert_eq!(r.encode().len(), 2 + 3 + MAX_CONTACTS * CONTACT_LEN);
+		assert!(r.encode().len() - 2 <= MAX_BODY);
+		roundtrip_req(r);
+		roundtrip_req(Request::pointer(false, &[finger(3, POINTER_FLAG_UP)]).unwrap());
+		assert!(Request::pointer(true, &[pen(down), pen(down)]).is_none());
+		assert!(Request::pointer(false, &[]).is_none());
+	}
+
+	#[test]
+	fn pointer_frames_are_validated() {
+		let bad = |r: Request, why: &str| {
+			let f = r.encode();
+			assert_eq!(Request::decode(&f[2..]), Err(DecodeError::Invalid(match why {
+				"flags" => "pointer flags",
+				"pen" => "pen contact",
+				"touch" => "touch contact",
+				"id" => "pointer id",
+				_ => "pointer pressure",
+			})), "{r:?}");
+		};
+		let mv = POINTER_FLAG_UPDATE | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT;
+		// No edge flag / two edge flags / a flag outside the whitelist (CANCELED 0x8000).
+		bad(Request::pointer(false, &[finger(0, POINTER_FLAG_INRANGE)]).unwrap(), "flags");
+		bad(Request::pointer(false, &[finger(0, POINTER_FLAG_DOWN | POINTER_FLAG_UP)]).unwrap(), "flags");
+		bad(Request::pointer(false, &[finger(0, mv | 0x8000)]).unwrap(), "flags");
+		bad(Request::pointer(false, &[PointerContact { pressure: 1025, ..finger(0, mv) }]).unwrap(), "pressure");
+		bad(Request::pointer(true, &[PointerContact { id: 1, ..pen(mv) }]).unwrap(), "pen");
+		bad(Request::pointer(true, &[PointerContact { rotation: 360, ..pen(mv) }]).unwrap(), "pen");
+		bad(Request::pointer(true, &[PointerContact { tilt_x: -91, ..pen(mv) }]).unwrap(), "pen");
+		bad(Request::pointer(true, &[PointerContact { pen_flags: 0x8, ..pen(mv) }]).unwrap(), "pen");
+		bad(Request::pointer(false, &[finger(10, mv)]).unwrap(), "touch");
+		bad(Request::pointer(false, &[PointerContact { pen_flags: PEN_FLAG_BARREL, ..finger(0, mv) }]).unwrap(), "touch");
+		bad(Request::pointer(false, &[finger(2, mv), finger(2, mv)]).unwrap(), "id");
+		// A pen frame with two contacts, a count that does not match the length.
+		let mut f = Request::pointer(false, &[finger(0, mv), finger(1, mv)]).unwrap().encode();
+		f[3] = 1; // pen
+		assert_eq!(Request::decode(&f[2..]), Err(DecodeError::Invalid("pointer count")));
+		let mut f = Request::pointer(false, &[finger(0, mv)]).unwrap().encode();
+		f[4] = 2;
+		assert_eq!(Request::decode(&f[2..]), Err(DecodeError::BadLength { tag: T_POINTER, len: 22 }));
+		assert_eq!(Request::decode(&[T_POINTER, 0]), Err(DecodeError::BadLength { tag: T_POINTER, len: 1 }));
 	}
 
 	#[test]

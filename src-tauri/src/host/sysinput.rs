@@ -17,15 +17,46 @@ pub(crate) use imp::HostInput;
 
 #[cfg(windows)]
 mod imp {
+	use pulsar_core::input::pen_touch::{PenState, PenTouch, PointerBackend, SynthContact, TouchFrame, WinSink};
 	use pulsar_core::input::{DesktopInput, MonitorRect};
-	use pulsar_sysagent::{SysInput, SysInputError};
+	use pulsar_sysagent::proto::PointerContact;
+	use pulsar_sysagent::{SysInput, SysInputError, SysPointer};
 	use std::time::{Duration, Instant};
 
 	const RETRY: Duration = Duration::from_secs(5);
 
+	/// The pen / touch sink's frames → the SYSTEM helper's pipe (protocol v2), which injects
+	/// them on its own synthetic devices on the current input desktop.
+	struct SysBackend(SysPointer);
+
+	impl PointerBackend for SysBackend {
+		fn inject(&mut self, pen: bool, contacts: &[SynthContact]) -> bool {
+			let c: Vec<PointerContact> = contacts.iter().map(to_wire).collect();
+			self.0.inject(pen, &c).is_ok()
+		}
+	}
+
+	/// pulsar-core's contact → the helper's wire contact (ranges already clamped by the sink).
+	pub(super) fn to_wire(c: &SynthContact) -> PointerContact {
+		PointerContact {
+			id: c.id.min(255) as u8,
+			flags: c.flags,
+			x: c.x,
+			y: c.y,
+			pressure: c.pressure.min(1024) as u16,
+			rotation: (c.rotation % 360) as u16,
+			tilt_x: c.tilt_x.clamp(-90, 90) as i8,
+			tilt_y: c.tilt_y.clamp(-90, 90) as i8,
+			pen_flags: (c.pen_flags & 0x7) as u8,
+		}
+	}
+
 	pub(crate) struct HostInput {
 		desk: DesktopInput,
 		sys: Option<SysInput>,
+		/// Pen / touch driver injecting through the helper (when it speaks protocol v2), so
+		/// pen and touch reach UAC prompts and the lock screen like the mouse does.
+		sys_pt: Option<PenTouch<Option<MonitorRect>>>,
 		next_try: Instant,
 		monitor: Option<MonitorRect>,
 		/// Log the helper state once per change, not per event.
@@ -37,6 +68,7 @@ mod imp {
 			let mut s = Self {
 				desk: DesktopInput::new()?,
 				sys: None,
+				sys_pt: None,
 				next_try: Instant::now(),
 				monitor: None,
 				logged_missing: false,
@@ -84,6 +116,7 @@ mod imp {
 					Err(e) => {
 						tracing::warn!(err = %e, "input: SYSTEM helper lost; falling back to SendInput");
 						self.sys = None;
+						self.sys_pt = None;
 						self.next_try = Instant::now() + RETRY;
 					}
 				}
@@ -96,6 +129,9 @@ mod imp {
 			self.desk.set_monitor(rect);
 			if let Some(s) = self.sys.as_mut() {
 				s.set_monitor(rect.map(conv));
+			}
+			if let Some(w) = &self.sys_pt {
+				w.set_geom(rect);
 			}
 		}
 		pub(crate) fn pointer(&mut self, x: f64, y: f64) {
@@ -119,17 +155,50 @@ mod imp {
 		pub(crate) fn pinch(&mut self, phase: u8, scale: f64) {
 			self.with(|s| s.pinch(phase, scale), |d| d.pinch(phase, scale));
 		}
-		/// Pen / touch go straight to the in-process injector (synthetic pointer devices): the
-		/// SYSTEM helper's protocol has no pen / touch requests, so pen and touch do not reach
-		/// UAC / lock-screen windows (UIPI blocks this High-integrity process there); the
-		/// mouse and keyboard still do.
-		pub(crate) fn pen(&mut self, s: pulsar_core::input::pen_touch::PenState) {
-			self.desk.pen(s);
+		/// Pen / touch through the helper when it is up and speaks protocol v2 (the pen /
+		/// touch driver runs here, the helper only injects its frames on the input desktop);
+		/// otherwise the in-process synthetic devices (which UIPI keeps out of UAC / the
+		/// lock screen).
+		fn sys_pointer(&mut self) -> bool {
+			self.ensure_sys();
+			if self.sys.as_ref().is_some_and(|s| !s.is_alive()) {
+				tracing::warn!("input: SYSTEM helper lost; falling back to SendInput");
+				self.sys = None;
+				self.next_try = Instant::now() + RETRY;
+			}
+			let Some(ptr) = self.sys.as_ref().and_then(|s| s.pen_touch()) else {
+				self.sys_pt = None;
+				return false;
+			};
+			if self.sys_pt.is_none() {
+				let w = PenTouch::spawn("pulsar-sys-pen-touch", move || Some(WinSink::with_backend(SysBackend(ptr))));
+				w.set_geom(self.monitor);
+				self.sys_pt = Some(w);
+			}
+			true
 		}
-		pub(crate) fn touch(&mut self, f: pulsar_core::input::pen_touch::TouchFrame) {
-			self.desk.touch(f);
+		pub(crate) fn pen(&mut self, s: PenState) {
+			if self.sys_pointer() {
+				if let Some(w) = &self.sys_pt {
+					w.pen(s);
+				}
+			} else {
+				self.desk.pen(s);
+			}
+		}
+		pub(crate) fn touch(&mut self, f: TouchFrame) {
+			if self.sys_pointer() {
+				if let Some(w) = &self.sys_pt {
+					w.touch(f);
+				}
+			} else {
+				self.desk.touch(f);
+			}
 		}
 		pub(crate) fn flush_held(&mut self) {
+			if let Some(w) = &self.sys_pt {
+				w.release();
+			}
 			if let Some(s) = self.sys.as_mut() {
 				let _ = s.flush_held();
 			}
