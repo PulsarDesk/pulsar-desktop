@@ -24,7 +24,7 @@ import { api } from '#lib/api.js';
 
 // Free cursor ("Serbest imleç") on the canvas path (Linux / macOS): hovering the video takes
 // control, leaving it hands control back, an explicit release waits for a leave.
-function make(opts: { free?: boolean; blocked?: boolean } = {}) {
+function make(opts: { free?: boolean; blocked?: boolean; game?: boolean } = {}) {
 	const canvas = document.createElement('canvas');
 	canvas.getBoundingClientRect = () => ({ left: 0, top: 0, width: 100, height: 100, x: 0, y: 0, right: 100, bottom: 100, toJSON() {} }) as DOMRect;
 	let input!: SessionInput;
@@ -33,8 +33,8 @@ function make(opts: { free?: boolean; blocked?: boolean } = {}) {
 			playId: () => 1,
 			wsPort: () => 9000,
 			canvas: () => canvas,
-			mode: () => 'remote',
-			native: () => false,
+			mode: () => (opts.game ? 'game' : 'remote'),
+			native: () => opts.game ?? false,
 			streamW: () => 0,
 			streamH: () => 0,
 			fitMode: () => 'fit',
@@ -183,6 +183,19 @@ describe('SessionInput pen and touch', () => {
 		input.stopControl();
 		expect(vi.mocked(api.inputPen).mock.calls.at(-1)![1]).toMatchObject({ inRange: false, contact: false });
 		expect(api.inputTouch).toHaveBeenLastCalledWith(1, []);
+		stop();
+	});
+
+	it('native game mode forwards pen and touch without taking control', () => {
+		const { input, stop } = make({ game: true });
+		input.onDown(pt('touch', { pointerId: 4 }));
+		expect(api.inputTouch).toHaveBeenLastCalledWith(1, [{ id: 4, x: 0.5, y: 0.25, pressure: 0 }]);
+		input.onUp(pt('touch', { pointerId: 4 }));
+		expect(api.inputTouch).toHaveBeenLastCalledWith(1, []);
+		input.onDown(pt('pen', { buttons: 1, pressure: 0.6 }));
+		expect(vi.mocked(api.inputPen).mock.calls.at(-1)![1]).toMatchObject({ contact: true, pressure: 0.6 });
+		expect(input.controlling).toBe(false);
+		expect(api.inputButton).not.toHaveBeenCalled();
 		stop();
 	});
 });

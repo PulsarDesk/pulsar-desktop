@@ -102,6 +102,7 @@ export class SessionInput {
 	#penDirty = false;
 	#touches = new Map<number, TouchSample>();
 	#touchDirty = false;
+	#flushQueued = false;
 
 	constructor(inputs: Inputs) {
 		this.#in = inputs;
@@ -116,14 +117,7 @@ export class SessionInput {
 					this.#moveDirty = false;
 					api.inputPointer(playId, this.#nx, this.#ny).catch(() => {});
 				}
-				if (this.#penDirty && this.#pen) {
-					this.#penDirty = false;
-					api.inputPen(playId, this.#pen).catch(() => {});
-				}
-				if (this.#touchDirty) {
-					this.#touchDirty = false;
-					api.inputTouch(playId, [...this.#touches.values()]).catch(() => {});
-				}
+				this.#flushPenTouch();
 				raf = requestAnimationFrame(pump);
 			};
 			let raf = requestAnimationFrame(pump);
@@ -233,7 +227,28 @@ export class SessionInput {
 			api.inputPen(this.#in.playId(), next).catch(() => {});
 		} else {
 			this.#penDirty = true;
+			this.#scheduleFlush();
 		}
+	}
+	/** Send the batched pen / touch moves (the rAF pump while controlling, else one frame). */
+	#flushPenTouch() {
+		const playId = this.#in.playId();
+		if (this.#penDirty && this.#pen) {
+			this.#penDirty = false;
+			api.inputPen(playId, this.#pen).catch(() => {});
+		}
+		if (this.#touchDirty) {
+			this.#touchDirty = false;
+			api.inputTouch(playId, [...this.#touches.values()]).catch(() => {});
+		}
+	}
+	#scheduleFlush() {
+		if (this.controlling || this.#flushQueued || typeof requestAnimationFrame === 'undefined') return;
+		this.#flushQueued = true;
+		requestAnimationFrame(() => {
+			this.#flushQueued = false;
+			this.#flushPenTouch();
+		});
 	}
 	#sendTouches() {
 		this.#touchDirty = false;
@@ -254,6 +269,18 @@ export class SessionInput {
 			if (playId >= 0) api.inputTouch(playId, []).catch(() => {});
 		}
 	}
+	/** Native game mode (Linux / macOS canvas): the evdev / native capture takes only the
+	 * keyboard and mouse, so a pen or a finger on the video reaches this canvas without any
+	 * "controlling" state — forward it straight away (the Windows renderer does the same with
+	 * WM_POINTER while engaged). */
+	#gamePenTouch(e: PointerEvent) {
+		return (
+			!this.controlling &&
+			this.#in.native() &&
+			this.#in.mode() === 'game' &&
+			(e.pointerType === 'pen' || e.pointerType === 'touch')
+		);
+	}
 	/** A pen / touch event while controlling: forwarded as pen / touch, never as the mouse. */
 	#penTouch(e: PointerEvent, kind: 'down' | 'move' | 'up' | 'leave'): boolean {
 		if (e.pointerType === 'pen') {
@@ -268,8 +295,10 @@ export class SessionInput {
 				const known = this.#touches.has(e.pointerId);
 				if (kind === 'move' && !known) return true; // a finger we never saw land
 				this.#touches.set(e.pointerId, { id: e.pointerId >>> 0, x: p[0], y: p[1], pressure: e.pressure || 0 });
-				if (known) this.#touchDirty = true;
-				else this.#sendTouches();
+				if (known) {
+					this.#touchDirty = true;
+					this.#scheduleFlush();
+				} else this.#sendTouches();
 			} else if (this.#touches.delete(e.pointerId)) {
 				this.#sendTouches();
 			}
@@ -353,6 +382,10 @@ export class SessionInput {
 	}
 	onEnter = (e: PointerEvent) => this.#tryHover(e);
 	onMove = (e: PointerEvent) => {
+		if (this.#gamePenTouch(e)) {
+			this.#penTouch(e, 'move');
+			return;
+		}
 		if (!this.controlling) {
 			this.#tryHover(e);
 			return;
@@ -366,7 +399,7 @@ export class SessionInput {
 	// up, and the leave then arrives with no button held).
 	clearMove = (e?: PointerEvent) => {
 		// A pen leaving the video leaves range on the host too; a finger sliding off lifts.
-		if (e && this.controlling && this.#penTouch(e, 'leave')) return;
+		if (e && (this.controlling || this.#gamePenTouch(e)) && this.#penTouch(e, 'leave')) return;
 		this.#moveDirty = false;
 		if (!this.#in.pointerFree()) return;
 		this.#hoverArmed = true;
@@ -376,6 +409,11 @@ export class SessionInput {
 	// (swallowed below) nor its up (which would otherwise fire a stray button-up,
 	// e.g. a right-click context menu on the host).
 	onDown = (e: PointerEvent) => {
+		if (this.#gamePenTouch(e)) {
+			e.preventDefault();
+			this.#penTouch(e, 'down');
+			return;
+		}
 		if (!this.controlling) {
 			this.startControl();
 			this.#armingClick = true;
@@ -413,6 +451,11 @@ export class SessionInput {
 		api.inputButton(this.#in.playId(), this.#hostButton(e.button), true).catch(() => {});
 	};
 	onUp = (e: PointerEvent) => {
+		if (this.#gamePenTouch(e)) {
+			e.preventDefault();
+			this.#penTouch(e, 'up');
+			return;
+		}
 		if (this.#armingClick) {
 			this.#armingClick = false;
 			return; // swallow the focusing click's release
@@ -424,7 +467,7 @@ export class SessionInput {
 	};
 	// The browser took the pointer over (a system gesture, palm rejection): lift it.
 	onCancel = (e: PointerEvent) => {
-		if (this.controlling) this.#penTouch(e, 'leave');
+		if (this.controlling || this.#gamePenTouch(e)) this.#penTouch(e, 'leave');
 	};
 	onWheel = (e: WheelEvent) => {
 		if (!this.controlling) return;
