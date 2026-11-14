@@ -28,8 +28,9 @@ const MAX_VISIBLE: usize = 4;
 const LIFETIME: Duration = Duration::from_secs(7);
 
 /// One notice. `kind` picks the title/icon in the UI: `file-in` (a file arrived), `kbd-perm`
-/// (macOS: the input capture needs the Accessibility permission); the file manager has no
-/// remote delete/rename yet, so `file-del` / `file-mod` are reserved.
+/// (macOS: the input capture needs the Accessibility permission), `pad-off` (a client
+/// controller got no virtual pad here — `name` holds the cause); the file manager has no remote
+/// delete/rename yet, so `file-del` / `file-mod` are reserved.
 #[derive(Clone, Serialize)]
 pub(crate) struct Toast {
 	id: u64,
@@ -59,6 +60,12 @@ pub(crate) fn file_received(app: &AppHandle, peer: &str, path: &Path) {
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn kbd_permission(app: &AppHandle) {
 	push(app, "kbd-perm", String::new(), String::new(), None);
+}
+
+/// A connected client's controller could not get a virtual pad on this host; `text` is the
+/// localized cause (crate::pad_notice::host_text).
+pub(crate) fn pad_unavailable(app: &AppHandle, text: String) {
+	push(app, "pad-off", text, String::new(), None);
 }
 
 fn push(app: &AppHandle, kind: &'static str, name: String, peer: String, path: Option<PathBuf>) {
@@ -171,7 +178,7 @@ pub(crate) fn toast_close(app: AppHandle, id: u64) {
 }
 
 /// A click on a notice: a file notice opens its folder with the file selected, the
-/// permission notice the permission's settings; then it is dismissed.
+/// permission notice the permission's settings; any notice is then dismissed.
 #[tauri::command]
 pub(crate) fn toast_open(app: AppHandle, id: u64) {
 	let (kind, path) = TOASTS

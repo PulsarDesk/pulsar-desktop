@@ -419,6 +419,7 @@
 	"toast.file-in": "Dosya geldi",
 	"toast.file-del": "Dosya silindi",
 	"toast.file-mod": "Dosya değiştirildi",
+	"toast.pad-off": "Sanal kol oluşturulamadı",
 	"toast.from": "{peer} gönderdi",
 	"toast.reveal": "Klasörde göstermek için tıkla",
 	"toast.kbd-perm": "Kısayollar için izin gerekli",

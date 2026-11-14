@@ -110,8 +110,9 @@ export interface SessionStats {
  * reserved for remote delete/rename). Clicking opens `path`'s folder with it selected. */
 export type PulsarToast = {
 	id: number;
-	/** `kbd-perm`: macOS input capture needs the Accessibility permission (click = settings). */
-	kind: 'file-in' | 'file-del' | 'file-mod' | 'kbd-perm';
+	/** `kbd-perm`: macOS input capture needs the Accessibility permission (click = settings).
+	 * `pad-off`: a client controller got no virtual pad on this host (`name` = the cause). */
+	kind: 'file-in' | 'file-del' | 'file-mod' | 'kbd-perm' | 'pad-off';
 	name: string;
 	peer: string;
 	path: string | null;

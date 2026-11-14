@@ -1431,6 +1431,16 @@ pub(super) async fn hold_session(
 								tracing::info!(slot, large, small, "rumble: client received → reader");
 								let _ = rumble_tx.try_send((slot, large, small));
 							}
+							DataMsg::PadUnavailable { slot, reason } => {
+								// The host could not create a virtual pad for this controller
+								// (e.g. a Mac host build without the virtual-HID entitlement): its
+								// input goes nowhere — say so in-session (drained on the 2 s tick).
+								tracing::warn!(slot, %reason, "host has no virtual pad for this controller");
+								crate::play_notice::push(
+									id,
+									crate::pad_notice::client_text(slot, &reason, crate::i18n::lang() == "en"),
+								);
+							}
 							DataMsg::FsEntries { path, entries } => {
 								// A host directory listing for the file panel's remote pane.
 								let _ = app_ev.emit("fs-entries", FsEntriesPayload { id, path, entries });
