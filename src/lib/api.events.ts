@@ -55,6 +55,9 @@ export type NavInput = {
 /** Subscribe to the gilrs→webview controller-nav bridge (started via api.gamepadNavStart).
  * The only pad-nav input on Linux (no webview Gamepad API), preferred everywhere. */
 export const onGamepadNav = (cb: (s: NavInput) => void) => listenTo<NavInput>('gamepad-nav', cb);
+/** Linux .deb/.rpm update download progress (bytes; total 0 = unknown). */
+export const onPkgUpdateProgress = (cb: (p: { received: number; total: number }) => void) =>
+	listenTo<{ received: number; total: number }>('pkg-update-progress', cb);
 /** The node (re)bound its UDP socket on `go_online` — the ACTUAL port for direct
  * `ip:port` connects (Home shows it next to the local IP). */
 export const onNodePort = (cb: (port: number) => void) => listenTo<number>('node-port', cb);

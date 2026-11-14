@@ -20,6 +20,12 @@ class UpdateStore {
 	/** Whether THIS install can self-update (false → flatpak/package-manager/raw
 	 * binary: the install button is disabled and manual instructions show). */
 	installable = $state(true);
+	/** How Install works here: the updater plugin in place, or a Linux distro package
+	 *  through the package manager (one admin prompt). */
+	kind = $state<'inPlace' | 'deb' | 'rpm' | 'none'>('inPlace');
+	/** Linux package install outcome the modal explains: the password dialog was dismissed,
+	 *  or the package was handed to the desktop's software installer. */
+	pkgNote = $state<'' | 'cancelled' | 'opened'>('');
 	phase = $state<UpdatePhase>('idle');
 	/** Download progress in bytes (total may be 0 when the server omits Content-Length). */
 	received = $state(0);
@@ -54,6 +60,7 @@ if (import.meta.env.DEV && typeof window !== 'undefined') {
 	(window as unknown as { __pulsarUpdate: unknown }).__pulsarUpdate = {
 		store: update,
 		mock(state: string) {
+			// 'deb' = the 'available' state of a Linux .deb install.
 			update.from = '0.7.3';
 			update.to = '0.8.0';
 			update.notes =
@@ -62,6 +69,8 @@ if (import.meta.env.DEV && typeof window !== 'undefined') {
 				'• Daily log file, openable from Settings → General\n' +
 				'• macOS: bundled ffplay fallback when mpv is not installed';
 			update.installable = state !== 'noSelfUpdate';
+			update.kind = state === 'deb' ? 'deb' : state === 'noSelfUpdate' ? 'none' : 'inPlace';
+			update.pkgNote = '';
 			update.error = state === 'error' ? 'signature verification failed (updater-latest/latest.json)' : '';
 			update.received = state === 'downloading' ? 37 * 1024 * 1024 : 0;
 			update.total = state === 'downloading' ? 86 * 1024 * 1024 : 0;

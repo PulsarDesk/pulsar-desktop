@@ -17,10 +17,21 @@ import { silentUpdateCheck } from './updater';
 vi.mock('./api.commands', () => ({
 	api: {
 		selfUpdatePossible: vi.fn().mockResolvedValue(true),
+		updateInstallKind: vi.fn().mockResolvedValue('inPlace'),
+		linuxPackageUpdate: vi.fn().mockResolvedValue('installed'),
 		markUpdateInstalling: vi.fn().mockResolvedValue(undefined),
 		launchUpdateWindow: vi.fn().mockResolvedValue(undefined),
 		clearUpdateInstalling: vi.fn().mockResolvedValue(undefined)
 	}
+}));
+
+// The package path listens for download progress; the test drives it by hand.
+let pkgProgress: ((p: { received: number; total: number }) => void) | null = null;
+vi.mock('./api.events', () => ({
+	onPkgUpdateProgress: vi.fn(async (cb: (p: { received: number; total: number }) => void) => {
+		pkgProgress = cb;
+		return () => (pkgProgress = null);
+	})
 }));
 
 beforeEach(() => {
@@ -87,6 +98,7 @@ describe('silentUpdateCheck', () => {
 import { checkForUpdateUi, installUpdate, startPeriodicUpdateCheck, plainNotes } from './updater';
 import { update as updateState } from './update.svelte';
 import { ui } from './settings.svelte';
+import { api } from './api.commands';
 
 function freshUpdate(over: Record<string, unknown> = {}) {
 	return {
@@ -105,8 +117,74 @@ beforeEach(() => {
 	updateState.phase = 'idle';
 	updateState.handle = null;
 	updateState.installable = true;
+	updateState.kind = 'inPlace';
+	updateState.pkgNote = '';
 	updateState.error = '';
 	ui.autoUpdate = false;
+	vi.mocked(api.updateInstallKind).mockResolvedValue('inPlace');
+	vi.mocked(api.linuxPackageUpdate).mockReset().mockResolvedValue('installed');
+});
+
+describe('Linux .deb/.rpm installs', () => {
+	it('offers the update as installable but never auto-installs (admin prompt)', async () => {
+		vi.mocked(api.updateInstallKind).mockResolvedValue('deb');
+		const u = freshUpdate();
+		mockCheck.mockResolvedValue(u);
+		ui.autoUpdate = true;
+
+		await checkForUpdateUi(() => false);
+
+		expect(updateState.available).toBe(true);
+		expect(updateState.installable).toBe(true);
+		expect(updateState.kind).toBe('deb');
+		expect(api.linuxPackageUpdate).not.toHaveBeenCalled();
+		expect(u.download).not.toHaveBeenCalled();
+	});
+
+	it('installs through the package manager, then relaunches', async () => {
+		const u = freshUpdate();
+		updateState.handle = u as never;
+		updateState.available = true;
+		updateState.kind = 'deb';
+		vi.mocked(api.linuxPackageUpdate).mockImplementation(async () => {
+			pkgProgress?.({ received: 50, total: 100 });
+			expect(updateState.phase).toBe('downloading');
+			pkgProgress?.({ received: 100, total: 100 });
+			expect(updateState.phase).toBe('installing');
+			return 'installed';
+		});
+
+		await installUpdate();
+
+		expect(api.linuxPackageUpdate).toHaveBeenCalledWith('2.0.0');
+		expect(u.download).not.toHaveBeenCalled();
+		expect(u.install).not.toHaveBeenCalled();
+		expect(updateState.phase).toBe('restarting');
+		expect(mockRelaunch).toHaveBeenCalledOnce();
+	});
+
+	it('a dismissed password dialog or a hand-off to the software installer does not relaunch', async () => {
+		updateState.handle = freshUpdate() as never;
+		updateState.available = true;
+		updateState.kind = 'rpm';
+		for (const res of ['cancelled', 'opened'] as const) {
+			vi.mocked(api.linuxPackageUpdate).mockResolvedValue(res);
+			await installUpdate();
+			expect(updateState.phase).toBe('idle');
+			expect(updateState.pkgNote).toBe(res);
+		}
+		expect(mockRelaunch).not.toHaveBeenCalled();
+	});
+
+	it('shows the package manager error', async () => {
+		updateState.handle = freshUpdate() as never;
+		updateState.available = true;
+		updateState.kind = 'deb';
+		vi.mocked(api.linuxPackageUpdate).mockRejectedValue('apt-get exited with 100');
+		await installUpdate();
+		expect(updateState.phase).toBe('error');
+		expect(updateState.error).toContain('apt-get');
+	});
 });
 
 describe('checkForUpdateUi', () => {

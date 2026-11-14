@@ -278,6 +278,14 @@ export const api = {
 	 * where the updater would silently rewrite a throwaway temp file instead of the deployed
 	 * AppImage. Used to skip the update with a clear warning rather than no-op'ing. */
 	selfUpdatePossible: () => invoke<boolean>('self_update_possible'),
+	/** How a found update installs here: `inPlace` (the updater plugin), `deb`/`rpm` (Linux
+	 *  package: `linuxPackageUpdate`, behind one admin prompt) or `none` (manual only). */
+	updateInstallKind: () => invoke<'inPlace' | 'deb' | 'rpm' | 'none'>('update_install_kind'),
+	/** Linux .deb/.rpm: download the signed package from the update channel and install it via
+	 *  pkexec + apt-get/dnf/zypper (`pkg-update-progress` events while downloading). Resolves
+	 *  'installed' (relaunch), 'opened' (handed to the software installer) or 'cancelled'. */
+	linuxPackageUpdate: (version: string) =>
+		invoke<'installed' | 'opened' | 'cancelled'>('linux_package_update', { version }),
 	/** Right before `install()`: until the new build starts, a launch of the OLD exe
 	 *  (Windows: the gap while the installer runs) shows "updating" and exits. */
 	markUpdateInstalling: (version: string) => invoke<void>('mark_update_installing', { version }),
