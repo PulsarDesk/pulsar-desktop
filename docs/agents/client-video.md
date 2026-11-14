@@ -167,6 +167,18 @@ overflows the renderer's 8-AU queue and drops the recovery frame.
   - `PULSAR_TEST_DEVICE_LOSS=<after_s>,<failed_attempts>` (Windows renderer) drops the renderer
     once as if its D3D device was removed and fails the first rebuilds (see "Device loss").
 
+## Frame pacing on the Windows renderer ("Kare eşitleme")
+
+Until 2026-11-14 the switch only changed the menu on Windows (and still does on macOS): the
+renderer presented every picture the moment it was decoded. Now (`win/mod.rs` `deliver` /
+`pace_tick`), with the switch on, decoded pictures wait in `pace_q` and leave ONE per display
+refresh, oldest first — the Linux pacer's rule (video.rs `take_frame`, Moonlight's per-vblank
+metering): trim toward one picture, keep up to 2 (game) / 3 (remote) while the queue keeps
+running dry, hard cap 4, an empty refresh keeps the last picture up, a burst flushes the
+queue. The refresh clock is DWM's own counter (`DwmGetCompositionTimingInfo().cRefresh`),
+polled every loop pass; without it a picture goes out as soon as it is there. Default off
+(`ui.framePacing`), sent at session start (`pace 0|1`); the menu switch also acts at once.
+
 ## Device loss on the Windows renderer (screen off, driver reset)
 
 `win/mod.rs` `event_loop` checks `GetDeviceRemovedReason` every pass and rebuilds the whole

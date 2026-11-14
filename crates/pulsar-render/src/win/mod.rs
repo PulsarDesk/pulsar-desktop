@@ -318,6 +318,74 @@ fn lparam_xy(lp: LPARAM) -> egui::Pos2 {
 	egui::pos2(x, y)
 }
 
+/// Pacing queue: hard cap, whatever the adaptive depth says.
+const PACE_QCAP: usize = 4;
+
+/// The most pictures the pacer keeps while the queue keeps running dry: game 2 (latency),
+/// remote 3 (smoothness) — the Linux pacer's ceilings.
+fn pace_ceiling(mode: crate::overlay::Mode) -> usize {
+	match mode {
+		crate::overlay::Mode::Game => 2,
+		crate::overlay::Mode::Remote => 3,
+	}
+}
+
+/// The queue depth at each of the last 32 refreshes; [`PaceDepths::push`] returns their
+/// minimum. A recent minimum of 0 or 1 = the queue keeps running dry (jitter), so the pacer may
+/// hold up to the ceiling to bridge the next gap; above 1 = a standing backlog, trim to one.
+#[derive(Default)]
+struct PaceDepths {
+	hist: [u16; 32],
+	idx: usize,
+}
+
+impl PaceDepths {
+	fn push(&mut self, depth: usize) -> usize {
+		let n = self.hist.len();
+		self.hist[self.idx % n] = depth.min(u16::MAX as usize) as u16;
+		self.idx = self.idx.wrapping_add(1);
+		self.hist.iter().copied().min().unwrap_or(0) as usize
+	}
+}
+
+/// The compositor's refresh counter (it moves once per display refresh), `None` when DWM can't
+/// tell. Cheap enough for every pass of the render loop.
+fn compositor_refresh() -> Option<u64> {
+	use windows::Win32::Graphics::Dwm::{DwmGetCompositionTimingInfo, DWM_TIMING_INFO};
+	let mut info = DWM_TIMING_INFO { cbSize: std::mem::size_of::<DWM_TIMING_INFO>() as u32, ..Default::default() };
+	// SAFETY: a correctly sized out struct; a null window = the whole desktop (required on 8.1+).
+	unsafe { DwmGetCompositionTimingInfo(HWND::default(), &mut info) }.ok()?;
+	Some(info.cRefresh)
+}
+
+#[cfg(test)]
+mod pace_tests {
+	use super::*;
+
+	#[test]
+	fn the_depth_signal_is_the_recent_minimum() {
+		let mut d = PaceDepths::default();
+		// A queue that ran dry a moment ago keeps the minimum at 0 for the window.
+		assert_eq!(d.push(0), 0);
+		for _ in 0..31 {
+			assert_eq!(d.push(2), 0);
+		}
+		// 32 refreshes with two waiting: a standing backlog → trim.
+		assert_eq!(d.push(2), 2);
+		assert_eq!(pace_ceiling(crate::overlay::Mode::Game), 2);
+		assert_eq!(pace_ceiling(crate::overlay::Mode::Remote), 3);
+	}
+
+	#[test]
+	fn the_compositor_counter_moves() {
+		// On a machine with a desktop the counter answers and advances with the refreshes.
+		let Some(a) = compositor_refresh() else { return };
+		std::thread::sleep(std::time::Duration::from_millis(60));
+		let b = compositor_refresh().unwrap();
+		assert!(b > a, "{a} → {b}");
+	}
+}
+
 /// AU-backlog overflow reports, at most one line per [`OVERFLOW_LOG_EVERY`] with what happened
 /// since the last one. Every overflow used to print its own line: a renderer that decoded
 /// nothing (its D3D device gone while the display was off) wrote one per arriving frame —
@@ -1137,6 +1205,15 @@ struct Renderer {
 	// Newest picture of an AU burst decoded without presenting (`on_access_unit(.., false)`);
 	// the render loop presents it once the burst is through. Owned texture, like `last_nv12`.
 	held_back: Option<ID3D11Texture2D>,
+	// Frame pacing (`PACE`, Menu → Yayın → "Kare eşitleme"): decoded pictures wait here and
+	// leave ONE per display refresh, oldest first (see `pace_tick`).
+	pace_q: std::collections::VecDeque<ID3D11Texture2D>,
+	// The compositor refresh the last paced picture went out on (`DWM_TIMING_INFO::cRefresh`).
+	pace_refresh: u64,
+	// Queue depth at each of the last refreshes (Moonlight's adaptive-depth signal).
+	pace_depths: PaceDepths,
+	// The stream's mode: game paces with a shallower queue (latency) than remote.
+	mode: crate::overlay::Mode,
 	// fps counter for the `vidsink-fps` HUD line + self-measured stream metrics
 	// (bytes → mbps, decode wall time → ms) so the overlay shows real numbers
 	// without an app-side echo (the stdin `stat` line never arrives on Windows).
@@ -1196,6 +1273,7 @@ impl Renderer {
 			present,
 			last_nv12,
 			held_back,
+			pace_q,
 			painter,
 			cursor_tex,
 			ostate,
@@ -1205,7 +1283,7 @@ impl Renderer {
 			..
 		} = self;
 		// Views and textures of the back buffer first, the swapchain last.
-		drop((painter, cursor_tex, present, decoder, last_nv12, held_back, rtv));
+		drop((painter, cursor_tex, present, decoder, last_nv12, held_back, pace_q, rtv));
 		drop(swap);
 		// SAFETY: the immediate context of this thread's device; both calls take no arguments.
 		unsafe {
@@ -1292,6 +1370,10 @@ impl Renderer {
 			src_h: 0,
 			last_nv12: None,
 			held_back: None,
+			pace_q: std::collections::VecDeque::new(),
+			pace_refresh: 0,
+			pace_depths: PaceDepths::default(),
+			mode,
 			frames: 0,
 			last_fps_at: std::time::Instant::now(),
 			bytes: 0,
@@ -1767,7 +1849,62 @@ impl Renderer {
 		// NV12 texture (multi-frame batch), and dropping all but the last silently loses frames
 		// (micro-stutter). In steady state this is exactly one frame, so the loop is a no-op there.
 		for nv12 in texs {
+			self.deliver(nv12);
+		}
+	}
+
+	/// A decoded picture to show: at once, or — frame pacing on — into the pacing queue.
+	unsafe fn deliver(&mut self, nv12: ID3D11Texture2D) {
+		if !PACE.load(Ordering::Relaxed) {
 			self.show_frame(&nv12);
+			return;
+		}
+		self.pace_q.push_back(nv12);
+		// Hard cap (a decoder far ahead of the display): the oldest goes.
+		while self.pace_q.len() > PACE_QCAP {
+			self.pace_q.pop_front();
+		}
+	}
+
+	/// Frame pacing, called every pass of the render loop. Pictures leave the queue ONE per
+	/// display refresh, oldest first (Moonlight's per-vblank metering): a clump that arrived
+	/// together — jitter on the network — goes out spread over the next refreshes instead of
+	/// showing its last picture only (a jump), and a refresh with nothing new keeps the last
+	/// picture up (no repeat-then-skip). The queue trims itself toward ONE picture (latency)
+	/// and keeps up to [`pace_ceiling`] only while it keeps running dry (a jittery path), the
+	/// same rule as the Linux pacer (video.rs `take_frame`). The refresh clock is the
+	/// compositor's own counter; without it a picture goes out as soon as it is there.
+	///
+	/// It was a switch in the menu with no effect on Windows: the renderer presented every
+	/// picture the moment it was decoded, whatever the switch said (found 2026-11-14).
+	unsafe fn pace_tick(&mut self) {
+		if !PACE.load(Ordering::Relaxed) {
+			// Turned off with pictures waiting: show the newest, drop the rest.
+			if let Some(newest) = self.pace_q.pop_back() {
+				self.pace_q.clear();
+				self.show_frame(&newest);
+			}
+			return;
+		}
+		let refresh = compositor_refresh();
+		if let Some(r) = refresh {
+			if r == self.pace_refresh {
+				return; // this refresh already got its picture (or none was there)
+			}
+			self.pace_refresh = r;
+		} else if self.pace_q.is_empty() {
+			return;
+		}
+		let recent_min = self.pace_depths.push(self.pace_q.len());
+		if self.pace_q.is_empty() {
+			return; // underflow: the last picture stays up
+		}
+		let target = if recent_min <= 1 { pace_ceiling(self.mode) } else { 1 };
+		while self.pace_q.len() > target {
+			self.pace_q.pop_front();
+		}
+		if let Some(next) = self.pace_q.pop_front() {
+			self.show_frame(&next);
 		}
 	}
 
@@ -2552,9 +2689,14 @@ unsafe fn event_loop(
 			// The newest AU produced no picture yet (decoder latency): show the newest one the
 			// burst did produce rather than nothing.
 			if let Some(t) = r.held_back.take() {
-				r.show_frame(&t);
+				if burst && PACE.load(Ordering::Relaxed) {
+					// A burst is stale by definition: nothing queued before it is worth pacing out.
+					r.pace_q.clear();
+				}
+				r.deliver(t);
 			}
 		}
+		r.pace_tick();
 		// Edges to the app. `ov stalled 1|0` keeps its meaning (release / allow the input
 		// capture) but only follows a real stop (STALLED); `ov recovering 1|0` is informational
 		// (render_stats.rs ignores unknown `ov` lines). `writeln!` rather than `println!`: after
@@ -2592,7 +2734,11 @@ fn apply_ov_cmd(ostate: &mut crate::overlay::OverlayState, c: crate::overlay::Ov
 				"fps" => ostate.fps_sel = val.clone(),
 				"bitrate" => ostate.bitrate = val.clone(),
 				"quality" => ostate.quality = val.clone(),
-				"pace" => ostate.pace = val == "on",
+				"pace" => {
+					ostate.pace = val == "on";
+					// Takes effect now (the app's `pace 0|1` echo only confirms it).
+					PACE.store(ostate.pace, Ordering::SeqCst);
+				}
 				// Local echo for the closed-state chrome toggles: flip the statics
 				// NOW so the row + HUD react instantly; the frontend's stdin echo
 				// (`statshud`/`ovbtn`) just confirms the same value later.
