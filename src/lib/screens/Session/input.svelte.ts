@@ -47,6 +47,10 @@ type Inputs = {
 	pointerFree: () => boolean;
 	/** Hovering must not take control now (session menu open, stream stopped). */
 	hoverBlocked: () => boolean;
+	/** The OS-level capture owns control (macOS event tap with the Accessibility permission —
+	 * Windows' hook never lets the click reach this canvas anyway): the canvas path stays out
+	 * of its way, or every click and key would go to the host twice. */
+	osCapture?: () => boolean;
 };
 
 export class SessionInput {
@@ -67,6 +71,7 @@ export class SessionInput {
 	// absolute pointer + buttons, which every host (desktop uinput, phone cursor/gesture)
 	// injects. Game mode is untouched — it keeps the relative evdev-grab path for FPS mouselook.
 	get controllable() {
+		if (this.#in.osCapture?.()) return false;
 		return this.#in.wsPort() > 0 || (this.#in.native() && this.#in.mode() === 'remote');
 	}
 

@@ -110,7 +110,8 @@ export interface SessionStats {
  * reserved for remote delete/rename). Clicking opens `path`'s folder with it selected. */
 export type PulsarToast = {
 	id: number;
-	kind: 'file-in' | 'file-del' | 'file-mod';
+	/** `kbd-perm`: macOS input capture needs the Accessibility permission (click = settings). */
+	kind: 'file-in' | 'file-del' | 'file-mod' | 'kbd-perm';
 	name: string;
 	peer: string;
 	path: string | null;

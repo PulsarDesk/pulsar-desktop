@@ -233,7 +233,29 @@
 				// in another app engages when they come back to Pulsar, not before.
 				.then(() => (autoEngage ? api.kbdEngage(true) : undefined))
 				.catch(() => {});
+		// macOS: is the event tap allowed (Accessibility)? Asked again whenever Pulsar gets the
+		// focus back — the user may have just granted it in System Settings; the capture is then
+		// re-armed so the tap starts for this session.
+		const id = playId;
+		const checkMac = () =>
+			api
+				.kbdOsCapture()
+				.then((ok) => {
+					const was = macCapture;
+					macCapture = ok;
+					if (ok && !was && captureOwner === id) {
+						// Granted mid-session: hand control from the canvas path to the tap.
+						if (input.controlling) input.stopControl();
+						api.kbdCaptureStart(id, true).catch(() => {});
+					}
+				})
+				.catch(() => {});
+		if (isMac) {
+			checkMac();
+			window.addEventListener('focus', checkMac);
+		}
 		return () => {
+			if (isMac) window.removeEventListener('focus', checkMac);
 			if (captureOwner !== playId) return; // another tab re-armed it for itself
 			captureOwner = -1;
 			// With this session's id: another window may own the capture by now.
@@ -616,6 +638,12 @@
 		return () => document.documentElement.removeAttribute('data-embedded');
 	});
 
+	// macOS: the OS-level capture (kbdhook/mac.rs, a CGEventTap) runs once Pulsar has the
+	// Accessibility permission. Then it owns control like Windows' hook does (Cmd+Tab etc. reach
+	// the host, click-to-engage happens in the tap); without it the canvas path stays in charge.
+	const isMac = typeof navigator !== 'undefined' && /Macintosh|Mac OS X/i.test(navigator.userAgent);
+	let macCapture = $state(false);
+
 	// Remote-control input engine (the `controlling` flag, absolute-positioning pointer/key
 	// forwarding, the rAF pump). See Session/input.svelte.ts. Created at component init so its
 	// effect scopes to + tears down with this component; inputs are getters so it tracks them.
@@ -628,10 +656,11 @@
 		streamW: () => streamW,
 		streamH: () => streamH,
 		fitMode: () => fitMode,
-		// Windows does the free cursor in the native hook (kbdhook/imp.rs); this is the canvas
-		// path (Linux, macOS, phone hosts) — remote mode only.
+		// Windows (and macOS with its event tap) do the free cursor in the native capture
+		// (kbdhook/imp.rs, pulsar-macinput); this is the canvas path — remote mode only.
 		pointerFree: () => ui.pointerFree && mode === 'remote' && caps.v?.platform !== 'windows',
-		hoverBlocked: () => dock.overlayOpen || media.stalled
+		hoverBlocked: () => dock.overlayOpen || media.stalled,
+		osCapture: () => isMac && macCapture
 	});
 	function stopControl() {
 		input.stopControl();
@@ -649,11 +678,12 @@
 	// overlay's debounced open/close, Escape-to-close). See Session/ui.svelte.ts. Cross-cutting
 	// actions are passed as callbacks (release control, end the tab, fullscreen, reset panel).
 	// Take control of this session the way a click on its video does (see onScreenDown): the
-	// OS-level capture on Windows native and in game mode, the canvas path otherwise. Used when
+	// OS-level capture on Windows native, on macOS with the Accessibility permission and in game
+	// mode, the canvas path otherwise. Used when
 	// the Pulsar menu closes by the combo that opened it, or by a click on the video beside it.
 	function takeControl() {
 		if (!active || playId < 0) return;
-		if (native && (isWindows || mode === 'game')) {
+		if (native && (isWindows || macCapture || mode === 'game')) {
 			if (!nativeEngaged) api.kbdEngage().catch(() => {});
 		} else {
 			input.startControl();

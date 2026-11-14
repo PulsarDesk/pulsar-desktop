@@ -415,6 +415,12 @@ export const api = {
 	 * otherwise once it gets the focus. */
 	kbdEngage: (auto = false) =>
 		kbdSerial(() => (auto ? invoke<void>('kbd_engage', { auto }) : invoke<void>('kbd_engage'))),
+	/** Control: whether the OS-level input capture can run here — Windows always, macOS once
+	 * Pulsar has the Accessibility permission (its CGEventTap needs it), Linux false. */
+	kbdOsCapture: () => invoke<boolean>('kbd_os_capture'),
+	/** Control (macOS): ask for the Accessibility permission (system prompt the first time,
+	 * then System Settings → Privacy & Security → Accessibility). No-op elsewhere. */
+	kbdRequestPermission: () => invoke<void>('kbd_request_permission'),
 	/** Control (Windows native): relay a key edge the webview saw (evdev code) to the capture's
 	 * key handler — the fallback for machines where the OS keyboard hook isn't called while
 	 * Pulsar's window has focus. Combos (Ctrl+Alt+Z etc.) are decided on the Rust side. */

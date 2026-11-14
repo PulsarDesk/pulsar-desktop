@@ -292,6 +292,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 		case 'kbd_capture_stop':
 		case 'kbd_engage':
 		case 'kbd_web_key':
+		case 'kbd_request_permission':
 		case 'native_view_rect':
 		case 'send_clipboard':
 		case 'send_chat':
@@ -304,6 +305,9 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 		case 'mic_stop':
 		case 'set_language':
 			return Promise.resolve(undefined as unknown as T);
+		case 'kbd_os_capture':
+			// Browser preview: no OS-level capture, the canvas path drives control.
+			return Promise.resolve(false as unknown as T);
 		case 'local_ls':
 			// Deterministic sample listing so the file panel is browsable in the
 			// browser preview (dirs first, alphabetical — like the real command).
