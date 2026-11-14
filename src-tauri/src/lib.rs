@@ -27,14 +27,16 @@ mod autostart;
 #[cfg(windows)]
 mod dpi_watch;
 mod display_watch;
+#[cfg(not(windows))]
+mod scale_watch;
 mod clipboard_sync;
 mod commands;
 mod connections;
 mod local_relay;
 mod logging;
 // Host-side "screen adaptation" (Parsec-style): switch a captured monitor to the
-// best-fit display mode for a client split-pane and revert on teardown. Windows-only
-// implementation; no-op stubs elsewhere.
+// best-fit display mode for a client split-pane and revert on teardown. Windows, Linux
+// (X11 xrandr + wlroots/KDE/GNOME Wayland) and macOS (CoreGraphics).
 mod display_mode;
 // Same-host co-op input isolation (opt-in ProtoInput component, Windows host).
 mod coop;
@@ -528,6 +530,10 @@ pub fn run() {
 			crate::clipboard_sync::spawn_watcher(app.handle().clone());
 			crate::remote_cursor::start(app.handle());
 			crate::host::takeover::start();
+			// Linux: put back a display mode a crashed earlier run left adapted (screen
+			// adaptation; macOS needs nothing — its change is app-scoped and dies with us).
+			#[cfg(target_os = "linux")]
+			std::thread::spawn(crate::display_mode::recover_stale);
 
 			// Startup capability probe (encode + decode), Moonlight-style: every launch,
 			// in the background; the frontend splash waits for the `local-caps` event.
@@ -535,6 +541,11 @@ pub fn run() {
 			// WebView2 render scale follows the window's DPI after a display change.
 			#[cfg(windows)]
 			crate::dpi_watch::start(app.handle().clone());
+			// macOS: the display-scale counterpart (CoreGraphics display reconfiguration) —
+			// keeps the renderer overlay's scale current. Linux hooks each main window build
+			// (ui_start.rs → scale_watch::watch_window).
+			#[cfg(target_os = "macos")]
+			crate::scale_watch::start(app.handle());
 
 			// Always-on PS/Guide-button watcher: lets a controller toggle gaming mode (the
 			// `guide-toggle` event) even from remote mode, independent of the gaming-mode nav
@@ -688,23 +699,12 @@ pub fn run() {
 				tabwin::note_moved(window.app_handle(), window.label());
 			}
 			WindowEvent::ScaleFactorChanged { scale_factor, .. } if window.label() == "main" => {
+				#[cfg(windows)]
 				crate::process::set_ui_scale(*scale_factor);
-				// Linux: the renderer only read PULSAR_UI_SCALE at spawn — push the new scale to
-				// every live one so its overlay follows a monitor-scale change mid-session.
-				// (Windows' renderer reads its DPI itself; macOS' eframe gets it from winit.)
-				#[cfg(target_os = "linux")]
-				{
-					use std::io::Write;
-					let plays = window.app_handle().state::<AppState>();
-					let stdins: Vec<_> =
-						plays.plays.lock().unwrap().values().map(|p| p.render_stdin.clone()).collect();
-					for si in stdins {
-						if let Some(si) = si.lock().unwrap().as_mut() {
-							let _ = writeln!(si, "uiscale {scale_factor}");
-							let _ = si.flush();
-						}
-					}
-				}
+				// Linux/macOS: remember it AND push it to the live renderers (scale_watch.rs; on
+				// Linux tao never emits this event — the GTK scale-factor watch there covers it).
+				#[cfg(not(windows))]
+				crate::scale_watch::changed(window.app_handle(), *scale_factor);
 			}
 			WindowEvent::Focused(focused) => {
 				// Capture/forward keyboard+mouse + the overlay/leave combos ONLY while

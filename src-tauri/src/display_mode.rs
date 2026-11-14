@@ -16,9 +16,18 @@
 //! revert target (`ENUM_CURRENT_SETTINGS`) BEFORE applying the change, and only return a
 //! `PrevMode` when the apply actually succeeded — so we never store a bogus target.
 //!
-//! Windows-only. On other platforms [`set_best_mode`] is a no-op returning `None` (X11
-//! mode-switching would be xrandr, not wired here) so the rest of the app compiles and the
-//! adapt logic in handlers.rs/host.rs is inert.
+//! Per platform:
+//! * **Windows** — `EnumDisplaySettingsW` / `ChangeDisplaySettingsExW` (below).
+//! * **Linux** — [`linux`]: X11 via `xrandr`; Wayland via the compositor's own tool/API
+//!   (wlroots `wlr-randr`, KDE `kscreen-doctor`, GNOME Mutter `DisplayConfig` D-Bus) — Wayland
+//!   has no standard output-management protocol, so other compositors keep their mode. A crash
+//!   journal restores a mode left switched by a crashed Pulsar at the next start.
+//! * **macOS** — CoreGraphics (`pulsar_capture::display_mode::macos`): the change is made
+//!   `kCGConfigureForAppOnly`, so the window server restores the mode when Pulsar exits, even
+//!   on a crash.
+//!
+//! The best-fit choice itself is shared (`pulsar_capture::display_mode::plan`). Linux and macOS
+//! are untested on hardware.
 
 // ---------------------------------------------------------------------------
 // Windows implementation
@@ -395,18 +404,76 @@ pub fn fit_window(_hwnd: i64, _w: u32, _h: u32) -> Option<WindowPrev> {
 pub fn restore_window(_prev: WindowPrev) {}
 
 // ---------------------------------------------------------------------------
-// Non-Windows stubs — keep handlers.rs / host.rs compiling everywhere.
+// Linux (X11 xrandr / Wayland compositor tools) — see display_mode/linux.rs
 // ---------------------------------------------------------------------------
-/// Placeholder so callers can name the type on every platform. Carries no state off Windows.
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+pub use linux::{recover_stale, revert, set_best_mode, PrevMode};
+
+// ---------------------------------------------------------------------------
+// macOS (CoreGraphics, app-scoped configuration)
+// ---------------------------------------------------------------------------
+#[cfg(target_os = "macos")]
+pub use mac::{revert, set_best_mode, PrevMode};
+
+#[cfg(target_os = "macos")]
+mod mac {
+	use pulsar_capture::display_mode::macos;
+
+	/// The display's original mode (a retained `CGDisplayModeRef`). The window server also puts
+	/// it back by itself when Pulsar exits, since the change is app-scoped.
+	pub struct PrevMode(macos::SavedMode);
+
+	/// Switch display `display_idx` (main display first, then `CGGetActiveDisplayList` order) to
+	/// the best fit for the pane; `Some` only when a change was applied.
+	pub fn set_best_mode(display_idx: u32, target_w: u32, target_h: u32) -> Option<PrevMode> {
+		if target_w == 0 || target_h == 0 {
+			return None;
+		}
+		match macos::set_best_mode(display_idx, target_w, target_h) {
+			Ok(Some(saved)) => {
+				let (w, h) = saved.size();
+				tracing::info!(
+					display_idx,
+					target_w,
+					target_h,
+					from = format!("{w}x{h}"),
+					"screen-adapt: switched host display mode for split pane"
+				);
+				Some(PrevMode(saved))
+			}
+			Ok(None) => None,
+			Err(e) => {
+				tracing::warn!(display_idx, target_w, target_h, "screen-adapt: {e}; leaving mode unchanged");
+				None
+			}
+		}
+	}
+
+	/// Restore the original mode (best-effort; logs on failure).
+	pub fn revert(prev: PrevMode) {
+		let (w, h) = prev.0.size();
+		match macos::restore(prev.0) {
+			Ok(()) => tracing::info!(w, h, "screen-adapt: reverted host display mode"),
+			Err(e) => tracing::warn!(w, h, "screen-adapt: revert failed (host left at adapted mode): {e}"),
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Other targets: no-op stubs — keep handlers.rs / host.rs compiling everywhere.
+// ---------------------------------------------------------------------------
+/// Placeholder so callers can name the type on every platform.
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub struct PrevMode;
 
-/// No-op: screen adaptation is Windows-only (X11 xrandr switching is not wired here).
-#[cfg(not(windows))]
+/// No-op where no display-mode API is wired.
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn set_best_mode(_display_idx: u32, _target_w: u32, _target_h: u32) -> Option<PrevMode> {
 	None
 }
 
-/// No-op revert off Windows (there is never a stored `PrevMode` to restore).
-#[cfg(not(windows))]
+/// No-op revert (there is never a stored `PrevMode` to restore).
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn revert(_prev: PrevMode) {}

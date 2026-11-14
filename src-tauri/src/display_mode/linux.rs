@@ -11,8 +11,9 @@
 //!     `wlr-output-management-unstable-v1`, driven here through the `wlr-randr` tool;
 //!   - KDE Plasma (KWin) exposes `kde-output-management`, driven through `kscreen-doctor`;
 //!   - GNOME (Mutter) only offers its private D-Bus `org.gnome.Mutter.DisplayConfig`
-//!     (`ApplyMonitorsConfig` with the whole layout) — not wired here (see status.md), so
-//!     GNOME Wayland hosts keep their mode.
+//!     (`ApplyMonitorsConfig` with the whole layout, "temporary" method) — see [`gnome`];
+//!   - any other compositor (e.g. weston, cosmic-comp without wlr-output-management, gamescope)
+//!     has no way for a client to change a mode at all, so the host keeps its mode there.
 //!
 //!   On Wayland the XDG ScreenCast portal decides which monitor is captured and does not say
 //!   which output it is, so the switch is only made when exactly ONE output is enabled (the
@@ -23,7 +24,7 @@
 //! revert. If Pulsar dies with a mode applied, the next start ([`recover_stale`]) restores
 //! what the journal holds (entries of a still-running Pulsar process are left alone).
 //!
-//! Untested on Linux hardware (X11, wlroots, KDE): written and type-checked on WSL only.
+//! Untested on Linux hardware (X11, wlroots, KDE, GNOME): written and type-checked on WSL only.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -31,6 +32,8 @@ use std::sync::Mutex;
 
 use pulsar_capture::display_mode::{self as fit, xrandr, Cand};
 use serde::{Deserialize, Serialize};
+
+mod gnome;
 
 /// The monitor's mode before we changed it — what [`revert`] re-applies.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -42,12 +45,17 @@ pub enum PrevMode {
 	Wlr { output: String, mode: String, x: i32, y: i32 },
 	/// `kscreen-doctor output.<output>.mode.<mode_id>`.
 	Kde { output: String, mode_id: String },
+	/// Mutter `ApplyMonitorsConfig` with `<output>` in `<mode_id>` at logical `scale`.
+	Gnome { output: String, mode_id: String, scale: f64 },
 }
 
 impl PrevMode {
 	fn output(&self) -> &str {
 		match self {
-			PrevMode::X11 { output, .. } | PrevMode::Wlr { output, .. } | PrevMode::Kde { output, .. } => output,
+			PrevMode::X11 { output, .. }
+			| PrevMode::Wlr { output, .. }
+			| PrevMode::Kde { output, .. }
+			| PrevMode::Gnome { output, .. } => output,
 		}
 	}
 }
@@ -74,6 +82,7 @@ fn apply(prev: &PrevMode) -> Result<(), String> {
 		)
 		.map(drop),
 		PrevMode::Kde { output, mode_id } => run("kscreen-doctor", &[format!("output.{output}.mode.{mode_id}")]).map(drop),
+		PrevMode::Gnome { output, mode_id, scale } => gnome::set_mode(output, mode_id, *scale),
 	}
 }
 
@@ -295,7 +304,15 @@ fn wayland_switch(display_idx: u32, target_w: u32, target_h: u32) -> Result<Opti
 		return Ok(Some((switch(prev, &next)?, format!("{w}x{h} (KDE)"))));
 	}
 	if desktop.contains("gnome") {
-		return Err("GNOME Wayland: mode switching (Mutter DisplayConfig D-Bus) is not supported".into());
+		let st = gnome::state()?;
+		let outs = gnome::outputs(&st);
+		let Some((out, cur, new, (w, h))) = wl_plan(&outs, target_w, target_h)? else {
+			return Ok(None);
+		};
+		let scale = gnome::scale_of(&st, &out.name).unwrap_or(1.0);
+		let prev = PrevMode::Gnome { output: out.name.clone(), mode_id: cur, scale };
+		let next = PrevMode::Gnome { output: out.name.clone(), mode_id: new, scale };
+		return Ok(Some((switch(prev, &next)?, format!("{w}x{h} (GNOME)"))));
 	}
 	if has_tool("wlr-randr") {
 		// Non-wlroots compositors refuse here ("compositor doesn't support
