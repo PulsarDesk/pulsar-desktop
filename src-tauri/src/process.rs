@@ -138,7 +138,7 @@ fn core_displays() -> Vec<pulsar_core::service::DisplayInfo> {
 		.enumerate()
 		.map(|(i, m)| pulsar_core::service::DisplayInfo {
 			idx: i as u32,
-			name: m.name,
+			name: display_label(&m.name, m.builtin, i, crate::i18n::t("display.builtin"), crate::i18n::t("display.numbered")),
 			width: m.width,
 			height: m.height,
 			primary: m.primary,
@@ -146,6 +146,20 @@ fn core_displays() -> Vec<pulsar_core::service::DisplayInfo> {
 			refresh_hz: m.refresh_hz,
 		})
 		.collect()
+}
+
+/// The monitor's label in the picker: the platform's name, or — when it gave none — the
+/// localized "built-in display" / "Display {n}" (`n` = 1-based list position).
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+pub(crate) fn display_label(name: &str, builtin: bool, idx: usize, builtin_label: &str, numbered: &str) -> String {
+	let name = name.trim();
+	if !name.is_empty() {
+		name.to_string()
+	} else if builtin {
+		builtin_label.to_string()
+	} else {
+		numbered.replace("{n}", &(idx + 1).to_string())
+	}
 }
 
 /// The ffmpeg avfoundation video input for host monitor `idx` (the `CGGetActiveDisplayList`
@@ -158,14 +172,28 @@ pub(crate) fn avfoundation_screen(idx: u32, screens: usize) -> String {
 	format!("Capture screen {i}")
 }
 
+/// Wayland, per session (it lives next to that session's portal restore token): the client's
+/// requested monitor the portal picker was last shown for, and the monitor that pick actually
+/// streams (`pulsar_core::displays::list` index from the portal's stream geometry; `None` =
+/// unknown — a window cast or no geometry).
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WaylandPick {
+	pub(crate) requested: Option<u32>,
+	pub(crate) picked: Option<u32>,
+}
+
 /// Wayland: should this (re-)stream re-open the portal picker instead of restoring the last
 /// choice? The portal can't be told which monitor to share — its restore token silently
-/// brings back the previous pick — so when the client asks for a DIFFERENT monitor than the
-/// one being streamed, the token is dropped and the person at the host picks again.
-/// `streamed` = the index the running capture actually shows (portal geometry), if known.
+/// brings back the previous pick. The picker opens again only for a NEW monitor request: one
+/// that differs from the request the person at the host last answered AND from the monitor
+/// that answer streams. Re-streams of the same request (reconnects, codec / resolution / ABR
+/// restarts) keep restoring silently even when the host person chose another monitor.
 #[cfg(any(target_os = "linux", test))]
-pub(crate) fn wayland_wants_repick(requested: u32, streamed: Option<u32>, monitors: usize) -> bool {
-	monitors > 1 && streamed.is_some_and(|s| s != requested)
+pub(crate) fn wayland_wants_repick(requested: u32, last: WaylandPick, monitors: usize) -> bool {
+	monitors > 1
+		&& last.requested.is_some_and(|r| r != requested)
+		&& last.picked.is_some_and(|p| p != requested)
 }
 
 /// Current refresh rate (Hz) of the GDI display `dev_name` ("DISPLAY1"); 0 = unknown.
@@ -1799,7 +1827,7 @@ pub fn window_hwnd(app: &AppHandle) -> Option<u64> {
 
 #[cfg(test)]
 mod display_pick_tests {
-	use super::{avfoundation_screen, wayland_wants_repick};
+	use super::{avfoundation_screen, display_label, wayland_wants_repick, WaylandPick};
 
 	#[test]
 	fn avfoundation_screen_names_and_clamps() {
@@ -1811,11 +1839,29 @@ mod display_pick_tests {
 	}
 
 	#[test]
-	fn wayland_repicks_only_for_a_different_monitor() {
-		assert!(wayland_wants_repick(1, Some(0), 2));
-		assert!(!wayland_wants_repick(0, Some(0), 2));
-		// Unknown streamed monitor (window cast / no geometry) or a single monitor: keep the token.
-		assert!(!wayland_wants_repick(1, None, 2));
-		assert!(!wayland_wants_repick(1, Some(0), 1));
+	fn wayland_repicks_only_for_a_new_request() {
+		let pick = |requested, picked| WaylandPick { requested: Some(requested), picked };
+		// Asked for 0, streams 0; now 1 is asked for: ask the host person again.
+		assert!(wayland_wants_repick(1, pick(0, Some(0)), 2));
+		// Same monitor again: restore silently.
+		assert!(!wayland_wants_repick(0, pick(0, Some(0)), 2));
+		// Asked for 1, the host person picked 0: re-streams of the same request (reconnect,
+		// codec / ABR restart) must NOT re-open the dialog.
+		assert!(!wayland_wants_repick(1, pick(1, Some(0)), 2));
+		// ... nor a request that follows the client to what is streamed.
+		assert!(!wayland_wants_repick(0, pick(1, Some(0)), 3));
+		// A really new request does.
+		assert!(wayland_wants_repick(2, pick(1, Some(0)), 3));
+		// Nothing answered yet, unknown streamed monitor or a single monitor: keep the token.
+		assert!(!wayland_wants_repick(1, WaylandPick::default(), 2));
+		assert!(!wayland_wants_repick(1, pick(0, None), 2));
+		assert!(!wayland_wants_repick(1, pick(0, Some(0)), 1));
+	}
+
+	#[test]
+	fn nameless_monitors_get_localized_labels() {
+		assert_eq!(display_label(" DELL U2720Q ", false, 0, "Dahili ekran", "Ekran {n}"), "DELL U2720Q");
+		assert_eq!(display_label("", true, 0, "Dahili ekran", "Ekran {n}"), "Dahili ekran");
+		assert_eq!(display_label("", false, 1, "Dahili ekran", "Ekran {n}"), "Ekran 2");
 	}
 }

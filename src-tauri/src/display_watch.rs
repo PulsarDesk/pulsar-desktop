@@ -20,21 +20,32 @@ struct Gen {
 	cv: Condvar,
 }
 
+/// The shared generation, starting the OS watcher on first use. Cheap and non-blocking on
+/// every platform (`pulsar_core::displays::watch` sets its source up asynchronously), so it
+/// is safe from any thread, a tokio worker included.
 fn state() -> &'static Gen {
 	static G: OnceLock<Gen> = OnceLock::new();
 	G.get_or_init(|| {
 		#[cfg(windows)]
 		start_listener();
 		#[cfg(not(windows))]
-		{
-			// Not from inside this initializer: the callback runs on the watcher's own
-			// thread (or the macOS main thread) after init returned.
-			let armed = pulsar_core::displays::watch(Box::new(bump));
-			tracing::info!(armed, "display watch: started");
-		}
+		start_core_watch();
 		Gen { n: Mutex::new(0), cv: Condvar::new() }
 	})
 }
+
+/// macOS / Linux: (re)start `pulsar_core::displays::watch`. The callback runs on the
+/// watcher's own thread (or the macOS main thread), never inside this call.
+#[cfg(not(windows))]
+fn start_core_watch() {
+	let live = pulsar_core::displays::watch(Box::new(bump));
+	tracing::info!(live, "display watch: start requested");
+}
+
+/// macOS / Linux: a watcher that dropped out (lost Wayland / X11 connection) is started
+/// again, at most this often, while callers poll in between.
+#[cfg(not(windows))]
+const RESTART_EVERY: Duration = Duration::from_secs(30);
 
 /// The current change generation (starts the watcher on first use).
 pub(crate) fn generation() -> u64 {
@@ -53,7 +64,29 @@ pub(crate) fn wait_change(seen: u64, timeout: Duration) -> u64 {
 /// macOS / Linux: while the `pulsar_core::displays` watcher is live.
 pub(crate) fn event_driven() -> bool {
 	let _ = state();
-	cfg!(windows) || pulsar_core::displays::watching()
+	#[cfg(windows)]
+	{
+		true
+	}
+	#[cfg(not(windows))]
+	{
+		if pulsar_core::displays::watching() {
+			return true;
+		}
+		static LAST_TRY: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+		let mut last = LAST_TRY.lock().unwrap();
+		// The first call only arms the timer: the initial start (in `state`) is still
+		// connecting.
+		match *last {
+			None => *last = Some(std::time::Instant::now()),
+			Some(t) if t.elapsed() >= RESTART_EVERY => {
+				*last = Some(std::time::Instant::now());
+				start_core_watch();
+			}
+			Some(_) => {}
+		}
+		false
+	}
 }
 
 fn bump() {

@@ -75,6 +75,7 @@ export {
 	onPlayDims,
 	onHostPointer,
 	onHostDisplays,
+	onHostDisplayStreamed,
 	onSessionEvent,
 	onAuthPrompt,
 	onNodePort,

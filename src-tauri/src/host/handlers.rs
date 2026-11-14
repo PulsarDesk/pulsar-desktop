@@ -351,23 +351,6 @@ fn spawn_pointer_lock_watch(out: tokio::sync::mpsc::Sender<DataMsg>, epoch: crat
 	});
 }
 
-/// Wayland: the `pulsar_core::displays::list` index the last portal pick streamed (`-1` =
-/// unknown — window cast, no portal geometry, or nothing streamed yet). Process-wide like the
-/// portal restore token it accompanies.
-#[cfg(target_os = "linux")]
-static WAYLAND_STREAMED: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
-
-#[cfg(target_os = "linux")]
-fn wayland_streamed_idx() -> Option<u32> {
-	let v = WAYLAND_STREAMED.load(std::sync::atomic::Ordering::SeqCst);
-	(v >= 0).then_some(v as u32)
-}
-
-#[cfg(target_os = "linux")]
-fn set_wayland_streamed_idx(idx: Option<usize>) {
-	WAYLAND_STREAMED.store(idx.map(|i| i as i64).unwrap_or(-1), std::sync::atomic::Ordering::SeqCst);
-}
-
 /// Tell the client when this host's monitor list changes mid-stream (a monitor plugged in or
 /// removed, a resolution / refresh / primary change): `DataMsg::Displays` with the fresh list,
 /// so its monitor picker matches without a reconnect. Woken by the OS display-change event
@@ -414,13 +397,15 @@ fn spawn_display_list_watch(out: tokio::sync::mpsc::Sender<DataMsg>, epoch: crat
 /// mouse (`takeover::active`, Windows + Linux detection), so it can show the host pointer
 /// labelled "Host" next to its own one (issue #7). ~30 Hz while active (only on movement, plus
 /// a 500 ms refresh), one `active: false` when it goes idle. Position = the host pointer within
-/// the streamed monitor, 0..1 — Windows only (GetCursorPos against the captured output); `-1`
-/// = unknown (Linux, a window capture, the pointer on another monitor): the client then shows
-/// only the "host is using the mouse" notice. Lives as long as this stream generation.
+/// the streamed monitor, 0..1 — Windows (GetCursorPos against the captured output) and macOS
+/// (the pointer against the streamed CGDirectDisplayID's bounds; no takeover detection there
+/// yet, so it is not sent today); `-1` = unknown (Linux, a window capture, the pointer on
+/// another monitor): the client then shows only the "host is using the mouse" notice. Lives as
+/// long as this stream generation.
 fn spawn_host_pointer_watch(
 	out: tokio::sync::mpsc::Sender<DataMsg>,
 	epoch: crate::process::ProcEpoch,
-	#[cfg(windows)] display: Arc<std::sync::atomic::AtomicU32>,
+	#[cfg(any(windows, target_os = "macos"))] display: Arc<std::sync::atomic::AtomicU32>,
 	window_capture: bool,
 ) {
 	use std::sync::atomic::Ordering;
@@ -441,6 +426,12 @@ fn spawn_host_pointer_watch(
 							return (nx, ny);
 						}
 					}
+				}
+			}
+			#[cfg(target_os = "macos")]
+			if !window_capture {
+				if let Some(p) = pulsar_core::displays::pointer_in(display.load(Ordering::Relaxed) as usize) {
+					return p;
 				}
 			}
 			let _ = window_capture;
@@ -1887,6 +1878,9 @@ pub(super) fn make_on_stream(
 	fec_n: Arc<std::sync::atomic::AtomicU16>,
 	media_sent: Arc<pulsar_core::service::media::MediaSendStats>,
 	#[cfg(target_os = "linux")] restore_token: Arc<Mutex<Option<String>>>,
+	// Wayland: the request the portal picker was last answered for + the monitor it streams
+	// (per session, beside `restore_token`).
+	#[cfg(target_os = "linux")] wayland_pick: Arc<Mutex<crate::process::WaylandPick>>,
 	#[cfg(target_os = "linux")] cap_slot: Arc<Mutex<Option<pulsar_core::capture::WaylandCapture>>>,
 	#[cfg(target_os = "linux")] libav_slot: Arc<Mutex<Option<super::libav::LibavHost>>>,
 	#[cfg(target_os = "linux")] cap_gen: Arc<std::sync::atomic::AtomicU64>,
@@ -2367,14 +2361,16 @@ pub(super) fn make_on_stream(
 			// The portal can't be told which monitor to share: its restore token silently
 			// brings the last pick back. When the client asks for a different monitor than the
 			// one the last portal pick showed, drop the token so the picker opens again and
-			// the person at the host chooses (the dialog decides). Untested on Wayland hardware.
+			// the person at the host chooses (the dialog decides). Only for a NEW request: a
+			// re-stream of the request already answered restores silently even when the host
+			// person picked another monitor. Untested on Wayland hardware.
 			let token = {
-				let monitors = pulsar_core::displays::list();
-				let streamed = wayland_streamed_idx();
-				if crate::process::wayland_wants_repick(req.display_idx, streamed, monitors.len()) {
+				let monitors = pulsar_core::displays::count();
+				let last = *wayland_pick.lock().unwrap();
+				if crate::process::wayland_wants_repick(req.display_idx, last, monitors) {
 					tracing::info!(
 						requested = req.display_idx,
-						?streamed,
+						?last,
 						"wayland: another monitor requested — re-opening the portal picker"
 					);
 					None
@@ -2382,7 +2378,10 @@ pub(super) fn make_on_stream(
 					restore_token.lock().unwrap().clone()
 				}
 			};
+			// No token = the picker dialog shows: its answer belongs to THIS request.
+			let picker_shown = token.is_none();
 			let requested_idx = req.display_idx;
+			let wayland_pick = wayland_pick.clone();
 			// AppImage: an encoder that only validated on the system gst runs there.
 			let system_gst = crate::process::gst_on_system(genc, gcodec);
 			let restore_token = restore_token.clone();
@@ -2441,16 +2440,28 @@ pub(super) fn make_on_stream(
 						}
 						// Which monitor the portal pick actually streams (its geometry in the
 						// output layout), for the next re-stream's repick decision.
-						let picked = cap.stream_rect().and_then(|(x, y, w, h)| {
-							pulsar_core::displays::index_of_rect(&pulsar_core::displays::list(), x, y, w, h)
-						});
-						set_wayland_streamed_idx(picked);
-						if picked.is_some_and(|p| p as u32 != requested_idx) {
+						let picked = cap
+							.stream_rect()
+							.and_then(|(x, y, w, h)| {
+								pulsar_core::displays::index_of_rect(&pulsar_core::displays::list(), x, y, w, h)
+							})
+							.map(|p| p as u32);
+						{
+							let mut pick = wayland_pick.lock().unwrap();
+							if picker_shown || pick.requested.is_none() {
+								pick.requested = Some(requested_idx);
+							}
+							pick.picked = picked;
+						}
+						if let Some(p) = picked.filter(|p| *p != requested_idx) {
+							// The person at the host shared another monitor than the client
+							// asked for: move the client's picker (and its next requests) there.
 							tracing::warn!(
 								requested = requested_idx,
-								?picked,
+								picked = p,
 								"wayland: the portal pick streams another monitor than the client asked for"
 							);
+							let _ = stats_task.try_send(DataMsg::StreamedDisplay(p));
 						}
 						// Store under the slot lock ONLY while still current: a session
 						// that tore down (or re-streamed) during the portal dialog gets
@@ -3704,7 +3715,7 @@ pub(super) fn make_on_stream(
 			spawn_host_pointer_watch(
 				stats_out.clone(),
 				proc_epoch.clone(),
-				#[cfg(windows)]
+				#[cfg(any(windows, target_os = "macos"))]
 				cur_display.clone(),
 				target_hwnd.is_some(),
 			);

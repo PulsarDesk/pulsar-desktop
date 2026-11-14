@@ -48,6 +48,7 @@ vi.mock('#lib/api.js', async () => {
 		onPeerAvatar: _vi.fn(),
 		onPeerName: _vi.fn(),
 		onHostDisplays: _vi.fn(),
+		onHostDisplayStreamed: _vi.fn(),
 		setFullscreen: _vi.fn().mockResolvedValue(undefined),
 		recordConnection: _vi.fn()
 	};

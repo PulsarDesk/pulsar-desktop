@@ -749,6 +749,10 @@ pub(crate) async fn bring_online(
 			// (resolution/codec/monitor changes) so those don't re-prompt.
 			#[cfg(target_os = "linux")]
 			let restore_token: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+			// Per-session too: which client request the portal picker was last answered for
+			// and which monitor that pick streams (the repick decision, process.rs).
+			#[cfg(target_os = "linux")]
+			let wayland_pick: Arc<Mutex<crate::process::WaylandPick>> = Arc::new(Mutex::new(Default::default()));
 			let app_h = app_h.clone();
 			let peer = {
 				let id = session.peer();
@@ -1466,6 +1470,8 @@ pub(crate) async fn bring_online(
 					#[cfg(target_os = "linux")]
 					restore_token.clone(),
 					#[cfg(target_os = "linux")]
+					wayland_pick.clone(),
+					#[cfg(target_os = "linux")]
 					cap_slot.clone(),
 					#[cfg(target_os = "linux")]
 					libav_slot.clone(),
@@ -1534,6 +1540,12 @@ pub(crate) async fn bring_online(
 					// macOS: the streamed monitor index last applied to the injector.
 					#[cfg(target_os = "macos")]
 					let mut applied_mac_display: u32 = u32::MAX;
+					// ... and the display-change generation / time it was resolved at: an unplug
+					// or rearrangement can keep the index but move it to another display.
+					#[cfg(target_os = "macos")]
+					let mut applied_mac_gen: u64 = u64::MAX;
+					#[cfg(target_os = "macos")]
+					let mut applied_mac_at = std::time::Instant::now();
 					#[cfg(windows)]
 					let native_out_arc = native_out_arc.clone();
 					#[cfg(windows)]
@@ -1908,13 +1920,21 @@ pub(crate) async fn bring_online(
 											d.set_region(
 												input_cap.lock().unwrap().as_ref().and_then(|c| c.pointer_region()),
 											);
-											// macOS: aim at the streamed monitor's CGDirectDisplayID (re-resolved
-											// only when the streamed index changes). Untested on macOS hardware.
+											// macOS: aim at the streamed monitor's CGDirectDisplayID, re-resolved
+											// when the streamed index changes, on a display-change event, and at
+											// least every second (covers a watcher that is not live yet).
+											// Untested on macOS hardware.
 											#[cfg(target_os = "macos")]
 											{
 												let idx = cur_display.load(std::sync::atomic::Ordering::Relaxed);
-												if idx != applied_mac_display {
+												let gen = crate::display_watch::generation();
+												if idx != applied_mac_display
+													|| gen != applied_mac_gen
+													|| applied_mac_at.elapsed() >= std::time::Duration::from_secs(1)
+												{
 													applied_mac_display = idx;
+													applied_mac_gen = gen;
+													applied_mac_at = std::time::Instant::now();
 													d.set_display(pulsar_core::displays::platform_id(idx as usize));
 												}
 											}

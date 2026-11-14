@@ -1315,6 +1315,39 @@ pub(super) async fn hold_session(
 								}
 								let _ = app_ev.emit("host-displays", (id, list));
 							}
+							DataMsg::StreamedDisplay(d) => {
+								// The host streams another monitor than we asked for (Linux Wayland:
+								// the person at the host picked it in the portal dialog). Follow it:
+								// later requests (reconnect, ABR, codec) ask for what is shown, and
+								// every picker (renderer overlay, webview menu) highlights it.
+								tracing::info!(display = d, requested = cur_display, "host streams another monitor");
+								if d != cur_display {
+									cur_display = d;
+									cur_window = None;
+									// The ABR ladder's native size follows the monitor really
+									// streamed; the running stream is not restarted for it.
+									if let Some(&(_, w, h, hz)) = host_displays.iter().find(|m| m.0 == d) {
+										let fps = if hz > 1 { client_fps.min(crate::util::nearest_fps(hz)) } else { client_fps };
+										ctl.set_native(w, h, fps);
+									}
+								}
+								if let Some(p) = tauri::Manager::state::<crate::state::AppState>(&app_ev)
+									.plays
+									.lock()
+									.unwrap()
+									.get(&id)
+								{
+									p.render_seed.lock().unwrap().display_idx = Some(d);
+								}
+								{
+									use std::io::Write as _;
+									if let Some(si) = render_stdin.lock().unwrap().as_mut() {
+										let _ = writeln!(si, "display {d}");
+										let _ = si.flush();
+									}
+								}
+								let _ = app_ev.emit("host-display-streamed", (id, d));
+							}
 							DataMsg::HostPointer { active, x, y } => {
 								// The person at the host is on their own mouse (remote mode): the
 								// renderer draws the host pointer labelled "Host" + a notice and
