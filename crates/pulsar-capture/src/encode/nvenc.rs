@@ -249,7 +249,7 @@ pub type PFN_LockBitstream =
 	unsafe extern "C" fn(*mut c_void, *mut NV_ENC_LOCK_BITSTREAM) -> NVENCSTATUS;
 pub type PFN_UnlockBitstream = unsafe extern "C" fn(*mut c_void, *mut c_void) -> NVENCSTATUS;
 pub type PFN_DestroyEncoder = unsafe extern "C" fn(*mut c_void) -> NVENCSTATUS;
-pub type PFN_GetLastErrorString = unsafe extern "C" fn(*mut c_void) -> *const i8;
+pub type PFN_GetLastErrorString = unsafe extern "C" fn(*mut c_void) -> *const std::ffi::c_char;
 // Which codecs THIS GPU's NVENC can encode: `count` first, then fill an array of that
 // size. Kepler/GM107 report H.264 only; HEVC arrives with GM20x, AV1 with Ada.
 pub type PFN_GetEncodeGUIDCount = unsafe extern "C" fn(*mut c_void, *mut u32) -> NVENCSTATUS;

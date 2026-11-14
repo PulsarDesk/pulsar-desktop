@@ -212,18 +212,20 @@ unsafe fn probe_nvenc_codecs() -> Result<Vec<Codec>, String> {
 	if let Some(destroy) = fns.nvEncDestroyEncoder {
 		let _ = destroy(enc);
 	}
-	let guids = guids?;
-	let mut codecs = Vec::new();
-	for (guid, codec) in [
+	Ok(codecs_from_guids(&guids?))
+}
+
+/// The codecs among NVENC's encode GUIDs (H.264, HEVC, AV1 — in that order).
+fn codecs_from_guids(guids: &[nvenc::GUID]) -> Vec<Codec> {
+	[
 		(nvenc::NV_ENC_CODEC_H264_GUID, Codec::H264),
 		(nvenc::NV_ENC_CODEC_HEVC_GUID, Codec::H265),
 		(nvenc::NV_ENC_CODEC_AV1_GUID, Codec::Av1),
-	] {
-		if guids.contains(&guid) {
-			codecs.push(codec);
-		}
-	}
-	Ok(codecs)
+	]
+	.into_iter()
+	.filter(|(g, _)| guids.contains(g))
+	.map(|(_, c)| c)
+	.collect()
 }
 
 /// Diagnostic log to a fixed file (the native encoder runs in the GUI host with no console).

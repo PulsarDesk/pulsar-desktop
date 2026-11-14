@@ -94,8 +94,8 @@ impl Cuda {
 	unsafe fn load() -> Result<Cuda, String> {
 		let lib = libloading::Library::new("libcuda.so.1").map_err(|e| format!("libcuda.so.1: {e}"))?;
 		macro_rules! sym {
-			($name:literal) => {
-				*lib.get(concat!($name, "\0").as_bytes()).map_err(|e| format!("libcuda {}: {e}", $name))?
+			($t:ty, $name:literal) => {
+				*lib.get::<$t>(concat!($name, "\0").as_bytes()).map_err(|e| format!("libcuda {}: {e}", $name))?
 			};
 		}
 		let init: FnInit = sym!(FnInit, "cuInit");
@@ -181,9 +181,9 @@ impl Context {
 	}
 
 	/// Make the context current on this thread until the guard drops.
-	pub(crate) fn push(&self) -> Result<Current<'_>, String> {
+	pub(crate) fn push(&self) -> Result<Current, String> {
 		self.cuda.check(unsafe { (self.cuda.ctx_push)(self.ctx) }, "cuCtxPushCurrent")?;
-		Ok(Current(self))
+		Ok(Current(self.cuda.clone()))
 	}
 
 	/// A pitched device allocation of `rows` rows of `width_bytes` (the context must be
@@ -248,11 +248,11 @@ impl Drop for Context {
 }
 
 /// The context is current on this thread while this lives (see [`Context::push`]).
-pub(crate) struct Current<'a>(&'a Context);
+pub(crate) struct Current(Arc<Cuda>);
 
-impl Drop for Current<'_> {
+impl Drop for Current {
 	fn drop(&mut self) {
 		let mut popped: CUcontext = std::ptr::null_mut();
-		let _ = unsafe { (self.0.cuda.ctx_pop)(&mut popped) };
+		let _ = unsafe { (self.0.ctx_pop)(&mut popped) };
 	}
 }

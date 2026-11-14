@@ -17,7 +17,6 @@ use super::d3d::{
 use super::encoder::Encoder;
 use super::{cap_dbg, nvenc, policy, EncParams, VENDOR_NVIDIA};
 use crate::rtp::RtpEgress;
-use crate::Codec;
 
 impl Encoder {
 	/// Build the whole native NVENC encode chain. `device`/`ctx` are the CAPTURE device

@@ -4,9 +4,6 @@
 //! keyed-mutex BGRA bridge, the rtp-dest parser, the NVENC session guard and the
 //! NVENC status check. Behaviour is unchanged from the original `encode.rs`.
 
-use std::ffi::c_void;
-use std::ptr;
-
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::{
 	D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
@@ -27,7 +24,7 @@ use windows::Win32::Graphics::Dxgi::{
 };
 use windows_core::Interface; // for `.cast::<T>()` and `.as_raw()`
 
-use super::{cap_dbg, nvenc, VENDOR_NVIDIA};
+use super::{cap_dbg, VENDOR_NVIDIA};
 // The NVENC helpers that need no D3D11 live in `nvsession` (shared with the Linux encoder).
 pub(super) use super::nvsession::{chk, parse_rtp_dest, SessionGuard};
 
