@@ -6,6 +6,7 @@
 	import { theme, setDark } from '#lib/theme.svelte.js';
 	import { api, isTauri } from '#lib/api.js';
 	import type { SharedModeStatus } from '#lib/api.types.js';
+	import { sharedErrorKey, sharedNoAccessKey } from '#lib/sharedMode.js';
 	import pkg from '../../../../package.json';
 
 	// Start with the computer (+ in the background): read from the OS (it is the source of
@@ -80,7 +81,7 @@
 	const sharedNote = $derived.by(() => {
 		if (sharedErr) return sharedErr;
 		if (!shared) return '';
-		if (shared.noAccess) return t('shared.noAccess');
+		if (shared.noAccess) return t(sharedNoAccessKey(!!shared.unix));
 		if (shared.enabled !== shared.active) return t('settings.restartRequired');
 		if (shared.active && !shared.held)
 			return shared.holder ? t('shared.standbyUser', { user: shared.holder }) : t('shared.standby');
@@ -98,7 +99,7 @@
 			})
 			.catch((e) => {
 				const msg = e instanceof Error ? e.message : String(e);
-				sharedErr = msg === 'SHARED_ELEVATION' ? t('shared.needAdmin') : t('shared.failed');
+				sharedErr = t(sharedErrorKey(msg, !!shared?.unix));
 			})
 			.finally(() => (sharedBusy = false));
 	}
@@ -203,7 +204,7 @@
 	<div class="srow">
 		<div class="st">
 			<b>{t('settings.sharedMode')}</b>
-			<span>{t('settings.sharedModeDesc')}{#if sharedNote} <strong class="restart">· {sharedNote}</strong>{/if}</span>
+			<span>{t(shared.unix ? 'settings.sharedModeDescUnix' : 'settings.sharedModeDesc')}{#if sharedNote} <strong class="restart">· {sharedNote}</strong>{/if}</span>
 		</div>
 		<button class="toggle" aria-label={t('settings.sharedMode')} class:on={shared.enabled} aria-pressed={shared.enabled} disabled={sharedBusy} onclick={toggleShared}><span class="knob"></span></button>
 	</div>

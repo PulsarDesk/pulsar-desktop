@@ -199,6 +199,8 @@ export interface SharedModeStatus {
 	held: boolean;
 	/** Windows user whose session hosts right now (another Pulsar holds the lease). */
 	holder: string | null;
+	/** Linux/macOS: "elevated" = admin-group member; the toggle asks for the system password. */
+	unix?: boolean;
 }
 
 export interface DeviceCredInfo {

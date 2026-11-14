@@ -127,7 +127,7 @@ that was down, leaving range, the last finger up) pass (`host.rs`, per-session `
 | Client, remote mode | renderer `WM_POINTER` → `pen` / `touch` stdout lines (`pulsar-render/src/win/pointer.rs`, only while engaged + overlay closed + host takes them; `render_stats.rs` parses) | webview canvas PointerEvents (`Session/input.svelte.ts`) + native tablet attributes from an evdev reader of every `BTN_TOOL_PEN` node (not grabbed; needs `/dev/input` read access) | webview canvas PointerEvents + native tablet attributes from a listen-only CGEventTap (tablet events aimed at the app's pid) — WKWebView reports a Wacom pen as `mouse` |
 | Client, game mode | same renderer path | canvas, forwarded without "controlling" (the evdev grab takes keyboard + mouse only) | canvas, same as Linux |
 | Host, pen | synthetic `PT_PEN` pointer device (pressure, tilt, rotation, eraser, barrel, hover); through the SYSTEM helper when it runs (UAC / lock screen reachable) | uinput tablet "Pulsar Virtual Pen" | CGEvent tablet proximity + tablet-point mouse events, on the streamed display |
-| Host, touch | synthetic `PT_TOUCH` device, 10 contacts; through the SYSTEM helper when it runs | uinput multitouch type B "Pulsar Virtual Touchscreen", 10 slots | **mapped to mouse + pixel scroll** — macOS has no public touch-injection API (no touchscreen input path; trackpad gestures are private IOHIDEvents), so pinch / rotate cannot be injected |
+| Host, touch | synthetic `PT_TOUCH` device, 10 contacts; through the SYSTEM helper when it runs | uinput multitouch type B "Pulsar Virtual Touchscreen", 10 slots | **mapped to mouse + pixel scroll** — macOS has no public touch-injection API (no touchscreen input path; trackpad gestures are private IOHIDEvents), so a touch frame's pinch / rotate cannot be injected as touch (the touchpad pinch, `InputEvent::Pinch`, goes through the private magnify gesture instead — see "Touchpad pinch") |
 
 Notes per platform:
 
@@ -167,6 +167,18 @@ macOS button choice, tablet augment + evdev fold), core `input/avf_screens`, `pu
 `kbdhook/imp.rs` `pen_and_touch_synthesized_mouse_is_recognized` (Windows; the app's lib-test
 binary does not start in this Windows dev setup — STATUS_ENTRYPOINT_NOT_FOUND — so it ran
 only as a type-check), `pulsar-render` `win/pointer.rs`.
+
+**Shared (machine-wide) mode on Linux + macOS (2026-11-14, untested on Linux and macOS
+hardware):** `crates/pulsar-machine` + the Unix branches of `shared_mode.rs` — see
+[architecture.md](architecture.md) "Linux / macOS". Unit tests for every rule (dir checks,
+group pick, script text, exit-code mapping, per-user paths); `flock` lease + `harden` tested on
+Linux (WSL); the setup script ran end-to-end as root in WSL on a scratch dir. The deb/rpm
+post-install default-ON block is unit-tested for its skip cases (decided / existing data) and
+parses in `sh`; **never run** inside a real `dpkg -i` / `rpm -i`. **Never run:**
+the real `pkexec` / macOS administrator prompt, the toggle + restart in the app, two users'
+Pulsar handing the lease over (logind `Active`, CGSession on-console), macOS at all (only
+`cargo check --target aarch64-apple-darwin -p pulsar-machine`; `pulsar-tauri` can't be
+mac-checked from Windows).
 
 **Host-only / headless host / Pulsar Split seat host (2026-11-13, not run on hardware):**
 `--host-only`, `--headless-host`, `--headless-stop`, `--split-seat` — see

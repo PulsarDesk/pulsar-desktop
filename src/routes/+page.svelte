@@ -65,6 +65,7 @@
 	import { TabWindows, isTabWin } from './page/tabWindows.svelte';
 	import { setLivePeers } from '#lib/presence.svelte.js';
 	import { setAuthDoneHandler } from '#lib/authDone.js';
+	import { sharedHostErrorKey, IS_UNIX_UI } from '#lib/sharedMode.js';
 
 	// When opened as the Allow/Deny approval popup (a separate window), render only
 	// that prompt and skip all the main-app logic (don't re-register with the relay).
@@ -510,9 +511,10 @@
 				connecting = false;
 				return;
 			}
-			if (msg === 'SHARED_NO_ACCESS') {
+			const sharedKey = sharedHostErrorKey(msg, IS_UNIX_UI);
+			if (sharedKey) {
 				versionBlocked = true;
-				connError = t('shared.noAccess');
+				connError = t(sharedKey);
 				connecting = false;
 				return;
 			}

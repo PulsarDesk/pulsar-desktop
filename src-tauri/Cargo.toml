@@ -138,6 +138,9 @@ gdkx11 = "0.18"
 # Linux): needed on macOS too — `stop_render_child` is cfg(unix).
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# Shared (machine-wide) mode on Linux/macOS: root-owned machine dir, admin-group access,
+# flock host lease, session-active query, pkexec/osascript setup (shared_mode.rs).
+pulsar-machine = { path = "../crates/pulsar-machine" }
 
 # Every macOS-only dependency lives in this ONE table (a second
 # `[target.'cfg(target_os = "macos")'.dependencies]` header is a TOML duplicate-key error).

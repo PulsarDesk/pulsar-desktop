@@ -64,7 +64,10 @@ pub(crate) fn save(path: &Path, map: &CredMap) {
 		#[cfg(unix)]
 		{
 			use std::os::unix::fs::PermissionsExt;
-			let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+			// Shared mode (Linux/macOS): the file sits in the admin-group-only shared dir and
+			// every admin's Pulsar must read it → owner + group (`shared_mode.rs`).
+			let mode = if crate::shared_mode::is_shared() { 0o660 } else { 0o600 };
+			let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
 		}
 	}
 }

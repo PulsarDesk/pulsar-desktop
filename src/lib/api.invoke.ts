@@ -187,7 +187,8 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 				noAccess: false,
 				elevated: true,
 				held: true,
-				holder: null
+				holder: null,
+				unix: false
 			} as unknown as T);
 		case 'set_shared_mode':
 			mockShared = !!(args as { enabled?: boolean })?.enabled;

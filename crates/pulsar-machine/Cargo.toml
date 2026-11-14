@@ -1,0 +1,28 @@
+# Pulsar machine-wide ("shared mode") plumbing for Linux and macOS.
+#
+# "Kullanıcılar arası ortak Pulsar" (src-tauri/src/shared_mode.rs) keeps ONE device
+# identity / config / pairings for the whole machine. On Windows that lives in
+# %ProgramData%\Pulsar\shared (protected DACL, DPAPI machine scope) and is implemented in
+# shared_mode.rs itself. This crate is the Unix side: the root-owned machine dir and its
+# permission checks, the admin-group access model, the machine-wide host lock (flock), the
+# "is my login session the active one" query (logind / CGSession) and the one-shot
+# privileged setup (pkexec / osascript).
+#
+# It is a separate crate (no Tauri, libc only) so the macOS code type-checks from a
+# non-Mac machine: `cargo check --target aarch64-apple-darwin -p pulsar-machine`.
+# The pure decision helpers build and are unit-tested on every OS; the platform code is
+# cfg(unix). Design: docs/agents/architecture.md → "Shared (machine-wide) mode".
+[package]
+name = "pulsar-machine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "pulsar_machine"
+path = "src/lib.rs"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
