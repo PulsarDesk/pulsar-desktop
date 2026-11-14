@@ -329,4 +329,16 @@ impl GlFsr {
 		gl.use_program(None);
 		true
 	}
+
+	/// Delete the GL objects (the presenter's context is lost or being replaced; on a context
+	/// that is really gone these are no-ops).
+	pub unsafe fn destroy(self, gl: &glow::Context) {
+		gl.delete_program(self.easu);
+		gl.delete_program(self.rcas);
+		gl.delete_buffer(self.vbo);
+		for t in [self.a, self.b].into_iter().flatten() {
+			gl.delete_framebuffer(t.fbo);
+			gl.delete_texture(t.tex);
+		}
+	}
 }

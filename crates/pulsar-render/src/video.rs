@@ -53,6 +53,18 @@ static STOP: AtomicBool = AtomicBool::new(false);
 /// the decode loop tears the old demuxer+decoder down and reopens in place.
 static REOPEN: AtomicBool = AtomicBool::new(false);
 static REOPEN_SDP: Mutex<Option<String>> = Mutex::new(None);
+/// Set by the presenter side after a GL context loss (GPU reset, NVIDIA suspend/resume purge):
+/// the decode thread reopens its hardware decoder in place on a fresh hw device context. A
+/// VAAPI/CUDA decoder whose device died with the GPU keeps "decoding" into dead surfaces —
+/// errors or garbage, never a picture — and the zero-output fallback does not catch it (it
+/// only watches a decoder that never produced a frame since it was opened).
+static DECODER_RESET: AtomicBool = AtomicBool::new(false);
+
+/// Ask the decode thread to reopen its hardware decoder (see [`DECODER_RESET`]); a no-op for a
+/// software decoder.
+pub fn request_decoder_reset() {
+	DECODER_RESET.store(true, Ordering::Relaxed);
+}
 /// True from the moment a reopen is requested (monitor/codec switch) until the new
 /// stream's first keyframe decodes — the overlay draws a "switching…" indicator over
 /// the held last frame so the user sees the change is in progress, not a hang. Only set
@@ -612,6 +624,8 @@ unsafe fn open_rtp(path: &str, name: &str) -> Option<Source> {
 		.spawn(move || {
 			// Rate limit for `vidsink-needidr` (at most 2/s, the Windows renderer's cadence).
 			let mut last_needidr = std::time::Instant::now() - std::time::Duration::from_secs(1);
+			// Overflow lines at most once per 2 s, with counts (one per AU flooded the log).
+			let mut overflow_log = crate::stream::recovery::OverflowLog::new("pulsar-render");
 			rtp::recv_loop_unix(
 				&name,
 				codec,
@@ -626,11 +640,15 @@ unsafe fn open_rtp(path: &str, name: &str) -> Option<Source> {
 					match crate::stream::recovery::bound_backlog(&mut g, AU_QCAP, AU_HARD_CAP) {
 						crate::stream::recovery::Backlog::Kept => {}
 						crate::stream::recovery::Backlog::DroppedLeadIn(k) => {
-							eprintln!("pulsar-render: AU backlog overflow — dropped {k} stale AU(s) ahead of newest keyframe");
+							if let Some(line) = overflow_log.note(k as u32, false, std::time::Instant::now()) {
+								eprintln!("{line}");
+							}
 						}
 						crate::stream::recovery::Backlog::ShedOldest => {
 							rtp::NEED_IDR.store(true, Ordering::Relaxed);
-							eprintln!("pulsar-render: AU backlog overflow — no keyframe queued; dropped the oldest AU, keyframe requested");
+							if let Some(line) = overflow_log.note(1, true, std::time::Instant::now()) {
+								eprintln!("{line}");
+							}
 						}
 					}
 					g.push_back(au);
@@ -897,6 +915,42 @@ unsafe fn decode_once(sdp: &CString) {
 			// The env pin wins over the app-derived reorder wait for the whole session.
 			let maxdelay_pinned = std::env::var_os("PULSAR_MAXDELAY").is_some();
 			while !STOP.load(Ordering::Relaxed) && !REOPEN.load(Ordering::Relaxed) {
+				// GL context loss on the presenter side: reopen a hardware decoder on a fresh
+				// device context (its old one may have died with the GPU) and re-sync on the next
+				// keyframe (the renderer asked the host for one). When it no longer opens, the
+				// zero-output fallback below walks on to the next candidate.
+				if DECODER_RESET.swap(false, Ordering::Relaxed) && sel.hwdev.is_some() {
+					eprintln!("pulsar-render: reopening decoder {} after GL context loss", sel.name);
+					ff::avcodec_free_context(&mut dc);
+					dc = open_decoder(par, codec_id, &sel);
+					if dc.is_null() {
+						eprintln!("pulsar-render: decoder {} did not reopen", sel.name);
+						skip.push(sel.key());
+						let mut reopened = false;
+						while let Some(p) = crate::decode::select_skipping(codec_id, &skip) {
+							dc = open_decoder(par, codec_id, &p.sel);
+							if dc.is_null() {
+								skip.push(p.sel.key());
+								continue;
+							}
+							sel = p.sel;
+							announce_decoder(&sel);
+							force_readback = !sel.zero_copy;
+							reopened = true;
+							break;
+						}
+						if !reopened {
+							eprintln!("pulsar-render: every decoder candidate failed after GL context loss");
+							break 'decode;
+						}
+					}
+					gen = DEC_GEN.fetch_add(1, Ordering::Relaxed) + 1;
+					map_failed = false;
+					seen_key = false;
+					au_since_open = 0;
+					frames_since_open = 0;
+					fallback_exhausted = false;
+				}
 				let r = src.read(pkt, maxdelay_pinned);
 				// A switch that never produced its first keyframe within SWITCH_TIMEOUT_MS:
 				// intr_cb has aborted the (otherwise indefinite) demux read, or the RTP feed
@@ -1246,6 +1300,17 @@ fn announce_decoder(sel: &crate::decode::Selected) {
 
 pub fn signal_stop() {
 	STOP.store(true, Ordering::Relaxed);
+}
+
+/// Free every decoded frame waiting for the presenter (the decode thread keeps going): used
+/// while the GL context is lost, so nothing piles up and the first frame after the rebuild
+/// is a fresh one.
+pub fn drop_frames() {
+	let mut q = MBX.lock().unwrap();
+	while let Some(f) = q.pop_front() {
+		let mut o = f.0;
+		unsafe { ff::av_frame_free(&mut o) };
+	}
 }
 
 pub fn stop_decode() {
@@ -1679,6 +1744,31 @@ impl Presenter {
 		if let Some(cu) = self.cuda.as_mut() {
 			cu.release();
 		}
+	}
+
+	/// The GL context this presenter was built on is lost (or about to be replaced): unregister
+	/// the CUDA interop, free the held + queued frames, delete every GL object (no-ops on a
+	/// context that is really gone). The presenter is not drawn with afterwards — linux.rs
+	/// builds a fresh one on the new context.
+	pub unsafe fn destroy_gl(&mut self, gl: &glow::Context) {
+		use glow::HasContext;
+		self.release();
+		self.cuda = None;
+		self.reset();
+		for p in [self.prog, self.sw_prog, self.nv_prog, self.rg_prog] {
+			gl.delete_program(p);
+		}
+		gl.delete_buffer(self.vbo);
+		for t in [self.tex].iter().chain(&self.sw_tex).chain(&self.zc_tex).chain(&self.cuda_tex) {
+			gl.delete_texture(*t);
+		}
+		if let Some(f) = self.fsr.take() {
+			f.destroy(gl);
+		}
+		crate::overlay::set_upscaler_active("");
+		// A zero-copy import that failed against the dying context must not pin the decoder to
+		// readback for good: the new context gets another try.
+		ZC_FAILED_GEN.store(0, Ordering::Relaxed);
 	}
 
 	/// EGLImage for layer `li` of a DRM_PRIME descriptor at `w`×`h` (null on failure).

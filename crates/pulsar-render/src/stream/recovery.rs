@@ -133,6 +133,107 @@ pub fn bound_backlog(q: &mut VecDeque<AccessUnit>, soft: usize, hard: usize) -> 
 	}
 }
 
+/// AU-backlog overflow reports, at most one line per [`OVERFLOW_LOG_EVERY`] with what happened
+/// since the last one (Windows and Linux renderers). Every overflow used to print its own line:
+/// a Windows renderer that decoded nothing (its D3D device gone while the display was off)
+/// wrote one per arriving frame — 2.6 million lines, 415 MB of app log, in one night
+/// (2026-11-14). The Linux renderer printed the same line per overflow.
+pub struct OverflowLog {
+	/// Line prefix (`pulsar-render(win)`, `pulsar-render`).
+	tag: &'static str,
+	/// Stale AUs dropped ahead of a queued keyframe since the last line.
+	skipped: u32,
+	/// Oldest AUs shed with no keyframe to skip to (each asks for an IDR) since the last line.
+	shed: u32,
+	last: Option<std::time::Instant>,
+}
+
+pub const OVERFLOW_LOG_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+
+impl OverflowLog {
+	pub fn new(tag: &'static str) -> OverflowLog {
+		OverflowLog { tag, skipped: 0, shed: 0, last: None }
+	}
+
+	/// Count one overflow — `dropped` AUs, `shed` = the oldest one went with no keyframe queued
+	/// — and return the line to print when one is due (the first at once).
+	pub fn note(&mut self, dropped: u32, shed: bool, now: std::time::Instant) -> Option<String> {
+		if shed {
+			self.shed += dropped;
+		} else {
+			self.skipped += dropped;
+		}
+		if self.last.is_some_and(|t| now.duration_since(t) < OVERFLOW_LOG_EVERY) {
+			return None;
+		}
+		self.last = Some(now);
+		let (skipped, shed) = (std::mem::take(&mut self.skipped), std::mem::take(&mut self.shed));
+		let mut parts = Vec::new();
+		if skipped > 0 {
+			parts.push(format!("dropped {skipped} stale AU(s) ahead of newest keyframe"));
+		}
+		if shed > 0 {
+			parts.push(format!("no keyframe queued; dropped the oldest AU {shed} time(s), keyframe requested"));
+		}
+		Some(format!("{}: AU backlog overflow — {}", self.tag, parts.join("; ")))
+	}
+}
+
+/// A log line that can repeat every frame (a present that stalls, a failing GPU call): the
+/// first one is printed, then at most one per `every`, carrying how many were held back.
+pub struct RateLog {
+	every: std::time::Duration,
+	last: Option<std::time::Instant>,
+	held: u32,
+}
+
+impl RateLog {
+	pub const fn new(every: std::time::Duration) -> RateLog {
+		RateLog { every, last: None, held: 0 }
+	}
+
+	/// One occurrence at `now`. `Some(n)` = print it now, `n` = occurrences held back since
+	/// the last printed one; `None` = stay quiet (counted).
+	pub fn hit(&mut self, now: std::time::Instant) -> Option<u32> {
+		if self.last.is_some_and(|t| now.duration_since(t) < self.every) {
+			self.held += 1;
+			return None;
+		}
+		self.last = Some(now);
+		Some(std::mem::take(&mut self.held))
+	}
+}
+
+/// ` (+N more since the last line)` for a [`RateLog`] count, empty for 0.
+pub fn held_suffix(n: u32) -> String {
+	if n == 0 {
+		String::new()
+	} else {
+		format!(" (+{n} more since the last line)")
+	}
+}
+
+/// Test hook `PULSAR_TEST_DEVICE_LOSS=<after_s>,<failed_attempts>` (both renderers): once,
+/// `<after_s>` seconds in, the renderer acts as if its GPU device / GL context was lost, and
+/// the first `<failed_attempts>` rebuilds fail like they do while the display is off.
+pub fn parse_device_loss_test(v: &str) -> Option<(std::time::Duration, u32)> {
+	let (after, fails) = v.split_once(',')?;
+	let after: f32 = after.trim().parse().ok()?;
+	if !after.is_finite() || after < 0.0 {
+		return None;
+	}
+	Some((std::time::Duration::from_secs_f32(after), fails.trim().parse().ok()?))
+}
+
+/// Pause between two attempts to rebuild a lost GPU device / GL context.
+pub const REBUILD_EVERY: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// A failing rebuild is logged at the first attempt, then every 120th (= once a minute at
+/// [`REBUILD_EVERY`]): a display that stays off can refuse it for hours.
+pub fn rebuild_fail_logged(attempt: u32) -> bool {
+	attempt == 1 || attempt % 120 == 0
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -307,5 +408,69 @@ mod tests {
 		keys[0] = true;
 		let mut q = queue(&keys);
 		assert_eq!(bound_backlog(&mut q, 32, 64), Backlog::ShedOldest);
+	}
+
+	#[test]
+	fn overflow_log_one_line_per_two_seconds_with_the_counts_since_the_last() {
+		let t0 = std::time::Instant::now();
+		let at = |ms: u64| t0 + std::time::Duration::from_millis(ms);
+		let mut log = OverflowLog::new("pulsar-render(win)");
+		// The first overflow is reported at once.
+		assert_eq!(
+			log.note(40, false, at(0)).as_deref(),
+			Some("pulsar-render(win): AU backlog overflow — dropped 40 stale AU(s) ahead of newest keyframe")
+		);
+		// A frame every 8 ms shed for two seconds: silent, then one line with the count.
+		let mut lines = Vec::new();
+		for i in 1..=250u64 {
+			lines.extend(log.note(1, true, at(i * 8)));
+		}
+		assert_eq!(lines.len(), 1, "{lines:?}");
+		assert!(lines[0].contains("dropped the oldest AU 250 time(s), keyframe requested"), "{lines:?}");
+		// Both kinds within one window share a line.
+		assert_eq!(log.note(63, false, at(2100)), None);
+		assert_eq!(log.note(1, true, at(2200)), None);
+		let line = log.note(1, true, at(4100)).unwrap();
+		assert!(line.contains("dropped 63 stale AU(s)") && line.contains("2 time(s)"), "{line}");
+	}
+
+	#[test]
+	fn overflow_log_uses_its_tag() {
+		let mut log = OverflowLog::new("pulsar-render");
+		let line = log.note(1, true, std::time::Instant::now()).unwrap();
+		assert!(line.starts_with("pulsar-render: AU backlog overflow — no keyframe"), "{line}");
+	}
+
+	#[test]
+	fn rate_log_prints_first_then_once_per_window_with_the_held_count() {
+		let t0 = std::time::Instant::now();
+		let at = |ms: u64| t0 + std::time::Duration::from_millis(ms);
+		let mut log = RateLog::new(std::time::Duration::from_secs(5));
+		assert_eq!(log.hit(at(0)), Some(0));
+		// A stall every frame for 5 s: quiet, counted.
+		for i in 1..300u64 {
+			assert_eq!(log.hit(at(i * 16)), None);
+		}
+		assert_eq!(log.hit(at(5000)), Some(299));
+		assert_eq!(log.hit(at(5001)), None);
+		assert_eq!(held_suffix(0), "");
+		assert_eq!(held_suffix(3), " (+3 more since the last line)");
+	}
+
+	#[test]
+	fn device_loss_test_hook_parses() {
+		use std::time::Duration;
+		assert_eq!(parse_device_loss_test("6,8"), Some((Duration::from_secs(6), 8)));
+		assert_eq!(parse_device_loss_test(" 1.5 , 0 "), Some((Duration::from_millis(1500), 0)));
+		assert_eq!(parse_device_loss_test("6"), None);
+		assert_eq!(parse_device_loss_test("x,1"), None);
+		assert_eq!(parse_device_loss_test("-1,1"), None);
+		assert_eq!(parse_device_loss_test("2,-1"), None);
+	}
+
+	#[test]
+	fn failing_rebuilds_log_once_a_minute() {
+		let logged: Vec<u32> = (1..=400).filter(|&n| rebuild_fail_logged(n)).collect();
+		assert_eq!(logged, vec![1, 120, 240, 360]);
 	}
 }

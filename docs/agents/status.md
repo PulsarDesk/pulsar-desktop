@@ -108,3 +108,13 @@ GNOME Mutter's DisplayConfig D-Bus; crash journal restored at the next start) an
 (no standard protocol). The client's display-scale change is watched on Linux (GTK
 scale-factor → live `uiscale` to the renderer) and macOS (CG reconfiguration callback). Details:
 [host-encode.md](host-encode.md#screen-adaptation--host-display-mode-per-platform-2026-11-14-local-branch-paritydisplay-mode).
+
+**Renderer GPU-loss recovery (2026-11-14):** Windows rebuilds a lost D3D device in place
+(screen off, driver reset); Linux rebuilds a lost GL context in place (GPU reset, NVIDIA
+suspend/resume purge; reset-notification EGL context + `glGetGraphicsResetStatus`, off by
+default on the Mali blob driver) and reopens the HW
+decoder. Both rate-limit AU-overflow / present-stall logs and take
+`PULSAR_TEST_DEVICE_LOSS`. **Linux path untested on Linux hardware** (WSL type-check + unit
+tests only). The macOS renderer (`src/mac/`) rebuilds its Metal device too (see the macOS
+renderer section of client-video.md).
+Details: [client-video.md](client-video.md) "GL context loss on the Linux renderer".
