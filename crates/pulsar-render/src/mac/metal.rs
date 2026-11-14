@@ -727,7 +727,7 @@ impl Gpu {
 								enc.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 3);
 							}
 							if let Some((prims, ppp)) = overlay {
-								self.paint_egui(&enc, prims, size, ppp);
+								self.paint_egui(&enc, prims, (tw as u32, th as u32), ppp);
 							}
 							enc.endEncoding();
 							fsr_done = true;
@@ -750,7 +750,7 @@ impl Gpu {
 				self.draw_video(&enc, y, c, yuv, &quad, viewport(0.0, 0.0, tw as f64, th as f64));
 			}
 			if let Some((prims, ppp)) = overlay {
-				self.paint_egui(&enc, prims, size, ppp);
+				self.paint_egui(&enc, prims, (tw as u32, th as u32), ppp);
 			}
 			enc.endEncoding();
 		}

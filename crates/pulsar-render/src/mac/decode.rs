@@ -386,6 +386,12 @@ impl Decoder {
 			let sb = Cf(sb as CFTypeRef);
 			let mut info = 0u32;
 			let st = VTDecompressionSessionDecodeFrame(self.session, sb.ptr() as CMSampleBufferRef, 0, std::ptr::null_mut(), &mut info);
+			// A synchronous decode has normally called back already; make sure the picture of THIS
+			// AU is out before returning (a decoder that still queues internally would add a
+			// frame of latency otherwise).
+			if st == 0 {
+				VTDecompressionSessionWaitForAsynchronousFrames(self.session);
+			}
 			let cb_err = self.shared.err.swap(0, Ordering::Relaxed);
 			let st = if st != 0 { st } else { cb_err };
 			if st == kVTInvalidSessionErr || st == kVTVideoDecoderMalfunctionErr {
