@@ -307,8 +307,9 @@ export const api = {
 	/** Switch the encode quality/perf profile live (the host restarts ffmpeg with it). */
 	setPlayQuality: (id: number, quality: 'latency' | 'quality') =>
 		invoke<void>('set_play_quality', { id, quality }),
-	/** Toggle Moonlight-style frame pacing on the Linux native renderer (client-local;
-	 * no host re-encode). No-op on Windows/macOS where there's no pulsar-render process. */
+	/** Toggle Moonlight-style frame pacing on the native renderer (pulsar-render on
+	 * Windows, Linux and macOS; client-local, no host re-encode). No-op when only the
+	 * mpv/ffplay fallback runs. */
 	setFramePacing: (id: number, on: boolean) => invoke<void>('set_frame_pacing', { id, on }),
 	/** Toggle the always-on mini stats HUD on the native renderer (persisted in ui). */
 	setStatsHud: (id: number, on: boolean) => invoke<void>('set_stats_hud', { id, on }),

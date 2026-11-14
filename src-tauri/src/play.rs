@@ -565,11 +565,9 @@ pub(crate) async fn start_remote_play(
 									}
 									// mpv missing/unrunnable used to be SILENTLY swallowed (the old
 									// `Err(_) => {}`), leaving the user on a black session with no idea why.
-									// Surface it now: a clear `tracing::error` AND a `host-stats` label line
-									// (the channel the session UI already renders as a status string â€” see
-									// play/hold.rs's `host-stats` emit) telling the user to install mpv
-									// (`brew install mpv`). The session still proceeds â€” the overlay below +
-									// the control channel come up; only the video is missing â€” so this is a
+									// Surface it now: a clear `tracing::error` AND a translated video error on
+									// `host-stats` (below). The session still proceeds — the overlay below +
+									// the control channel come up; only the video is missing — so this is a
 									// degraded-not-fatal notice, NOT a `play-ended` teardown.
 									None => {
 										// No mpv: fall back to the BUNDLED ffplay (software decode, its own
@@ -581,25 +579,25 @@ pub(crate) async fn start_remote_play(
 												tracing::warn!(
 													pid = c.id(),
 													port = vport,
-													"macOS: mpv unavailable â€” bundled ffplay renders the video (software decode)"
+													"macOS: mpv unavailable — bundled ffplay renders the video (software decode)"
 												);
 												native_child = Some(c);
 												video_port = vport;
 											}
 											None => {
-												// Neither player could be spawned. Say so on the `host-stats` label
-												// (the channel the session UI already renders as a status string)
-												// rather than leaving a silent black session; the overlay + control
-												// channel still come up, so this is degraded-not-fatal.
+												// pulsar-render, mpv and the bundled ffplay all failed. Say so as the
+												// session's video error ("!" on `host-stats`; "!@<key>" = an i18n key
+												// the UI translates, see media.svelte.ts) rather than leaving a
+												// silent black session; the overlay + control channel still come up,
+												// so this is degraded-not-fatal.
 												tracing::error!(
-													"macOS: neither mpv nor the bundled ffplay could be spawned â€” video unavailable (brew install mpv)"
+													"macOS: the built-in renderer (pulsar-render) failed to start and neither mpv nor the bundled ffplay could be spawned — video unavailable"
 												);
 												let _ = app.emit(
 													"host-stats",
 													crate::events::PlayStats {
 														id,
-														label: "Video yok â€” mpv kurulu deÄŸil (brew install mpv)"
-															.to_string(),
+														label: "!@session.rendererFailed".to_string(),
 													},
 												);
 											}

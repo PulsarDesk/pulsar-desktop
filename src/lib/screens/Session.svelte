@@ -341,8 +341,10 @@
 		return scope.dispose;
 	});
 
-	// In-app native video (Linux): the renderer is embedded in a pass-through container
-	// window the Rust side positions over THIS screen's rect — the video renders inside
+	// In-app native video: on Linux/Windows the renderer is embedded in a pass-through
+	// container/child window the Rust side positions over THIS screen's rect; on macOS
+	// pulsar-render owns a borderless panel that tracks this rect (viewrect in points,
+	// cross-process NSView embedding is impossible). Either way the video renders inside
 	// the session tab (chrome/tabs stay visible) instead of covering the window. Report
 	// the rect on layout/resize; the tab going inactive (display:none) yields a 0×0 rect
 	// → container unmaps. Cleanup reports 0×0 so an unmounted tab never leaves video up.
@@ -825,9 +827,10 @@
 		const scope = listenScope();
 		// The OS keyboard hook / evdev emits overlay-toggle whenever capture is active, with no
 		// knowledge of mode. The webview overlay only renders in game mode (`{#if mode === 'game'}`),
-		// so on Windows/macOS remote sessions (native=false) a toggle would just drop control with
-		// nothing shown. Only honor it in game mode, or when a native renderer (Linux) is up — there
-		// the overlay is drawn on the video and works in any mode. Payload-less global event:
+		// so in a remote session without a native renderer (native=false) a toggle would just drop
+		// control with nothing shown. Only honor it in game mode, or when a native renderer
+		// (pulsar-render on Windows/Linux/macOS) is up — there the overlay is drawn on the video
+		// and works in any mode. Payload-less global event:
 		// only the active tab toggles, never every mounted game/native tab at once.
 		scope.add(
 			onOverlayToggle((chordHeld) => {
