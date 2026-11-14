@@ -300,8 +300,8 @@ pub(crate) fn free_mode() -> bool {
 }
 
 /// Arm the capture for a session. Returns whether the OS capture (event tap) runs — `false`
-/// means the Accessibility permission is missing and nothing is captured (the app keeps its
-/// webview input path).
+/// means the Accessibility permission is missing or the tap could not be created (yet), and
+/// nothing is captured (the app keeps its webview input path).
 pub fn enable(new_sink: Arc<dyn Sink>, arm: Arm) -> bool {
 	let id = arm.id;
 	let same_session = LAST_PLAY.load(SeqCst) == id;

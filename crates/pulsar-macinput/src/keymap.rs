@@ -9,8 +9,23 @@ pub const KC_FN: u16 = 0x3F;
 /// release, so it is forwarded as a press + release.
 pub const KC_CAPSLOCK: u16 = 0x39;
 
-/// Evdev code of a macOS virtual key code; `None` for keys with no host equivalent (they
-/// stay local).
+/// `KBGetLayoutType` answer for an ISO keyboard (`kKeyboardISO`, the four-char code 'ISO ').
+pub const KB_LAYOUT_ISO: u32 = u32::from_be_bytes(*b"ISO ");
+
+/// On ISO keyboards macOS reports the key left of 1 as `kVK_ISO_Section` (0x0A) and the key
+/// right of Left Shift as `kVK_ANSI_Grave` (0x32) — swapped against their positions. Chromium
+/// and SDL undo it the same way (`KBGetLayoutType(LMGetKbdType()) == kKeyboardISO`), so the
+/// host gets the key at the right place. Other layouts are passed through.
+pub fn layout_fix(kc: u16, iso: bool) -> u16 {
+	match (iso, kc) {
+		(true, 0x0A) => 0x32,
+		(true, 0x32) => 0x0A,
+		_ => kc,
+	}
+}
+
+/// Evdev code of a macOS virtual key code (after [`layout_fix`]); `None` for keys with no
+/// host equivalent (they stay local: Fn, the volume keys).
 pub fn to_evdev(kc: u16) -> Option<u32> {
 	Some(match kc {
 		0x00 => 30,  // A
@@ -80,9 +95,6 @@ pub fn to_evdev(kc: u16) -> Option<u32> {
 		0x43 => 55,  // Keypad *
 		0x45 => 78,  // Keypad +
 		0x47 => 69,  // Keypad Clear (sits where Num Lock is)
-		0x48 => 115, // Volume Up
-		0x49 => 114, // Volume Down
-		0x4A => 113, // Mute
 		0x4B => 98,  // Keypad /
 		0x4C => 96,  // Keypad Enter
 		0x4E => 74,  // Keypad -
@@ -210,6 +222,29 @@ mod tests {
 					panic!("evdev {code} mapped from both {prev:#x} and {kc:#x}");
 				}
 			}
+		}
+	}
+
+	#[test]
+	fn iso_keyboards_swap_section_and_grave() {
+		// ISO: the key left of 1 (reported 0x0A) is KEY_GRAVE on the host, the key right of
+		// Left Shift (reported 0x32) is KEY_102ND.
+		assert_eq!(to_evdev(layout_fix(0x0A, true)), Some(41));
+		assert_eq!(to_evdev(layout_fix(0x32, true)), Some(86));
+		// ANSI / JIS: unchanged.
+		assert_eq!(layout_fix(0x0A, false), 0x0A);
+		assert_eq!(layout_fix(0x32, false), 0x32);
+		// Every other key is untouched on ISO too.
+		assert_eq!(layout_fix(0x00, true), 0x00);
+		assert_eq!(KB_LAYOUT_ISO, 0x4953_4F20);
+	}
+
+	#[test]
+	fn volume_keys_stay_local() {
+		// kVK_VolumeUp / kVK_VolumeDown / kVK_Mute: no host injector acts on them, so they
+		// keep controlling the Mac's own volume while engaged.
+		for kc in 0x48..=0x4A {
+			assert_eq!(to_evdev(kc), None);
 		}
 	}
 

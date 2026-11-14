@@ -96,7 +96,16 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, _sta
 		remote: super::SESSION_REMOTE.load(Ordering::SeqCst),
 		free_cursor: super::pointer_free(),
 	};
-	if !mi::enable(Arc::new(TauriSink { app: app.clone(), tx }), arm) {
+	if mi::enable(Arc::new(TauriSink { app: app.clone(), tx }), arm) {
+		return;
+	}
+	if mi::trusted() {
+		// Trusted but no tap (CGEventTapCreate failed — e.g. a stale grant on a rebuilt
+		// unsigned binary — or the tap is still starting): nothing engages through the tap,
+		// so the UI must keep the canvas path in charge.
+		tracing::warn!("macOS: Accessibility granted but the event tap is not running — webview input path");
+		let _ = app.emit("kbd-released", ());
+	} else {
 		permission_missing(&app);
 	}
 }
@@ -194,10 +203,10 @@ pub fn set_view_rect(app: &AppHandle, id: u64, x: i32, y: i32, w: i32, h: i32) {
 	);
 }
 
-/// The OS-level capture can run (Accessibility granted): the session UI then takes control
-/// through it instead of the webview canvas path.
+/// The OS-level capture runs (Accessibility granted and the event tap created): the session
+/// UI then takes control through it instead of the webview canvas path.
 pub fn os_capture_available() -> bool {
-	mi::trusted()
+	mi::tap_ready()
 }
 
 /// "Grant the permission": macOS's prompt (first time) and the Accessibility settings pane.

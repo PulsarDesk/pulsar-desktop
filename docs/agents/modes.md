@@ -140,8 +140,15 @@ pulsar-macinput`). Same surface and rules as the Windows hook (`imp.rs`):
   100 ms (window moves). Free cursor ("Serbest imlec"): no confine, leaving the video
   releases, hovering it engages, same rules as Windows. Buttons 0-2 are forwarded;
   back/forward are swallowed (no host injector knows them). Wheel: point deltas (trackpad)
-  or lines x 100 (notched wheel), browser-pixel units like every other client. A click on
-  another app's window releases and acts locally.
+  or lines x 100 (notched wheel), browser-pixel units like every other client. macOS's
+  "natural scrolling" setting is already applied to those deltas and is **kept on purpose**:
+  the remote content moves the way the Mac's own content does for this user (the webview
+  fallback forwards browser wheel deltas, which carry it too). A Windows/Linux client has no
+  such setting, so its deltas are the device's. A click on another app's window releases and
+  acts locally.
+- **Keys**: positional (`kVK_*` -> evdev). ISO keyboards (`KBGetLayoutType(LMGetKbdType())`,
+  read per arm): the § and ` key codes macOS swaps are swapped back, like Chromium/SDL do.
+  The volume keys (`kVK_VolumeUp/Down/Mute`) and Fn stay local.
 - **Video rect**: the renderer child's window (the one under the cursor, else the largest),
   narrowed by the renderer's `vidsink-vrect` fractions when it reports them. Without a
   renderer window of ours on screen: the session area of the Pulsar window
@@ -157,7 +164,12 @@ pulsar-macinput`). Same surface and rules as the Windows hook (`imp.rs`):
   (controllers) uses the same answer on macOS.
 - **Accessibility permission** (`AXIsProcessTrusted`): without it `CGEventTapCreate` fails, so
   `enable` arms nothing and the session keeps the webview canvas path exactly as before (OS
-  shortcuts stay local). The first arm per run calls `AXIsProcessTrustedWithOptions` (macOS's
+  shortcuts stay local). `kbd_os_capture` answers `tap_ready()` (trusted **and** the tap really
+  created), not trust alone: a stale grant on a rebuilt unsigned binary reports trusted while
+  the creation fails; `enable` then emits `kbd-released` and the canvas path stays in charge.
+  The tap thread is started once (IDLE -> STARTING -> RUNNING, set by the thread itself); a
+  start slower than the 3 s wait is waited for again on the next arm, never doubled, and a tap
+  that comes up late stays inert (`TAP_OK`) until the next arm. The first arm per run calls `AXIsProcessTrustedWithOptions` (macOS's
   own prompt) and shows a Pulsar toast (`toast.kbd-perm`, click -> System Settings -> Privacy &
   Security -> Accessibility). `kbd_os_capture` tells the UI which path owns control;
   `Session.svelte` asks again on window focus and hands control from the canvas to the tap

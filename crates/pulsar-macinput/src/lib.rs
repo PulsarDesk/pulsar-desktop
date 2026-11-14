@@ -80,6 +80,14 @@ pub fn trusted() -> bool {
 	os::trusted()
 }
 
+/// The event tap really runs (the permission is granted AND `CGEventTapCreate` succeeded),
+/// starting it if needed — what decides whether the session UI hands control to the OS
+/// capture. Trust alone is not enough: a stale TCC grant on a rebuilt unsigned binary reports
+/// trusted while the tap creation still fails, and the webview path must then stay in charge.
+pub fn tap_ready() -> bool {
+	os::trusted() && os::start_tap()
+}
+
 /// Ask for the Accessibility permission: macOS shows its own "Pulsar would like to control
 /// this computer" prompt (once per app; after that only System Settings can grant it).
 /// Returns whether it is already granted.

@@ -11,14 +11,24 @@ use crate::geom::{self, Rect};
 use crate::keymap;
 use crate::sys::*;
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicPtr, AtomicU64, Ordering::SeqCst};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicPtr, AtomicU64, AtomicU8, Ordering::SeqCst};
 use std::sync::Mutex;
 
 /// The tap's mach port (null until created). Re-enabled from the callback when macOS
 /// disables a tap (timeout / secure input) and toggled by `set_tap_enabled`.
 static TAP_PORT: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
-static TAP_RUNNING: AtomicBool = AtomicBool::new(false);
-static START_LOCK: Mutex<()> = Mutex::new(());
+
+/// Tap thread state. Only the tap thread moves STARTING -> RUNNING / IDLE, so a start that
+/// outlives `start_tap`'s wait is never followed by a second tap thread.
+const TAP_IDLE: u8 = 0;
+const TAP_STARTING: u8 = 1;
+const TAP_RUNNING: u8 = 2;
+static TAP_STATE: AtomicU8 = AtomicU8::new(TAP_IDLE);
+/// The start in flight reports here (taken back by the next `start_tap` after a timeout).
+static START_RX: Mutex<Option<std::sync::mpsc::Receiver<bool>>> = Mutex::new(None);
+
+/// The keyboard is ISO (`KBGetLayoutType`): § and ` are reported swapped (see `keymap`).
+static ISO_KBD: AtomicBool = AtomicBool::new(false);
 
 /// One on-screen window from the last poll, front to back.
 #[derive(Debug, Clone, Copy)]
@@ -107,25 +117,53 @@ pub fn open_accessibility_settings() {
 // ───────────────────────────── tap thread ─────────────────────────────
 
 /// Make sure the tap runs (created once, then kept for the app's lifetime and only
-/// enabled/disabled). Returns false without the Accessibility permission: macOS refuses to
-/// create an active tap then. A later call retries (the user may have granted it meanwhile).
+/// enabled/disabled). Returns false without the Accessibility permission (macOS refuses to
+/// create an active tap then) or while the tap is not up yet. A later call retries (the user
+/// may have granted the permission meanwhile) or, if a start is still in flight, waits for
+/// that one again instead of spawning a second tap thread.
 pub fn start_tap() -> bool {
-	let _g = START_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-	if TAP_RUNNING.load(SeqCst) {
-		return true;
+	refresh_layout();
+	let mut rx_slot = START_RX.lock().unwrap_or_else(|e| e.into_inner());
+	match TAP_STATE.load(SeqCst) {
+		TAP_RUNNING => return true,
+		TAP_STARTING => {}
+		_ => {
+			if !trusted() {
+				tracing::warn!("macOS input capture: Accessibility permission missing — no event tap");
+				return false;
+			}
+			let (tx, rx) = std::sync::mpsc::channel::<bool>();
+			TAP_STATE.store(TAP_STARTING, SeqCst);
+			if std::thread::Builder::new().name("macinput-tap".into()).spawn(move || run_tap(tx)).is_err() {
+				TAP_STATE.store(TAP_IDLE, SeqCst);
+				return false;
+			}
+			*rx_slot = Some(rx);
+		}
 	}
-	if !trusted() {
-		tracing::warn!("macOS input capture: Accessibility permission missing — no event tap");
-		return false;
+	// STARTING: wait for the tap thread's answer (CGEventTapCreate is quick; the bound only
+	// keeps a wedged first-run TCC check from hanging the arm).
+	let Some(rx) = rx_slot.take() else {
+		return TAP_STATE.load(SeqCst) == TAP_RUNNING;
+	};
+	match rx.recv_timeout(std::time::Duration::from_secs(3)) {
+		Ok(ok) => ok,
+		Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+			tracing::warn!("macOS input capture: event tap still starting after 3 s — webview input for now");
+			*rx_slot = Some(rx);
+			false
+		}
+		Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => TAP_STATE.load(SeqCst) == TAP_RUNNING,
 	}
-	let (tx, rx) = std::sync::mpsc::channel::<bool>();
-	let spawned = std::thread::Builder::new().name("macinput-tap".into()).spawn(move || run_tap(tx));
-	if spawned.is_err() {
-		return false;
+}
+
+/// Read the physical keyboard type (once per arm: a keyboard may be plugged in between).
+fn refresh_layout() {
+	// SAFETY: plain HIToolbox queries.
+	let iso = unsafe { KBGetLayoutType(LMGetKbdType() as i16) } == keymap::KB_LAYOUT_ISO;
+	if ISO_KBD.swap(iso, SeqCst) != iso {
+		tracing::info!(iso, "macOS input capture: keyboard layout type");
 	}
-	let ok = rx.recv_timeout(std::time::Duration::from_secs(3)).unwrap_or(false);
-	TAP_RUNNING.store(ok, SeqCst);
-	ok
 }
 
 fn event_mask() -> u64 {
@@ -167,6 +205,7 @@ fn run_tap(report: std::sync::mpsc::Sender<bool>) {
 		);
 		if port.is_null() {
 			tracing::warn!("CGEventTapCreate failed — no macOS input capture (Accessibility permission?)");
+			TAP_STATE.store(TAP_IDLE, SeqCst);
 			let _ = report.send(false);
 			return;
 		}
@@ -188,6 +227,10 @@ fn run_tap(report: std::sync::mpsc::Sender<bool>) {
 		}
 		CGEventTapEnable(port, engine::ENABLED.load(SeqCst));
 		tracing::info!("macOS input capture: event tap running");
+		// Set here, not by the waiter: a start that outlived `start_tap`'s wait still counts,
+		// and no second thread is ever spawned. The engine only uses it from the next arm on
+		// (`TAP_OK`), so a late tap never fights the webview path of the current one.
+		TAP_STATE.store(TAP_RUNNING, SeqCst);
 		let _ = report.send(true);
 		CFRunLoopRun();
 	}
@@ -210,7 +253,9 @@ unsafe extern "C" fn tap_cb(_proxy: CGEventTapProxy, ty: u32, ev: CGEventRef, _i
 		tracing::info!(timeout = ty == kCGEventTapDisabledByTimeout, "event tap was disabled by macOS — re-enabled");
 		return ev;
 	}
-	if ev.is_null() || !engine::ENABLED.load(SeqCst) {
+	// Inert unless this arm runs on the tap: a tap that came up after `start_tap` gave up
+	// waiting leaves the current arm on the webview path (`TAP_OK` false) until the next arm.
+	if ev.is_null() || !engine::ENABLED.load(SeqCst) || !engine::TAP_OK.load(SeqCst) {
 		return ev;
 	}
 	// Never act on events this process posted itself.
@@ -230,7 +275,7 @@ unsafe extern "C" fn tap_cb(_proxy: CGEventTapProxy, ty: u32, ev: CGEventRef, _i
 }
 
 unsafe fn key_event(ev: CGEventRef, down: bool) -> bool {
-	let kc = CGEventGetIntegerValueField(ev, kCGKeyboardEventKeycode) as u16;
+	let kc = keymap::layout_fix(CGEventGetIntegerValueField(ev, kCGKeyboardEventKeycode) as u16, ISO_KBD.load(SeqCst));
 	let Some(code) = keymap::to_evdev(kc) else {
 		return false; // no host equivalent: stays local
 	};
@@ -316,7 +361,9 @@ unsafe fn mouse_event(ty: u32, ev: CGEventRef) -> CGEventRef {
 		kCGEventScrollWheel => {
 			// Browser wheel pixels (+y = down, +x = right), what every host injector takes.
 			// Quartz axis 1 is vertical, positive = towards the top; axis 2 horizontal,
-			// positive = towards the left. Natural scrolling is already in the values.
+			// positive = towards the left. The user's "natural scrolling" choice is already in
+			// the values and kept on purpose: the remote content moves the way this Mac's own
+			// content does (the webview fallback forwards it the same way). See modes.md.
 			let (dx, dy) = if CGEventGetIntegerValueField(ev, kCGScrollWheelEventIsContinuous) != 0 {
 				(
 					-CGEventGetDoubleValueField(ev, kCGScrollWheelEventPointDeltaAxis2),
@@ -356,7 +403,7 @@ unsafe fn mouse_event(ty: u32, ev: CGEventRef) -> CGEventRef {
 /// 100 ms, on the tap thread while armed: measure the video rect, follow the frontmost app,
 /// keep the cursor where the mode wants it.
 unsafe extern "C" fn tick_cb(_timer: CFRunLoopTimerRef, _info: *mut c_void) {
-	if !engine::ENABLED.load(SeqCst) {
+	if !engine::ENABLED.load(SeqCst) || !engine::TAP_OK.load(SeqCst) {
 		return;
 	}
 	let pool = objc_autoreleasePoolPush();

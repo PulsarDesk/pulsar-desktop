@@ -177,6 +177,13 @@ extern "C" {
 	pub fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> u8;
 }
 
+// HIToolbox (Carbon umbrella): the physical keyboard type, for the ISO key swap.
+#[link(name = "Carbon", kind = "framework")]
+extern "C" {
+	pub fn LMGetKbdType() -> u8;
+	pub fn KBGetLayoutType(keyboard_type: i16) -> u32;
+}
+
 // NSWorkspace / NSWindow live in AppKit; the class lookups below need it linked (the Tauri
 // app links it anyway).
 #[link(name = "AppKit", kind = "framework")]
