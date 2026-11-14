@@ -119,6 +119,16 @@ mod imp {
 		pub(crate) fn pinch(&mut self, phase: u8, scale: f64) {
 			self.with(|s| s.pinch(phase, scale), |d| d.pinch(phase, scale));
 		}
+		/// Pen / touch go straight to the in-process injector (synthetic pointer devices): the
+		/// SYSTEM helper's protocol has no pen / touch requests, so pen and touch do not reach
+		/// UAC / lock-screen windows (UIPI blocks this High-integrity process there); the
+		/// mouse and keyboard still do.
+		pub(crate) fn pen(&mut self, s: pulsar_core::input::pen_touch::PenState) {
+			self.desk.pen(s);
+		}
+		pub(crate) fn touch(&mut self, f: pulsar_core::input::pen_touch::TouchFrame) {
+			self.desk.touch(f);
+		}
 		pub(crate) fn flush_held(&mut self) {
 			if let Some(s) = self.sys.as_mut() {
 				let _ = s.flush_held();

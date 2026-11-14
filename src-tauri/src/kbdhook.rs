@@ -217,6 +217,15 @@ pub fn set_host_pinch(on: bool) {
 }
 #[cfg(not(windows))]
 pub fn set_host_pinch(_on: bool) {}
+/// Whether the connected host injects real pen / touch (`FEAT_PEN` / `FEAT_TOUCH`): the
+/// Windows mouse hook then leaves the mouse synthesized from pen / touch to the renderer's
+/// WM_POINTER forwarding. Elsewhere the webview's PointerEvents carry pen / touch.
+#[cfg(windows)]
+pub fn set_host_pen_touch(pen: bool, touch: bool) {
+	imp::set_host_pen_touch(pen, touch)
+}
+#[cfg(not(windows))]
+pub fn set_host_pen_touch(_pen: bool, _touch: bool) {}
 #[cfg(windows)]
 pub fn is_engaged() -> bool {
 	imp::is_engaged()

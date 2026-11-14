@@ -10,6 +10,8 @@ vi.mock('#lib/api.js', () => {
 			inputKey: vi.fn(ok),
 			inputChar: vi.fn(ok),
 			inputScroll: vi.fn(ok),
+			inputPen: vi.fn(ok),
+			inputTouch: vi.fn(ok),
 			kbdCaptureStart: vi.fn(ok),
 			kbdCaptureStop: vi.fn(ok),
 			kbdEngage: vi.fn(ok)
@@ -18,6 +20,7 @@ vi.mock('#lib/api.js', () => {
 });
 
 import { SessionInput } from './input.svelte.js';
+import { api } from '#lib/api.js';
 
 // Free cursor ("Serbest imleç") on the canvas path (Linux / macOS): hovering the video takes
 // control, leaving it hands control back, an explicit release waits for a leave.
@@ -104,5 +107,82 @@ describe('SessionInput free cursor (canvas path)', () => {
 		unfocused.input.onEnter(ev());
 		expect(unfocused.input.controlling).toBe(false);
 		unfocused.stop();
+	});
+});
+
+const pt = (pointerType: string, o: Partial<PointerEvent> = {}) =>
+	({ clientX: 50, clientY: 25, buttons: 0, button: 0, pointerId: 7, pressure: 0, tiltX: 0, tiltY: 0, twist: 0, pointerType, preventDefault() {}, ...o }) as unknown as PointerEvent;
+
+describe('SessionInput pen and touch', () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+		vi.spyOn(document, 'hasFocus').mockReturnValue(true);
+	});
+
+	function controlling() {
+		const m = make({ free: false });
+		m.input.onDown(pt('mouse')); // the engaging click (swallowed)
+		m.input.onUp(pt('mouse'));
+		vi.clearAllMocks();
+		return m;
+	}
+
+	it('a pen stroke goes out as pen state, never as mouse buttons', () => {
+		const { input, stop } = controlling();
+		input.onDown(pt('pen', { buttons: 1, pressure: 0.8, tiltX: 30 }));
+		expect(api.inputPen).toHaveBeenLastCalledWith(1, {
+			x: 0.5,
+			y: 0.25,
+			pressure: 0.8,
+			tiltX: 30,
+			tiltY: 0,
+			twist: 0,
+			inRange: true,
+			contact: true,
+			eraser: false,
+			barrel: false
+		});
+		input.onUp(pt('pen'));
+		expect(vi.mocked(api.inputPen).mock.calls.at(-1)![1]).toMatchObject({ inRange: true, contact: false, pressure: 0 });
+		input.clearMove(pt('pen'));
+		expect(vi.mocked(api.inputPen).mock.calls.at(-1)![1]).toMatchObject({ inRange: false });
+		expect(api.inputButton).not.toHaveBeenCalled();
+		expect(input.controlling).toBe(true);
+		stop();
+	});
+
+	it('the eraser button and the barrel button are reported', () => {
+		const { input, stop } = controlling();
+		input.onDown(pt('pen', { buttons: 32, button: 5, pressure: 0.3 }));
+		expect(vi.mocked(api.inputPen).mock.calls.at(-1)![1]).toMatchObject({ eraser: true, contact: true });
+		input.onDown(pt('pen', { buttons: 3, pressure: 0.3 }));
+		expect(vi.mocked(api.inputPen).mock.calls.at(-1)![1]).toMatchObject({ barrel: true, eraser: false });
+		stop();
+	});
+
+	it('fingers go out as one frame; a lift sends the rest at once', () => {
+		const { input, stop } = controlling();
+		input.onDown(pt('touch', { pointerId: 1 }));
+		input.onDown(pt('touch', { pointerId: 2, clientX: 100 }));
+		expect(api.inputTouch).toHaveBeenLastCalledWith(1, [
+			{ id: 1, x: 0.5, y: 0.25, pressure: 0 },
+			{ id: 2, x: 1, y: 0.25, pressure: 0 }
+		]);
+		input.onUp(pt('touch', { pointerId: 1 }));
+		expect(api.inputTouch).toHaveBeenLastCalledWith(1, [{ id: 2, x: 1, y: 0.25, pressure: 0 }]);
+		input.onCancel(pt('touch', { pointerId: 2 }));
+		expect(api.inputTouch).toHaveBeenLastCalledWith(1, []);
+		expect(api.inputButton).not.toHaveBeenCalled();
+		stop();
+	});
+
+	it('releasing control lifts the pen and every finger on the host', () => {
+		const { input, stop } = controlling();
+		input.onDown(pt('pen', { buttons: 1, pressure: 0.5 }));
+		input.onDown(pt('touch', { pointerId: 9 }));
+		input.stopControl();
+		expect(vi.mocked(api.inputPen).mock.calls.at(-1)![1]).toMatchObject({ inRange: false, contact: false });
+		expect(api.inputTouch).toHaveBeenLastCalledWith(1, []);
+		stop();
 	});
 });

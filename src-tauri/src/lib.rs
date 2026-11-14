@@ -115,8 +115,8 @@ use files_window::open_files_window;
 use fs_browse::local_ls;
 use host::go_online;
 use io_cmds::{
-	chat_log, confine_pointer, host_send_chat, input_button, input_char, input_key, input_pointer,
-	input_scroll, kbd_capture_start, kbd_capture_stop, kbd_engage, kbd_web_key, list_input_devices, mic_start,
+	chat_log, confine_pointer, host_send_chat, input_button, input_char, input_key, input_pen,
+	input_pointer, input_scroll, input_touch, kbd_capture_start, kbd_capture_stop, kbd_engage, kbd_web_key, list_input_devices, mic_start,
 	mic_stop, native_view_rect, read_clipboard_text, send_chat, send_clipboard, send_file,
 	send_file_path, set_active_session, set_controller_lock, set_kbm_lock, set_pane_count,
 	set_window_fullscreen, write_clipboard_text,
@@ -880,6 +880,8 @@ pub fn run() {
 			input_scroll,
 			input_key,
 			input_char,
+			input_pen,
+			input_touch,
 			confine_pointer,
 			kbd_capture_start,
 			kbd_capture_stop,

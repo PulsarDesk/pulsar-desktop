@@ -54,6 +54,11 @@ pub(crate) fn held_back(sid: u64, ev: &InputEvent, region: Option<Region>) {
 	}
 	match *ev {
 		InputEvent::PointerMotion { x, y } => (gh.x, gh.y) = (x, y),
+		InputEvent::Pen(p) if p.in_range => (gh.x, gh.y) = (p.x as f64, p.y as f64),
+		InputEvent::Touch(f) if !f.is_empty() => {
+			let t = f.points()[0];
+			(gh.x, gh.y) = (t.x as f64, t.y as f64)
+		}
 		InputEvent::PointerRelative { dx, dy } => {
 			let (w, h) = *SCREEN_PX.lock().unwrap();
 			gh.x += dx / w.max(1.0);

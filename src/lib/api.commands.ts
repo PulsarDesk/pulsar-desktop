@@ -3,7 +3,7 @@
 
 import type { AutoConnectTarget, Config, ConnInfo, ControllerInfo, PulsarToast } from './types';
 import type { FsEntry, LocalCaps } from './api.types';
-import type { GameInfo, LanDevice, PlayInfo, RemoteSources, ScannedApp, WindowInfo } from './api.types';
+import type { GameInfo, LanDevice, PenSample, PlayInfo, RemoteSources, ScannedApp, TouchSample, WindowInfo } from './api.types';
 import { invoke } from './api.invoke';
 import type { Ds5Settings } from './settings.svelte';
 
@@ -401,6 +401,11 @@ export const api = {
 	 * printable keys with no shortcut modifier so non-US layouts + AltGr symbols land
 	 * correctly on the host regardless of ITS active layout. */
 	inputChar: (id: number, ch: string) => invoke<void>('input_char', { id, ch }),
+	/** Control: the pen's full state (sent on every change; the host lifts it after ~1 s
+	 * without one, the Rust side keeps it alive while it hovers / touches). */
+	inputPen: (id: number, pen: PenSample) => invoke<void>('input_pen', { id, pen }),
+	/** Control: every finger on the video (empty = all lifted), positions 0..1. */
+	inputTouch: (id: number, points: TouchSample[]) => invoke<void>('input_touch', { id, points }),
 	/** Control (Windows): arm the low-level keyboard hook so OS-reserved keys
 	 * (Win, Alt+Tab, Ctrl+Esc, media) go to the remote and are suppressed locally.
 	 * No-op on non-Windows. */

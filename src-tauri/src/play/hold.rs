@@ -556,6 +556,10 @@ pub(super) async fn hold_session(
 	// The adaptive cap for a DIRECT path (the user's configured bitrate, else the auto cap):
 	// a relayed session that upgrades to direct mid-stream drops the relay's cap for this.
 	direct_cap_kbps: u32,
+	// The host injects real pen / touch (`FEAT_PEN` / `FEAT_TOUCH`); otherwise both go out as
+	// mouse events (pulsar-core `pen_touch::client`).
+	host_pen: bool,
+	host_touch: bool,
 ) {
 	// A relayed session keeps punching in the background (core `punch_in_background`) and may
 	// upgrade to a direct path mid-stream; the adaptive rate then starts over on it.
@@ -569,6 +573,15 @@ pub(super) async fn hold_session(
 	tokio::pin!(ping);
 	let mut repair = tokio::time::interval(std::time::Duration::from_millis(REPAIR_SWEEP_MS));
 	repair.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+	// Pen / touch: the gate (feature check + mouse fallback) and its timers — the keep-alive
+	// re-send while a pen hovers / a finger rests, the fallback's press-and-hold.
+	let mut pen_touch = pulsar_core::input::pen_touch::client::ClientPenTouch::new(
+		host_pen,
+		host_touch,
+		std::time::Instant::now(),
+	);
+	let mut pen_tick = tokio::time::interval(std::time::Duration::from_millis(50));
+	pen_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 	// ---- Media-over-session demux state (single-socket transport) ----
 	// Media frames arrive INSIDE this session ([tag][rtp…]); forward each datagram to
 	// the local consumer: the renderer's RTP port (video) / the viewer's audio port.
@@ -840,9 +853,25 @@ pub(super) async fn hold_session(
 		let win_deadline = pending_windows.as_ref().map(|(_, d)| *d);
 		tokio::select! {
 			ev = input_rx.recv() => match ev {
-				Some(ev) => if send_input(&mut sess, &ev).await.is_err() { break },
+				Some(ev) => {
+					let mut dead = false;
+					for ev in pen_touch.on_event(std::time::Instant::now(), ev) {
+						if send_input(&mut sess, &ev).await.is_err() {
+							dead = true;
+							break;
+						}
+					}
+					if dead {
+						break;
+					}
+				}
 				None => break,
 			},
+			_ = pen_tick.tick() => {
+				for ev in pen_touch.tick(std::time::Instant::now()) {
+					let _ = send_input(&mut sess, &ev).await;
+				}
+			}
 			d = data_rx.recv() => match d {
 				// A side-channel send failure must NOT kill the session: an oversized
 				// payload (e.g. an avatar past the datagram budget → EMSGSIZE) is a

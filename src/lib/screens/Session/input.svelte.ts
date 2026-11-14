@@ -9,6 +9,7 @@
 
 import { api } from '#lib/api.js';
 import { evdevCode } from '#lib/keymap.js';
+import type { PenSample, TouchSample } from '#lib/api.types.js';
 
 // Confine the OS cursor to the session's video area (Linux; the app window elsewhere) while
 // controlling (best-effort; no-op where unsupported). Rust command, NOT
@@ -93,6 +94,14 @@ export class SessionInput {
 	// quiet (it would flash on every pass over the video).
 	quietHint = $state(false);
 	#hoverEngaged = false;
+	// Pen / touch (PointerEvent pointerType 'pen' / 'touch'): forwarded as their own state
+	// messages, not as the mouse — the Rust side turns them into the mouse for a host that
+	// does not inject pen / touch. Moves are batched into the rAF pump like the pointer;
+	// touch-down / lift and pen contact edges go out at once.
+	#pen: PenSample | null = null;
+	#penDirty = false;
+	#touches = new Map<number, TouchSample>();
+	#touchDirty = false;
 
 	constructor(inputs: Inputs) {
 		this.#in = inputs;
@@ -107,6 +116,14 @@ export class SessionInput {
 					this.#moveDirty = false;
 					api.inputPointer(playId, this.#nx, this.#ny).catch(() => {});
 				}
+				if (this.#penDirty && this.#pen) {
+					this.#penDirty = false;
+					api.inputPen(playId, this.#pen).catch(() => {});
+				}
+				if (this.#touchDirty) {
+					this.#touchDirty = false;
+					api.inputTouch(playId, [...this.#touches.values()]).catch(() => {});
+				}
 				raf = requestAnimationFrame(pump);
 			};
 			let raf = requestAnimationFrame(pump);
@@ -115,6 +132,7 @@ export class SessionInput {
 			// Focus stolen (Start menu opened by Win, Alt+Tab, etc.) → the webview won't get
 			// the key-ups, so release everything held on the host to avoid stuck keys.
 			const onBlur = () => {
+				this.#releasePenTouch();
 				this.#releaseButtons();
 				this.#releaseHeldKeys();
 				// Don't keep the OS cursor confined while another window has focus.
@@ -144,8 +162,14 @@ export class SessionInput {
 	}
 
 	#norm(e: PointerEvent) {
+		const p = this.#videoXY(e);
+		if (!p) return;
+		[this.#nx, this.#ny] = p;
+	}
+	/** The event's position as 0..1 over the video (letterbox-aware, see #norm's notes). */
+	#videoXY(e: PointerEvent): [number, number] | null {
 		const r = this.#in.canvas().getBoundingClientRect();
-		if (r.width <= 0 || r.height <= 0) return;
+		if (r.width <= 0 || r.height <= 0) return null;
 		let x = (e.clientX - r.left) / r.width;
 		let y = (e.clientY - r.top) / r.height;
 		// FIT (default): the video is aspect-fit (letterboxed) inside the canvas, so the video
@@ -172,8 +196,86 @@ export class SessionInput {
 				y = (e.clientY - r.top - oy) / vh;
 			}
 		}
-		this.#nx = Math.min(1, Math.max(0, x));
-		this.#ny = Math.min(1, Math.max(0, y));
+		return [Math.min(1, Math.max(0, x)), Math.min(1, Math.max(0, y))];
+	}
+	/** Pen state from a PointerEvent (buttons: 1 = tip, 2 = barrel, 32 = eraser). */
+	#penSample(e: PointerEvent, inRange: boolean): PenSample | null {
+		const p = this.#videoXY(e);
+		if (!p) return null;
+		const eraser = (e.buttons & 32) !== 0 || e.button === 5;
+		const contact = inRange && (e.buttons & (1 | 32)) !== 0;
+		return {
+			x: p[0],
+			y: p[1],
+			// Devices without pressure report 0.5 while touching, 0 while hovering.
+			pressure: contact ? e.pressure || 0.5 : 0,
+			tiltX: e.tiltX || 0,
+			tiltY: e.tiltY || 0,
+			twist: e.twist || 0,
+			inRange,
+			contact,
+			eraser,
+			barrel: (e.buttons & 2) !== 0
+		};
+	}
+	/** Forward a pen sample: edges (contact / range / buttons) now, moves on the next frame. */
+	#sendPen(next: PenSample) {
+		const prev = this.#pen;
+		this.#pen = next.inRange ? next : null;
+		const edge =
+			!prev ||
+			!next.inRange ||
+			prev.contact !== next.contact ||
+			prev.barrel !== next.barrel ||
+			prev.eraser !== next.eraser;
+		if (edge) {
+			this.#penDirty = false;
+			api.inputPen(this.#in.playId(), next).catch(() => {});
+		} else {
+			this.#penDirty = true;
+		}
+	}
+	#sendTouches() {
+		this.#touchDirty = false;
+		api.inputTouch(this.#in.playId(), [...this.#touches.values()]).catch(() => {});
+	}
+	/** Lift the pen and every finger on the host (blur, release, end of control). */
+	#releasePenTouch() {
+		const playId = this.#in.playId();
+		if (this.#pen) {
+			const out = { ...this.#pen, inRange: false, contact: false, pressure: 0 };
+			this.#pen = null;
+			this.#penDirty = false;
+			if (playId >= 0) api.inputPen(playId, out).catch(() => {});
+		}
+		if (this.#touches.size) {
+			this.#touches.clear();
+			this.#touchDirty = false;
+			if (playId >= 0) api.inputTouch(playId, []).catch(() => {});
+		}
+	}
+	/** A pen / touch event while controlling: forwarded as pen / touch, never as the mouse. */
+	#penTouch(e: PointerEvent, kind: 'down' | 'move' | 'up' | 'leave'): boolean {
+		if (e.pointerType === 'pen') {
+			const s = this.#penSample(e, kind !== 'leave');
+			if (s) this.#sendPen(s);
+			return true;
+		}
+		if (e.pointerType === 'touch') {
+			if (kind === 'down' || kind === 'move') {
+				const p = this.#videoXY(e);
+				if (!p) return true;
+				const known = this.#touches.has(e.pointerId);
+				if (kind === 'move' && !known) return true; // a finger we never saw land
+				this.#touches.set(e.pointerId, { id: e.pointerId >>> 0, x: p[0], y: p[1], pressure: e.pressure || 0 });
+				if (known) this.#touchDirty = true;
+				else this.#sendTouches();
+			} else if (this.#touches.delete(e.pointerId)) {
+				this.#sendTouches();
+			}
+			return true;
+		}
+		return false;
 	}
 	#releaseButtons() {
 		const playId = this.#in.playId();
@@ -214,6 +316,7 @@ export class SessionInput {
 	};
 	stopControl = () => {
 		if (this.controlling) {
+			this.#releasePenTouch();
 			this.controlling = false;
 			api.kbdCaptureStop().catch(() => {});
 			this.#releaseButtons();
@@ -228,6 +331,7 @@ export class SessionInput {
 	detach = () => {
 		this.#hoverArmed = false; // an explicit release (combo): no hover re-grab
 		if (this.controlling) {
+			this.#releasePenTouch();
 			this.controlling = false;
 			this.#releaseButtons();
 			this.#releaseHeldKeys();
@@ -253,6 +357,7 @@ export class SessionInput {
 			this.#tryHover(e);
 			return;
 		}
+		if (this.#penTouch(e, 'move')) return;
 		this.#norm(e);
 		this.#moveDirty = true;
 	};
@@ -260,6 +365,8 @@ export class SessionInput {
 	// video hands control back (a drag keeps it — the pointer is captured until the button is
 	// up, and the leave then arrives with no button held).
 	clearMove = (e?: PointerEvent) => {
+		// A pen leaving the video leaves range on the host too; a finger sliding off lifts.
+		if (e && this.controlling && this.#penTouch(e, 'leave')) return;
 		this.#moveDirty = false;
 		if (!this.#in.pointerFree()) return;
 		this.#hoverArmed = true;
@@ -283,6 +390,15 @@ export class SessionInput {
 			return; // the focusing click's press/release isn't forwarded
 		}
 		e.preventDefault();
+		if (this.#penTouch(e, 'down')) {
+			// Keep the stroke's events when it leaves the video (touch is captured implicitly).
+			try {
+				this.#in.canvas().setPointerCapture(e.pointerId);
+			} catch {
+				/* no capture support */
+			}
+			return;
+		}
 		// Free cursor: keep a drag's events (and the remote's button) until release even if it
 		// leaves the video; pointerleave then comes after the up.
 		if (this.#in.pointerFree()) {
@@ -303,7 +419,12 @@ export class SessionInput {
 		}
 		if (!this.controlling) return;
 		e.preventDefault();
+		if (this.#penTouch(e, 'up')) return;
 		api.inputButton(this.#in.playId(), this.#hostButton(e.button), false).catch(() => {});
+	};
+	// The browser took the pointer over (a system gesture, palm rejection): lift it.
+	onCancel = (e: PointerEvent) => {
+		if (this.controlling) this.#penTouch(e, 'leave');
 	};
 	onWheel = (e: WheelEvent) => {
 		if (!this.controlling) return;
