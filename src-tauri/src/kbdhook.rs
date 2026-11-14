@@ -1,4 +1,6 @@
-//! Windows WH_KEYBOARD_LL keyboard hook for the Pulsar *client*.
+//! OS-level keyboard + mouse capture for the Pulsar *client*: Windows WH_KEYBOARD_LL /
+//! Interception (`imp.rs`), Linux evdev grab (`linux.rs`), macOS CGEventTap (`mac.rs`, via the
+//! `pulsar-macinput` crate). The Windows notes follow.
 //!
 //! While the user is controlling a remote session, this captures EVERY key
 //! (including OS-reserved ones the webview never sees — Win, Alt+Tab, Ctrl+Esc,
@@ -42,6 +44,8 @@ pub fn set_pointer_free(on: bool) {
 	if was != on {
 		#[cfg(windows)]
 		imp::pointer_free_changed();
+		#[cfg(target_os = "macos")]
+		mac::pointer_free_changed(on);
 	}
 }
 
@@ -66,7 +70,7 @@ pub fn host_cursor() -> bool {
 }
 
 /// The free-cursor handover applies to the armed session (setting on + remote mode).
-#[allow(dead_code)] // only the Windows capture reads it
+#[allow(dead_code)] // only the Windows capture reads it (macOS reads the parts at enable)
 pub(crate) fn free_pointer_session() -> bool {
 	pointer_free() && SESSION_REMOTE.load(std::sync::atomic::Ordering::SeqCst)
 }
@@ -78,7 +82,11 @@ pub(crate) fn free_pointer_session() -> bool {
 pub fn hover_edge() -> bool {
 	imp::hover_edge()
 }
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub fn hover_edge() -> bool {
+	mac::hover_edge()
+}
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn hover_edge() -> bool {
 	false
 }
@@ -101,8 +109,8 @@ pub(crate) fn scale_relative(dx: f64, dy: f64) -> (f64, f64) {
 	})
 }
 
-// macOS (and any non-Windows, non-Linux target): no client-side capture yet.
-#[cfg(not(any(windows, target_os = "linux")))]
+// Any other target: no client-side capture.
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn enable(
 	_app: AppHandle,
 	_tx: tokio::sync::mpsc::Sender<InputEvent>,
@@ -111,12 +119,11 @@ pub fn enable(
 	_start_suspended: bool,
 ) {
 }
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn disable() {}
-// No grab to release on these targets (the webview floats over the live video).
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn overlay_suspend(_suspend: bool) {}
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn set_focused(_focused: bool) {}
 
 #[cfg(any(windows, test))]
@@ -125,6 +132,14 @@ mod confine;
 mod imp;
 #[cfg(windows)]
 pub use imp::{disable, enable, overlay_suspend, set_focused};
+
+#[cfg(target_os = "macos")]
+mod mac;
+#[cfg(target_os = "macos")]
+pub use mac::{
+	app_focused, arm_kiosk as arm_kiosk_engage, disable, enable, is_engaged, os_capture_available,
+	overlay_suspend, request_permission, set_focused, set_view_rect,
+};
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -149,7 +164,11 @@ pub fn engage(app: &AppHandle) {
 pub fn engage_auto(app: &AppHandle) {
 	imp::engage_auto(app, "connect")
 }
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub fn engage_auto(app: &AppHandle) {
+	mac::engage_auto(app)
+}
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn engage_auto(app: &AppHandle) {
 	engage(app)
 }
@@ -171,7 +190,11 @@ pub fn arm_kiosk_engage() {
 pub fn set_stream_stalled(app: &AppHandle, stalled: bool) {
 	imp::set_stream_stalled(app, stalled)
 }
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub fn set_stream_stalled(_app: &AppHandle, stalled: bool) {
+	mac::set_stream_stalled(stalled)
+}
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn set_stream_stalled(_app: &AppHandle, _stalled: bool) {}
 /// A key edge seen by the webview (fallback for when WH_KEYBOARD_LL isn't called; see
 /// imp::web_key). evdev code space, same as the hook.
@@ -179,7 +202,11 @@ pub fn set_stream_stalled(_app: &AppHandle, _stalled: bool) {}
 pub fn web_key(evdev: u32, down: bool) {
 	imp::web_key(evdev, down)
 }
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub fn web_key(evdev: u32, down: bool) {
+	mac::web_key(evdev, down)
+}
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn web_key(_evdev: u32, _down: bool) {}
 /// A key the native renderer's focused child window received (Windows VK, left/right
 /// resolved): same fallback role as `web_key`.
@@ -194,21 +221,33 @@ pub fn render_key(_vk: u16, _down: bool, _from_hook: bool) {}
 pub fn set_video_frac(x0: f32, y0: f32, x1: f32, y1: f32) {
 	imp::set_video_frac(x0, y0, x1, y1)
 }
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub fn set_video_frac(x0: f32, y0: f32, x1: f32, y1: f32) {
+	mac::set_video_frac(x0, y0, x1, y1)
+}
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn set_video_frac(_x0: f32, _y0: f32, _x1: f32, _y1: f32) {}
 /// Where the renderer's overlay-open button sits (client fractions; None = hidden).
 #[cfg(windows)]
 pub fn set_ovbtn_frac(f: Option<(f32, f32, f32, f32)>) {
 	imp::set_ovbtn_frac(f)
 }
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub fn set_ovbtn_frac(f: Option<(f32, f32, f32, f32)>) {
+	mac::set_ovbtn_frac(f)
+}
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn set_ovbtn_frac(_f: Option<(f32, f32, f32, f32)>) {}
 /// The host hid its cursor (a game grabbed the mouse): send relative motion meanwhile.
 #[cfg(windows)]
 pub fn set_pointer_lock(id: u64, on: bool) {
 	imp::set_pointer_lock(id, on)
 }
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub fn set_pointer_lock(id: u64, on: bool) {
+	mac::set_pointer_lock(id, on)
+}
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn set_pointer_lock(_id: u64, _on: bool) {}
 /// Whether the connected host injects real pinch gestures (`FEAT_PINCH`).
 #[cfg(windows)]
@@ -221,7 +260,7 @@ pub fn set_host_pinch(_on: bool) {}
 pub fn is_engaged() -> bool {
 	imp::is_engaged()
 }
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn is_engaged() -> bool {
 	false
 }
@@ -241,15 +280,50 @@ pub fn captured_input_devices() -> Vec<String> {
 	Vec::new()
 }
 
-// macOS: no client-side capture — all lifecycle hooks are no-ops.
-#[cfg(not(any(windows, target_os = "linux")))]
+// macOS: the CGEventTap capture (kbdhook/mac.rs). A click on the video engages from the tap
+// itself; the webview / renderer paths below land on the same engage.
+#[cfg(target_os = "macos")]
+pub fn engage(app: &AppHandle) {
+	mac::engage(app)
+}
+#[cfg(target_os = "macos")]
+pub fn engage_render(app: &AppHandle) {
+	mac::engage(app)
+}
+#[cfg(target_os = "macos")]
+pub fn release(app: &AppHandle) {
+	mac::release(app)
+}
+
+// Any other target: no client-side capture — all lifecycle hooks are no-ops.
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn engage(_app: &AppHandle) {}
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn engage_render(_app: &AppHandle) {}
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn release(_app: &AppHandle) {}
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn arm_kiosk_engage() {}
+
+/// The OS-level capture can run here: Windows always (LL hooks / Interception), macOS once the
+/// Accessibility permission is granted. Linux's evdev grab is engaged only in game mode by the
+/// UI, so it reports false (the remote-mode canvas path stays as it is there).
+#[cfg(windows)]
+pub fn os_capture_available() -> bool {
+	true
+}
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn os_capture_available() -> bool {
+	false
+}
+/// Ask for whatever permission the OS capture needs (macOS: Accessibility). No-op elsewhere.
+#[cfg(not(target_os = "macos"))]
+pub fn request_permission() {}
+/// Where the session area sits in its window — only macOS's capture uses it (confine rect
+/// while no renderer window is on screen); Windows/Linux position their renderer from it.
+#[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
+pub fn set_view_rect(_app: &AppHandle, _id: u64, _x: i32, _y: i32, _w: i32, _h: i32) {}
 
 #[cfg(test)]
 mod sensitivity_tests {

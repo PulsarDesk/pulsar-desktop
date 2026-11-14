@@ -15,7 +15,8 @@
 //! - Linux: the evdev capture's own focus gate (Tauri focus map OR the standalone render
 //!   window), and a kiosk launch (`--connect`, e.g. the Orange Pi player) is always focused:
 //!   it is the only app and may never receive a focus event at all.
-//! - macOS: the Tauri focus map.
+//! - macOS: the Tauri focus map OR the frontmost app being Pulsar / one of its renderer
+//!   children (the video window belongs to another process, so focusing it drops the map).
 //!
 //! Settings → Genel → "Arka planda kol girdisi" (`set_background_input`, default off) lets
 //! the pad keep driving the HOST while another app is focused (Moonlight's "process gamepad
@@ -50,7 +51,11 @@ pub fn app_focused() -> bool {
 	{
 		crate::kbdhook::app_focused()
 	}
-	#[cfg(not(any(windows, target_os = "linux")))]
+	#[cfg(target_os = "macos")]
+	{
+		WINDOW_FOCUSED.load(Ordering::SeqCst) || crate::kbdhook::app_focused()
+	}
+	#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 	{
 		WINDOW_FOCUSED.load(Ordering::SeqCst)
 	}

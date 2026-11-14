@@ -107,8 +107,84 @@ While another app is focused, Pulsar acts on NO input (maintainer rule, 2026-11-
 - **Keyboard/mouse capture**: automatic engages (CLI `--connect` kiosk start, game mode's
   connect-time engage — `kbd_engage { auto: true }`) only happen while Pulsar is focused;
   otherwise they wait and engage when Pulsar gets the focus (Windows `PENDING_ENGAGE` in
-  `kbdhook/imp.rs`; Linux's evdev grab is held only while focused anyway). On Windows a kiosk
-  session now releases on focus loss too and re-engages on its own when focus returns.
+  `kbdhook/imp.rs`; Linux's evdev grab is held only while focused anyway; macOS
+  `PENDING_ENGAGE` in the `pulsar-macinput` engine). On Windows and macOS a kiosk session
+  releases on focus loss too and re-engages on its own when focus returns.
+
+## macOS input capture (CGEventTap) - 2026-11-14, untested on macOS hardware
+
+`src-tauri/src/kbdhook/mac.rs` (Tauri glue) + `crates/pulsar-macinput` (everything else; its
+own crate so it type-checks with `cargo check --target aarch64-apple-darwin -p
+pulsar-macinput` from a non-Mac, and its engine is unit-tested on every OS with `cargo test -p
+pulsar-macinput`). Same surface and rules as the Windows hook (`imp.rs`):
+
+- **Tap**: `CGEventTapCreate(kCGSessionEventTap, kCGHeadInsertEventTap, ...)` on its own
+  CFRunLoop thread, created at the first arm and kept (enabled/disabled with the arm). A tap
+  macOS disables (callback timeout, secure input) is re-enabled from the callback. A 100 ms
+  run-loop timer reads the window list (`CGWindowListCopyWindowInfo`: bounds, owner pid,
+  layer, number; no screen-recording permission needed) and the frontmost app.
+- **Engaged**: every key is swallowed and forwarded (Cmd+Tab, Cmd+Space, Cmd+Q, Ctrl+arrows
+  reach the host). Key map: `keymap.rs` (`kVK_*` to evdev, positional like Windows; Cmd = Meta,
+  Option = Alt, Right Option = AltGr on a Windows host). Modifiers come from `FlagsChanged`
+  (device bits tell left/right apart). Caps Lock is forwarded as a tap per toggle (the local
+  caps state toggles too: the HID system does that before any tap). Fn stays local. A key-up
+  whose down acted locally (pressed before engaging) also reaches the local app.
+- **Combos**, engaged or merely frontmost: Ctrl+Shift+M (menu, kept-chord rule), Ctrl+Shift+Q
+  (end), Ctrl+Shift+F11 or Cmd+Shift+F11 (fullscreen, as on the webview path). Engaged only:
+  Ctrl+Alt(Option)+Z and 3xRightCtrl let go. Never while another app is frontmost.
+- **Mouse**: relative in game mode and while the host holds a pointer lock. The cursor is
+  frozen (`CGAssociateMouseAndMouseCursorPosition(false)`, plus a warp back to the anchor if
+  it moves anyway), `kCGMouseEventDeltaX/Y` times the sensitivity are sent, the move is dropped.
+  Remote mode: absolute, normalized to the video rect, the move passes locally; an overshoot
+  is re-located and `CGWarpMouseCursorPosition`ed to the edge (the confine), re-checked every
+  100 ms (window moves). Free cursor ("Serbest imlec"): no confine, leaving the video
+  releases, hovering it engages, same rules as Windows. Buttons 0-2 are forwarded;
+  back/forward are swallowed (no host injector knows them). Wheel: point deltas (trackpad)
+  or lines x 100 (notched wheel), browser-pixel units like every other client. macOS's
+  "natural scrolling" setting is already applied to those deltas and is **kept on purpose**:
+  the remote content moves the way the Mac's own content does for this user (the webview
+  fallback forwards browser wheel deltas, which carry it too). A Windows/Linux client has no
+  such setting, so its deltas are the device's. A click on another app's window releases and
+  acts locally.
+- **Keys**: positional (`kVK_*` -> evdev). ISO keyboards (`KBGetLayoutType(LMGetKbdType())`,
+  read per arm): the § and ` key codes macOS swaps are swapped back, like Chromium/SDL do.
+  The volume keys (`kVK_VolumeUp/Down/Mute`) and Fn stay local.
+- **Video rect**: the renderer child's window (the one under the cursor, else the largest),
+  narrowed by the renderer's `vidsink-vrect` fractions when it reports them. Without a
+  renderer window of ours on screen: the session area of the Pulsar window
+  (`native_view_rect` -> `set_view`, by Quartz window number so it follows moves).
+- **Click-to-engage**: a left click inside the video rect on the video's own window (not a
+  Pulsar dialog over it) engages from the tap. The click still acts locally (activates the
+  window) and never reaches the host; the host pointer starts at the click. The webview
+  `kbd_engage` paths land on the same engage.
+- **Focus**: Tauri `Focused(false)` releases only if the frontmost app
+  (`NSWorkspace.frontmostApplication`) is neither Pulsar nor a renderer child (a child =
+  `proc_pidinfo` parent pid is ours). The 100 ms poll releases when another app becomes
+  frontmost (600 ms grace after an engage: activation is asynchronous). `focus_gate`
+  (controllers) uses the same answer on macOS.
+- **Accessibility permission** (`AXIsProcessTrusted`): without it `CGEventTapCreate` fails, so
+  `enable` arms nothing and the session keeps the webview canvas path exactly as before (OS
+  shortcuts stay local). `kbd_os_capture` answers `tap_ready()` (trusted **and** the tap really
+  created), not trust alone: a stale grant on a rebuilt unsigned binary reports trusted while
+  the creation fails; `enable` then emits `kbd-released` and the canvas path stays in charge.
+  The tap thread is started once (IDLE -> STARTING -> RUNNING, set by the thread itself); a
+  start slower than the 3 s wait is waited for again on the next arm, never doubled, and a tap
+  that comes up late stays inert (`TAP_OK`) until the next arm. The first arm per run calls `AXIsProcessTrustedWithOptions` (macOS's
+  own prompt) and shows a Pulsar toast (`toast.kbd-perm`, click -> System Settings -> Privacy &
+  Security -> Accessibility). `kbd_os_capture` tells the UI which path owns control;
+  `Session.svelte` asks again on window focus and hands control from the canvas to the tap
+  when the permission was just granted (`SessionInput` `osCapture` keeps the canvas path out
+  of the tap's way). TCC binds the grant to the signed app identity: an unsigned dev build may
+  have to be re-granted after a rebuild.
+- **Not done on macOS**: WYSIWYG `Char` typing through the local layout (Linux has xkb; the
+  Windows hook is positional too), touchpad pinch -> `InputEvent::Pinch` (separate task),
+  media keys (`NX_SYSDEFINED`; no host injector maps media keys and the Windows client leaves
+  them local as well).
+- **Needs a Mac to verify**: that the session tap really suppresses Cmd+Tab / Cmd+Space /
+  Mission Control on current macOS; association + warp with the mpv window in front; Caps
+  Lock; the window-list geometry with Retina and several displays; that the `src-tauri` side
+  compiles (`pulsar-tauri` cannot be type-checked for macOS from Windows).
+
 
 ## Ctrl+Shift+M toggles the Pulsar menu — the second press has to arrive too
 
@@ -127,7 +203,9 @@ key path. Every path must read it (2026-11-14: it opened and never closed):
   next M as a bare "m"). `keep_chord` keeps them as held until their next real edge, a focus
   loss or `CHORD_KEEP` (5 s); the `overlay-toggle` event carries `true` so the relay treats
   the bare M / Q / F11 as the combo for the same time.
-- **Webview key path** (macOS, phone hosts, the Windows fallback) — `SessionInput.onKey` only
+- **macOS** (`pulsar-macinput` engine `handle_key`, a port of the Windows one incl. the kept
+  chord), fed by the event tap, which sees the real modifier edges while disengaged too.
+- **Webview key path** (macOS without Accessibility, phone hosts, the Windows fallback) — `SessionInput.onKey` only
   reads combos while controlling, so `SessionUi` (the Escape handler) reads Ctrl+Shift+M
   itself while the overlay is open.
 
@@ -136,7 +214,7 @@ Two sources may report one press (Linux evdev + the webview): both end in
 
 **Closing by the toggle takes control again** (2026-11-14): the combo opened the menu out of
 the session and closes it back into it — `SessionUi` calls `takeControl` (Session.svelte: the
-OS capture on Windows native / game mode, the canvas path otherwise) once the close is
+OS capture on Windows native / macOS with Accessibility / game mode, the canvas path otherwise) once the close is
 applied. So does a click on the video beside the menu (`ov control`, client-video.md).
 Escape, the menu's own close and B on the pad leave control released (click-to-control). Tests: `ui.svelte.test.ts`,
 `kbdhook::imp::chord_tests` (the Tauri crate's test binary needs a Common-Controls v6
@@ -189,7 +267,9 @@ Parsec-style handover, issue #3. Settings → Görüntü + the session menu's G�
   as outside the video, so the button stays clickable.
 - Handover edges skip the renderer tooltip (`kbdhook::hover_edge` in `render_hint`), except
   the first engage of a session.
-- **Linux / macOS (and phone hosts): the canvas path**, `Session/input.svelte.ts`
+- **macOS with the Accessibility permission**: the event tap does it (`pulsar-macinput`
+  engine `free_mode` / `handle_hover`, same rules as Windows); the canvas path is off.
+- **Linux / macOS without the permission (and phone hosts): the canvas path**, `Session/input.svelte.ts`
   (`pointerFree` input, off on Windows where the hook does it). No `confine_pointer`; a
   `pointerenter`/move over the canvas with no button, Pulsar focused (`document.hasFocus`) and
   nothing blocking (session menu open, stream stopped) → `startControl`; `pointerleave` with

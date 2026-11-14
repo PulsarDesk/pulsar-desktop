@@ -21,7 +21,7 @@ import { SessionInput } from './input.svelte.js';
 
 // Free cursor ("Serbest imleç") on the canvas path (Linux / macOS): hovering the video takes
 // control, leaving it hands control back, an explicit release waits for a leave.
-function make(opts: { free?: boolean; blocked?: boolean } = {}) {
+function make(opts: { free?: boolean; blocked?: boolean; os?: boolean } = {}) {
 	const canvas = document.createElement('canvas');
 	canvas.getBoundingClientRect = () => ({ left: 0, top: 0, width: 100, height: 100, x: 0, y: 0, right: 100, bottom: 100, toJSON() {} }) as DOMRect;
 	let input!: SessionInput;
@@ -36,7 +36,8 @@ function make(opts: { free?: boolean; blocked?: boolean } = {}) {
 			streamH: () => 0,
 			fitMode: () => 'fit',
 			pointerFree: () => opts.free ?? true,
-			hoverBlocked: () => opts.blocked ?? false
+			hoverBlocked: () => opts.blocked ?? false,
+			osCapture: () => opts.os ?? false
 		});
 	});
 	return { input, stop };
@@ -104,5 +105,31 @@ describe('SessionInput free cursor (canvas path)', () => {
 		unfocused.input.onEnter(ev());
 		expect(unfocused.input.controlling).toBe(false);
 		unfocused.stop();
+	});
+});
+
+// macOS with the Accessibility permission: the CGEventTap owns control (click-to-engage, keys,
+// mouse) — the canvas path must not start as well, or every input would reach the host twice.
+describe('SessionInput with the OS-level capture', () => {
+	beforeEach(() => {
+		vi.spyOn(document, 'hasFocus').mockReturnValue(true);
+	});
+
+	it('neither a click nor a hover starts canvas control', () => {
+		const { input, stop } = make({ os: true });
+		expect(input.controllable).toBe(false);
+		input.startControl();
+		input.onEnter(ev());
+		flushSync();
+		expect(input.controlling).toBe(false);
+		stop();
+	});
+
+	it('without it the canvas path works as before', () => {
+		const { input, stop } = make({ os: false, free: false });
+		expect(input.controllable).toBe(true);
+		input.startControl();
+		expect(input.controlling).toBe(true);
+		stop();
 	});
 });

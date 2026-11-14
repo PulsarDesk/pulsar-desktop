@@ -474,6 +474,22 @@ pub(crate) fn kbd_engage(app: AppHandle, auto: Option<bool>) -> Result<(), Strin
 	Ok(())
 }
 
+/// Client: whether the OS-level input capture can run on this machine — Windows always,
+/// macOS once Pulsar has the Accessibility permission (the CGEventTap needs it), Linux false
+/// (its evdev grab is engaged by game mode only). The session UI takes control through the
+/// OS capture when true, through the webview canvas otherwise.
+#[tauri::command]
+pub(crate) fn kbd_os_capture() -> bool {
+	kbdhook::os_capture_available()
+}
+
+/// Client (macOS): ask for the Accessibility permission the input capture needs (macOS's
+/// prompt the first time, then System Settings → Privacy & Security → Accessibility).
+#[tauri::command]
+pub(crate) fn kbd_request_permission() {
+	kbdhook::request_permission();
+}
+
 /// Client (Windows native): a key edge the webview received while the session tab is active —
 /// fed to the capture's key handler (see kbdhook::imp::web_key). Sync so edges stay in order.
 #[tauri::command]
@@ -532,7 +548,6 @@ pub(crate) fn native_view_rect(
 	{
 		// macOS: the renderer keeps its panel over this rect, in POINTS from the window's
 		// top-left (CSS px == Cocoa points; the panel's backing scale does the rest).
-		let _ = &app;
 		use std::io::Write as _;
 		let stdin = state.plays.lock().unwrap().get(&id).map(|p| {
 			p.render_seed.lock().unwrap().viewrect = Some((x, y, w, h));
@@ -543,6 +558,9 @@ pub(crate) fn native_view_rect(
 				let _ = writeln!(si, "viewrect {x} {y} {w} {h}");
 			}
 		}
+		// The input capture's confine / normalization rect (kbdhook/mac.rs): the same rect
+		// the renderer panel covers, or the webview canvas when no renderer of ours runs.
+		kbdhook::set_view_rect(&app, id, x, y, w, h);
 	}
 	Ok(())
 }

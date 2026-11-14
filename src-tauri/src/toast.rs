@@ -27,8 +27,9 @@ const MARGIN: f64 = 6.0;
 const MAX_VISIBLE: usize = 4;
 const LIFETIME: Duration = Duration::from_secs(7);
 
-/// One notice. `kind` picks the title/icon in the UI: `file-in` (a file arrived); the
-/// file manager has no remote delete/rename yet, so `file-del` / `file-mod` are reserved.
+/// One notice. `kind` picks the title/icon in the UI: `file-in` (a file arrived), `kbd-perm`
+/// (macOS: the input capture needs the Accessibility permission); the file manager has no
+/// remote delete/rename yet, so `file-del` / `file-mod` are reserved.
 #[derive(Clone, Serialize)]
 pub(crate) struct Toast {
 	id: u64,
@@ -51,6 +52,13 @@ pub(crate) fn file_received(app: &AppHandle, peer: &str, path: &Path) {
 		.map(|n| n.to_string_lossy().into_owned())
 		.unwrap_or_default();
 	push(app, "file-in", name, peer.to_string(), Some(path.to_path_buf()));
+}
+
+/// macOS: the input capture needs the Accessibility permission (`kbdhook/mac.rs`). Clicking the
+/// notice opens System Settings at the right pane (`toast_open`).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn kbd_permission(app: &AppHandle) {
+	push(app, "kbd-perm", String::new(), String::new(), None);
 }
 
 fn push(app: &AppHandle, kind: &'static str, name: String, peer: String, path: Option<PathBuf>) {
@@ -162,15 +170,20 @@ pub(crate) fn toast_close(app: AppHandle, id: u64) {
 	dismiss(&app, id);
 }
 
-/// A click on a file notice: open its folder with the file selected, then dismiss it.
+/// A click on a notice: a file notice opens its folder with the file selected, the
+/// permission notice the permission's settings; then it is dismissed.
 #[tauri::command]
 pub(crate) fn toast_open(app: AppHandle, id: u64) {
-	let path = TOASTS
+	let (kind, path) = TOASTS
 		.lock()
 		.unwrap_or_else(|e| e.into_inner())
 		.iter()
 		.find(|t| t.id == id)
-		.and_then(|t| t.path.clone());
+		.map(|t| (t.kind, t.path.clone()))
+		.unwrap_or(("", None));
+	if kind == "kbd-perm" {
+		crate::kbdhook::request_permission();
+	}
 	if let Some(p) = path {
 		reveal_in_folder(Path::new(&p));
 	}

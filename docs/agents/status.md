@@ -33,6 +33,14 @@ FSR upscaling, overlay, pacing, device-loss rebuild — see [client-video.md](cl
 fallback. Type-checked for `aarch64-apple-darwin` only; `src-tauri`'s macOS code could not be
 type-checked here.
 
+**macOS client input capture (2026-11-14, untested on macOS hardware):** CGEventTap in
+`crates/pulsar-macinput` + `kbdhook/mac.rs`: system keys and combos to the host, relative
+mouse (game mode / host pointer lock), absolute mouse confined to the video, free cursor,
+click-to-engage, focus-loss release, held-key flush; Accessibility prompt + toast, webview
+fallback without it. Details and the open hardware checks: modes.md "macOS input capture".
+`pulsar-tauri` itself can't be type-checked for macOS from Windows (objc2-exception-helper
+needs a mac C toolchain); the crate can.
+
 **Scaffolded / known gaps:** macOS virtual gamepad (no-op stub); HW encode on
 the Wayland/gst path (software x264 only); media-over-the-session for
 symmetric-NAT (media is a direct UDP RTP flow today — fine for LAN/cone-NAT/
