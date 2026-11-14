@@ -167,7 +167,14 @@ pub struct Panel {
 	last_order_check: std::time::Instant,
 	/// The app window vanished from the window server (closed / its process died).
 	pub parent_gone: bool,
+	/// The last window-server answer for the app window and when it was asked (the render loop
+	/// runs every few ms; the window server is asked at most every `INFO_EVERY`).
+	info: Option<(CGRect, bool)>,
+	info_at: Option<std::time::Instant>,
+	info_key: (u32, Option<(i32, i32, i32, i32)>),
 }
+
+const INFO_EVERY: std::time::Duration = std::time::Duration::from_millis(8);
 
 impl Panel {
 	pub fn new(mtm: MainThreadMarker, parent: u32) -> Self {
@@ -218,6 +225,9 @@ impl Panel {
 			display: 0,
 			last_order_check: std::time::Instant::now(),
 			parent_gone: false,
+			info: None,
+			info_at: None,
+			info_key: (0, None),
 		}
 	}
 
@@ -228,7 +238,13 @@ impl Panel {
 	/// Place the panel: over `rect` (points from the app window's top-left; None = the whole
 	/// window; 0×0 = hidden) when `visible`. Returns true when the drawable size changed.
 	pub fn place(&mut self, rect: Option<(i32, i32, i32, i32)>, visible: bool) -> bool {
-		let info = window_info(self.parent);
+		let key = (self.parent, rect);
+		if key != self.info_key || self.info_at.is_none_or(|t| t.elapsed() >= INFO_EVERY) {
+			self.info = window_info(self.parent);
+			self.info_at = Some(std::time::Instant::now());
+			self.info_key = key;
+		}
+		let info = self.info;
 		self.parent_gone = info.is_none();
 		let target = match (info, rect) {
 			(Some((_, false)), _) | (None, _) => None,

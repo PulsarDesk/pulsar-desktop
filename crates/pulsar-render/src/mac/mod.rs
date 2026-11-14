@@ -1535,43 +1535,53 @@ impl Renderer {
 				out_line(&format!("vidsink-dims {vw}x{vh}"));
 			}
 		}
-		// First picture: show the panel now (unless the app holds it behind its preparing
-		// screen), so the loading screen gives way to video, never to a black panel.
-		let first = *self.first_drawn.get_or_insert_with(std::time::Instant::now);
-		let held = HOLD_REVEAL.load(Ordering::SeqCst) && !REVEAL.load(Ordering::SeqCst) && first.elapsed() < REVEAL_FALLBACK;
-		if !self.revealed && !held {
+		// First picture: the panel shows from now on (unless the app holds it behind its
+		// preparing screen, see `reveal_due`), so the loading screen gives way to video, never
+		// to a black panel.
+		self.first_drawn.get_or_insert_with(std::time::Instant::now);
+		if self.reveal_due() {
 			self.revealed = true;
 			let rect = *VIEW_RECT.lock().unwrap();
 			win.place(rect, true);
 		}
-		if !self.draw(win, Some(&f)) {
-			// No drawable (the panel is hidden or the compositor is behind): keep the picture.
-			self.last = Some(f);
-			return;
-		}
-		let size = win.size_px;
-		let (vw, vh) = view::displayed_dims(sw, sh);
-		let (_, d) = view::fit_rects(vw as f32, vh as f32, size.0 as f32, size.1 as f32);
-		let (w, h) = (size.0.max(1) as f32, size.1.max(1) as f32);
-		let fr = (d.0 / w, d.1 / h, (d.0 + d.2) / w, (d.1 + d.3) / h);
-		if fr != self.last_vrect {
-			self.last_vrect = fr;
-			out_line(&format!("vidsink-vrect {:.5} {:.5} {:.5} {:.5}", fr.0, fr.1, fr.2, fr.3));
-		}
-		let b = ovbtn_frac(size);
-		if b != self.last_ovbtn {
-			self.last_ovbtn = b;
-			match b {
-				Some(b) => out_line(&format!("vidsink-ovbtn {:.5} {:.5} {:.5} {:.5}", b.0, b.1, b.2, b.3)),
-				None => out_line("vidsink-ovbtn -"),
+		// Hidden (held back, tab inactive, app window minimized): no drawable to draw on — a
+		// hidden layer's drawables never come back — but the stream is still counted, the app
+		// reveals the picture off these numbers.
+		if win.shown && self.draw(win, Some(&f)) {
+			let size = win.size_px;
+			let (vw, vh) = view::displayed_dims(sw, sh);
+			let (_, d) = view::fit_rects(vw as f32, vh as f32, size.0 as f32, size.1 as f32);
+			let (w, h) = (size.0.max(1) as f32, size.1.max(1) as f32);
+			let fr = (d.0 / w, d.1 / h, (d.0 + d.2) / w, (d.1 + d.3) / h);
+			if fr != self.last_vrect {
+				self.last_vrect = fr;
+				out_line(&format!("vidsink-vrect {:.5} {:.5} {:.5} {:.5}", fr.0, fr.1, fr.2, fr.3));
+			}
+			let b = ovbtn_frac(size);
+			if b != self.last_ovbtn {
+				self.last_ovbtn = b;
+				match b {
+					Some(b) => out_line(&format!("vidsink-ovbtn {:.5} {:.5} {:.5} {:.5}", b.0, b.1, b.2, b.3)),
+					None => out_line("vidsink-ovbtn -"),
+				}
 			}
 		}
 		self.last = Some(f);
 		self.tick_fps();
 	}
 
+	/// The first picture is there and the app does not hold it back (any more).
+	fn reveal_due(&self) -> bool {
+		let Some(first) = self.first_drawn else { return false };
+		!self.revealed
+			&& !(HOLD_REVEAL.load(Ordering::SeqCst) && !REVEAL.load(Ordering::SeqCst) && first.elapsed() < REVEAL_FALLBACK)
+	}
+
 	/// Re-draw the last picture (or the idle background) with the overlay over it.
 	fn repaint_idle(&mut self, win: &window::Panel) {
+		if !win.shown {
+			return;
+		}
 		let last = self.last.clone();
 		self.draw(win, last.as_ref());
 	}
@@ -1768,6 +1778,12 @@ fn event_loop(mtm: MainThreadMarker, parent: u32, port: u16, codec: Codec, mode:
 			eprintln!("pulsar-render(mac): moved to window {np}");
 		}
 		let rect = *VIEW_RECT.lock().unwrap();
+		if let Some(r) = renderer.as_mut() {
+			// `reveal` arrived (or its fallback ran out) while no new picture came.
+			if r.reveal_due() {
+				r.revealed = true;
+			}
+		}
 		let revealed = renderer.as_ref().is_some_and(|r| r.revealed);
 		let resized = win.place(rect, revealed);
 		if win.parent_gone && STALLED.load(Ordering::Relaxed) {
