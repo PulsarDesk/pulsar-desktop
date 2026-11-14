@@ -27,6 +27,12 @@ sizes FEC parity from the client's `Stats` and encodes with intra-refresh / shor
 reorder wait (`maxdelay`), and on Windows/macOS has a reorder buffer. Test with
 `scripts/netem.sh` + `scripts/validate-log.mjs`. Do not push behaviour changes untested.
 
+**Linux host RFI (2026-11-14, LOCAL, unpushed, untested on Linux hardware):** an NVIDIA
+Linux host (X11 and Wayland) encodes with the NVENC SDK on CUDA and heals a client-reported
+loss with reference-frame invalidation like the Windows host — see
+[host-encode.md](host-encode.md) "Linux NVENC SDK". Open: the Linux client does not ask for
+RFI yet (`play.rs` `cfg!(windows)`); VA-API / QSV / AMF hosts have no equivalent (keyframe).
+
 **Scaffolded / known gaps:** macOS virtual gamepad (no-op stub); HW encode on
 the Wayland/gst path (software x264 only); media-over-the-session for
 symmetric-NAT (media is a direct UDP RTP flow today — fine for LAN/cone-NAT/

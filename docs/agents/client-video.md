@@ -138,7 +138,9 @@ acceptable; priority is Moonlight-class latency during play.
 
 ## Loss recovery on Windows — reference-frame invalidation (RFI)
 
-When the host advertises `rfi` (native NVENC), the Windows client asks for `StreamReq::rfi`.
+When the host advertises `rfi` (native NVENC — a Windows host, or since 2026-11-14 a Linux
+host with an NVIDIA GPU through the NVENC SDK on CUDA, see host-encode.md "Linux NVENC SDK";
+untested on Linux hardware), the Windows client asks for `StreamReq::rfi`.
 The host then keeps a level-5.1-sized DPB (`encode/policy.rs` `rfi_dpb`: 16 at ≤ 1080p,
 12 at 1440p, 8 at 4K; one reference for prediction). The flow:
 

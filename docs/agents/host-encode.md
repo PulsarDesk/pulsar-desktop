@@ -30,6 +30,9 @@ Part of the pulsar-desktop agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
   x11grab → libavfilter → libavcodec x264/x265/SVT-AV1/NVENC → libavformat RTP; live
   bitrate, forced IDR on request, short-GOP recovery; `PULSAR_LIBAV_HOST=0` disables).
   Falls back to the ffmpeg CLI below when it cannot start or for VA-API/Vulkan/HDR/4:4:4.
+  - **NVENC there goes through the NVENC SDK** (2026-11-14, untested on Linux hardware):
+    `pulsar_capture::NvencCuda` (`crates/pulsar-capture/src/encode/cuda_enc.rs`) instead of
+    libavcodec's `h264_nvenc`. See "Linux NVENC SDK" below.
 - **Windows (non-NVENC) / macOS** (and the Linux fallback) — ffmpeg CLI (`ddagrab`/
   `gdigrab`/`avfoundation`/`x11grab` → HW encode or libx264 → RTP). Arg builders are pure
   functions in pulsar-core `pipeline/` (unit-tested); spawning is here (`process.rs`, `host/`).
@@ -68,6 +71,54 @@ Part of the pulsar-desktop agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
   clean distro containers (`scripts/appimage/smoke.sh`) before publishing.
 
 All paths emit **RTP/H.264(+HEVC/AV1) over UDP**.
+
+## Linux NVENC SDK — reference-frame invalidation on Linux hosts (2026-11-14, LOCAL, unpushed)
+
+libavcodec's and GStreamer's NVENC encoders cannot invalidate a reference frame, so a Linux
+host could only heal a client-reported loss with a keyframe. Now the Linux host on an NVIDIA
+GPU runs the **same NVENC SDK session as Windows**:
+
+- `pulsar-capture` builds on Linux too (only the encoder part; capture stays Windows-only).
+  `encode/cuda.rs` = the CUDA driver API from `libcuda.so.1` (dlopen: `cuInit`, context,
+  `cuMemAllocPitch`, `cuMemcpy2D`); `encode/cuda_enc.rs` = `NvencCuda`: `libnvidia-encode.so.1`
+  (dlopen), session on a CUDA context (`NV_ENC_DEVICE_TYPE_CUDA`), one pitched NV12 device
+  buffer registered once (`NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR`), two host→device copies
+  per frame, sync encode, `RtpEgress` (our RTP packetizer + send log). `encode/nvsession.rs`
+  holds the session config shared with Windows (`configure`: presets, CBR, one-frame VBV, RFI
+  DPB, intra refresh, low-budget / two-pass classes), so both OSes stream with the same
+  settings. `invalidate_lost` = the Windows `RefTracker` + `nvEncInvalidateRefFrames` +
+  recovery SEI. Nothing is linked at build time.
+- **X11** (`src-tauri/src/host/libav.rs`): an NVENC plan keeps x11grab → libavfilter
+  (scale → NV12), then `NvencCuda` encodes instead of libavcodec (no libavformat RTP muxer).
+  `LibavHost::request_rfi` → `Cmd::Rfi`. `NvencCuda::new` failing (no driver / CUDA, NVENC
+  API < 12.2 = driver < 550, no free session) logs a warning and opens libavcodec as before.
+- **Wayland** (pulsar-core `capture::start_with_frames`, `capture/frames.rs`): the portal's
+  PipeWire stream → `videoconvert` → NV12 → `fakesink` handoff → the app's `FrameEncoder`
+  (`src-tauri/src/host/nvenc_frames.rs`, the SDK encoder). Built on the first frame at the
+  cast's size, rebuilt on a size change. If it cannot be built or no frame arrives in 4 s,
+  the gst-encoder pipeline runs on the SAME portal session (no second share dialog). Chosen
+  when the gst pick is `nvh26xenc`, or software x264 while the client left the encoder open /
+  asked for NVENC (an AppImage whose bundled `nvh264enc` cannot open a 5xx driver then still
+  gets NVENC), and the codec is one NVENC encodes. `WaylandCapture::request_rfi` forwards
+  the loss; bitrate / keyframe / short GOP reach the SDK encoder through the same calls.
+- `host.rs` advertises `FEAT_RFI` on Linux once a background probe (`linux_nvenc_sdk`,
+  started by `go_online`) found NVENC on CUDA; `on_rfi` feeds both the libav engine and the
+  Wayland capture.
+- Knobs: `PULSAR_NVENC_SDK=0` (libavcodec / gst encoders as before), `PULSAR_CUDA_DEVICE=N`
+  (default 0), plus the Windows ones (`PULSAR_NVENC_PRESET`, `PULSAR_NVENC_MULTIPASS`,
+  `PULSAR_IDR_SEC`). Encoder log: `$TMPDIR/pulsar-capture-dbg.txt`.
+- **Untested on hardware**: no Linux machine with an NVIDIA GPU was available; only type
+  checks, unit tests (the no-driver path of `NvencCuda::new`, plane-size rules, the gst handoff
+  plumbing with `videotestsrc`) and the libav end-to-end x264 test ran.
+- Which clients use it: the Windows client asks for RFI (`play.rs` `host_rfi` is
+  `cfg!(windows)`). The Linux renderer already reports `vidsink-rfi` and resumes at the tag, but
+  the Linux client does not ask yet.
+- **VA-API / Intel / AMD**: no equivalent through the encoders we use. libavcodec's
+  `*_vaapi`/`*_qsv` and GStreamer's `va*`/`vaapi*` encoders expose no reference invalidation.
+  Possible only with an encoder of our own: raw VA-API (the app owns the DPB and the
+  reference lists, but must also write SPS/PPS/slice headers itself), Intel oneVPL
+  (`mfxExtAVCRefListCtrl.RejectedRefList`) or AMD AMF long-term references. Not done; those
+  hosts keep the keyframe recovery.
 
 ## Poor-link host path (2026-11-09, LOCAL, unpushed, untested on a GPU / the field link)
 
