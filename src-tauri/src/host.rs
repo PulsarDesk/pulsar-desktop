@@ -577,7 +577,7 @@ pub(crate) async fn bring_online(
 	let identity = match crate::seat::identity() {
 		Some(id) => id,
 		None if crate::seat::active() => return Err("seat identity not loaded".into()),
-		None => pulsar_core::crypto::Identity::load_or_create(identity_path(&app)),
+		None => crate::shared_mode::load_identity(&identity_path(&app))?,
 	};
 	// Credentials for a relay with an auth policy (v4/v5). Normal case: we already hold an
 	// ACCESS KEY for this relay from a previous authentication, so registration is silent.

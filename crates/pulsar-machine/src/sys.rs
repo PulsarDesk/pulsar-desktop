@@ -42,8 +42,49 @@ pub fn euid() -> u32 {
 	unsafe { libc::geteuid() }
 }
 
-/// The effective gid + supplementary groups of this process.
+/// The effective gid + the groups this user belongs to.
+///
+/// Linux: the process's supplementary groups (`getgroups`). macOS: `getgroups` is capped at
+/// 16 entries (the legacy symbol) while membership is resolved by opendirectoryd, so an
+/// admin with many groups may not see gid 80 there; `getgrouplist` of the login user asks
+/// the directory service and has no such cap. The process list is merged in as well.
 pub fn my_gids() -> Vec<u32> {
+	let mut out = process_gids();
+	#[cfg(target_os = "macos")]
+	for g in directory_gids() {
+		if !out.contains(&g) {
+			out.push(g);
+		}
+	}
+	out
+}
+
+/// macOS: `getgrouplist(<login name>, <primary gid>)`, growing the buffer until it fits.
+#[cfg(target_os = "macos")]
+fn directory_gids() -> Vec<u32> {
+	let Some((name, gid)) = passwd_entry() else {
+		return Vec::new();
+	};
+	let Ok(c) = CString::new(name) else {
+		return Vec::new();
+	};
+	let mut cap: libc::c_int = 64;
+	while cap <= 4096 {
+		let mut buf = vec![0 as libc::c_int; cap as usize];
+		let mut n = cap;
+		// SAFETY: `buf` holds `n` ints; on success `n` is the number filled in.
+		let rc = unsafe { libc::getgrouplist(c.as_ptr(), gid as libc::c_int, buf.as_mut_ptr(), &mut n) };
+		if rc != -1 {
+			buf.truncate(n.clamp(0, cap) as usize);
+			return buf.into_iter().map(|g| g as u32).collect();
+		}
+		cap *= 4;
+	}
+	Vec::new()
+}
+
+/// The effective gid + supplementary groups of this process.
+fn process_gids() -> Vec<u32> {
 	// SAFETY: getgroups(0, NULL) returns the count; the second call fills a buffer of that
 	// size (+ slack in case a group is added in between, the result is truncated to `n`).
 	let mut out = vec![unsafe { libc::getegid() }];
@@ -113,6 +154,9 @@ pub fn check_access() -> Result<(), String> {
 	let sm = meta(&s).map_err(|e| format!("{}: {e}", s.display()))?;
 	let gids: Vec<u32> = admin_groups().into_iter().map(|(_, g)| g).collect();
 	crate::check_shared_dir(&sm, &gids)?;
+	// Linux: a clearer message than EACCES below. macOS: skipped — the kernel's `access()`
+	// resolves membership through opendirectoryd, our group list may be incomplete.
+	#[cfg(not(target_os = "macos"))]
 	if euid() != 0 && !my_gids().contains(&sm.gid) {
 		return Err(format!("not a member of the shared dir's group {}", sm.gid));
 	}
@@ -226,15 +270,23 @@ pub fn user_name() -> String {
 			return u;
 		}
 	}
+	passwd_entry()
+		.map(|(n, _)| n)
+		.unwrap_or_else(|| euid().to_string())
+}
+
+/// (login name, primary gid) of the effective uid (`getpwuid_r`).
+fn passwd_entry() -> Option<(String, u32)> {
 	let mut pw: libc::passwd = unsafe { std::mem::zeroed() };
 	let mut res: *mut libc::passwd = std::ptr::null_mut();
 	let mut buf = vec![0 as libc::c_char; 16 * 1024];
 	// SAFETY: every pointer is valid for the call.
 	let rc = unsafe { libc::getpwuid_r(euid(), &mut pw, buf.as_mut_ptr(), buf.len(), &mut res) };
 	if rc == 0 && !res.is_null() && !pw.pw_name.is_null() {
-		return unsafe { CStr::from_ptr(pw.pw_name) }.to_string_lossy().into_owned();
+		let name = unsafe { CStr::from_ptr(pw.pw_name) }.to_string_lossy().into_owned();
+		return Some((name, pw.pw_gid as u32));
 	}
-	euid().to_string()
+	None
 }
 
 /// This user's per-user Pulsar config dir (same path Tauri resolves).

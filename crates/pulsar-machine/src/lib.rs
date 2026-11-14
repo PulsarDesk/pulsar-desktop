@@ -162,8 +162,10 @@ pub fn valid_group_name(s: &str) -> bool {
 /// is a symlink or not a dir (exit 3), owned by someone else than root (exit 4) — re-applies
 /// owner and mode, gives the regular files already in the shared dir the admin group + 0660
 /// (e.g. an `identity.key` left 0600 by a Pulsar that exited before hardening it; `find
-/// -type f` never matches a symlink), and atomically writes `mode.json`. `None` for an unsafe
-/// group name.
+/// -type f` never matches a symlink), and atomically writes `mode.json`. Any other failure of
+/// the body (a missing tool, `set -e`) that happens to be 126 / 127 is reported as 5, so it
+/// is never mistaken for pkexec's own "dismissed" / "not authorized" (see
+/// [`classify_pkexec`]). `None` for an unsafe group name.
 pub fn setup_script(os: Os, group: &str, enable: bool) -> Option<String> {
 	setup_script_at(os, machine_dir_for(os), group, enable)
 }
@@ -171,7 +173,23 @@ pub fn setup_script(os: Os, group: &str, enable: bool) -> Option<String> {
 /// [`setup_script`] for an explicit machine dir (tests run it on a scratch dir as root).
 /// `m` must not contain a `'` (it is spliced into a single-quoted shell string).
 pub fn setup_script_at(os: Os, m: &str, group: &str, enable: bool) -> Option<String> {
-	if !valid_group_name(group) || m.contains('\'') || !m.starts_with('/') {
+	if !valid_group_name(group) {
+		return None;
+	}
+	let body = setup_body(os, m, enable)?;
+	Some(format!(
+		"G='{group}'\n\
+		 ( set -eu\n{body})\n\
+		 rc=$?\n\
+		 case $rc in 126|127) exit 5;; esac\n\
+		 exit $rc\n"
+	))
+}
+
+/// The privileged body shared by [`setup_script_at`] and [`postinst_shared_default_at`]:
+/// expects `$G` = the admin group name and runs under `set -eu` in a subshell.
+fn setup_body(os: Os, m: &str, enable: bool) -> Option<String> {
+	if m.contains('\'') || !m.starts_with('/') {
 		return None;
 	}
 	let stat_uid = match os {
@@ -180,11 +198,9 @@ pub fn setup_script_at(os: Os, m: &str, group: &str, enable: bool) -> Option<Str
 	};
 	let shared = if enable { "true" } else { "false" };
 	Some(format!(
-		"set -eu\n\
-		 umask 022\n\
+		"umask 022\n\
 		 M='{m}'\n\
 		 S=\"$M/{SHARED_SUBDIR}\"\n\
-		 G='{group}'\n\
 		 chk() {{ if [ -L \"$1\" ] || {{ [ -e \"$1\" ] && [ ! -d \"$1\" ]; }}; then echo \"$1: not a plain directory\" >&2; exit 3; fi; }}\n\
 		 own() {{ o=$({stat_uid} \"$1\"); if [ \"$o\" != 0 ]; then echo \"$1: owned by uid $o\" >&2; exit 4; fi; }}\n\
 		 chk \"$M\"; mkdir -p \"$M\"; chk \"$M\"; own \"$M\"\n\
@@ -196,6 +212,60 @@ pub fn setup_script_at(os: Os, m: &str, group: &str, enable: bool) -> Option<Str
 		 printf '{{\"shared\":{shared}}}\\n' > \"$T\"; chmod 644 \"$T\"; mv -f \"$T\" \"$M/mode.json\"\n"
 	))
 }
+
+/// Begin / end lines of the generated block inside `src-tauri/linux/postinst.sh`.
+pub const POSTINST_BEGIN: &str = "# >>> pulsar-machine shared-mode default (generated: pulsar_machine::postinst_shared_default)";
+pub const POSTINST_END: &str = "# <<< pulsar-machine shared-mode default";
+
+/// The deb/rpm post-install block that gives a FRESH Linux machine the Windows default
+/// (shared mode ON, see `decide` in shared_mode.rs) without a prompt: the package manager
+/// runs it as root, which Pulsar itself never is. It turns shared mode on only when
+/// `mode.json` does not exist yet (nobody decided) AND no user has per-user Pulsar data
+/// (`identity.key` / `config.json` under `/root/.config/<id>` or `/home/*/.config/<id>`
+/// without the provisional marker) — an existing install keeps its per-user ID, exactly like
+/// Windows. A machine with no admin group is left undecided. Never fails the install.
+/// A custom `$XDG_CONFIG_HOME` per user is not visible to a package script; such a user's
+/// data is not seen (documented in architecture.md).
+pub fn postinst_shared_default(app_id: &str) -> Option<String> {
+	postinst_shared_default_at(LINUX_MACHINE_DIR, "/root/.config /home/*/.config", app_id)
+}
+
+/// [`postinst_shared_default`] for an explicit machine dir and config-dir parents (a
+/// space-separated list of shell words, globs allowed; tests use scratch dirs).
+pub fn postinst_shared_default_at(m: &str, config_parents: &str, app_id: &str) -> Option<String> {
+	let ok = |s: &str| {
+		s.bytes()
+			.all(|b| b.is_ascii_alphanumeric() || b"/._-* ".contains(&b))
+	};
+	if !ok(config_parents) || !ok(app_id) || app_id.contains(' ') {
+		return None;
+	}
+	let body = setup_body(Os::Linux, m, true)?;
+	let groups = admin_group_candidates(Os::Linux).join(" ");
+	Some(format!(
+		"{POSTINST_BEGIN}\n\
+		 pulsar_shared_default() {{\n\
+		 \tif [ -e '{m}/mode.json' ] || [ -L '{m}/mode.json' ]; then return 0; fi\n\
+		 \tfor p in {config_parents}; do\n\
+		 \t\td=\"$p/{app_id}\"\n\
+		 \t\tif {{ [ -f \"$d/identity.key\" ] || [ -f \"$d/config.json\" ]; }} && [ ! -e \"$d/{PROV}\" ]; then return 0; fi\n\
+		 \tdone\n\
+		 \tG=''\n\
+		 \tfor g in {groups}; do\n\
+		 \t\tif getent group \"$g\" >/dev/null 2>&1; then G=$g; break; fi\n\
+		 \tdone\n\
+		 \tif [ -z \"$G\" ]; then return 0; fi\n\
+		 \t( set -eu\n{body}) && echo \"Pulsar: shared (machine-wide) mode is on for this new install (group $G).\"\n\
+		 }}\n\
+		 pulsar_shared_default || true\n\
+		 {POSTINST_END}\n",
+		PROV = PROVISIONAL_MARKER,
+	))
+}
+
+/// Per-user marker name written by older builds / Windows (`shared_mode.rs`); such data does
+/// not count as an existing install.
+pub const PROVISIONAL_MARKER: &str = ".shared-mode-provisional";
 
 /// Quote `s` as an AppleScript string literal (for `do shell script "…"`).
 pub fn applescript_quote(s: &str) -> String {
@@ -246,7 +316,8 @@ impl std::fmt::Display for PrivError {
 }
 
 /// `pkexec` exit status → result (man pkexec: 126 = dialog dismissed, 127 = not authorized
-/// or pkexec failed; anything else is the script's own status).
+/// or pkexec failed; anything else is the script's own status — [`setup_script`] never
+/// exits 126 / 127 itself, it maps those to 5).
 pub fn classify_pkexec(code: Option<i32>, stderr: &str) -> Result<(), PrivError> {
 	match code {
 		Some(0) => Ok(()),
@@ -415,6 +486,79 @@ mod tests {
 				assert!(st.success(), "sh -n rejected the {os:?} script:\n{s}");
 			}
 		}
+	}
+
+	#[test]
+	fn setup_script_never_exits_with_pkexec_codes() {
+		let s = setup_script(Os::Linux, "sudo", true).unwrap();
+		assert!(s.starts_with("G='sudo'\n( set -eu\n"));
+		assert!(s.contains("case $rc in 126|127) exit 5;; esac"));
+	}
+
+	/// A missing tool inside the script (`mkdir: not found` = 127 under `set -e`) comes out
+	/// as 5, not as pkexec's "not authorized". Runs unprivileged: it fails before any chown.
+	#[cfg(unix)]
+	#[test]
+	fn setup_script_maps_its_own_127_to_5() {
+		let d = std::env::temp_dir().join(format!("pulsar-machine-127-{}", std::process::id()));
+		let s = setup_script_at(Os::Linux, d.join("m").to_str().unwrap(), "sudo", true).unwrap();
+		let st = std::process::Command::new("/bin/sh")
+			.args(["-c", &s])
+			.env("PATH", "/nonexistent")
+			.status()
+			.unwrap();
+		assert_eq!(st.code(), Some(5));
+	}
+
+	#[test]
+	fn postinst_block_is_in_the_package_script() {
+		let block = postinst_shared_default("dev.pulsar.app").unwrap();
+		assert!(block.starts_with(POSTINST_BEGIN) && block.trim_end().ends_with(POSTINST_END));
+		assert!(block.contains("if [ -e '/var/lib/pulsar/mode.json' ]"));
+		assert!(block.contains("for p in /root/.config /home/*/.config; do"));
+		assert!(block.contains("for g in sudo wheel admin; do"));
+		assert!(block.contains(r#"printf '{"shared":true}\n'"#));
+		assert!(block.contains("pulsar_shared_default || true"));
+		// `src-tauri/linux/postinst.sh` must carry exactly this block (regenerate it from
+		// here when the setup body changes).
+		let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/linux/postinst.sh");
+		let file = std::fs::read_to_string(&p).unwrap().replace("\r\n", "\n");
+		assert!(file.contains(&block), "{} is out of date; expected block:\n{block}", p.display());
+		assert!(postinst_shared_default_at("/x", "/home/*/.config; rm -rf /", "a").is_none());
+		assert!(postinst_shared_default_at("/x'y", "/home", "a").is_none());
+	}
+
+	/// The undecided / existing-install checks of the post-install block, unprivileged: every
+	/// "leave it alone" case returns before touching the machine dir.
+	#[cfg(unix)]
+	#[test]
+	fn postinst_block_skips_decided_and_existing_installs() {
+		let base = std::env::temp_dir().join(format!("pulsar-machine-postinst-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&base);
+		let m = base.join("machine");
+		let homes = base.join("home");
+		let app = homes.join("u1").join(".config").join("dev.pulsar.app");
+		std::fs::create_dir_all(&app).unwrap();
+		let run = || {
+			let parents = format!("{}/*/.config", homes.display());
+			let s = postinst_shared_default_at(m.to_str().unwrap(), &parents, "dev.pulsar.app").unwrap();
+			let st = std::process::Command::new("/bin/sh").args(["-n", "-c", &s]).status().unwrap();
+			assert!(st.success(), "sh -n rejected:\n{s}");
+			let o = std::process::Command::new("/bin/sh").args(["-c", &s]).output().unwrap();
+			assert!(o.status.success(), "never fails the install");
+		};
+		// An existing per-user install keeps per-user mode.
+		std::fs::write(app.join("config.json"), b"{}").unwrap();
+		run();
+		assert!(!m.exists(), "existing install: machine dir untouched");
+		// Already decided (mode.json present): untouched even without user data.
+		std::fs::remove_file(app.join("config.json")).unwrap();
+		std::fs::create_dir_all(&m).unwrap();
+		std::fs::write(m.join("mode.json"), b"{\"shared\":false}").unwrap();
+		run();
+		assert!(!m.join(SHARED_SUBDIR).exists(), "decided: untouched");
+		assert_eq!(std::fs::read_to_string(m.join("mode.json")).unwrap(), "{\"shared\":false}");
+		let _ = std::fs::remove_dir_all(&base);
 	}
 
 	#[test]

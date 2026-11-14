@@ -40,7 +40,9 @@ selection.
 hardware):** `crates/pulsar-machine` + the Unix branches of `shared_mode.rs` — see
 [architecture.md](architecture.md) "Linux / macOS". Unit tests for every rule (dir checks,
 group pick, script text, exit-code mapping, per-user paths); `flock` lease + `harden` tested on
-Linux (WSL); the setup script ran end-to-end as root in WSL on a scratch dir. **Never run:**
+Linux (WSL); the setup script ran end-to-end as root in WSL on a scratch dir. The deb/rpm
+post-install default-ON block is unit-tested for its skip cases (decided / existing data) and
+parses in `sh`; **never run** inside a real `dpkg -i` / `rpm -i`. **Never run:**
 the real `pkexec` / macOS administrator prompt, the toggle + restart in the app, two users'
 Pulsar handing the lease over (logind `Active`, CGSession on-console), macOS at all (only
 `cargo check --target aarch64-apple-darwin -p pulsar-machine`; `pulsar-tauri` can't be

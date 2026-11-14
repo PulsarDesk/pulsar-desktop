@@ -3,7 +3,7 @@ import tr from './i18n/tr.json';
 import en from './i18n/en.json';
 import ru from './i18n/ru.json';
 import kk from './i18n/kk.json';
-import { sharedErrorKey, sharedNoAccessKey } from './sharedMode';
+import { sharedErrorKey, sharedHostErrorKey, sharedNoAccessKey } from './sharedMode';
 
 describe('shared mode error copy', () => {
 	it('maps backend codes per platform', () => {
@@ -14,6 +14,9 @@ describe('shared mode error copy', () => {
 		expect(sharedErrorKey('SHARED_DIR:/var/lib/pulsar: owned by uid 1000', true)).toBe('shared.failed');
 		expect(sharedNoAccessKey(false)).toBe('shared.noAccess');
 		expect(sharedNoAccessKey(true)).toBe('shared.noAccessUnix');
+		expect(sharedHostErrorKey('SHARED_NO_ACCESS', true)).toBe('shared.noAccessUnix');
+		expect(sharedHostErrorKey('SHARED_REPAIR', true)).toBe('shared.repairUnix');
+		expect(sharedHostErrorKey('SHARED_STANDBY:a', true)).toBeNull();
 	});
 
 	it('every key exists in every language', () => {
@@ -24,7 +27,8 @@ describe('shared mode error copy', () => {
 				sharedErrorKey(m, false)
 			]),
 			sharedNoAccessKey(true),
-			sharedNoAccessKey(false)
+			sharedNoAccessKey(false),
+			'shared.repairUnix'
 		];
 		for (const dict of [tr, en, ru, kk] as Record<string, string>[]) {
 			for (const k of keys) expect(dict[k], k).toBeTruthy();

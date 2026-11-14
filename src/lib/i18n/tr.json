@@ -348,6 +348,7 @@
 	"shared.failed": "Ortak Pulsar ayarı değiştirilemedi",
 	"settings.sharedModeDescUnix": "Bu bilgisayardaki tüm kullanıcılar tek Pulsar kimliği ve ayarları kullanır. Değiştirmek sistem parolası ve yeniden başlatma ister; yalnızca yönetici grubundaki (sudo/wheel/admin) hesaplar kullanabilir.",
 	"shared.noAccessUnix": "Ortak Pulsar açık ama bu hesap yönetici grubunda (sudo/wheel/admin) değil; yayın için hesabı gruba ekleyip oturumu yeniden açın",
+	"shared.repairUnix": "Ortak Pulsar dosyalarının izinleri bozuk (başka bir yöneticinin Pulsar’ı tarafından yazılmış); onarmak için Ayarlar → Genel’de ortak Pulsar’ı kapatıp yeniden açın",
 	"shared.needAdminUnix": "Bu ayarı değiştirmek için hesabınız yönetici grubunda (sudo/wheel/admin) olmalı",
 	"shared.cancelled": "Parola istemi iptal edildi",
 	"shared.denied": "Yetki verilmedi",
