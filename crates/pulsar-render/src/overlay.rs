@@ -266,6 +266,116 @@ fn set_headset_volume_local(uuid: &str, v: u8) {
 /// Volume step per d-pad press.
 const HEADSET_STEP: u8 = 5;
 
+/// This computer's audio devices for the Ses view's pickers: which microphone goes to the
+/// host and which output plays the session (the app's `micdevs` / `spkdevs` stdin lines).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DevList {
+	/// The app sent a list (an older app never does: the rows stay hidden).
+	pub known: bool,
+	/// The user's pick by name; empty = the system default.
+	pub cur: String,
+	/// The devices present now, by name.
+	pub devs: Vec<String>,
+}
+
+static MIC_DEVS: std::sync::Mutex<DevList> =
+	std::sync::Mutex::new(DevList { known: false, cur: String::new(), devs: Vec::new() });
+static SPK_DEVS: std::sync::Mutex<DevList> =
+	std::sync::Mutex::new(DevList { known: false, cur: String::new(), devs: Vec::new() });
+
+/// The token for "the system default" in the device lines.
+pub const DEV_DEFAULT: &str = "*";
+
+/// A device name as one space-free token for the stdin/stdout lines: bytes other than
+/// `A-Z a-z 0-9 - _ . ~` become `%XX`. The empty name (the system default) is [`DEV_DEFAULT`].
+/// Same encoding as the app's `audio_devices::encode`.
+pub fn dev_encode(name: &str) -> String {
+	if name.is_empty() {
+		return DEV_DEFAULT.to_string();
+	}
+	let mut s = String::with_capacity(name.len());
+	for b in name.bytes() {
+		if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+			s.push(b as char);
+		} else {
+			s.push_str(&format!("%{b:02X}"));
+		}
+	}
+	s
+}
+
+/// Inverse of [`dev_encode`] (`None` for a malformed token).
+pub fn dev_decode(tok: &str) -> Option<String> {
+	if tok == DEV_DEFAULT {
+		return Some(String::new());
+	}
+	let b = tok.as_bytes();
+	let mut out = Vec::with_capacity(b.len());
+	let mut i = 0;
+	while i < b.len() {
+		if b[i] == b'%' {
+			let hex = std::str::from_utf8(b.get(i + 1..i + 3)?).ok()?;
+			out.push(u8::from_str_radix(hex, 16).ok()?);
+			i += 3;
+		} else {
+			out.push(b[i]);
+			i += 1;
+		}
+	}
+	String::from_utf8(out).ok()
+}
+
+/// Parse a `micdevs <cur> <dev>…` / `spkdevs <cur> <dev>…` line's tokens (after the keyword).
+pub fn parse_dev_list(toks: &[&str]) -> DevList {
+	let mut it = toks.iter().filter_map(|t| dev_decode(t));
+	let cur = it.next().unwrap_or_default();
+	let mut devs: Vec<String> = Vec::new();
+	for d in it {
+		if !d.is_empty() && !devs.contains(&d) {
+			devs.push(d);
+		}
+	}
+	DevList { known: true, cur, devs }
+}
+
+/// The app's `micdevs …` / `spkdevs …` stdin line (every backend calls this). Returns
+/// whether the line was one of them.
+pub fn audio_devices_line(line: &str) -> bool {
+	let mut it = line.split_whitespace();
+	let slot = match it.next() {
+		Some("micdevs") => &MIC_DEVS,
+		Some("spkdevs") => &SPK_DEVS,
+		_ => return false,
+	};
+	let toks: Vec<&str> = it.collect();
+	*slot.lock().unwrap_or_else(|e| e.into_inner()) = parse_dev_list(&toks);
+	true
+}
+
+fn dev_list(mic: bool) -> DevList {
+	let slot = if mic { &MIC_DEVS } else { &SPK_DEVS };
+	slot.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// A pick in the menu, mirrored at once (the app echoes the list back).
+fn set_dev_pick(mic: bool, name: &str) {
+	let slot = if mic { &MIC_DEVS } else { &SPK_DEVS };
+	slot.lock().unwrap_or_else(|e| e.into_inner()).cur = name.to_string();
+}
+
+/// A picker's options as `(token, label)`: the system default, every present device, and the
+/// user's pick when it is not connected now (marked, so the row still shows what is chosen).
+fn dev_options(l: &DevList) -> Vec<(String, String)> {
+	let mut opts = vec![(DEV_DEFAULT.to_string(), t("adev.default").to_string())];
+	for d in &l.devs {
+		opts.push((dev_encode(d), d.clone()));
+	}
+	if !l.cur.is_empty() && !l.devs.contains(&l.cur) {
+		opts.push((dev_encode(&l.cur), format!("{} ({})", l.cur, t("adev.missing"))));
+	}
+	opts
+}
+
 /// Overlay settings whose change restarts the stream; see [`UiState::deferred`].
 pub const RESTART_FIELDS: [&str; 8] =
 	["codec", "encoder", "res", "fps", "quality", "display", "adapt", "aquality"];
@@ -1904,7 +2014,10 @@ fn draw_audio(
 	cmds: &mut Vec<OverlayCmd>,
 ) {
 	let onoff = [("on", t("on")), ("off", t("off"))];
-	let mut rows = Rows::new(5, input);
+	// The device pickers (this computer's mic / output) show once the app sent the lists.
+	let mics = dev_list(true);
+	let spks = dev_list(false);
+	let mut rows = Rows::new(5 + usize::from(mics.known) + usize::from(spks.known), input);
 	ui.spacing_mut().item_spacing.y = ROW_GAP;
 	let call = if st.mic_on { "on" } else { "off" };
 	if let Some(v) = rows.choice(ui, 0, t("audio.call"), call, &onoff, Some(t("info.call"))) {
@@ -1923,6 +2036,27 @@ fn draw_audio(
 	if let Some(v) = rows.choice(ui, 3, t("audio.mic"), mic, &onoff, None) {
 		cmds.push(OverlayCmd::Set("mic", v));
 	}
+	let mut row = 4;
+	// Which microphone / output device of THIS computer (applied at once, no stream restart;
+	// the app falls back to the system default while the pick is not connected).
+	for (list, is_mic) in [(&mics, true), (&spks, false)] {
+		if !list.known {
+			continue;
+		}
+		let owned = dev_options(list);
+		let opts: Vec<(&str, &str)> = owned.iter().map(|(v, l)| (v.as_str(), l.as_str())).collect();
+		let cur = dev_encode(&list.cur);
+		let (label, info, field) = if is_mic {
+			(t("adev.mic"), t("info.adev.mic"), "micdev")
+		} else {
+			(t("adev.out"), t("info.adev.out"), "spkdev")
+		};
+		if let Some(v) = rows.choice(ui, row, label, &cur, &opts, Some(info)) {
+			set_dev_pick(is_mic, &dev_decode(&v).unwrap_or_default());
+			cmds.push(OverlayCmd::Set(field, v));
+		}
+		row += 1;
+	}
 	// Audio quality — a stream restart, so it waits for the menu to close (RESTART_FIELDS).
 	let qualities = [
 		("auto", t("aq.auto")),
@@ -1931,7 +2065,7 @@ fn draw_audio(
 		("raw", t("aq.raw")),
 	];
 	let q = staged(deferred, "aquality", audio_quality());
-	if let Some(v) = rows.choice(ui, 4, t("audio.quality"), q, &qualities, Some(t("info.aquality"))) {
+	if let Some(v) = rows.choice(ui, row, t("audio.quality"), q, &qualities, Some(t("info.aquality"))) {
 		cmds.push(OverlayCmd::Set("aquality", v));
 	}
 	if rows.picking() {
@@ -4046,5 +4180,66 @@ mod rows_tests {
 			press(&ctx, &st, &mut ui, egui::Key::ArrowDown);
 		}
 		assert_eq!(press(&ctx, &st, &mut ui, egui::Key::Enter), vec![("fullscreen", "1".to_string())]);
+	}
+
+	#[test]
+	fn the_device_pickers_follow_the_app_lists_and_emit_picks() {
+		assert!(audio_devices_line("micdevs * Mic%20A Headset%20%28USB%29"));
+		assert!(audio_devices_line("spkdevs Gone%20Speaker Speakers"));
+		let st = open_state();
+		let (ctx, mut ui) = opened(View::Audio, &st);
+		// Rows: call, host, host speakers, mic, mic device (4), output device (5), quality.
+		for _ in 0..4 {
+			press(&ctx, &st, &mut ui, egui::Key::ArrowDown);
+		}
+		assert_eq!(ui.sub_sel, 4);
+		// Three options (default + two mics) side by side: right stages, A confirms.
+		let mut out = press(&ctx, &st, &mut ui, egui::Key::ArrowRight);
+		if ui.picker.is_none() && ui.pending.is_none() {
+			// Did not fit side by side: the row is an options page.
+			out = press(&ctx, &st, &mut ui, egui::Key::Enter);
+		}
+		assert!(out.is_empty());
+		if ui.picker.is_some() {
+			press(&ctx, &st, &mut ui, egui::Key::ArrowRight);
+		}
+		let got = press(&ctx, &st, &mut ui, egui::Key::Enter);
+		assert_eq!(got, vec![("micdev", "Mic%20A".to_string())]);
+		assert_eq!(dev_list(true).cur, "Mic A", "mirrored at once");
+		// The output pick is not connected: still listed (marked) so the row shows it.
+		let opts = dev_options(&dev_list(false));
+		assert_eq!(opts.len(), 3);
+		assert!(opts[2].1.starts_with("Gone Speaker ("));
+		assert!(audio_devices_line("micdevs *"));
+		assert!(audio_devices_line("spkdevs *"));
+	}
+}
+
+#[cfg(test)]
+mod audio_device_tests {
+	use super::*;
+
+	#[test]
+	fn names_round_trip_as_single_tokens() {
+		for n in ["Mikrofon (Realtek(R) Audio)", "Kulaklık ğüşİ", "a%b", "plain-name_1.2~"] {
+			let e = dev_encode(n);
+			assert!(!e.contains(' ') && !e.is_empty());
+			assert_eq!(dev_decode(&e).as_deref(), Some(n));
+		}
+		assert_eq!(dev_encode(""), DEV_DEFAULT);
+		assert_eq!(dev_decode(DEV_DEFAULT).as_deref(), Some(""));
+		assert_eq!(dev_decode("bad%2"), None);
+		assert_eq!(dev_decode("bad%zz"), None);
+	}
+
+	#[test]
+	fn a_list_line_parses_cur_and_unique_devices() {
+		let l = parse_dev_list(&["Mic%20A", "Mic%20A", "Mic%20B", "*"]);
+		assert!(l.known);
+		assert_eq!(l.cur, "Mic A");
+		assert_eq!(l.devs, vec!["Mic A".to_string(), "Mic B".to_string()]);
+		let empty = parse_dev_list(&[]);
+		assert!(empty.known && empty.cur.is_empty() && empty.devs.is_empty());
+		assert!(!audio_devices_line("hpvol x"));
 	}
 }
