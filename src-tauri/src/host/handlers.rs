@@ -1816,19 +1816,6 @@ fn spawn_media_forwarders(
 	Some((vport, aport))
 }
 
-/// If `req` differs from the previous native request ONLY in fields the LIVE `CaptureHandle` can
-/// absorb without a full capture+encode+audio rebuild — the monitor (`display_idx`) and/or the
-/// target bitrate (`bitrate_kbps`, to a concrete >0 value) — return `(display_changed,
-/// bitrate_changed)`. Otherwise `None` (codec/encoder/res/fps/audio/etc. changed → full rebuild).
-///
-/// This is what keeps a session-menu MONITOR switch AND the client's adaptive-bitrate steps off
-/// the slow path: a monitor change is an in-thread re-capture (`switch_output`), a bitrate change
-/// is a live `nvEncReconfigureEncoder` (`set_bitrate`) — neither spawns a second encoder. Before
-/// this, an adaptive bitrate step landing during a switch made the restream "not display-only" →
-/// a full rebuild that STACKED with the switch (two encoders → the host's encode load doubled,
-/// and the switch time went erratic 1-8 s). Comparing via the derived `PartialEq` (with both live
-/// fields normalized) means any field added to `StreamReq` later defaults to the safe full path.
-#[cfg(windows)]
 /// A native capture thread whose encoded-frame count stays flat this long is treated as wedged
 /// (an in-thread monitor switch rebuild takes well under this).
 #[cfg(any(windows, target_os = "macos"))]
@@ -1850,6 +1837,18 @@ const NATIVE_STUCK_TICKS: u32 = (NATIVE_STUCK_AFTER.as_millis() / 500) as u32;
 #[cfg(any(windows, target_os = "macos"))]
 const NATIVE_STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// If `req` differs from the previous native request ONLY in fields the LIVE `CaptureHandle` can
+/// absorb without a full capture+encode+audio rebuild — the monitor (`display_idx`) and/or the
+/// target bitrate (`bitrate_kbps`, to a concrete >0 value) — return `(display_changed,
+/// bitrate_changed)`. Otherwise `None` (codec/encoder/res/fps/audio/etc. changed → full rebuild).
+///
+/// This is what keeps a session-menu MONITOR switch AND the client's adaptive-bitrate steps off
+/// the slow path: a monitor change is an in-thread re-capture (`switch_output`), a bitrate change
+/// is a live `nvEncReconfigureEncoder` (`set_bitrate`) — neither spawns a second encoder. Before
+/// this, an adaptive bitrate step landing during a switch made the restream "not display-only" →
+/// a full rebuild that STACKED with the switch (two encoders → the host's encode load doubled,
+/// and the switch time went erratic 1-8 s). Comparing via the derived `PartialEq` (with both live
+/// fields normalized) means any field added to `StreamReq` later defaults to the safe full path.
 fn live_change(prev: &StreamReq, req: &StreamReq) -> Option<(bool, bool)> {
 	let display_changed = prev.display_idx != req.display_idx;
 	let bitrate_changed = prev.bitrate_kbps != req.bitrate_kbps;
