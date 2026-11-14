@@ -192,6 +192,16 @@ Pulsar handing the lease over (logind `Active`, CGSession on-console), macOS at 
 `cargo check --target aarch64-apple-darwin -p pulsar-machine`; `pulsar-tauri` can't be
 mac-checked from Windows).
 
+**Controller touchpad as mouse — all three desktop OSes (2026-11-14, not run on hardware):**
+was Linux-only (evdev). Windows + macOS now read the DS4 / DualSense touchpad from SDL3 (or
+the DualSense passthrough report) in `touchpad_mouse.rs`; all three share
+`pulsar_core::input::touchpad_mouse` (pointer / two-finger scroll / click / two-finger right
+click — scroll and right click are new on Linux too). Settings toggle added
+(Genel → Oyun kolu). Gesture logic and pad routing (tabs / split / locks / press-to-join,
+`pulsar_core::input::pad_route`, shared with the gamepad forward gate) unit-tested; the pad
+click also reaches the host as the pad's touchpad button (open maintainer decision); see
+[modes.md](modes.md) "Input only while Pulsar is focused".
+
 **Host-only / headless host / Pulsar Split seat host (2026-11-13, not run on hardware):**
 `--host-only`, `--headless-host`, `--headless-stop`, `--split-seat` — see
 [modes.md](modes.md) "Host-only and headless host". Unit-tested (argv parsing, pipe protocol

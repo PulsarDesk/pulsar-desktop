@@ -104,6 +104,33 @@ While another app is focused, Pulsar acts on NO input (maintainer rule, 2026-11-
   capture's focus (Tauri map or standalone render window), always true for a kiosk
   `--connect` launch (Orange Pi). Settings → Genel → "Arka planda kol girdisi" (default off)
   lets the pad keep driving the host (not the in-app UI) in the background.
+- **Controller touchpad as mouse** (Settings → Genel → Oyun kolu → "Dokunmatik yüzey fare olarak",
+  `ui.touchpadAsMouse`, default on, read at connect): a DS4 / DualSense touchpad drives the
+  host pointer with the shared gestures of `pulsar_core::input::touchpad_mouse` — one finger
+  = relative pointer, two fingers = scroll (natural direction), pad press = left click,
+  two-finger press = right click. Readers per OS: **Linux** the pad's evdev touchpad node
+  (`pulsar_core::input::touchpad_linux`, both MT slots; gate = `kbdhook::input_active`);
+  **Windows + macOS** `src-tauri/src/touchpad_mouse.rs`, fed by `controllers.rs`
+  (`PadView::touch`: SDL3 `SDL_GetGamepadTouchpadFinger` + the TOUCHPAD button, or the
+  DualSense passthrough's raw report while it owns the pad); gate = Pulsar focused and the
+  session menu closed (background input does NOT extend to the mouse); a disabled pad is
+  ignored. **Routing** = the gamepad forward gate's rule (`focus_gate::PadRouting` →
+  `pulsar_core::input::pad_route::pad_routes_to`, unit-tested in core): several tabs → only
+  the focused tab's host; split screen → the pad's lock owner, else the focused pane, and no
+  pane while "press to join" waits. Linux applies the same rule with "unlocked" (its evdev
+  node is not tied to an SDL pad uuid, so a split-pane lock is not seen there).
+  **The pad click reaches the host twice, on every OS** (maintainer decision pending, not a
+  regression): as the mouse click, and in the forwarded pad state (`button::TOUCHPAD`, the
+  touchpad button of the host's virtual pad) / the DualSense
+  passthrough report; the touch contacts also reach the host's virtual DualSense through
+  the passthrough. A game that reacts to the touchpad button gets it while the pointer
+  clicks. Linux readers mark a new MT tracking id as a new contact (re-seed, no jump when a
+  slot swaps fingers inside one frame); SDL and the raw DualSense report carry no contact
+  id here, so that rare swap can still jump once on Windows / macOS. SDL contacts are
+  scaled back with SDL's own divisors (920 DS4 / 1070 DS5) so motion matches the raw
+  paths. **Untested on hardware on all three OSes**
+  (macOS: SDL may serve the pad through its GameController/MFi driver instead of HIDAPI —
+  that driver also reports the touchpad, unverified).
 - **Keyboard/mouse capture**: automatic engages (CLI `--connect` kiosk start, game mode's
   connect-time engage — `kbd_engage { auto: true }`) only happen while Pulsar is focused;
   otherwise they wait and engage when Pulsar gets the focus (Windows `PENDING_ENGAGE` in

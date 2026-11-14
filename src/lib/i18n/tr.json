@@ -359,6 +359,8 @@
 	"shared.denied": "Yetki verilmedi",
 	"settings.padBackground": "Arka planda kol girdisi",
 	"settings.padBackgroundDesc": "Başka uygulama öndeyken de kol karşı bilgisayarı kontrol eder.",
+	"settings.touchpadMouse": "Dokunmatik yüzey fare olarak",
+	"settings.touchpadMouseDesc": "DualShock 4 / DualSense dokunmatik yüzeyi: tek parmak imleci kaydırır, iki parmak sayfayı kaydırır, basmak tıklar (iki parmakla sağ tık). Sonraki bağlantıda geçerli olur.",
 	"settings.gamingTitle": "Oyun Ayarları",
 	"settings.gamingSub": "Oyun modu yalnızca istemcidir: burada sadece bağlanırken kullanılan ayarlar var. Normal moddaki ayarlar (host, güvenlik) farklı olabilir.",
 	"settings.gamingAllSub": "Tüm ayarlar gösteriliyor; host ve güvenlik ayarları normal modla ortaktır.",

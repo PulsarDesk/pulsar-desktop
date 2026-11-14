@@ -182,8 +182,8 @@ export interface UiSettings {
 	/** Per-controller DISABLED flag keyed by uuid hex (true = off). A disabled pad isn't
 	 * forwarded to the host and doesn't rumble. Absent = enabled. */
 	controllerDisabled: Record<string, boolean>;
-	/** Feature 2 Piece B: treat the DS4/DS5 touchpad as a relative mouse (pointer
-	 * moves + left-click). Default true. */
+	/** Treat the DS4/DS5 touchpad as a mouse (one finger = pointer, two = scroll, press =
+	 * click; Settings → Genel → Oyun kolu). Default true. */
 	touchpadAsMouse: boolean;
 	/** App-level personality (persisted): 'remote' = the general remote-desktop app
 	 * (left sidebar, host capability); 'game' = the controller-first game-streaming

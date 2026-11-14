@@ -22,6 +22,9 @@ use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use pulsar_core::input::touchpad_mouse::{
+    ds5_usb_touch, finger_from_normalized, TouchFrame, SDL_DS4_Y_SCALE, SDL_DS5_Y_SCALE,
+};
 use pulsar_core::input::{button, vid_pid_from_sdl_guid, GamepadKind, GamepadState};
 use sdl3_sys::events::{
     SDL_PollEvent, SDL_WaitEventTimeout, SDL_Event, SDL_EVENT_GAMEPAD_ADDED,
@@ -63,6 +66,10 @@ pub struct PadView {
     /// The pad's HID device path (SDL_GetGamepadPath), for raw HID access (DualSense
     /// passthrough, `ds5::client`). `None` when SDL doesn't drive it through hidapi.
     pub path: Option<std::ffi::CString>,
+    /// The pad's touchpad contacts + pad click (DS4 / DualSense), read by the
+    /// touchpad-as-mouse reader on Windows and macOS (`touchpad_mouse.rs`). `None` = the pad
+    /// has no touchpad.
+    pub touch: Option<TouchFrame>,
 }
 
 /// A rumble request routed to the SDL thread: prefer the GUID-matched pad, else slot-Nth.
@@ -180,8 +187,8 @@ static PADS: OnceLock<Option<SdlPads>> = OnceLock::new();
 /// comes from the passthrough's own parse instead of SDL: a BT DualSense streaming its mic
 /// interleaves mic reports into the same report id, and SDL's driver reads those as random
 /// button presses (which fired the overlay / leave-session combos, 2026-11-11).
-fn ds5_override_map() -> &'static Mutex<HashMap<Vec<u8>, GamepadState>> {
-    static M: OnceLock<Mutex<HashMap<Vec<u8>, GamepadState>>> = OnceLock::new();
+fn ds5_override_map() -> &'static Mutex<HashMap<Vec<u8>, (GamepadState, TouchFrame)>> {
+    static M: OnceLock<Mutex<HashMap<Vec<u8>, (GamepadState, TouchFrame)>>> = OnceLock::new();
     M.get_or_init(Default::default)
 }
 
@@ -194,7 +201,7 @@ pub fn set_ds5_input(path: &CStr, usb_input: &[u8; 64]) {
     ds5_override_map()
         .lock()
         .unwrap()
-        .insert(path_key(path), ds5_usb_to_state(usb_input));
+        .insert(path_key(path), (ds5_usb_to_state(usb_input), ds5_usb_touch(usb_input)));
 }
 
 /// The passthrough let go of the pad: SDL's own reading applies again.
@@ -202,7 +209,7 @@ pub fn clear_ds5_input(path: &CStr) {
     ds5_override_map().lock().unwrap().remove(&path_key(path));
 }
 
-fn ds5_override(path: Option<&std::ffi::CString>) -> Option<GamepadState> {
+fn ds5_override(path: Option<&std::ffi::CString>) -> Option<(GamepadState, TouchFrame)> {
     let p = path?;
     let m = ds5_override_map().lock().unwrap();
     if m.is_empty() {
@@ -393,6 +400,9 @@ struct OpenPad {
     kind: GamepadKind,
     name: String,
     path: Option<std::ffi::CString>,
+    /// The Y divisor SDL normalized this pad's touchpad with, which turns its contacts back
+    /// into raw touchpad units (`None` = the pad has no touchpad).
+    pad_height: Option<f64>,
 }
 
 /// The SDL thread body: init the gamepad subsystem, then run the Moonlight-style event loop
@@ -414,7 +424,7 @@ fn run(shared: Arc<Shared>, rumble_rx: Receiver<RumbleCmd>, ready: std::sync::mp
     tracing::info!("controllers: SDL gamepad subsystem up (event-driven input + rumble)");
 
     let mut open: HashMap<u32, OpenPad> = HashMap::new();
-    let mut last: HashMap<u32, GamepadState> = HashMap::new();
+    let mut last: HashMap<u32, (GamepadState, Option<TouchFrame>)> = HashMap::new();
     let mut ev: SDL_Event = unsafe { std::mem::zeroed() };
     let mut needs_refresh = true; // open already-connected pads on the first pass
     let mut battery_at = std::time::Instant::now();
@@ -448,7 +458,12 @@ fn run(shared: Arc<Shared>, rumble_rx: Receiver<RumbleCmd>, ready: std::sync::mp
 
         // Read each open pad and diff against the last published state.
         for (inst, p) in &open {
-            let st = ds5_override(p.path.as_ref()).unwrap_or_else(|| unsafe { read_state(p.ptr) });
+            // The touchpad is part of the diff, so a touch-only change also wakes the readers
+            // (the forward loop dedups on GamepadState, so it sends nothing extra).
+            let st = match ds5_override(p.path.as_ref()) {
+                Some((st, touch)) => (st, p.pad_height.map(|_| touch)),
+                None => unsafe { (read_state(p.ptr), p.pad_height.map(|h| read_touch(p.ptr, h))) },
+            };
             if last.get(inst) != Some(&st) {
                 last.insert(*inst, st);
                 changed = true;
@@ -462,7 +477,7 @@ fn run(shared: Arc<Shared>, rumble_rx: Receiver<RumbleCmd>, ready: std::sync::mp
             battery_at = std::time::Instant::now();
             let mut views: Vec<PadView> = Vec::with_capacity(open.len());
             for (inst, p) in &open {
-                let Some(st) = last.get(inst).copied() else { continue };
+                let Some((st, touch)) = last.get(inst).copied() else { continue };
                 // Battery % (None for wired/unknown). Cheap cached getter.
                 let battery = unsafe {
                     let mut pct: c_int = -1;
@@ -480,6 +495,7 @@ fn run(shared: Arc<Shared>, rumble_rx: Receiver<RumbleCmd>, ready: std::sync::mp
                     state: st,
                     battery,
                     path: p.path.clone(),
+                    touch,
                 });
             }
             views.sort_by(|a, b| a.uuid.cmp(&b.uuid));
@@ -526,7 +542,13 @@ fn refresh(open: &mut HashMap<u32, OpenPad>) {
                     tracing::info!(instance = id.0, %uuid, ?kind, %name, "controllers: SDL opened pad");
                     let path_ptr = SDL_GetGamepadPath(ptr);
                     let path = (!path_ptr.is_null()).then(|| CStr::from_ptr(path_ptr).to_owned());
-                    open.insert(id.0, OpenPad { ptr, uuid, kind, name, path });
+                    // SDL's HIDAPI drivers expose the DS4 / DualSense touchpad with both
+                    // axes normalized to 0..1, Y by a per-model divisor (920 / 1070, not
+                    // the raw 942 / 1080): undo exactly SDL's scale.
+                    let pad_height = (SDL_GetNumGamepadTouchpads(ptr) > 0).then_some(
+                        if kind == GamepadKind::Ds5 { SDL_DS5_Y_SCALE } else { SDL_DS4_Y_SCALE },
+                    );
+                    open.insert(id.0, OpenPad { ptr, uuid, kind, name, path, pad_height });
                 }
             }
             SDL_free(ids as *mut c_void);
@@ -578,6 +600,21 @@ unsafe fn read_state(gp: *mut SDL_Gamepad) -> GamepadState {
     st.left_trigger = trig(SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_LEFT_TRIGGER));
     st.right_trigger = trig(SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER));
     st
+}
+
+/// Read touchpad 0's first two contacts and the pad click from SDL. `pad_height` is SDL's
+/// Y divisor for this model; it turns the normalized Y back into raw units (X is 1920).
+unsafe fn read_touch(gp: *mut SDL_Gamepad, pad_height: f64) -> TouchFrame {
+    let mut t = TouchFrame::default();
+    let n = SDL_GetNumGamepadTouchpadFingers(gp, 0).clamp(0, 2);
+    for i in 0..n {
+        let (mut down, mut x, mut y, mut pressure) = (false, 0f32, 0f32, 0f32);
+        if SDL_GetGamepadTouchpadFinger(gp, 0, i, &mut down, &mut x, &mut y, &mut pressure) {
+            t.fingers[i as usize] = finger_from_normalized(down, x, y, pad_height);
+        }
+    }
+    t.click = SDL_GetGamepadButton(gp, SDL_GAMEPAD_BUTTON_TOUCHPAD);
+    t
 }
 
 /// Drive one rumble command onto the right open pad: the GUID-matched pad (exact pad the

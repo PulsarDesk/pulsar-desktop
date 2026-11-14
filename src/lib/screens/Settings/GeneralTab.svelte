@@ -259,6 +259,10 @@
 	<div class="st"><b>{t('settings.padBackground')}</b><span>{t('settings.padBackgroundDesc')}</span></div>
 	<button class="toggle" aria-label={t('settings.padBackground')} class:on={ui.padBackground} aria-pressed={ui.padBackground} onclick={() => { ui.padBackground = !ui.padBackground; saveUi(); api.setPadBackground(ui.padBackground).catch(() => {}); }}><span class="knob"></span></button>
 </div>
+<div class="srow">
+	<div class="st"><b>{t('settings.touchpadMouse')}</b><span>{t('settings.touchpadMouseDesc')}</span></div>
+	<button class="toggle" aria-label={t('settings.touchpadMouse')} class:on={ui.touchpadAsMouse} aria-pressed={ui.touchpadAsMouse} onclick={() => { ui.touchpadAsMouse = !ui.touchpadAsMouse; saveUi(); }}><span class="knob"></span></button>
+</div>
 <div class="subgroup">{t('settings.subDiag')}</div>
 <div class="subdesc">{t('settings.subDiagDesc')}</div>
 <div class="srow">

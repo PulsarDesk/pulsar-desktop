@@ -282,3 +282,46 @@ mod tests {
 		assert_eq!(pad_forward_allowed(), app_focused());
 	}
 }
+
+/// The shared state a session needs to decide which local pads are "its" pads (tabs,
+/// split panes, pad locks, split "press to join"). Clones of the `AppState` Arcs, so a
+/// per-session reader thread reads the live values without holding `AppState`.
+#[derive(Clone)]
+pub(crate) struct PadRouting {
+	pub(crate) focused: std::sync::Arc<std::sync::atomic::AtomicU64>,
+	pub(crate) plays: std::sync::Arc<
+		std::sync::Mutex<std::collections::HashMap<u64, crate::state::PlaySession>>,
+	>,
+	pub(crate) split_panes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl PadRouting {
+	pub(crate) fn from_state(state: &crate::state::AppState) -> Self {
+		Self {
+			focused: state.focused_session.clone(),
+			plays: state.plays.clone(),
+			split_panes: state.split_pane_count.clone(),
+		}
+	}
+
+	/// Whether a pad locked to `lock_owner` (None = unlocked) drives session `play`. The
+	/// rule itself is `pulsar_core::input::pad_route::pad_routes_to` (unit-tested there);
+	/// the gamepad forward loop and the touchpad-as-mouse readers both call this.
+	/// `try_lock`: never block a pad loop on the session map (busy map = forward, as before).
+	pub(crate) fn routes(&self, play: u64, lock_owner: Option<u64>) -> bool {
+		let focused = self.focused.load(Ordering::SeqCst);
+		let sessions = self
+			.plays
+			.try_lock()
+			.ok()
+			.map(|p| (p.len(), p.contains_key(&focused)));
+		pulsar_core::input::pad_route::pad_routes_to(&pulsar_core::input::pad_route::PadRoute {
+			play,
+			lock_owner,
+			focused,
+			sessions,
+			split_panes: self.split_panes.load(Ordering::SeqCst),
+			split_join_active: crate::split_join::active(),
+		})
+	}
+}

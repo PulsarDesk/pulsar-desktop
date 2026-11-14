@@ -359,6 +359,8 @@
 	"shared.denied": "Not authorized",
 	"settings.padBackground": "Controller input in the background",
 	"settings.padBackgroundDesc": "The controller keeps driving the remote PC while another app is in front.",
+	"settings.touchpadMouse": "Touchpad as mouse",
+	"settings.touchpadMouseDesc": "DualShock 4 / DualSense touchpad: one finger moves the pointer, two fingers scroll, pressing clicks (two fingers = right click). Applies from the next connection.",
 	"settings.gamingTitle": "Gaming Settings",
 	"settings.gamingSub": "Gaming mode is client-only: only the settings used when connecting are shown here. Normal-mode settings (host, security) may differ.",
 	"settings.gamingAllSub": "Showing all settings; host and security settings are shared with normal mode.",
