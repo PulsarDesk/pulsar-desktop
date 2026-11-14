@@ -71,7 +71,8 @@ pub fn linux_displays() -> Vec<LinuxDisplay> {
 
 /// Host monitors to advertise in `StreamCaps::displays`, primary at idx 0. Windows
 /// uses the DXGI output list (same index the native capture takes); Linux/X11 uses
-/// xrandr. Empty elsewhere / on Wayland — the client then shows no picker.
+/// xrandr; macOS the CoreGraphics display list (same index ScreenCaptureKit takes). Empty
+/// elsewhere / on Wayland — the client then shows no picker.
 pub fn host_displays() -> Vec<pulsar_core::service::DisplayInfo> {
 	use pulsar_core::service::DisplayInfo;
 	#[cfg(windows)]
@@ -113,7 +114,27 @@ pub fn host_displays() -> Vec<pulsar_core::service::DisplayInfo> {
 			})
 			.collect();
 	}
-	#[cfg(not(any(windows, target_os = "linux")))]
+	// macOS: the active displays, main first — the same order and index the native
+	// ScreenCaptureKit capture (`pulsar_capture::start_capture_encode`) takes. Untested on macOS
+	// hardware.
+	#[cfg(target_os = "macos")]
+	{
+		return pulsar_core::macos_capture::displays()
+			.into_iter()
+			.enumerate()
+			.map(|(i, d)| DisplayInfo {
+				idx: i as u32,
+				name: d.name,
+				width: d.width,
+				height: d.height,
+				primary: d.primary,
+				// Mode enumeration is not wired on macOS; the client uses its fixed presets.
+				modes: Vec::new(),
+				refresh_hz: d.refresh_hz,
+			})
+			.collect();
+	}
+	#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 	{
 		Vec::new()
 	}

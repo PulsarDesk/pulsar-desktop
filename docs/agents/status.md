@@ -36,6 +36,15 @@ merged (2026-09-02); AMD-on-Windows, macOS and Windows ARM64 are CI-built but **
 on hardware** — read [host-encode.md](host-encode.md) before touching encoder/decoder
 selection.
 
+**macOS native host (2026-11-14, LOCAL branch `parity/mac-host-capture-audio`, never run on a
+Mac — only `cargo check --target aarch64-apple-darwin` of pulsar-capture and pulsar-core; the
+src-tauri wiring is reviewed by hand, it cannot be checked off a Mac):** ScreenCaptureKit →
+VideoToolbox → RTP with live bitrate / keyframe / display switch (see host-encode.md), and the
+system mix without Pulsar via ScreenCaptureKit audio (see audio.md); Screen Recording
+permission notice on the home screen. Parity gaps that remain on macOS: RFI and intra refresh
+(VideoToolbox has no API), surround system audio (SCK gives stereo), per-window capture,
+absolute pointer on a non-main display, ffmpeg fallback on a non-main display.
+
 **Host-only / headless host / Pulsar Split seat host (2026-11-13, not run on hardware):**
 `--host-only`, `--headless-host`, `--headless-stop`, `--split-seat` — see
 [modes.md](modes.md) "Host-only and headless host". Unit-tested (argv parsing, pipe protocol

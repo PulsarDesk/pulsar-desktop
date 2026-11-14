@@ -26,11 +26,34 @@ Part of the pulsar-desktop agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
   - `examples/capbench.rs` measures paint → encoded latency per source (see its doc);
     `PULSAR_CAPTURE=dxgi|wgc|dxgi-mf`, `PULSAR_CAPTURE_REPROBE=1` and `PULSAR_EMIT_ON_ARRIVAL=0`
     are the knobs.
+- **macOS (2026-11-14, LOCAL, untested on macOS hardware)** — `crates/pulsar-capture/src/mac/`:
+  ScreenCaptureKit (pulsar-core `macos_capture::ScStream`: one display, NV12 video range, the
+  client's fps as `minimumFrameInterval`, cursor composited, queue depth 5) → VideoToolbox
+  `VTCompressionSession` (`mac/vt.rs`: H.264 High / HEVC Main, hardware preferred, RealTime,
+  no frame reordering, `MaxFrameDelayCount` 0, `EnableLowLatencyRateControl` when the OS takes
+  it for the codec — the session is re-created without it otherwise, `PrioritizeEncodingSpeed…`
+  for latency picks, 10 s safety GOP) → Annex B (`mac/annexb.rs`, parameter sets before every
+  keyframe) → the same `RtpEgress`. Same `CaptureHandle` contract as Windows: live bitrate
+  (`AverageBitRate` + `DataRateLimits` 1.5× / 1 s), keyframe on request, live display switch
+  (rebuild in the thread, revert on failure), a stream SCK stops on its own is rebuilt (≤ 5 in a
+  row), a still screen re-encodes the last frame once per fps slot, `LiveStats.source = "sck"`,
+  display kept awake (`IOPMAssertion`). Not possible with VideoToolbox: reference-frame
+  invalidation (declined, counted as `rfi_declined`) and periodic intra refresh (keyframes
+  instead). Entered when the resolved encoder is VideoToolbox, codec ≠ AV1, no HDR/4:4:4;
+  `PULSAR_FFMPEG_CAPTURE=1` forces ffmpeg. Falls back to the ffmpeg avfoundation CLI on macOS <
+  12.3 (ScreenCaptureKit is dlopen'ed, never linked — the app still starts on older macOS), a
+  missing **Screen Recording permission** (the host's home screen shows a notice with "İzin
+  iste" / "Sistem Ayarlarını aç" — `screen_permission.rs`, `ScreenPermissionNotice.svelte` —
+  and the client gets a `!` stats line `host.screenPermission`), or a session VideoToolbox
+  refuses. `host_displays()` on macOS = the CoreGraphics list, main first (the index the native
+  capture takes). Open: the ffmpeg fallback still captures the main display only, and the
+  absolute pointer is not mapped onto a non-main captured display (`display_rect` exists on
+  macOS, in global points, but host.rs's input mapping is Windows-only).
 - **Linux X11** — the ffmpeg **libraries in-process** (`src-tauri/src/host/libav.rs`:
   x11grab → libavfilter → libavcodec x264/x265/SVT-AV1/NVENC → libavformat RTP; live
   bitrate, forced IDR on request, short-GOP recovery; `PULSAR_LIBAV_HOST=0` disables).
   Falls back to the ffmpeg CLI below when it cannot start or for VA-API/Vulkan/HDR/4:4:4.
-- **Windows (non-NVENC) / macOS** (and the Linux fallback) — ffmpeg CLI (`ddagrab`/
+- **Windows (non-NVENC) / macOS fallback** (and the Linux fallback) — ffmpeg CLI (`ddagrab`/
   `gdigrab`/`avfoundation`/`x11grab` → HW encode or libx264 → RTP). Arg builders are pure
   functions in pulsar-core `pipeline/` (unit-tested); spawning is here (`process.rs`, `host/`).
 - **Wayland (KDE/GNOME)** — pulsar-core `capture` (Linux-only module): XDG

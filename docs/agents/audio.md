@@ -69,6 +69,16 @@ A second Opus/RTP stream parallel to video. Implementation lives in
   measured at ≥15 Mbit/s, High at ≥3 Mbit/s, else Standard; the pick is
   Settings → Görüntü / the session menu's Ses view (a re-stream). The host's
   audio forwarder passes PT 97 and 98 only.
+- **macOS system mix (2026-11-14, LOCAL, untested on macOS hardware)** — ScreenCaptureKit audio
+  (pulsar-core `audio::run_system_audio_capture`, macOS 13+): every app except Pulsar
+  (`excludesCurrentProcessAudio`), 48 kHz stereo f32, silence written while SCK sends nothing so
+  the timeline keeps moving. No BlackHole / virtual device; needs the Screen Recording
+  permission. Default whenever no AVFoundation device is named (`audio_loopback()` is now true
+  on macOS for an empty / `loopback` / `system` device) and also with a host-silent redirect
+  armed (SCK taps the apps, not the output device). Encoded by the same in-process Opus/L16
+  encoder as Windows (`handlers/opus_rtp.rs`, `spawn_system_audio_mac`), ffmpeg on its stdin as
+  the fallback. Stereo only: a surround request, macOS < 13 or a start failure keep the
+  AVFoundation input below (`AvFoundation(0)` is usually the microphone).
 - **dshow / Pulse `.monitor` / AVFoundation** on Linux/macOS, or when the user
   names a device (`Config::audio_input` non-empty → `audio_loopback()` false).
 
