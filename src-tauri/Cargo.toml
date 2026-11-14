@@ -126,12 +126,6 @@ windows-core = "0.62"
 # + downscale (same pipeline as the Linux block below).
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp"] }
 
-# macOS app activation (mac_activate.rs: pad wake / bring forward). The same objc2 0.6 /
-# objc2-app-kit 0.3 tao already pulls in — no new crates, only the features it needs.
-[target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSRunningApplication", "NSWindow", "NSResponder"] }
-
 # Linux/X11: resolve the Pulsar window's X11 id so the native mpv renderer embeds INSIDE
 # the app window via `--wid` (in-app HW-decoded video, no webview hop). Versions match
 # the gtk3 stack tauri/wry already pull in (gtk/gdk/gdkx11 0.18.2 in Cargo.lock).
@@ -164,7 +158,9 @@ pulsar-macinput = { path = "../crates/pulsar-macinput" }
 # same objc2 0.6 family tauri/tao already use on macOS (no new crates in the lock).
 block2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "NSNotification", "NSOperation", "NSString", "NSObject"] }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSWorkspace"] }
+# mac_activate.rs (pad wake / bring forward): app activation. The same objc2 0.6 /
+# objc2-app-kit 0.3 tao already pulls in — no new crates, only the features they need.
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSWorkspace", "NSApplication", "NSRunningApplication", "NSWindow", "NSResponder"] }
 
 # Linux client-side input capture: grab the local keyboard+mouse (evdev) and forward to
 # the host while the embedded native renderer covers the webview (the Linux analog of the
