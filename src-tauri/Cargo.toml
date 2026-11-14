@@ -136,6 +136,9 @@ gdkx11 = "0.18"
 # Linux): needed on macOS too — `stop_render_child` is cfg(unix).
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# Shared (machine-wide) mode on Linux/macOS: root-owned machine dir, admin-group access,
+# flock host lease, session-active query, pkexec/osascript setup (shared_mode.rs).
+pulsar-machine = { path = "../crates/pulsar-machine" }
 
 # Linux client-side input capture: grab the local keyboard+mouse (evdev) and forward to
 # the host while the embedded native renderer covers the webview (the Linux analog of the
