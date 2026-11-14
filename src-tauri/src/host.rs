@@ -1295,8 +1295,9 @@ pub(crate) async fn bring_online(
 				// The monitor (`display_idx`) the current stream is capturing, so the input path
 				// can map an absolute (webview) pointer onto the streamed screen instead of always
 				// the primary. `on_stream` publishes the selected idx here; `on_input` reads it.
-				// Windows-only (the native multi-monitor absolute-pointer mapping).
-				#[cfg(windows)]
+				// Windows (the native multi-monitor absolute-pointer mapping) and macOS (the
+				// avfoundation `Capture screen N` monitor → its CGDirectDisplayID bounds).
+				#[cfg(any(windows, target_os = "macos"))]
 				let cur_display: Arc<std::sync::atomic::AtomicU32> =
 					Arc::new(std::sync::atomic::AtomicU32::new(0));
 				// On the native (DXGI+NVENC) path the input closure reads the capture thread's OWN
@@ -1445,7 +1446,7 @@ pub(crate) async fn bring_online(
 					self_name.clone(),
 					#[cfg(windows)]
 					native_slot.clone(),
-					#[cfg(windows)]
+					#[cfg(any(windows, target_os = "macos"))]
 					cur_display.clone(),
 					#[cfg(windows)]
 					native_out_arc.clone(),
@@ -1528,8 +1529,11 @@ pub(crate) async fn bring_online(
 					// Which monitor's geometry is currently applied to the desktop injector, so we
 					// only re-resolve the virtual-desktop rect when the streamed monitor changes.
 					// `u32::MAX` = "none applied yet" (forces the first resolve).
-					#[cfg(windows)]
+					#[cfg(any(windows, target_os = "macos"))]
 					let cur_display = cur_display.clone();
+					// macOS: the streamed monitor index last applied to the injector.
+					#[cfg(target_os = "macos")]
+					let mut applied_mac_display: u32 = u32::MAX;
 					#[cfg(windows)]
 					let native_out_arc = native_out_arc.clone();
 					#[cfg(windows)]
@@ -1904,6 +1908,16 @@ pub(crate) async fn bring_online(
 											d.set_region(
 												input_cap.lock().unwrap().as_ref().and_then(|c| c.pointer_region()),
 											);
+											// macOS: aim at the streamed monitor's CGDirectDisplayID (re-resolved
+											// only when the streamed index changes). Untested on macOS hardware.
+											#[cfg(target_os = "macos")]
+											{
+												let idx = cur_display.load(std::sync::atomic::Ordering::Relaxed);
+												if idx != applied_mac_display {
+													applied_mac_display = idx;
+													d.set_display(pulsar_core::displays::platform_id(idx as usize));
+												}
+											}
 											d.pointer(x, y)
 										}
 										InputEvent::PointerRelative { dx, dy } => {

@@ -351,6 +351,23 @@ fn spawn_pointer_lock_watch(out: tokio::sync::mpsc::Sender<DataMsg>, epoch: crat
 	});
 }
 
+/// Wayland: the `pulsar_core::displays::list` index the last portal pick streamed (`-1` =
+/// unknown — window cast, no portal geometry, or nothing streamed yet). Process-wide like the
+/// portal restore token it accompanies.
+#[cfg(target_os = "linux")]
+static WAYLAND_STREAMED: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
+
+#[cfg(target_os = "linux")]
+fn wayland_streamed_idx() -> Option<u32> {
+	let v = WAYLAND_STREAMED.load(std::sync::atomic::Ordering::SeqCst);
+	(v >= 0).then_some(v as u32)
+}
+
+#[cfg(target_os = "linux")]
+fn set_wayland_streamed_idx(idx: Option<usize>) {
+	WAYLAND_STREAMED.store(idx.map(|i| i as i64).unwrap_or(-1), std::sync::atomic::Ordering::SeqCst);
+}
+
 /// Tell the client when this host's monitor list changes mid-stream (a monitor plugged in or
 /// removed, a resolution / refresh / primary change): `DataMsg::Displays` with the fresh list,
 /// so its monitor picker matches without a reconnect. Woken by the OS display-change event
@@ -1837,8 +1854,9 @@ pub(super) fn make_on_stream(
 	self_name: String,
 	#[cfg(windows)] native_slot: Arc<Mutex<Option<pulsar_capture::CaptureHandle>>>,
 	// The monitor (`display_idx`) the current stream captures, published for the input path so an
-	// absolute (webview) pointer lands on the streamed screen, not always the primary. Windows-only.
-	#[cfg(windows)] cur_display: Arc<std::sync::atomic::AtomicU32>,
+	// absolute (webview) pointer lands on the streamed screen, not always the primary. Windows +
+	// macOS.
+	#[cfg(any(windows, target_os = "macos"))] cur_display: Arc<std::sync::atomic::AtomicU32>,
 	// Live-confirmed output Arc from the active CaptureHandle (C4): the input closure reads from
 	// this instead of cur_display on the native path so it sees the monitor the capture thread is
 	// ACTUALLY streaming — not the optimistically-requested value written before the rebuild completes.
@@ -2346,7 +2364,25 @@ pub(super) fn make_on_stream(
 				(bitrate as f32 / 1000.0).round() as u32,
 				crate::i18n::t("stream.mbitTarget")
 			)));
-			let token = restore_token.lock().unwrap().clone();
+			// The portal can't be told which monitor to share: its restore token silently
+			// brings the last pick back. When the client asks for a different monitor than the
+			// one the last portal pick showed, drop the token so the picker opens again and
+			// the person at the host chooses (the dialog decides). Untested on Wayland hardware.
+			let token = {
+				let monitors = pulsar_core::displays::list();
+				let streamed = wayland_streamed_idx();
+				if crate::process::wayland_wants_repick(req.display_idx, streamed, monitors.len()) {
+					tracing::info!(
+						requested = req.display_idx,
+						?streamed,
+						"wayland: another monitor requested — re-opening the portal picker"
+					);
+					None
+				} else {
+					restore_token.lock().unwrap().clone()
+				}
+			};
+			let requested_idx = req.display_idx;
 			// AppImage: an encoder that only validated on the system gst runs there.
 			let system_gst = crate::process::gst_on_system(genc, gcodec);
 			let restore_token = restore_token.clone();
@@ -2402,6 +2438,19 @@ pub(super) fn make_on_stream(
 					Ok((cap, new_token)) => {
 						if let Some(t) = new_token {
 							*restore_token.lock().unwrap() = Some(t);
+						}
+						// Which monitor the portal pick actually streams (its geometry in the
+						// output layout), for the next re-stream's repick decision.
+						let picked = cap.stream_rect().and_then(|(x, y, w, h)| {
+							pulsar_core::displays::index_of_rect(&pulsar_core::displays::list(), x, y, w, h)
+						});
+						set_wayland_streamed_idx(picked);
+						if picked.is_some_and(|p| p as u32 != requested_idx) {
+							tracing::warn!(
+								requested = requested_idx,
+								?picked,
+								"wayland: the portal pick streams another monitor than the client asked for"
+							);
 						}
 						// Store under the slot lock ONLY while still current: a session
 						// that tore down (or re-streamed) during the portal dialog gets
@@ -3005,8 +3054,16 @@ pub(super) fn make_on_stream(
 		// origin. Also clamp eff_w/eff_h to the SELECTED monitor (not the root screen) so
 		// the capture region never overflows that monitor's bounds. Single-monitor / primary
 		// at (0,0) keeps the plain display string (no change in behavior).
-		#[cfg(not(target_os = "linux"))]
+		#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 		let cap_display = cfg.display.clone();
+		// macOS: avfoundation's `Capture screen N` for the client-picked monitor — the same
+		// `CGGetActiveDisplayList` index `host_displays` advertised (pulsar_core::displays).
+		// Untested on macOS hardware.
+		#[cfg(target_os = "macos")]
+		let cap_display = crate::process::avfoundation_screen(
+			req.display_idx,
+			pulsar_core::displays::count(),
+		);
 		#[cfg(target_os = "linux")]
 		let (cap_display, eff_w, eff_h) = {
 			let displays = crate::process::linux_displays();
@@ -3228,6 +3285,14 @@ pub(super) fn make_on_stream(
 		#[cfg(windows)]
 		if !native_started {
 			cur_display.store(ffmpeg_display_idx, std::sync::atomic::Ordering::Relaxed);
+		}
+		// macOS: the monitor avfoundation captures (`cap_display` = `Capture screen N`, clamped
+		// the same way) is what absolute pointer moves map onto.
+		#[cfg(target_os = "macos")]
+		{
+			let n = pulsar_core::displays::count();
+			let idx = if n == 0 { 0 } else { req.display_idx.min(n as u32 - 1) };
+			cur_display.store(idx, std::sync::atomic::Ordering::Relaxed);
 		}
 
 		// Remember the latest request so the host-side display-mode watcher can re-issue it
