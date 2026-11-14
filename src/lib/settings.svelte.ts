@@ -108,6 +108,10 @@ export interface UiSettings {
 	 * this PC, coming back over the video takes control again (Parsec-style, issue #3). Off =
 	 * the cursor stays locked to the video until Ctrl+Alt+Z. Also in the session menu. */
 	pointerFree: boolean;
+	/** 3 / 4-finger touchpad swipes and taps go to the host while controlling it (the host does
+	 * what its own OS settings say for that gesture); this PC's own gestures are held off
+	 * meanwhile where the OS allows it. Default on. */
+	touchpadGestures: boolean;
 	/** Remote mode: mark the host's pointer ("Host") while the person at the host uses their
 	 * own mouse, and show ours separately (issue #7). Default on; also in the session menu. */
 	hostCursor: boolean;
@@ -262,6 +266,7 @@ const DEFAULTS: UiSettings = {
 	audioQuality: 'auto',
 	mouseSens: 1,
 	pointerFree: false,
+	touchpadGestures: true,
 	hostCursor: true,
 	duplicateSessions: false,
 	upscale: 'auto',

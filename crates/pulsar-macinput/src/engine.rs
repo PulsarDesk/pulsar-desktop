@@ -28,6 +28,9 @@ pub enum Out {
 	Button { button: u8, down: bool },
 	/// Browser wheel pixels: +y = down, +x = right.
 	Scroll { dx: f64, dy: f64 },
+	/// A trackpad Dock swipe (Spaces / Mission Control / App Exposé) the tap swallowed;
+	/// `horizontal` = the swipe's axis (the app picks the finger count from the user's prefs).
+	Swipe { horizontal: bool, dir: crate::gesture::SwipeDir },
 }
 
 /// A lifecycle edge or combo the app turns into its Tauri event.
@@ -218,6 +221,8 @@ pub(crate) enum Job {
 	Released(&'static str),
 	/// The frontmost-app poll saw Pulsar gain (`true`) / lose the focus.
 	Focus(bool),
+	/// A Dock swipe recognised (and swallowed) while engaged.
+	Swipe(bool, crate::gesture::SwipeDir),
 }
 
 #[cfg(not(test))]
@@ -270,6 +275,13 @@ fn run_job(job: Job) {
 			if !in_focus_grace() {
 				tracing::info!("frontmost app is no longer Pulsar");
 				focus_lost();
+			}
+		}
+		Job::Swipe(horizontal, dir) => {
+			if ENGAGED.load(SeqCst) {
+				if let Some(s) = sink() {
+					s.send(Out::Swipe { horizontal, dir });
+				}
 			}
 		}
 	}

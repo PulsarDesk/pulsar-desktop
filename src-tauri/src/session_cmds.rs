@@ -1459,6 +1459,14 @@ pub(crate) async fn set_mouse_sensitivity(value: f32) -> Result<(), String> {
 	Ok(())
 }
 
+/// Client: Settings → "Touchpad hareketlerini gönder" (default on): 3 / 4-finger touchpad
+/// swipes and taps go to the host while control is engaged (`crate::gesture`).
+#[tauri::command]
+pub(crate) async fn set_touchpad_gestures(on: bool) -> Result<(), String> {
+	crate::gesture::set_enabled(on);
+	Ok(())
+}
+
 /// Client: Kumandalar panel → "DS4 kulaklık girişi" (experimental, USB).
 #[tauri::command]
 pub(crate) async fn set_ds4_headset(on: bool) -> Result<(), String> {

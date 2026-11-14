@@ -27,6 +27,8 @@
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
 pub mod geom;
+/// Trackpad Dock swipes (Spaces / Mission Control) → the host, swallowed while engaged.
+pub mod gesture;
 pub mod keymap;
 
 mod engine;

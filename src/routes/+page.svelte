@@ -1138,6 +1138,12 @@
 		api.setMouseSensitivity(ui.mouseSens).catch(() => {});
 	});
 
+	// Touchpad gestures to the host follow the setting (startup + every change).
+	$effect(() => {
+		if (isPopup) return;
+		api.setTouchpadGestures(ui.touchpadGestures).catch(() => {});
+	});
+
 	// Free cursor (remote mode) follows the setting (startup + every change, Settings or menu).
 	$effect(() => {
 		if (isPopup) return;

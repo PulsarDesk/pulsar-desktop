@@ -291,6 +291,10 @@ pub(crate) async fn start_remote_play(
 	crate::kbdhook::set_host_pinch(
 		host_caps.features.iter().any(|f| f == pulsar_core::service::media::FEAT_PINCH),
 	);
+	// 3 / 4-finger touchpad gestures: only to hosts that perform them (none to the rest).
+	crate::gesture::set_host_gesture(
+		host_caps.features.iter().any(|f| f == pulsar_core::service::media::FEAT_GESTURE),
+	);
 	// Pen / multi-touch: real events to hosts that inject them, mouse events to the rest
 	// (hold.rs, pulsar-core `pen_touch::client`).
 	let host_pen = host_caps.features.iter().any(|f| f == pulsar_core::service::media::FEAT_PEN);

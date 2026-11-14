@@ -8,6 +8,7 @@
 
 use crate::engine::{self, Geo, Job, MouseEv, Verdict};
 use crate::geom::{self, Rect};
+use crate::gesture;
 use crate::keymap;
 use crate::sys::*;
 use std::ffi::c_void;
@@ -182,6 +183,9 @@ fn event_mask() -> u64 {
 		kCGEventOtherMouseDown,
 		kCGEventOtherMouseUp,
 		kCGEventOtherMouseDragged,
+		// Trackpad gestures: only the Dock swipe is acted on (see `gesture_event`).
+		gesture::EVENT_GESTURE,
+		gesture::EVENT_DOCK_CONTROL,
 	]
 	.iter()
 	.fold(0u64, |m, t| m | (1u64 << t))
@@ -265,6 +269,7 @@ unsafe extern "C" fn tap_cb(_proxy: CGEventTapProxy, ty: u32, ev: CGEventRef, _i
 	let swallow = match ty {
 		kCGEventKeyDown | kCGEventKeyUp => key_event(ev, ty == kCGEventKeyDown),
 		kCGEventFlagsChanged => flags_event(ev),
+		gesture::EVENT_GESTURE | gesture::EVENT_DOCK_CONTROL => gesture_event(ev),
 		_ => return mouse_event(ty, ev),
 	};
 	if swallow {
@@ -272,6 +277,27 @@ unsafe extern "C" fn tap_cb(_proxy: CGEventTapProxy, ty: u32, ev: CGEventRef, _i
 	} else {
 		ev
 	}
+}
+
+/// A trackpad gesture event: a Dock swipe (Spaces / Mission Control / App Exposé) is swallowed
+/// while engaged and gestures go to the host (this Mac must not switch Spaces under the
+/// session), and its direction is queued for the host. Everything else passes.
+unsafe fn gesture_event(ev: CGEventRef) -> bool {
+	static SWIPE: Mutex<gesture::DockSwipe> = Mutex::new(gesture::DockSwipe::new());
+	if CGEventGetIntegerValueField(ev, gesture::FIELD_HID_TYPE) != gesture::HID_DOCK_SWIPE {
+		return false;
+	}
+	if !engine::ENGAGED.load(SeqCst) || !gesture::forward_gestures() {
+		return false;
+	}
+	let motion = CGEventGetIntegerValueField(ev, gesture::FIELD_SWIPE_MOTION);
+	let phase = CGEventGetIntegerValueField(ev, gesture::FIELD_PHASE);
+	let progress = CGEventGetDoubleValueField(ev, gesture::FIELD_SWIPE_PROGRESS);
+	let dir = SWIPE.lock().unwrap_or_else(|e| e.into_inner()).event(phase, motion, progress);
+	if let Some(dir) = dir {
+		engine::queue(Job::Swipe(motion == gesture::MOTION_HORIZONTAL, dir));
+	}
+	true
 }
 
 unsafe fn key_event(ev: CGEventRef, down: bool) -> bool {

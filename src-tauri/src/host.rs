@@ -175,6 +175,11 @@ fn media_features() -> Vec<String> {
 	// to hosts without these.
 	v.push(pulsar_core::service::media::FEAT_PEN.to_string());
 	v.push(pulsar_core::service::media::FEAT_TOUCH.to_string());
+	// 3 / 4-finger touchpad gestures, done as this host's user configured them (Windows
+	// precision-touchpad settings, macOS trackpad prefs, GNOME / KDE defaults), injected as
+	// the matching shortcut. Untested on hardware.
+	#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+	v.push(pulsar_core::service::media::FEAT_GESTURE.to_string());
 	// The session-start bandwidth probe (pulsar-core serve loop answers it on every platform).
 	v.push(pulsar_core::service::media::FEAT_PROBE.to_string());
 	// DualSense passthrough: a virtual wired DualSense over USB/IP (usbip-win2 / vhci-hcd).
@@ -1678,6 +1683,9 @@ pub(crate) async fn bring_online(
 					// The pen as last injected for this session: in contact (tip down). The
 					// takeover gate lets only real lift edges of a pen that was down through.
 					let mut pen_down = false;
+					// Touchpad gestures (3 / 4 fingers): the host user's own action for each,
+					// read from this host's settings per gesture (pulsar-core `input::gesture`).
+					let mut gestures = pulsar_core::input::gesture::HostGestures::new();
 					move |ev: InputEvent| {
 						// View-only: drop EVERY input event for this session (gamepad too)
 						// while the host user has control revoked.
@@ -1956,7 +1964,9 @@ pub(crate) async fn bring_online(
 											// Pen / touch are screen-level pointer devices: the
 											// global injector takes them (no per-window pen path).
 											| InputEvent::Pen(_)
-											| InputEvent::Touch(_) => {
+											| InputEvent::Touch(_)
+											// A gesture is a desktop shortcut (Task View, Spaces, ...).
+											| InputEvent::Gesture { .. } => {
 												routed_to_window = false;
 											}
 										}
@@ -2157,6 +2167,17 @@ pub(crate) async fn bring_online(
 										InputEvent::Key { code, down } => d.key(code, down),
 										InputEvent::Char(c) => d.type_char(c),
 										InputEvent::Pinch { phase, scale } => d.pinch(phase, scale),
+										InputEvent::Gesture { fingers, kind } => {
+											let action = gestures.action(fingers, kind);
+											tracing::info!(fingers, ?kind, ?action, "touchpad gesture");
+											for e in action.events() {
+												match e {
+													InputEvent::Key { code, down } => d.key(code, down),
+													InputEvent::PointerButton { button, down } => d.button(button, down),
+													_ => {}
+												}
+											}
+										}
 										// Pen / touch land on the streamed monitor like absolute motion
 										// (Windows: the rect last resolved for the pointer; Linux: the
 										// portal region, re-read here like PointerMotion does).
