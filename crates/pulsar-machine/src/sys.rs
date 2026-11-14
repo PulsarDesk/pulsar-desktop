@@ -49,6 +49,7 @@ pub fn euid() -> u32 {
 /// admin with many groups may not see gid 80 there; `getgrouplist` of the login user asks
 /// the directory service and has no such cap. The process list is merged in as well.
 pub fn my_gids() -> Vec<u32> {
+	#[allow(unused_mut)] // only macOS adds to it
 	let mut out = process_gids();
 	#[cfg(target_os = "macos")]
 	for g in directory_gids() {
@@ -499,6 +500,26 @@ mod tests {
 		let _ = std::fs::remove_dir_all(&m);
 		std::os::unix::fs::symlink(&base, &m).unwrap();
 		assert_eq!(run(true).status.code(), Some(3));
+		let _ = std::fs::remove_dir_all(&base);
+	}
+
+	/// The deb/rpm post-install block on a fresh scratch machine (no marker, no user data)
+	/// turns shared mode on with an admin group. Needs root, like the test above.
+	#[test]
+	fn postinst_turns_a_fresh_machine_on_as_root() {
+		if euid() != 0 || crate::admin_group_candidates(os()).iter().all(|g| group_gid(g).is_none()) {
+			return;
+		}
+		let base = tmp("postinst-root");
+		let m = base.join("machine");
+		std::fs::create_dir_all(base.join("home/u1/.config")).unwrap();
+		let parents = format!("{}/*/.config", base.join("home").display());
+		let s = crate::postinst_shared_default_at(m.to_str().unwrap(), &parents, "dev.pulsar.app").unwrap();
+		let o = std::process::Command::new("/bin/sh").args(["-c", &s]).output().unwrap();
+		assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+		assert_eq!(std::fs::read_to_string(m.join("mode.json")).unwrap().trim(), r#"{"shared":true}"#);
+		let gids: Vec<u32> = admin_groups().into_iter().map(|(_, g)| g).collect();
+		crate::check_shared_dir(&meta(&m.join("shared")).unwrap(), &gids).unwrap();
 		let _ = std::fs::remove_dir_all(&base);
 	}
 
