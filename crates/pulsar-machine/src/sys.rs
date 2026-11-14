@@ -4,7 +4,7 @@ use std::ffi::{CStr, CString};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use crate::{Meta, Os, PrivError};
@@ -353,6 +353,7 @@ mod macos {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use std::os::unix::fs::PermissionsExt;
 
 	fn tmp(name: &str) -> PathBuf {
 		let d = std::env::temp_dir().join(format!("pulsar-machine-{name}-{}", std::process::id()));
