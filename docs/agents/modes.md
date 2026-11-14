@@ -256,13 +256,35 @@ path its DOWN took).
 | Linux native Wayland | — | **impossible**: no protocol lets one client inject into another's surface; uinput / RemoteDesktop portal are seat-global | — | everything (global injector stays) |
 | macOS | CGWindowID | `window_mac.rs`: `CGEventPostToPid` to the owning PID (+ window number fields); front = HID tap | AppKit/NSEvent apps, SDL keyboard, many windowed games | IOHID / GameController readers; keyboard of a second window of the SAME process goes to that process's key window |
 
-**Wiring state:** only the Windows WGC path publishes a window today. On Linux/macOS
-`win_capture_hwnd` is reset to `None` per stream (handlers.rs, `#[cfg(not(windows))]`)
-until a per-window capture path there publishes its confirmed XID / CGWindowID — then the
-input side needs no change. The ProtoInput instance isolation (`coop.rs`) is DLL
-injection into a Windows process and has no Linux/macOS counterpart.
+**Per-window capture source (what publishes `win_capture_hwnd`), per OS:**
 
-**Untested on Linux and macOS hardware** (type-checked only).
+| OS | Window list (client picker, `QueryWindows`) | Launched game → window | Capture | State |
+| --- | --- | --- | --- | --- |
+| Windows | `pulsar_capture::list_capture_windows` (EnumWindows) | `find_window_for_launch` (PID + child PIDs) | native WGC + NVENC | wired |
+| Linux X11 | `pulsar_core::x11win::list_windows` (`_NET_CLIENT_LIST`, viewable, titled, no dock/desktop, not Pulsar) | `x11win::find_window_for_pids(pid_tree(pid))` via `_NET_WM_PID`, polled 10 s | ffmpeg `x11grab -window_id` (needs ffmpeg 5.1+), scaled to `fit_window_size` (even, aspect kept, never upscaled) | wired 2026-11-14 |
+| Linux Wayland | empty | none | portal (whole output) | impossible for input (see above); global injector |
+| macOS | empty | none | avfoundation (whole display) | **not wired**: a window source needs ScreenCaptureKit (`SCContentFilter(desktopIndependentWindow:)`) — a new capture backend, separate work item; the injector is ready |
+
+Linux details (`handlers.rs` `x11_window`): only on a real X11 session with
+`capture = x11grab` and only while the window exists (its size is read at stream start).
+The gst/KMS path and the in-process libav encoder grab the whole display, so a window
+plan skips them and runs the ffmpeg CLI chain (`libav::supported` refuses
+`plan.window_id`). The XID the plan captures is published as the input target and in
+`coop::set_capture`. A window resized mid-stream keeps the start size (x11grab reads
+the geometry once); a re-stream picks up the new size. A window that is unmapped
+(minimized) captures black.
+
+`WindowInput` caches its window-server answers (`is_alive`, `in_front`, size, X11 child
+under the pointer) for 200 ms, because the host asks on every input event. X11 "front"
+needs the X input focus inside the target AND (with EWMH) `_NET_ACTIVE_WINDOW` naming it
+(XWayland keeps `_NET_ACTIVE_WINDOW` stale when a Wayland window takes focus). macOS
+"front" = owner pid is `NSWorkspace.frontmostApplication` AND the window is that pid's
+top on-screen window; relative mouse deltas are divided by the display's backing scale.
+
+The ProtoInput instance isolation (`coop.rs`) is DLL injection into a Windows process
+and has no Linux/macOS counterpart.
+
+**Untested on Linux and macOS hardware** (type-checked + unit tests only).
 
 ## Reverse direction
 

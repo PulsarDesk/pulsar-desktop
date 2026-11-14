@@ -18,9 +18,11 @@ and the Tauri bridge.
 
 **Same-host co-op per-window input (2026-11-14, branch parity/coop-window-input):**
 `WindowInput` now exists on Windows (PostMessage), Linux X11/XWayland (SendEvent/XTest) and
-macOS (CGEventPostToPid); routing in `host.rs` is cross-platform. Linux/macOS have no
-per-window capture yet, so it stays idle there; native Wayland is impossible. Untested on
-Linux and macOS hardware — see [modes.md](modes.md#same-host-co-op-per-window-input-all-desktop-oses-2026-11-14).
+macOS (CGEventPostToPid); routing in `host.rs` is cross-platform. Linux X11 now also has
+the per-window capture source (`x11grab -window_id`, X window picker, launched game →
+window by `_NET_WM_PID`), so it runs end to end there. macOS still has NO per-window capture
+source (needs ScreenCaptureKit — open work item), so its injector stays idle; native
+Wayland is impossible. Untested on Linux and macOS hardware — see [modes.md](modes.md#same-host-co-op-per-window-input-all-desktop-oses-2026-11-14).
 
 **Adaptive streaming (shipped 2026-09-03 in v0.11.0, refined in v0.12.0 — still awaiting the
 maintainer's real-session test):** the shared
