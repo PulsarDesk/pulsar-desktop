@@ -223,6 +223,9 @@ fn try_create(app: &AppHandle) -> Result<(), String> {
 				if let Ok(scale) = w.scale_factor() {
 					crate::process::set_ui_scale(scale);
 				}
+				// Linux: tao never reports scale changes on GTK — watch the window's own.
+				#[cfg(target_os = "linux")]
+				crate::scale_watch::watch_window(app, &w);
 			}));
 			Ok(())
 		}

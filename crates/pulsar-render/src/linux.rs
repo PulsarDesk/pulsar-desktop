@@ -33,6 +33,15 @@ static QUALITY_SEED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(No
 /// `u32::MAX` = not set (sentinel); any real display index is < MAX.
 static DISPLAY_IDX_SEED: std::sync::atomic::AtomicU32 =
 	std::sync::atomic::AtomicU32::new(u32::MAX);
+/// The app window's display scale pushed live over stdin (`uiscale <f>`, sent when the app
+/// window's scale factor changes — a monitor's scale setting changed, or the window moved to
+/// another monitor). f32 bits; 0 = none yet (the spawn-time `PULSAR_UI_SCALE` stays).
+static UI_SCALE_LIVE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// `uiscale` stdin value → the scale to apply (`None` = ignore: unparsable / not positive).
+fn parse_ui_scale(v: &str) -> Option<f32> {
+	v.parse::<f32>().ok().filter(|s| s.is_finite() && *s > 0.0).map(|s| s.clamp(0.5, 4.0))
+}
 /// Host caps + active selections pushed by the app over stdin (`caps …` line):
 /// (host_codecs, host_encoders, active codec, active encoder). The render loop
 /// copies them into the OverlayState each frame.
@@ -389,6 +398,12 @@ pub fn run() {
 				// Session ended: hide the video window (reveal the webview) + idle, WITHOUT
 				// exiting — keeps our EGL context alive so WebKit's shared Mali GL isn't corrupted.
 				Some("hide") => IDLE.store(true, Ordering::SeqCst),
+				// Live display-scale change of the app window → the overlay follows.
+				Some("uiscale") => {
+					if let Some(s) = it.next().and_then(parse_ui_scale) {
+						UI_SCALE_LIVE.store(s.to_bits(), Ordering::SeqCst);
+					}
+				}
 				// Overlay open/close, the race-free twin of SIGUSR1/SIGUSR2 — used right after a
 				// respawn, when a signal could arrive before the handler above is installed.
 				Some("open") => OPEN.store(true, Ordering::SeqCst),
@@ -1035,8 +1050,9 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 		.filter(|s| s.is_finite() && *s > 0.0)
 		.unwrap_or(1.0)
 		.clamp(0.5, 4.0);
-	let ppp = 1.25_f32 * ui_scale;
+	let mut ppp = 1.25_f32 * ui_scale;
 	egui_ctx.set_pixels_per_point(ppp);
+	let mut ui_scale_seen = 0u32;
 	let mut painter = egui_glow::Painter::new(gl.clone(), "", None, false).expect("painter");
 
 	let dpy_ptr = display.as_ptr();
@@ -1101,6 +1117,17 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 			}
 			std::thread::sleep(std::time::Duration::from_millis(16));
 			continue;
+		}
+		// A live `uiscale` from the app: re-scale the overlay (same 1.25 base as at spawn).
+		let live = UI_SCALE_LIVE.load(Ordering::SeqCst);
+		if live != 0 && live != ui_scale_seen {
+			ui_scale_seen = live;
+			let next = 1.25_f32 * f32::from_bits(live);
+			if (next - ppp).abs() > 0.001 {
+				eprintln!("pulsar-render: ui scale {} → {}", ppp / 1.25, next / 1.25);
+				ppp = next;
+				egui_ctx.set_pixels_per_point(ppp);
+			}
 		}
 		let open = OPEN.load(Ordering::SeqCst);
 		state.open = open;
@@ -2055,4 +2082,21 @@ fn emit_cmd(state: &mut OverlayState, c: OverlayCmd) {
 		OverlayCmd::OpenFiles => println!("ov files"),
 	}
 	let _ = std::io::stdout().flush();
+}
+
+#[cfg(test)]
+mod ui_scale_tests {
+	use super::parse_ui_scale;
+
+	#[test]
+	fn parses_and_clamps_the_live_scale() {
+		assert_eq!(parse_ui_scale("2"), Some(2.0));
+		assert_eq!(parse_ui_scale("1.5"), Some(1.5));
+		assert_eq!(parse_ui_scale("9"), Some(4.0));
+		assert_eq!(parse_ui_scale("0.1"), Some(0.5));
+		assert_eq!(parse_ui_scale("0"), None);
+		assert_eq!(parse_ui_scale("-1"), None);
+		assert_eq!(parse_ui_scale("NaN"), None);
+		assert_eq!(parse_ui_scale("x"), None);
+	}
 }

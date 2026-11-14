@@ -430,6 +430,9 @@ fn run_headless() -> i32 {
 		*app.state::<crate::state::AppState>().config.lock().unwrap() = cfg;
 		#[cfg(windows)]
 		crate::firewall::setup(app);
+		// Linux: put back a display mode a crashed earlier run left adapted.
+		#[cfg(target_os = "linux")]
+		std::thread::spawn(crate::display_mode::recover_stale);
 		crate::shared_mode::lease::start(app.clone());
 		crate::headless::start(app.clone(), "--headless-host");
 	})

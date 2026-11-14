@@ -77,12 +77,14 @@ sdl3-sys = { version = "0.7", default-features = false, features = ["build-from-
 # in-process — the host's Opus/RTP stream is decoded here and played through SDL3
 # (src/native_audio.rs, Moonlight's model) on every desktop platform.
 opus = "0.4"
+# Native host capture+encode (DXGI Desktop Duplication + NVENC SDK → RTP, Sunshine-technique).
+# Replaces the ffmpeg ddagrab hot path on Windows/NVENC; ffmpeg stays as the fallback. Also on
+# Linux/macOS for its cross-platform parts: the screen-adaptation best-fit + xrandr parser and
+# the macOS CoreGraphics display-mode switch (display_mode.rs).
+pulsar-capture = { path = "../crates/pulsar-capture" }
 
 # Raw Win32 for true taskbar-covering fullscreen (borderless-fullscreen via SetWindowPos).
 [target.'cfg(windows)'.dependencies]
-# Native host capture+encode (DXGI Desktop Duplication + NVENC SDK → RTP, Sunshine-technique).
-# Replaces the ffmpeg ddagrab hot path on Windows/NVENC; ffmpeg stays as the fallback.
-pulsar-capture = { path = "../crates/pulsar-capture" }
 # In-session SYSTEM input helper client (UAC consent / lock screen input) — see
 # docs/agents/system-agent.md. Optional at runtime: without the service it falls back to SendInput.
 pulsar-sysagent = { path = "../crates/pulsar-sysagent" }
@@ -172,6 +174,9 @@ ffmpeg-sys-next = { version = "8", default-features = false, features = ["avcode
 x11 = { version = "2.21", features = ["xlib", "xfixes", "dpms"] }
 # power_watch/linux.rs: logind PrepareForSleep (+ delay inhibitor) and the desktop screen saver's
 # ActiveChanged over D-Bus, blocking API on plain threads. zbus 5 is already in the tree (ashpd).
+# GNOME Wayland screen adaptation (display_mode/linux/gnome.rs): Mutter's DisplayConfig D-Bus
+# (no standard Wayland protocol changes output modes). Same zbus 5 + tokio ashpd (pulsar-core's
+# ScreenCast portal) already pulls in; `blocking-api` for the short synchronous calls.
 zbus = { version = "5", default-features = false, features = ["tokio", "blocking-api"] }
 # Self-avatar resolution (avatar.rs): decode the account photo / wallpaper, center-crop
 # + downscale to a 96×96 PNG. Decode-only features kept minimal (png/jpeg/webp/bmp cover

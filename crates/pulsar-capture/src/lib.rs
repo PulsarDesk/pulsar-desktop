@@ -375,6 +375,11 @@ pub use window::{
 	find_window_for_launch, list_windows as list_capture_windows, window_pid, WindowDesc,
 };
 
+// Host "screen adaptation" (switch the captured monitor's display mode to fit a client split
+// pane): the platform-independent best-fit logic + the `xrandr` text parser (pure, unit-tested
+// everywhere) and the macOS CoreGraphics mode switch (FFI, cfg(target_os = "macos")).
+pub mod display_mode;
+
 // ===========================================================================
 // Windows implementation
 // ===========================================================================

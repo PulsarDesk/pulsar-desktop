@@ -239,7 +239,7 @@ struct SessionCleanupGuard {
 	/// HERE (the guard always drops, on both the normal and abort paths) — exactly once.
 	preauth_pubkey: Option<[u8; 32]>,
 	/// Per-session screen-adaptation state. If this session switched the captured monitor's
-	/// display mode for a split pane (Windows, `StreamReq::adapt`), the original mode is stored
+	/// display mode for a split pane (Windows/Linux/macOS, `StreamReq::adapt`), the original mode is stored
 	/// here; Drop reverts it so the host's resolution is ALWAYS restored on teardown — on both
 	/// the normal end and the abort() path (Drop covers both). `take()`n so it's idempotent (a
 	/// second drop / a prior revert via an `adapt: None` restream sees `None` and no-ops). The
@@ -283,8 +283,7 @@ impl Drop for SessionCleanupGuard {
 		// display mode for a split pane, restore the ORIGINAL mode now so the host is never
 		// left stuck at a wrong resolution. This is the teardown guarantee — it fires on BOTH
 		// the normal end and the abort() path (Drop covers both). `take()` makes it idempotent
-		// (a second drop, or a prior revert from an `adapt: None` restream, finds None). No-op
-		// off Windows (the stored PrevMode is always None there).
+		// (a second drop, or a prior revert from an `adapt: None` restream, finds None).
 		{
 			let mut st = self.adapt_state.lock().unwrap();
 			if let Some(prev) = st.prev.take() {
