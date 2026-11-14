@@ -36,6 +36,34 @@ merged (2026-09-02); AMD-on-Windows, macOS and Windows ARM64 are CI-built but **
 on hardware** — read [host-encode.md](host-encode.md) before touching encoder/decoder
 selection.
 
+**Pen + multi-touch (2026-11-14, branch `parity/pen-touch`, untested on pen / touch
+hardware on every platform):** `InputEvent::Pen` / `InputEvent::Touch` (state messages, see
+`pulsar-core` `input/pen_touch/`), gated by the host features `pen` / `touch`; an older host
+gets the same input as mouse (tap = click, drag, two-finger scroll; pen tip = left, tip with
+the barrel button = right) from `ClientPenTouch` in `play/hold.rs`, which also re-sends the
+held state every 250 ms (the host lifts after 1 s without one) and lifts after 30 s without
+new input from the source.
+
+| | Windows | Linux | macOS |
+| --- | --- | --- | --- |
+| Client, remote mode | renderer `WM_POINTER` → `pen` / `touch` stdout lines (`pulsar-render/src/win/pointer.rs`, only while engaged + overlay closed + host takes them; `render_stats.rs` parses) | webview canvas PointerEvents (`Session/input.svelte.ts`) | webview canvas PointerEvents |
+| Client, game mode | same renderer path | canvas, forwarded without "controlling" (the evdev grab takes keyboard + mouse only) | canvas, same as Linux |
+| Host, pen | synthetic `PT_PEN` pointer device (pressure, tilt, rotation, eraser, barrel, hover) | uinput tablet "Pulsar Virtual Pen" | CGEvent tablet proximity + tablet-point mouse events |
+| Host, touch | synthetic `PT_TOUCH` device, 10 contacts | uinput multitouch type B "Pulsar Virtual Touchscreen", 10 slots | **mapped to mouse + pixel scroll** — macOS has no public touch-injection API (no touchscreen input path; trackpad gestures are private IOHIDEvents), so pinch / rotate cannot be injected |
+
+Known limits: pen / touch do not go through the Windows SYSTEM helper (`pulsar-sysagent`),
+so they do not reach UAC / lock-screen windows (mouse + keyboard do); the Windows mouse hook
+leaves pen/touch-synthesized mouse (`MI_WP_SIGNATURE` in `dwExtraInfo`) alone while the
+host takes pen/touch (`kbdhook/imp.rs`). Whether WebKitGTK / WKWebView report a Wacom pen as
+`pointerType: 'pen'` (with pressure / tilt) is unverified — if they report `mouse`, the pen
+works as a mouse there. The renderer maps a client point onto the video rect without
+rotation (a rotated stream is not corrected). Tests: core `input/pen_touch` (driver, slot
+tracker, mouse mapping, client gate, Windows pen flag steps, Linux evdev reports, macOS
+button choice), `Session/input.svelte.test.ts`, `render_stats.rs` `pen_touch_tests`,
+`kbdhook/imp.rs` `pen_and_touch_synthesized_mouse_is_recognized` (Windows; the app's lib-test
+binary does not start in this Windows dev setup — STATUS_ENTRYPOINT_NOT_FOUND — so it ran
+only as a type-check), `pulsar-render` `win/pointer.rs`.
+
 **Host-only / headless host / Pulsar Split seat host (2026-11-13, not run on hardware):**
 `--host-only`, `--headless-host`, `--headless-stop`, `--split-seat` — see
 [modes.md](modes.md) "Host-only and headless host". Unit-tested (argv parsing, pipe protocol
