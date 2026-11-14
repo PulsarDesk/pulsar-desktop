@@ -42,7 +42,9 @@ launched-window capture, until now Windows-only (WGC), on X11 (`x11grab -window_
 `ximagesrc xid=`), Wayland (portal WINDOW source — the host person picks) and macOS
 (ScreenCaptureKit window → rawvideo → ffmpeg). Per-OS table + limits:
 [host-encode.md](host-encode.md#per-window-capture-pencere-phase-2b-co-op--per-os). Needs the
-matching pulsar-core branch. Per-window input and window-to-pane fitting stay Windows-only.
+matching pulsar-core branch. X11 + macOS also map the pointer into the window, raise it,
+restart the stream when it is resized / closed, and fit it to a split pane (macOS: needs the
+Accessibility grant). Wayland can do none of those (no window positions for programs).
 
 **Host-only / headless host / Pulsar Split seat host (2026-11-13, not run on hardware):**
 `--host-only`, `--headless-host`, `--headless-stop`, `--split-seat` — see
