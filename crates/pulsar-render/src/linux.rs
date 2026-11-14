@@ -843,8 +843,10 @@ unsafe extern "C" fn x_error_ignore(
 
 // --- GL context loss (GPU reset, driver update, NVIDIA suspend/resume) ---
 // EGL_EXT_create_context_robustness: ask for reset notifications, so a GPU reset is reported
-// through glGetGraphicsResetStatus instead of a context that silently draws nothing.
-const EGL_CONTEXT_OPENGL_ROBUST_ACCESS_EXT: egl::Int = 0x30BF;
+// through glGetGraphicsResetStatus instead of a context that silently draws nothing. Only the
+// reset-notification strategy is set: robust BUFFER ACCESS (EGL_CONTEXT_OPENGL_ROBUST_ACCESS_EXT)
+// is not needed for detection, adds bounds checks and can move a driver off its fast paths
+// (dmabuf / EGLImage zero-copy), so it stays off.
 const EGL_CONTEXT_OPENGL_RESET_NOTIFICATION_STRATEGY_EXT: egl::Int = 0x3138;
 const EGL_LOSE_CONTEXT_ON_RESET_EXT: egl::Int = 0x31BF;
 // EGL_NV_robustness_video_memory_purge: the NVIDIA driver drops video memory on suspend /
@@ -857,18 +859,16 @@ const GL_UNKNOWN_CONTEXT_RESET: u32 = 0x8255;
 const GL_PURGED_CONTEXT_RESET_NV: u32 = 0x92BB;
 type GlGetGraphicsResetStatus = unsafe extern "C" fn() -> u32;
 
-/// The context attribute lists to try, most robust first: robust access + lose-on-reset
+/// The context attribute lists to try, most robust first: lose-on-reset notification
 /// (+ the NVIDIA purge report when offered), then the plain ES2 context the renderer always
 /// used. A driver that lists the extension but refuses an attribute falls through to the next.
-/// `PULSAR_GL_ROBUST=0` skips straight to the plain context.
+/// Whether the robust lists are tried at all is `robust_wanted`.
 fn context_attrib_lists(robustness: bool, nv_purge: bool) -> Vec<Vec<egl::Int>> {
 	let mut out = Vec::new();
 	if robustness {
 		let robust = vec![
 			egl::CONTEXT_CLIENT_VERSION,
 			2,
-			EGL_CONTEXT_OPENGL_ROBUST_ACCESS_EXT,
-			egl::TRUE as egl::Int,
 			EGL_CONTEXT_OPENGL_RESET_NOTIFICATION_STRATEGY_EXT,
 			EGL_LOSE_CONTEXT_ON_RESET_EXT,
 		];
@@ -882,6 +882,59 @@ fn context_attrib_lists(robustness: bool, nv_purge: bool) -> Vec<Vec<egl::Int>> 
 	out.push(vec![egl::CONTEXT_CLIENT_VERSION, 2]);
 	for l in &mut out {
 		l.push(egl::NONE);
+	}
+	out
+}
+
+/// Whether to ask for a reset-notification context. `PULSAR_GL_ROBUST=1|0` forces it on/off;
+/// by default it is on, except on the Mali blob driver: the Orange Pi 5B (RK3588) client is the
+/// one Linux box in daily use and a context-attribute change there is untested on its hardware.
+fn robust_wanted(env: Option<&str>, mali: bool) -> bool {
+	match env.map(str::trim) {
+		Some("0") => false,
+		Some("1") => true,
+		_ => !mali,
+	}
+}
+
+/// Whether the EGL implementation is ARM's Mali driver (libmali), from EGL_VENDOR /
+/// EGL_VERSION: known before any context exists, so the build path can avoid destroying a
+/// Mali context (see `retire_context`). Panfrost (Mesa) is not the blob and returns false.
+fn egl_is_mali(vendor: &str, version: &str) -> bool {
+	let v = vendor.trim().to_ascii_lowercase();
+	let ver = version.to_ascii_lowercase();
+	v == "arm"
+		|| v.starts_with("arm ")
+		|| v.contains("mali")
+		|| ["mali", "valhall", "bifrost", "midgard"].iter().any(|k| ver.contains(k))
+}
+
+/// The (major, minor) of an OpenGL ES GL_VERSION string ("OpenGL ES 3.2 Mesa 24.0"), or None
+/// for a desktop GL / unparsable string.
+fn gles_version(s: &str) -> Option<(u32, u32)> {
+	let num = s.strip_prefix("OpenGL ES ")?.split_whitespace().next()?;
+	let mut it = num.split('.');
+	let major = it.next()?.parse().ok()?;
+	let minor = it
+		.next()
+		.and_then(|m| m.chars().take_while(char::is_ascii_digit).collect::<String>().parse().ok())
+		.unwrap_or(0);
+	Some((major, minor))
+}
+
+/// Which glGetGraphicsResetStatus entry points may be used, in order. eglGetProcAddress
+/// (glvnd) returns a dispatch stub for ANY gl* name, so a name is only trusted when the context
+/// really has it: the EXT/KHR names with their extension, the core name only on ES 3.2+.
+fn reset_status_names(gl_version: &str, has_ext: bool, has_khr: bool) -> Vec<&'static str> {
+	let mut out = Vec::new();
+	if has_ext {
+		out.push("glGetGraphicsResetStatusEXT");
+	}
+	if has_khr {
+		out.push("glGetGraphicsResetStatusKHR");
+	}
+	if gles_version(gl_version).is_some_and(|v| v >= (3, 2)) {
+		out.push("glGetGraphicsResetStatus");
 	}
 	out
 }
@@ -919,21 +972,26 @@ struct GlStack {
 	egui_ctx: egui::Context,
 	/// glGetGraphicsResetStatus, when the context was made with reset notification.
 	reset_status: Option<GlGetGraphicsResetStatus>,
-	/// GL_RENDERER (a Mali context is never destroyed, see `retire_context`).
-	renderer: String,
+	/// The driver is Mali (EGL vendor or GL_RENDERER): its context is never destroyed, see
+	/// `retire_context`.
+	mali: bool,
 }
 
-/// Create the GL context (robust when the driver offers it), make it current on `surface` —
-/// the window surface of the previous context when there is one (it outlives a context loss
-/// on every driver we know; a second window surface on the same X window would be refused
-/// with EGL_BAD_ALLOC), else a new one — and build the painter + presenter on it.
+/// Create the GL context (robust when wanted and offered), make it current on the window
+/// surface in `surface` — the one of the previous context when there is one (it outlives a
+/// context loss on every driver we know; a second window surface on the same X window would be
+/// refused with EGL_BAD_ALLOC), else a new one — and build the painter + presenter on it.
+/// `surface` is the caller's slot: it is set to None as soon as the old surface is destroyed
+/// and to the new one once created, so a failed attempt never leaves a dangling handle behind.
+/// `mali` (from `egl_is_mali`) keeps the error paths from destroying a Mali context.
 #[allow(clippy::too_many_arguments)]
 unsafe fn build_gl(
 	egl: &egl::Instance<egl::Static>,
 	display: egl::Display,
 	config: egl::Config,
 	win: u64,
-	surface: Option<egl::Surface>,
+	surface: &mut Option<egl::Surface>,
+	mali: bool,
 	vsync: i32,
 	ppp: f32,
 ) -> Result<GlStack, String> {
@@ -942,7 +1000,14 @@ unsafe fn build_gl(
 		.map(|s| s.to_string_lossy().into_owned())
 		.unwrap_or_default();
 	let has = |e: &str| exts.split_whitespace().any(|x| x == e);
-	let robust_allowed = std::env::var("PULSAR_GL_ROBUST").map_or(true, |v| v != "0");
+	let robust_allowed = robust_wanted(std::env::var("PULSAR_GL_ROBUST").ok().as_deref(), mali);
+	// Drop a context made by a failed attempt, but never a Mali one (see `retire_context`).
+	let drop_context = |c: egl::Context, mali: bool| {
+		let _ = egl.make_current(display, None, None, None);
+		if !mali {
+			let _ = egl.destroy_context(display, c);
+		}
+	};
 	egl.bind_api(egl::OPENGL_ES_API).ok();
 	let mut context = None;
 	let mut robust = false;
@@ -961,26 +1026,32 @@ unsafe fn build_gl(
 		return Err(format!("eglCreateContext: {last_err:?}"));
 	};
 	// Reuse the old surface when it still binds; else replace it.
-	let surface = match surface {
-		Some(s) if egl.make_current(display, Some(s), Some(s), Some(context)).is_ok() => s,
-		old => {
-			if let Some(s) = old {
+	let reused = match *surface {
+		Some(s) if egl.make_current(display, Some(s), Some(s), Some(context)).is_ok() => Some(s),
+		_ => None,
+	};
+	let surf = match reused {
+		Some(s) => s,
+		None => {
+			// The slot is cleared BEFORE the destroy: a later failure must not leave the dead
+			// handle behind for the next attempt.
+			if let Some(s) = surface.take() {
 				let _ = egl.destroy_surface(display, s);
 			}
 			let s = match egl.create_window_surface(display, config, win as egl::NativeWindowType, None) {
 				Ok(s) => s,
 				Err(e) => {
-					let _ = egl.destroy_context(display, context);
+					drop_context(context, mali);
 					return Err(format!("eglCreateWindowSurface: {e}"));
 				}
 			};
 			if let Err(e) = egl.make_current(display, Some(s), Some(s), Some(context)) {
-				let _ = egl.make_current(display, None, None, None);
-				let _ = egl.destroy_context(display, context);
+				drop_context(context, mali);
 				// Keep no half-made surface: the next attempt creates it again.
 				let _ = egl.destroy_surface(display, s);
 				return Err(format!("eglMakeCurrent: {e}"));
 			}
+			*surface = Some(s);
 			s
 		}
 	};
@@ -994,15 +1065,19 @@ unsafe fn build_gl(
 	let gl = Arc::new(glow::Context::from_loader_function(|s| get_proc(s)));
 	use glow::HasContext;
 	let renderer = gl.get_parameter_string(glow::RENDERER);
+	let mali = mali || renderer.contains("Mali");
 	let reset_status = if robust {
 		let gl_exts = gl.supported_extensions();
-		["glGetGraphicsResetStatusEXT", "glGetGraphicsResetStatusKHR", "glGetGraphicsResetStatus"]
-			.iter()
-			.zip(["GL_EXT_robustness", "GL_KHR_robustness", ""])
-			.filter(|(_, ext)| ext.is_empty() || gl_exts.contains(*ext))
-			.map(|(f, _)| get_proc(*f))
-			.find(|p| !p.is_null())
-			.map(|p| std::mem::transmute::<*const c_void, GlGetGraphicsResetStatus>(p))
+		let gl_version = gl.get_parameter_string(glow::VERSION);
+		reset_status_names(
+			&gl_version,
+			gl_exts.contains("GL_EXT_robustness"),
+			gl_exts.contains("GL_KHR_robustness"),
+		)
+		.into_iter()
+		.map(get_proc)
+		.find(|p| !p.is_null())
+		.map(|p| std::mem::transmute::<*const c_void, GlGetGraphicsResetStatus>(p))
 	} else {
 		None
 	};
@@ -1013,8 +1088,7 @@ unsafe fn build_gl(
 	let painter = match egui_glow::Painter::new(gl.clone(), "", None, false) {
 		Ok(p) => p,
 		Err(e) => {
-			let _ = egl.make_current(display, None, None, None);
-			let _ = egl.destroy_context(display, context);
+			drop_context(context, mali);
 			return Err(format!("egui painter: {e}"));
 		}
 	};
@@ -1022,7 +1096,7 @@ unsafe fn build_gl(
 	let egui_ctx = egui::Context::default();
 	overlay::apply_theme(&egui_ctx);
 	egui_ctx.set_pixels_per_point(ppp);
-	Ok(GlStack { context, surface, gl, painter, presenter, egui_ctx, reset_status, renderer })
+	Ok(GlStack { context, surface: surf, gl, painter, presenter, egui_ctx, reset_status, mali })
 }
 
 /// The GL context was lost: free what can be freed while it is still current, then let it go.
@@ -1033,9 +1107,16 @@ unsafe fn retire_context(egl: &egl::Instance<egl::Static>, display: egl::Display
 	g.presenter.destroy_gl(&g.gl);
 	g.painter.destroy();
 	let _ = egl.make_current(display, None, None, None);
-	if !g.renderer.contains("Mali") {
+	if !g.mali {
 		let _ = egl.destroy_context(display, g.context);
 	}
+}
+
+/// Whether X window `w` still exists (XGetWindowAttributes fails with BadWindow, which
+/// `x_error_ignore` swallows, once it is destroyed).
+unsafe fn window_alive(xd: *mut xlib::Display, w: u64) -> bool {
+	let mut a: xlib::XWindowAttributes = std::mem::zeroed();
+	xlib::XGetWindowAttributes(xd, w, &mut a) != 0
 }
 
 unsafe fn real_run(wid: u64, mode: Mode) {
@@ -1221,7 +1302,17 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 	let ppp = 1.25_f32 * ui_scale;
 	// The GL context + everything on it (rebuilt in place after a context loss, see the top of
 	// the loop).
-	let mut g = match build_gl(&egl, display, config, win, None, vsync, ppp) {
+	// Known before the first context: Mali contexts are never destroyed (`retire_context`).
+	let egl_str = |name| {
+		egl.query_string(Some(display), name)
+			.map(|s| s.to_string_lossy().into_owned())
+			.unwrap_or_default()
+	};
+	let mali = egl_is_mali(&egl_str(egl::VENDOR), &egl_str(egl::VERSION));
+	// The window surface, owned outside the GL stack so a failed rebuild that destroyed it
+	// leaves None here, never a dangling handle (see `build_gl`).
+	let mut surface: Option<egl::Surface> = None;
+	let mut g = match build_gl(&egl, display, config, win, &mut surface, mali, vsync, ppp) {
 		Ok(g) => g,
 		Err(e) => panic!("pulsar-render: GL setup failed: {e}"),
 	};
@@ -1321,7 +1412,7 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 				test_fails_left -= 1;
 				Err("simulated failure (PULSAR_TEST_DEVICE_LOSS)".to_string())
 			} else {
-				build_gl(&egl, display, config, win, Some(g.surface), vsync, ppp)
+				build_gl(&egl, display, config, win, &mut surface, mali, vsync, ppp)
 			};
 			match built {
 				Ok(fresh) => {
@@ -1346,6 +1437,14 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 				}
 				Err(e) => {
 					rebuild_fails += 1;
+					if !window_alive(xd, win) || (!standalone && !window_alive(xd, parent)) {
+						// The window (or the app window it lives in) is gone: there is nothing
+						// to rebuild on, so stop instead of retrying forever.
+						eprintln!("pulsar-render: renderer rebuild failed: {e} — video window gone, stopping");
+						STOP.store(true, Ordering::SeqCst);
+						video::signal_stop();
+						continue;
+					}
 					if rebuild_fail_logged(rebuild_fails) {
 						eprintln!("pulsar-render: renderer rebuild failed: {e} — retrying (attempt {rebuild_fails})");
 					}
@@ -1382,6 +1481,17 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 					(w, h) = (nw, nh);
 					xlib::XResizeWindow(xd, win, w, h);
 				}
+			}
+			// A session that ends meanwhile must still reveal the app UI underneath: unmap on
+			// IDLE like the normal path does (RESET_VIEW stays latched for after the rebuild).
+			let idle = IDLE.load(Ordering::SeqCst);
+			if idle != prev_idle {
+				if idle {
+					xlib::XUnmapWindow(xd, win);
+					win_visible = false;
+				}
+				xlib::XSync(xd, xlib::False);
+				prev_idle = idle;
 			}
 			video::drop_frames();
 			std::thread::sleep(std::time::Duration::from_millis(40));
@@ -2118,7 +2228,15 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 		} else {
 			let swap_t0 = std::time::Instant::now();
 			if let Err(e) = egl.swap_buffers(display, g.surface) {
-				if swap_error_is_loss(e) {
+				if matches!(e, egl::Error::BadNativeWindow | egl::Error::BadSurface)
+					&& (!window_alive(xd, win) || (!standalone && !window_alive(xd, parent)))
+				{
+					// The X window itself is gone (app teardown, parent destroyed): there is
+					// nothing to rebuild on.
+					eprintln!("pulsar-render: eglSwapBuffers: {e:?} — video window gone, stopping");
+					STOP.store(true, Ordering::SeqCst);
+					video::signal_stop();
+				} else if swap_error_is_loss(e) {
 					// Rebuilt at the top of the next pass.
 					loss = Some(format!("eglSwapBuffers: {e:?}"));
 				} else if let Some(n) = swap_err_log.hit(std::time::Instant::now()) {
@@ -2409,5 +2527,44 @@ mod gl_loss_tests {
 		assert!(swap_error_is_loss(egl::Error::ContextLost));
 		assert!(swap_error_is_loss(egl::Error::BadSurface));
 		assert!(!swap_error_is_loss(egl::Error::BadAlloc));
+	}
+
+	#[test]
+	fn robust_lists_never_ask_for_robust_access() {
+		const EGL_CONTEXT_OPENGL_ROBUST_ACCESS_EXT: egl::Int = 0x30BF;
+		for l in context_attrib_lists(true, true) {
+			assert!(!l.contains(&EGL_CONTEXT_OPENGL_ROBUST_ACCESS_EXT));
+		}
+	}
+
+	#[test]
+	fn robust_default_off_on_mali_env_overrides() {
+		assert!(robust_wanted(None, false));
+		assert!(!robust_wanted(None, true));
+		assert!(robust_wanted(Some("1"), true));
+		assert!(!robust_wanted(Some("0"), false));
+		assert!(robust_wanted(Some("yes"), false));
+	}
+
+	#[test]
+	fn mali_detection() {
+		assert!(egl_is_mali("ARM", "1.4 Valhall-\"g13p0-01eac0\""));
+		assert!(egl_is_mali("Rockchip", "1.4 Midgard-\"r18p0\""));
+		assert!(!egl_is_mali("Mesa Project", "1.5"));
+		assert!(!egl_is_mali("NVIDIA", "1.5"));
+		assert!(!egl_is_mali("Armada", "1.5"));
+	}
+
+	#[test]
+	fn reset_status_core_name_only_on_es32() {
+		assert_eq!(gles_version("OpenGL ES 3.2 Mesa 24.0.5"), Some((3, 2)));
+		assert_eq!(gles_version("OpenGL ES 2.0 build 1.13"), Some((2, 0)));
+		assert_eq!(gles_version("4.6.0 NVIDIA 550"), None);
+		assert!(reset_status_names("OpenGL ES 2.0", false, false).is_empty());
+		assert_eq!(reset_status_names("OpenGL ES 3.1 Mesa", true, false), vec!["glGetGraphicsResetStatusEXT"]);
+		assert_eq!(
+			reset_status_names("OpenGL ES 3.2 NVIDIA", false, true),
+			vec!["glGetGraphicsResetStatusKHR", "glGetGraphicsResetStatus"]
+		);
 	}
 }
