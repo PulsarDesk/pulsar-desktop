@@ -1,29 +1,67 @@
-//! AMD FidelityFX Super Resolution 1 (EASU upscale + RCAS sharpen) for the Linux GL presenter
-//! (`video.rs`) — the "picture upscaling" setting (Settings → Görüntü → Görüntü iyileştirme;
-//! stdin `upscale off|auto|fsr|ai`; Linux has no vendor AI upscaler, so every "on" mode is FSR).
+//! Picture upscaling for the Linux GL presenter (`video.rs`) — the "picture upscaling" setting
+//! (Settings → Görüntü → Görüntü iyileştirme; stdin `upscale off|auto|fsr|ai|sgsr`). Linux has
+//! no vendor AI upscaler, so `auto` / `fsr` / `ai` are AMD FidelityFX Super Resolution 1 (EASU
+//! upscale + RCAS sharpen) and `sgsr` is Snapdragon Game Super Resolution 1 (one pass,
+//! `sgsr1.glsl`, the GLSL ES port of the Windows `win/sgsr1.hlsl`).
 //!
 //! The presenter's own draw (whichever decode path: dmabuf / CUDA / NV12 / YUV upload) is
-//! redirected into `a` (an RGBA texture at the stream's size) instead of the screen; EASU scales
-//! `a` into `b` at the letterboxed on-screen size; RCAS sharpens `b` onto the screen. Any GL
-//! failure (shader, incomplete framebuffer) turns FSR off for the session: plain scaling, never
-//! a black picture.
+//! redirected into `a` (an RGBA texture at the stream's size) instead of the screen. FSR: EASU
+//! scales `a` into `b` at the letterboxed on-screen size, RCAS sharpens `b` onto the screen.
+//! SGSR: one pass from `a` (bilinear) onto the screen. Any GL failure (shader, incomplete
+//! framebuffer) turns the upscaler off for the session: plain scaling, never a black picture;
+//! an SGSR shader that won't build falls back to FSR (as on Windows).
 //!
 //! Shader math: FSR 1.0.2 (Copyright (c) 2021 Advanced Micro Devices, Inc., MIT license) after
 //! agyild's mpv port, in GLSL ES 1.00 like the presenter's shaders (no bit-cast reciprocal
-//! approximations there — plain guarded divisions), RGB with luma-driven edge analysis.
+//! approximations there — plain guarded divisions), RGB with luma-driven edge analysis. SGSR 1
+//! (Copyright (c) 2023 Qualcomm Innovation Center, Inc., BSD-3-Clause): see `sgsr1.glsl`.
 
 use glow::HasContext;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 
-static ON: AtomicBool = AtomicBool::new(false);
+/// Which upscaler the setting asks for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mode {
+	Off,
+	Fsr,
+	Sgsr,
+}
 
-/// `upscale <mode>` from the app: anything but "off" enables FSR.
+/// 0 off · 1 FSR · 2 SGSR.
+static MODE: AtomicU8 = AtomicU8::new(0);
+
+/// The app's `upscale <mode>` value → the upscaler Linux runs for it.
+pub fn parse_mode(mode: &str) -> Mode {
+	match mode.trim() {
+		"" | "off" => Mode::Off,
+		"sgsr" => Mode::Sgsr,
+		// auto / fsr / ai (no vendor AI upscaler on Linux) and anything newer.
+		_ => Mode::Fsr,
+	}
+}
+
+/// `upscale <mode>` from the app. Diagnostics: `PULSAR_UPSCALE=off|auto|fsr|ai|sgsr` pins the
+/// mode over the app's setting (as on Windows).
 pub fn set_upscale(mode: &str) {
-	ON.store(!matches!(mode.trim(), "" | "off"), Ordering::Relaxed);
+	let forced = std::env::var("PULSAR_UPSCALE").ok();
+	let v = match parse_mode(forced.as_deref().unwrap_or(mode)) {
+		Mode::Off => 0,
+		Mode::Fsr => 1,
+		Mode::Sgsr => 2,
+	};
+	MODE.store(v, Ordering::Relaxed);
+}
+
+pub fn mode() -> Mode {
+	match MODE.load(Ordering::Relaxed) {
+		1 => Mode::Fsr,
+		2 => Mode::Sgsr,
+		_ => Mode::Off,
+	}
 }
 
 pub fn enabled() -> bool {
-	ON.load(Ordering::Relaxed)
+	mode() != Mode::Off
 }
 
 const VERT: &str = "attribute vec2 pos;\nattribute vec2 uvin;\nvarying vec2 uv;\nvoid main(){ uv=uvin; gl_Position=vec4(pos,0.0,1.0); }\n";
@@ -111,6 +149,9 @@ void main(){
 }
 "#;
 
+/// Snapdragon GSR 1, GLSL ES 1.00 (shared source, see the file's header).
+const SGSR: &str = include_str!("sgsr1.glsl");
+
 const RCAS: &str = r#"
 vec3 ld(vec2 p){ return texture2D(tex, (p + 0.5) * con0.zw).rgb; }
 void main(){
@@ -159,6 +200,8 @@ pub struct GlFsr {
 	over_budget: bool,
 	easu: glow::Program,
 	rcas: glow::Program,
+	/// None = the SGSR shader didn't build on this GL (FSR runs instead).
+	sgsr: Option<glow::Program>,
 	vbo: glow::Buffer,
 	a: Option<Target>,
 	b: Option<Target>,
@@ -171,7 +214,7 @@ unsafe fn program(gl: &glow::Context, frag: &str) -> Option<glow::Program> {
 		gl.shader_source(s, &src);
 		gl.compile_shader(s);
 		if !gl.get_shader_compile_status(s) {
-			eprintln!("pulsar-render: FSR shader: {}", gl.get_shader_info_log(s));
+			eprintln!("pulsar-render: upscaler shader: {}", gl.get_shader_info_log(s));
 			return None;
 		}
 		gl.attach_shader(prog, s);
@@ -180,7 +223,7 @@ unsafe fn program(gl: &glow::Context, frag: &str) -> Option<glow::Program> {
 	gl.bind_attrib_location(prog, 1, "uvin");
 	gl.link_program(prog);
 	if !gl.get_program_link_status(prog) {
-		eprintln!("pulsar-render: FSR link: {}", gl.get_program_info_log(prog));
+		eprintln!("pulsar-render: upscaler link: {}", gl.get_program_info_log(prog));
 		return None;
 	}
 	gl.use_program(Some(prog));
@@ -195,11 +238,33 @@ impl GlFsr {
 	pub unsafe fn new(gl: &glow::Context) -> Option<Self> {
 		let easu = program(gl, EASU)?;
 		let rcas = program(gl, RCAS)?;
+		let sgsr = program(gl, SGSR);
 		let vbo = gl.create_buffer().ok()?;
 		let renderer = gl.get_parameter_string(glow::RENDERER);
 		let mobile = ["Mali", "Adreno", "PowerVR", "Immortalis"].iter().any(|m| renderer.contains(m));
-		eprintln!("pulsar-render: FSR upscaler ready (gpu {renderer:?}, mobile budget {mobile})");
-		Some(Self { mobile, over_budget: false, easu, rcas, vbo, a: None, b: None })
+		eprintln!(
+			"pulsar-render: upscalers ready (FSR, SGSR {}; gpu {renderer:?}, mobile budget {mobile})",
+			if sgsr.is_some() { "ok" } else { "unavailable: FSR instead" }
+		);
+		Some(Self { mobile, over_budget: false, easu, rcas, sgsr, vbo, a: None, b: None })
+	}
+
+	/// The upscaler `finish` runs for the current setting (SGSR only when its shader built).
+	pub fn active(&self) -> Mode {
+		match mode() {
+			Mode::Off => Mode::Off,
+			Mode::Sgsr if self.sgsr.is_some() => Mode::Sgsr,
+			_ => Mode::Fsr,
+		}
+	}
+
+	/// The name the menu's stream line shows (as on Windows).
+	pub fn active_name(&self) -> &'static str {
+		match self.active() {
+			Mode::Off => "",
+			Mode::Fsr => "FSR",
+			Mode::Sgsr => "SGSR",
+		}
 	}
 
 	/// Can the GPU afford FSR for `px` output pixels at `fps`? Always on a desktop GPU; within
@@ -209,7 +274,7 @@ impl GlFsr {
 		if over != self.over_budget {
 			self.over_budget = over;
 			eprintln!(
-				"pulsar-render: FSR {} ({px} px x {fps:.0} fps vs {:.0} Mpx/s budget)",
+				"pulsar-render: upscaler {} ({px} px x {fps:.0} fps vs {:.0} Mpx/s budget)",
 				if over { "paused: over the GPU budget" } else { "back on" },
 				MOBILE_BUDGET_PX_S / 1e6
 			);
@@ -273,10 +338,15 @@ impl GlFsr {
 		Some(prev)
 	}
 
-	unsafe fn pass(&self, gl: &glow::Context, prog: glow::Program, src: &Target, out_w: i32, out_h: i32) {
+	/// One full-viewport draw of `prog` sampling `src`: `linear` = bilinear filtering (SGSR's
+	/// centre tap; its texel fetches hit texel centres, so they stay exact), else nearest.
+	unsafe fn pass(&self, gl: &glow::Context, prog: glow::Program, src: &Target, out_w: i32, out_h: i32, linear: bool) {
 		gl.use_program(Some(prog));
 		gl.active_texture(glow::TEXTURE0);
 		gl.bind_texture(glow::TEXTURE_2D, Some(src.tex));
+		let filter = if linear { glow::LINEAR } else { glow::NEAREST } as i32;
+		gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, filter);
+		gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, filter);
 		let (sw, sh) = (src.w as f32, src.h as f32);
 		if let Some(l) = gl.get_uniform_location(prog, "con0") {
 			gl.uniform_4_f32(Some(&l), sw, sh, 1.0 / sw, 1.0 / sh);
@@ -299,9 +369,10 @@ impl GlFsr {
 		gl.draw_arrays(glow::TRIANGLES, 0, 6);
 	}
 
-	/// After the presenter drew into `a`: EASU `a` → `b` (rw x rh), RCAS `b` → the restored
-	/// framebuffer at (vx, vy, rw, rh). False when `b` can't be made (the frame is lost once;
-	/// the caller turns FSR off).
+	/// After the presenter drew into `a`: FSR = EASU `a` → `b` (rw x rh), RCAS `b` → the
+	/// restored framebuffer at (vx, vy, rw, rh); SGSR = `a` → the restored framebuffer in one
+	/// pass. False when `b` can't be made (the frame is lost once; the caller turns the
+	/// upscaler off).
 	pub unsafe fn finish(
 		&mut self,
 		gl: &glow::Context,
@@ -311,6 +382,14 @@ impl GlFsr {
 		rw: i32,
 		rh: i32,
 	) -> bool {
+		if let (Mode::Sgsr, Some(prog), Some(a)) = (self.active(), self.sgsr, self.a.as_ref()) {
+			gl.bind_framebuffer(glow::FRAMEBUFFER, prev);
+			gl.viewport(vx, vy, rw, rh);
+			self.pass(gl, prog, a, rw, rh, true);
+			gl.bind_texture(glow::TEXTURE_2D, None);
+			gl.use_program(None);
+			return true;
+		}
 		if Self::target(gl, &mut self.b, rw, rh).is_none() {
 			gl.bind_framebuffer(glow::FRAMEBUFFER, prev);
 			return false;
@@ -321,12 +400,50 @@ impl GlFsr {
 		};
 		gl.bind_framebuffer(glow::FRAMEBUFFER, Some(b.fbo));
 		gl.viewport(0, 0, rw, rh);
-		self.pass(gl, self.easu, a, rw, rh);
+		self.pass(gl, self.easu, a, rw, rh, false);
 		gl.bind_framebuffer(glow::FRAMEBUFFER, prev);
 		gl.viewport(vx, vy, rw, rh);
-		self.pass(gl, self.rcas, b, rw, rh);
+		self.pass(gl, self.rcas, b, rw, rh, false);
 		gl.bind_texture(glow::TEXTURE_2D, None);
 		gl.use_program(None);
 		true
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn modes() {
+		assert_eq!(parse_mode("off"), Mode::Off);
+		assert_eq!(parse_mode(""), Mode::Off);
+		assert_eq!(parse_mode(" sgsr\n"), Mode::Sgsr);
+		for m in ["auto", "fsr", "ai"] {
+			assert_eq!(parse_mode(m), Mode::Fsr, "{m}");
+		}
+	}
+
+	/// The shader's code (comments stripped).
+	fn code(src: &str) -> String {
+		let mut out = String::new();
+		let mut rest = src;
+		while let Some(i) = rest.find("/*") {
+			out.push_str(&rest[..i]);
+			rest = rest[i..].find("*/").map_or("", |j| &rest[i + j + 2..]);
+		}
+		out.push_str(rest);
+		out.lines().map(|l| l.split("//").next().unwrap_or("")).collect::<Vec<_>>().join("\n")
+	}
+
+	#[test]
+	fn sgsr_source_is_es100() {
+		let c = code(SGSR);
+		// GLSL ES 1.00 has none of these; the prelude (PRE) supplies tex / con0 / uv.
+		for bad in ["textureGather", "texture(", "#version", "half", "out vec4", "uniform", "varying", "precision"] {
+			assert!(!c.contains(bad), "sgsr1.glsl uses {bad:?}");
+		}
+		assert!(c.contains("gl_FragColor"));
+		assert!(c.contains("void main()"));
 	}
 }
