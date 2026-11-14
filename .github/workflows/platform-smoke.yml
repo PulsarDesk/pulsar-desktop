@@ -1,0 +1,142 @@
+name: Platform smoke
+
+# What the developers cannot check on their own machines: the whole app compiled, its test
+# suites run, and the app plus the native renderer actually started, on a real macOS (Apple
+# silicon) and a real x86-64 Linux. Not a hardware test: no input permissions (Accessibility,
+# Screen Recording) can be granted on a runner, there is no GPU video decoder guarantee and no
+# controller. It answers "does it build, do the tests pass, does it start and draw frames".
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  smoke:
+    name: Smoke · ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, name: macos-arm64 }
+          - { os: ubuntu-22.04, name: linux-x64 }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config cmake nasm clang \
+            libwebkit2gtk-4.1-dev librsvg2-dev libayatana-appindicator3-dev libxdo-dev libssl-dev \
+            libudev-dev libasound2-dev libpulse-dev libdbus-1-dev libdrm-dev libgbm-dev \
+            libegl1-mesa-dev libgl1-mesa-dev libgles2-mesa-dev libwayland-dev libxkbcommon-dev \
+            libx11-dev libxext-dev libxfixes-dev libxi-dev libxrandr-dev libxss-dev libxtst-dev libxcursor-dev \
+            libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libmpv-dev ffmpeg xvfb
+
+      - name: Install macOS deps
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: smoke-${{ matrix.name }}
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Frontend build (embedded into the app)
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
+      - name: Build app + renderer
+        run: cargo build --locked -p pulsar-tauri -p pulsar-render
+
+      - name: Tests (app, renderer, platform crates)
+        shell: bash
+        run: |
+          set -e
+          cargo test --locked -p pulsar-render
+          cargo test --locked -p pulsar-tauri --lib
+          for c in pulsar-macinput pulsar-machine; do
+            if cargo metadata --format-version 1 --no-deps | grep -q "\"name\":\"$c\""; then cargo test --locked -p "$c"; fi
+          done
+
+      - name: Self-test (bundled media stack)
+        shell: bash
+        run: |
+          set +e
+          ./target/debug/pulsar --selftest; echo "selftest exit $?"
+
+      - name: App starts and stays up (30 s)
+        shell: bash
+        run: |
+          set -e
+          if [ "$RUNNER_OS" = "Linux" ]; then Xvfb :99 -screen 0 1920x1080x24 & export DISPLAY=:99; sleep 2; fi
+          export PULSAR_NO_ELEVATE=1
+          ./target/debug/pulsar > app.log 2>&1 &
+          pid=$!
+          sleep 30
+          if kill -0 $pid 2>/dev/null; then echo "app alive after 30 s"; else echo "APP EXITED"; tail -80 app.log; exit 1; fi
+          kill $pid || true
+          echo "--- app log (tail)"; tail -60 app.log
+          find ~ -path '*dev.pulsar.app*/logs/*.log' -newer app.log -o -path '*dev.pulsar.app*/logs/*.log' 2>/dev/null | head -2 | while read f; do echo "--- $f"; tail -60 "$f"; done
+
+      - name: Renderer decodes and draws a test stream (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -e
+          # A plain app window to put the picture over (the renderer follows a window by number).
+          cat > win.swift <<'SWIFT'
+          import AppKit
+          let app = NSApplication.shared
+          app.setActivationPolicy(.regular)
+          let w = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 1280, height: 720), styleMask: [.titled], backing: .buffered, defer: false)
+          w.makeKeyAndOrderFront(nil)
+          app.activate(ignoringOtherApps: true)
+          print(w.windowNumber); fflush(stdout)
+          app.run()
+          SWIFT
+          swiftc -O win.swift -o win
+          ./win > win.out & winpid=$!
+          for i in $(seq 1 50); do [ -s win.out ] && break; sleep 0.2; done
+          wid=$(head -1 win.out); echo "window number $wid"
+          printf 'v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=Pulsar\r\nc=IN IP4 0.0.0.0\r\nt=0 0\r\nm=video 59876 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\na=fmtp:96 packetization-mode=1\r\n' > t.sdp
+          ffmpeg -hide_banner -loglevel error -re -f lavfi -i testsrc2=size=1280x720:rate=30 -c:v libx264 -preset ultrafast -tune zerolatency -g 15 -pix_fmt yuv420p -f rtp -payload_type 96 rtp://127.0.0.1:59876 & ffpid=$!
+          ( sleep 2; echo "viewrect 0 0 1280 720"; sleep 20 ) | ./target/debug/pulsar-render t.sdp --wid "$wid" --mode remote > render.out 2> render.err || true
+          kill $ffpid $winpid 2>/dev/null || true
+          echo "--- stdout"; grep -E "vidsink-(fps|dims|dec)" render.out | tail -8 || true
+          echo "--- stderr"; tail -40 render.err
+          fps=$(grep -E "^vidsink-fps" render.out | tail -1 | awk '{print $2}')
+          echo "last fps: ${fps:-none}"
+          [ -n "$fps" ] && [ "${fps%.*}" -ge 10 ]
+
+      - name: Renderer decodes and draws a test stream (Linux, Xvfb)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set +e
+          Xvfb :98 -screen 0 1920x1080x24 & export DISPLAY=:98; sleep 2
+          printf 'v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=Pulsar\r\nc=IN IP4 0.0.0.0\r\nt=0 0\r\nm=video 59876 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\na=fmtp:96 packetization-mode=1\r\n' > t.sdp
+          ffmpeg -hide_banner -loglevel error -re -f lavfi -i testsrc2=size=1280x720:rate=30 -c:v libx264 -preset ultrafast -tune zerolatency -g 15 -pix_fmt yuv420p -f rtp -payload_type 96 rtp://127.0.0.1:59876 & ffpid=$!
+          timeout 25 ./target/debug/pulsar-render t.sdp --mode remote > render.out 2> render.err
+          kill $ffpid 2>/dev/null
+          echo "--- stdout"; grep -E "vidsink-(fps|dims|dec)" render.out | tail -8
+          echo "--- stderr"; tail -40 render.err
+          grep -qE "^vidsink-fps [1-9]" render.out
