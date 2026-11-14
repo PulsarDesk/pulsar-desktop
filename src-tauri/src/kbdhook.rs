@@ -144,6 +144,8 @@ pub use mac::{
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
+mod linux_pinch;
+#[cfg(target_os = "linux")]
 pub use linux::{
 	app_focused, arm_kiosk_engage, disable, enable, engage, engage_render, input_active, is_engaged,
 	overlay_suspend, release, set_focused, set_render_focused,
@@ -249,13 +251,11 @@ pub fn set_pointer_lock(id: u64, on: bool) {
 }
 #[cfg(not(any(windows, target_os = "macos")))]
 pub fn set_pointer_lock(_id: u64, _on: bool) {}
-/// Whether the connected host injects real pinch gestures (`FEAT_PINCH`).
-#[cfg(windows)]
+/// Whether the connected host injects real pinch gestures (`FEAT_PINCH`). Read by every
+/// pinch capture path (Windows hook, Linux touchpad reader, webview `input_pinch`).
 pub fn set_host_pinch(on: bool) {
-	imp::set_host_pinch(on)
+	crate::pinch::set_host_pinch(on)
 }
-#[cfg(not(windows))]
-pub fn set_host_pinch(_on: bool) {}
 #[cfg(windows)]
 pub fn is_engaged() -> bool {
 	imp::is_engaged()

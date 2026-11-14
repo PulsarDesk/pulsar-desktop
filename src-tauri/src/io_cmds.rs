@@ -281,6 +281,46 @@ pub(crate) async fn input_scroll(
 	Ok(())
 }
 
+/// Open webview pinches per play session (see `input_pinch`).
+static WEB_PINCH: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<u64, crate::pinch::PinchForwarder>>> =
+	std::sync::OnceLock::new();
+
+/// Client: a touchpad pinch seen by the webview (WebKit `gesture*` events on macOS, or the
+/// Ctrl + wheel Chromium/WebKit synthesize). `phase` 0 = begin, 1 = update, 2 = end; `scale`
+/// cumulative since begin. Forwarded as `InputEvent::Pinch` to hosts that inject gestures
+/// (`FEAT_PINCH`), as Ctrl + wheel steps to the rest (`crate::pinch`).
+#[tauri::command]
+pub(crate) async fn input_pinch(
+	state: State<'_, AppState>,
+	id: u64,
+	phase: u8,
+	scale: f64,
+) -> Result<(), String> {
+	let events = {
+		let mut map = WEB_PINCH.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+		let f = map.entry(id).or_default();
+		let out = match phase {
+			0 => {
+				let mut out = f.begin(crate::pinch::host_pinch());
+				if (scale - 1.0).abs() > f64::EPSILON {
+					out.extend(f.update(scale));
+				}
+				out
+			}
+			1 => f.update(scale),
+			_ => f.end(),
+		};
+		if !f.active() {
+			map.remove(&id);
+		}
+		out
+	};
+	for ev in events {
+		forward(&state, id, ev).await;
+	}
+	Ok(())
+}
+
 /// Client: forward a keyboard evdev keycode press/release.
 #[tauri::command]
 pub(crate) async fn input_key(

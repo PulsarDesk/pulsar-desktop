@@ -26,7 +26,7 @@ use xkbcommon::xkb;
 /// leaving TWO threads sharing the ENGAGED/SUSPENDED statics and racing EVIOCGRAB —
 /// with events draining into the dead (or the WRONG host's) tx. With a generation,
 /// every superseded thread exits deterministically; only the newest tx survives.
-static GEN: AtomicU64 = AtomicU64::new(0);
+pub(super) static GEN: AtomicU64 = AtomicU64::new(0);
 /// True while a capture thread is armed (session live) — gates `engage()`.
 static RUNNING: AtomicBool = AtomicBool::new(false);
 /// One-shot kiosk auto-engage: armed by `lib.rs` only for a launch that will actually
@@ -399,6 +399,8 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, star
 		// Keep the frontend's engage hint in sync with the auto-engage.
 		let _ = app.emit("kbd-engaged", ());
 	}
+	// Touchpad pinch: read alongside the compositor (touchpads are never grabbed).
+	super::linux_pinch::spawn(gen, tx.clone());
 	std::thread::spawn(move || {
 		// Loop telemetry (see the "evdev capture state" log below).
 		let mut diag_at = std::time::Instant::now();

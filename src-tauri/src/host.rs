@@ -131,9 +131,11 @@ fn media_features() -> Vec<String> {
 		FEAT_FEC.to_string(),
 		FEAT_FEC_RS.to_string(),
 	];
-	// Real pinch gestures (two-finger touch injection) — Windows hosts only; elsewhere the
-	// client keeps sending Ctrl + wheel.
-	#[cfg(windows)]
+	// Real pinch gestures: Windows = two-finger touch injection, Linux = a virtual uinput
+	// touchpad pinch (libinput gesture), macOS = a trackpad magnify gesture (pulsar-core
+	// `DesktopInput::pinch`). Linux/macOS untested on hardware. Other targets: the client
+	// keeps sending Ctrl + wheel.
+	#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 	v.push(pulsar_core::service::media::FEAT_PINCH.to_string());
 	// Reference-frame invalidation: the native NVENC path heals a client-reported loss without
 	// a keyframe (other paths answer MediaRfi with a keyframe).

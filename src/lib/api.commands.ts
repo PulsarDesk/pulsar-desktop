@@ -395,6 +395,10 @@ export const api = {
 	/** Control: scroll delta. */
 	inputScroll: (id: number, dx: number, dy: number) =>
 		invoke<void>('input_scroll', { id, dx, dy }),
+	/** Control: touchpad pinch — phase 0 begin / 1 update / 2 end, `scale` cumulative since
+	 * begin. A real pinch for hosts that inject gestures, Ctrl + wheel for the rest. */
+	inputPinch: (id: number, phase: 0 | 1 | 2, scale: number) =>
+		invoke<void>('input_pinch', { id, phase, scale }),
 	/** Control: keyboard evdev keycode press/release. */
 	inputKey: (id: number, code: number, down: boolean) =>
 		invoke<void>('input_key', { id, code, down }),

@@ -73,3 +73,24 @@ self-pipe instead of an inherited blocked mask, and the stop event grants the sa
 `EVENT_MODIFY_STATE` with a Medium label (`--headless-stop` exit 7 = access denied).
 Unverified: the elevated-GUI / elevated-host cases (needs an elevated run), the Unix signal
 path (not compiled on Linux here), and `--headless-host` on Linux needs a display.
+
+**Touchpad pinch (2026-11-14 parity work; Linux + macOS untested on hardware):** one
+shared client module, `src-tauri/src/pinch.rs` — the host-pinch flag (`FEAT_PINCH`, set by
+play.rs), `PinchForwarder` (gesture → `InputEvent::Pinch` for hosts that inject it, else
+Ctrl + wheel steps at 1.12× per notch) and `TouchTracker` (two-finger pinch recognition from
+raw multitouch). Per client platform:
+- **Windows** — the LL mouse hook turns Windows' synthesized Ctrl + wheel into the pinch
+  (`kbdhook/imp.rs`, unchanged; it reads the shared flag now).
+- **Linux** — `kbdhook/linux_pinch.rs`: one reader thread per capture generation opens
+  every touchpad READ-ONLY (no grab — the compositor keeps it) and forwards a recognised
+  pinch while the session is controlled (`input_active`). Needs read access to
+  `/dev/input` (the same `input` group the keyboard/mouse grab needs). Touchpad pointer
+  motion itself is still not forwarded by the evdev capture (only keyboards and REL mice are
+  grabbed) — a separate gap.
+- **macOS / any webview session** — `Session/input.svelte.ts`: WKWebView `gesturestart /
+  gesturechange / gestureend` on the video canvas, and a Ctrl + wheel with no Ctrl key held
+  (Chromium / WebKit report a pinch that way; idle 200 ms = end) → `input_pinch` command
+  (`io_cmds.rs`). If a macOS native renderer ever covers the webview, the renderer must read
+  `NSEventTypeMagnify` itself and relay it (not done — no such renderer path yet).
+Hosts: Windows, Linux and macOS all advertise `FEAT_PINCH` now (`host.rs media_features`);
+the injection is pulsar-core `DesktopInput::pinch` (see `../pulsar-core/docs/agents/modules.md`).
