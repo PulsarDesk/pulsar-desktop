@@ -162,14 +162,19 @@ pub fn valid_group_name(s: &str) -> bool {
 /// is a symlink or not a dir (exit 3), owned by someone else than root (exit 4) — re-applies
 /// owner and mode, and atomically writes `mode.json`. `None` for an unsafe group name.
 pub fn setup_script(os: Os, group: &str, enable: bool) -> Option<String> {
-	if !valid_group_name(group) {
+	setup_script_at(os, machine_dir_for(os), group, enable)
+}
+
+/// [`setup_script`] for an explicit machine dir (tests run it on a scratch dir as root).
+/// `m` must not contain a `'` (it is spliced into a single-quoted shell string).
+pub fn setup_script_at(os: Os, m: &str, group: &str, enable: bool) -> Option<String> {
+	if !valid_group_name(group) || m.contains('\'') || !m.starts_with('/') {
 		return None;
 	}
 	let stat_uid = match os {
 		Os::Linux => "stat -c %u",
 		Os::MacOs => "stat -f %u",
 	};
-	let m = machine_dir_for(os);
 	let shared = if enable { "true" } else { "false" };
 	Some(format!(
 		"set -eu\n\
@@ -389,6 +394,22 @@ mod tests {
 		let s = setup_script(Os::MacOs, "admin", true).unwrap();
 		assert!(s.contains("M='/Library/Application Support/Pulsar'"));
 		assert!(s.contains("stat -f %u"));
+	}
+
+	/// The script is valid `/bin/sh` (parse only: `sh -n`, nothing runs).
+	#[cfg(unix)]
+	#[test]
+	fn setup_script_parses_in_sh() {
+		for os in [Os::Linux, Os::MacOs] {
+			for on in [true, false] {
+				let s = setup_script(os, "admin", on).unwrap();
+				let st = std::process::Command::new("/bin/sh")
+					.args(["-n", "-c", &s])
+					.status()
+					.unwrap();
+				assert!(st.success(), "sh -n rejected the {os:?} script:\n{s}");
+			}
+		}
 	}
 
 	#[test]

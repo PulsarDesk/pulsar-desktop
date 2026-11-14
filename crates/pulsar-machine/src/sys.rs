@@ -406,6 +406,44 @@ mod tests {
 		let _ = std::fs::remove_dir_all(&other);
 	}
 
+	/// Runs the real setup script on a scratch machine dir. Needs root (chown 0:group), so it
+	/// is a no-op otherwise; run it once with `sudo -E cargo test -p pulsar-machine`.
+	#[test]
+	fn setup_script_end_to_end_as_root() {
+		if euid() != 0 {
+			return;
+		}
+		let base = tmp("setup");
+		let m = base.join("machine");
+		let ms = m.to_str().unwrap().to_string();
+		let group = if group_gid("wheel").is_some() { "wheel" } else { "root" };
+		let gid = group_gid(group).unwrap();
+		let run = |enable: bool| {
+			let s = crate::setup_script_at(os(), &ms, group, enable).unwrap();
+			std::process::Command::new("/bin/sh").args(["-c", &s]).output().unwrap()
+		};
+		let o = run(true);
+		assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+		crate::check_machine_dir(&meta(&m).unwrap()).unwrap();
+		crate::check_shared_dir(&meta(&m.join("shared")).unwrap(), &[gid]).unwrap();
+		assert_eq!(meta(&m.join("shared")).unwrap().mode, crate::SHARED_DIR_MODE);
+		let mj = m.join("mode.json");
+		assert_eq!(std::fs::read_to_string(&mj).unwrap().trim(), r#"{"shared":true}"#);
+		assert_eq!(meta(&mj).unwrap().mode & 0o777, 0o644);
+		// Turning it off rewrites the marker, keeps the shared dir.
+		assert!(run(false).status.success());
+		assert_eq!(std::fs::read_to_string(&mj).unwrap().trim(), r#"{"shared":false}"#);
+		assert!(m.join("shared").is_dir());
+		// A user-owned shared dir is refused (exit 4) — never re-owned.
+		std::os::unix::fs::chown(m.join("shared"), Some(12345), None).unwrap();
+		assert_eq!(run(true).status.code(), Some(4));
+		// A symlinked machine dir is refused (exit 3).
+		let _ = std::fs::remove_dir_all(&m);
+		std::os::unix::fs::symlink(&base, &m).unwrap();
+		assert_eq!(run(true).status.code(), Some(3));
+		let _ = std::fs::remove_dir_all(&base);
+	}
+
 	#[test]
 	fn own_gids_include_the_effective_one() {
 		assert!(my_gids().contains(&unsafe { libc::getegid() }));
