@@ -240,7 +240,8 @@ showed ~600 ms head-of-line holds, "stream stopped" over a live session and a lo
 The video child window covers the webview, so a stylus or a finger on the video reaches
 only the renderer, as `WM_POINTER*` (`src/win/pointer.rs`). The app tells it what the host
 injects with `pentouch <pen> <touch>` on stdin (sent at spawn and respawn next to `ptrfree`,
-from `kbdhook::pen_touch_line`). While control is engaged and the overlay is closed, those
+from `kbdhook::pen_touch_line(host_pen, host_touch)` with the play's own host features). While
+control is engaged and the overlay is closed, those
 messages are answered (no mouse is synthesized from them) and reported on stdout:
 
 - `pen <x> <y> <pressure> <tilt_x> <tilt_y> <twist> <flags>` — 0..1 of the video rect
