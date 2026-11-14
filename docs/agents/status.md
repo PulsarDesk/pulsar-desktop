@@ -65,5 +65,6 @@ path (not compiled on Linux here), and `--headless-host` on Linux needs a displa
 Windows, Linux (evdev + X11 XInput2 raw events; X11 pointer position) and macOS (listen-only
 CGEventTap, Pulsar's injected events tagged via `kCGEventSourceUserData`; main-display pointer
 position), and the macOS remote-cursor ghost is a system-wide overlay. Wayland without
-`/dev/input` access cannot detect it (OS limit). See [modes.md](modes.md) "Host pointer marker".
+`/dev/input` access does not detect it yet (possible via the portal's cursor-metadata mode;
+not built). See [modes.md](modes.md) "Host pointer marker".
 Linux X11 and macOS paths are **untested on hardware**.

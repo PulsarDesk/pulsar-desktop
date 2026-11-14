@@ -74,8 +74,24 @@ pub(crate) fn start() {
 	std::thread::Builder::new()
 		.name("pulsar-takeover".into())
 		.spawn(|| {
-			if let Err(e) = pulsar_core::input::local_pointer_macos::watch_local_pointer(touch) {
-				tracing::warn!("takeover: {e} — host mouse takeover disabled");
+			use pulsar_core::input::local_pointer_macos as lp;
+			if !lp::request_listen_access() {
+				tracing::info!("takeover: listen-event access not granted (yet)");
+			}
+			// The tap fails until the grant exists; retry so a later grant works without a
+			// restart. `watch_local_pointer` only returns early on failure.
+			let mut warned = false;
+			loop {
+				match lp::watch_local_pointer(touch) {
+					Ok(()) => return,
+					Err(e) => {
+						if !warned {
+							warned = true;
+							tracing::warn!("takeover: {e} — host mouse takeover off, retrying every 10 s");
+						}
+						std::thread::sleep(std::time::Duration::from_secs(10));
+					}
+				}
 			}
 		})
 		.ok();
@@ -205,24 +221,32 @@ mod xi2 {
 	use std::collections::HashMap;
 	use x11::{xinput2 as xi, xlib};
 
-	/// Is slave device `id` a real (local) one? Cached per id.
+	/// Is slave device `id` a real (local) one? Cached per id; the cache is cleared on every
+	/// `XI_HierarchyChanged` (ids are reused when devices go away). A failed lookup (device
+	/// already gone) counts as local but is not cached.
 	unsafe fn is_local(dpy: *mut xlib::Display, id: i32, cache: &mut HashMap<i32, bool>) -> bool {
 		if let Some(&v) = cache.get(&id) {
 			return v;
 		}
 		let mut n = 0;
 		let info = xi::XIQueryDevice(dpy, id, &mut n);
-		let local = if info.is_null() || n < 1 || (*info).name.is_null() {
-			true
+		if info.is_null() {
+			return true;
+		}
+		let local = if n < 1 || (*info).name.is_null() {
+			None
 		} else {
 			let name = std::ffi::CStr::from_ptr((*info).name).to_string_lossy();
-			!super::is_synthetic_device(&name)
+			Some(!super::is_synthetic_device(&name))
 		};
-		if !info.is_null() {
-			xi::XIFreeDeviceInfo(info);
+		xi::XIFreeDeviceInfo(info);
+		match local {
+			Some(v) => {
+				cache.insert(id, v);
+				v
+			}
+			None => true,
 		}
-		cache.insert(id, local);
-		local
 	}
 
 	pub(super) unsafe fn run() {
@@ -249,17 +273,26 @@ mod xi2 {
 		for e in [xi::XI_RawMotion, xi::XI_RawButtonPress, xi::XI_RawButtonRelease] {
 			xi::XISetMask(&mut bits, e);
 		}
-		let mut mask = xi::XIEventMask {
+		let mask = xi::XIEventMask {
 			deviceid: xi::XIAllMasterDevices,
 			mask_len: bits.len() as i32,
 			mask: bits.as_mut_ptr(),
 		};
-		xi::XISelectEvents(dpy, xlib::XDefaultRootWindow(dpy), &mut mask, 1);
+		// Devices come and go (hot-plug, our own uinput ones per session) and X reuses ids:
+		// the hierarchy event clears the cache so a reused id is looked up again.
+		let mut hbits = [0u8; 4];
+		xi::XISetMask(&mut hbits, xi::XI_HierarchyChanged);
+		let mut masks = [
+			mask,
+			xi::XIEventMask {
+				deviceid: xi::XIAllDevices,
+				mask_len: hbits.len() as i32,
+				mask: hbits.as_mut_ptr(),
+			},
+		];
+		xi::XISelectEvents(dpy, xlib::XDefaultRootWindow(dpy), masks.as_mut_ptr(), 2);
 		xlib::XFlush(dpy);
-		// Devices come and go (hot-plug, our own uinput ones per session): forget the cache
-		// now and then so a reused id is looked up again.
 		let mut cache: HashMap<i32, bool> = HashMap::new();
-		let mut since_clear = std::time::Instant::now();
 		let mut event: xlib::XEvent = std::mem::zeroed();
 		loop {
 			xlib::XNextEvent(dpy, &mut event);
@@ -274,11 +307,9 @@ mod xi2 {
 				cookie.evtype,
 				xi::XI_RawMotion | xi::XI_RawButtonPress | xi::XI_RawButtonRelease
 			);
-			if raw_ev && !cookie.data.is_null() {
-				if since_clear.elapsed() > std::time::Duration::from_secs(5) {
-					cache.clear();
-					since_clear = std::time::Instant::now();
-				}
+			if cookie.evtype == xi::XI_HierarchyChanged {
+				cache.clear();
+			} else if raw_ev && !cookie.data.is_null() {
 				let raw = &*(cookie.data as *const xi::XIRawEvent);
 				if is_local(dpy, raw.sourceid, &mut cache) {
 					super::touch();

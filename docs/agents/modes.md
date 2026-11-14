@@ -218,16 +218,25 @@ pointer input back for 1.2 s), the client marks the host's pointer and shows its
   `LLMHF_INJECTED`. Linux: evdev read of every `/dev/input` pointer except `Pulsar*` uinput
   devices (needs the `input` group) **plus**, on X11, an XInput2 raw-event listener (RawMotion /
   RawButton* on the root, no permission needed) that skips `Pulsar*` and `XTEST` slave devices
-  (`is_synthetic_device`). Wayland without `/dev/input` access: not detectable — Wayland gives a
-  client no global pointer events and no portal exposes them. macOS: listen-only `CGEventTap`
+  (`is_synthetic_device`); its device-id cache is cleared on `XI_HierarchyChanged` (X reuses
+  ids when our per-session uinput devices go away). Wayland without `/dev/input` access: **not
+  done yet, but possible** — the ScreenCast portal offers `CursorMode::Metadata` (GNOME/KDE),
+  whose PipeWire buffers carry the pointer position (`SPA_META_Cursor`); "pointer moved with no
+  Pulsar injection in the last few ms" would give takeover detection and the marker x/y without
+  the `input` group. It needs a capture path that reads PipeWire buffers itself (GStreamer's
+  `pipewiresrc` drops the cursor meta) and the cursor drawn over the video another way (the
+  client's cursor overlay), since Metadata mode removes it from the frames. Until then Wayland
+  sends `-1/-1` and detects takeover only via evdev. macOS: listen-only `CGEventTap`
   (`pulsar_core::input::local_pointer_macos::watch_local_pointer`); every event Pulsar's
   injector posts carries `kCGEventSourceUserData = "PULS"` and is skipped (plus our own pid).
-  The tap needs the Accessibility / Input Monitoring grant; without it a warning is logged and
-  remote input always applies. **Linux X11 and macOS untested on hardware.**
+  Mouse-only listen taps need no TCC grant on 10.15+ (only keyboard taps need Input
+  Monitoring); `request_listen_access` still asks once, and a failed tap is retried every 10 s
+  so a later grant works without a restart; while it fails, remote input always applies. **Linux X11 and macOS untested on hardware.**
 - **Host-side ghost** (`remote_cursor.rs`, the client's pointer while held back): Linux = GTK
   popup; Windows/macOS = transparent click-through webview. On macOS it is made a system-wide
   overlay (`pulsar_core::overlay_macos::make_overlay_window`: status-window level, joins every
-  Space incl. full-screen apps) and kept out of the avfoundation capture by
+  Space; showing over another app's full-screen Space is **unverified** — a plain NSWindow may
+  not, and the fix would be an NSPanel with `NSWindowStyleMaskNonactivatingPanel`) and kept out of the avfoundation capture by
   `content_protected` (`NSWindowSharingNone`). Untested on macOS hardware; mixed-DPI monitor
   layouts may misplace it (Tauri physical coordinates).
 - **Desktop client**: `play/hold.rs` → renderer `hostptr 1 x y` / `hostptr 0`, `hostname <name>`
