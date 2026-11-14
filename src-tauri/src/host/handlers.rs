@@ -2760,6 +2760,24 @@ pub(super) fn make_on_stream(
 		// client explicitly asked for "rkmpp", route the encode through a gst
 		// `ximagesrc → mpp/vaapi/nv → RTP` pipeline instead of ffmpeg+libx264.
 		// gst x264 is NOT used here — ffmpeg's own libx264 path has more knobs.
+		// Linux X11 per-window capture target (same-host co-op), the counterpart of the
+		// Windows WGC window below: the client's pick, else the window the resolver found
+		// for a game this session launched. Only on a real X11 session with the x11grab
+		// capture (Wayland goes through the portal; KMS grabs a whole CRTC), and only while
+		// the window still exists (its size is the capture size). `Some` → ffmpeg
+		// `x11grab -window_id`; the gst/KMS and in-process libav paths grab the display, so
+		// they are skipped for it.
+		#[cfg(target_os = "linux")]
+		let x11_window: Option<(i64, (u32, u32))> = if pulsar_core::capture::is_wayland()
+			|| super::mock_capture()
+			|| capture_from_str(&cfg.capture) != CaptureMethod::X11grab
+		{
+			None
+		} else {
+			req.window_hwnd
+				.or_else(|| *launched_hwnd.lock().unwrap())
+				.and_then(|id| pulsar_core::x11win::window_size(id).map(|size| (id, size)))
+		};
 		#[cfg(target_os = "linux")]
 		{
 			// Client-selected host monitor → ximagesrc capture region (None = whole root /
@@ -2772,7 +2790,8 @@ pub(super) fn make_on_stream(
 					.filter(|_| displays.len() > 1)
 					.map(|(_, x, y, w, h, _)| (*x, *y, *w, *h))
 			};
-			let want_gst = enc_pref == "rkmpp" || (encoder == HwEncoder::Software && enc_pref != "software");
+			let want_gst = x11_window.is_none()
+				&& (enc_pref == "rkmpp" || (encoder == HwEncoder::Software && enc_pref != "software"));
 			if want_gst {
 				let hw: Vec<_> = crate::process::validated_gst_encoders()
 					.into_iter()
@@ -3005,7 +3024,12 @@ pub(super) fn make_on_stream(
 		#[cfg(not(target_os = "linux"))]
 		let cap_display = cfg.display.clone();
 		#[cfg(target_os = "linux")]
-		let (cap_display, eff_w, eff_h) = {
+		let (cap_display, eff_w, eff_h) = if let Some((_, (ww, wh))) = x11_window {
+			// One window: x11grab -window_id takes the display name alone (no +x,y), and
+			// the encode size follows the window's aspect within the requested size.
+			let (w, h) = pipeline::fit_window_size(ww, wh, eff_w, eff_h);
+			(cfg.display.clone(), w, h)
+		} else {
 			let displays = crate::process::linux_displays();
 			if let Some((_, x, y, w, h, _)) = displays
 				.get(req.display_idx as usize)
@@ -3062,6 +3086,10 @@ pub(super) fn make_on_stream(
 			hdr: req.hdr,
 			yuv444: req.yuv444,
 			loss_recovery: req.loss_recovery,
+			#[cfg(target_os = "linux")]
+			window_id: x11_window.map(|(id, _)| id as u64),
+			#[cfg(not(target_os = "linux"))]
+			window_id: None,
 		};
 		// NATIVE WINDOWS path: DXGI Desktop Duplication + NVENC SDK → RTP
 		// (Sunshine-technique, steady client-fps). Used for NVENC on Windows
@@ -3207,11 +3235,19 @@ pub(super) fn make_on_stream(
 			// second instance of the same game — see coop.rs).
 			crate::coop::set_capture(sid, if native_started { target_hwnd } else { None });
 		}
-		// Linux / macOS: no capture path here captures a single window yet, so the stream always
-		// shows a whole monitor and the input must stay global. A per-window capture path (X11
-		// XID / CGWindowID) publishes its CONFIRMED target here when it started, exactly as the
-		// Windows WGC path does above; the input side (`WindowInput`) is already in place.
-		#[cfg(not(windows))]
+		// Linux X11: the plan captures `x11_window` with x11grab -window_id (the ffmpeg CLI
+		// chain below; libav and gst never take a window plan), so that XID is the input
+		// target — X11 `WindowInput` (SendEvent / XTest when in front).
+		#[cfg(target_os = "linux")]
+		{
+			let w = plan.window_id.map(|id| id as i64);
+			*win_capture_hwnd.lock().unwrap() = w;
+			crate::coop::set_capture(sid, w);
+		}
+		// macOS: no per-window capture source yet (avfoundation grabs a whole display;
+		// a window source needs ScreenCaptureKit — see docs/agents/status.md), so the
+		// stream shows a whole monitor and the input must stay global.
+		#[cfg(not(any(windows, target_os = "linux")))]
 		{
 			*win_capture_hwnd.lock().unwrap() = None;
 		}
@@ -3502,6 +3538,7 @@ pub(super) fn make_on_stream(
 						hdr: base.hdr,
 						yuv444: base.yuv444,
 						loss_recovery: base.loss_recovery,
+						window_id: base.window_id,
 					};
 					pipeline::encode_command(&p).1
 				}

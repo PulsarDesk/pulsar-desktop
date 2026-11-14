@@ -2362,11 +2362,13 @@ pub(crate) async fn bring_online(
 					}),
 					// The host's visible top-level windows the client can pick as a per-window
 					// (WGC) capture target (Phase 2b co-op) — answers the client's QueryWindows.
-					// Cheap (one EnumWindows pass), called on demand when the client opens its
-					// window picker. Empty on non-Windows (no per-window source) → no picker.
+					// Cheap (one EnumWindows pass / one EWMH client-list read), called on demand
+					// when the client opens its window picker. Linux X11 lists X windows (captured
+					// with x11grab -window_id); Wayland and macOS have no per-window source yet →
+					// empty → no picker.
 					windows: Box::new(|| {
 						// pulsar-capture (and its WGC/EnumWindows window source) is a Windows-only
-						// dependency; off Windows there is no per-window source, so reply empty.
+						// dependency; Linux uses pulsar-core's X11 enumeration instead.
 						#[cfg(windows)]
 						{
 							pulsar_capture::list_capture_windows()
@@ -2377,7 +2379,19 @@ pub(crate) async fn bring_online(
 								})
 								.collect()
 						}
-						#[cfg(not(windows))]
+						// Linux X11: the EWMH client list (empty on Wayland: no per-window source).
+						#[cfg(target_os = "linux")]
+						{
+							if pulsar_core::capture::is_wayland() {
+								Vec::new()
+							} else {
+								pulsar_core::x11win::list_windows()
+									.into_iter()
+									.map(|(hwnd, title)| pulsar_core::service::WindowInfo { hwnd, title })
+									.collect()
+							}
+						}
+						#[cfg(not(any(windows, target_os = "linux")))]
 						{
 							Vec::<pulsar_core::service::WindowInfo>::new()
 						}

@@ -1565,8 +1565,28 @@ pub fn resolve_launched_window(pid: u32) -> Option<i64> {
 	}
 }
 
-/// Non-Windows stub (see [`resolve_launched_window`]) — per-window capture is Windows-only.
-#[cfg(not(windows))]
+/// Linux X11: the launched game's top-level X window (`_NET_WM_PID` of the process or any
+/// of its children), polled like the Windows resolver. `None` on Wayland: a native
+/// Wayland window has no id to capture or inject into (see `pulsar_core::x11win`).
+#[cfg(target_os = "linux")]
+pub fn resolve_launched_window(pid: u32) -> Option<i64> {
+	if pulsar_core::capture::is_wayland() {
+		return None;
+	}
+	let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+	loop {
+		if let Some(xid) = pulsar_core::x11win::find_window_for_pids(&pulsar_core::x11win::pid_tree(pid)) {
+			return Some(xid);
+		}
+		if std::time::Instant::now() >= deadline {
+			return None;
+		}
+		std::thread::sleep(std::time::Duration::from_millis(250));
+	}
+}
+
+/// macOS stub (see [`resolve_launched_window`]): no per-window capture source yet.
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn resolve_launched_window(_pid: u32) -> Option<i64> {
 	None
 }

@@ -92,6 +92,8 @@ pub fn supported(plan: &StreamPlan) -> bool {
 		return false;
 	}
 	plan.capture == CaptureMethod::X11grab
+		// One X window (co-op): the in-process source grabs the display; the CLI takes it.
+		&& plan.window_id.is_none()
 		&& !plan.hdr
 		&& !plan.yuv444
 		&& matches!(plan.encoder, HwEncoder::Software | HwEncoder::Nvenc)
