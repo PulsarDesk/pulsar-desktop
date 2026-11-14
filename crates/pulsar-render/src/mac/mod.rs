@@ -25,6 +25,7 @@ pub mod decode; // VideoToolbox decode (AU → CVPixelBuffer NV12/P010)
 mod bitstream; // Annex-B / OBU → VideoToolbox samples (pure)
 mod ffi; // CoreFoundation / CoreMedia / CoreVideo / VideoToolbox / CG window list
 mod metal; // CVPixelBuffer → Metal (YUV→RGB, FSR) + egui painter
+mod metalfx; // MetalFX spatial scaler (macOS 13+, loaded at run time) for upscale auto|ai
 pub mod view; // fit / rotation / upscale state + YUV constants (pure)
 mod window; // the panel over the app window + display link
 
@@ -1437,7 +1438,7 @@ impl Renderer {
 			metal::VideoDraw { frame: f, src, dst }
 		});
 		let ppp = self.egui_ctx.pixels_per_point();
-		self.gpu.render(size, video, view::upscale_on(), prims.as_deref().map(|p| (p, ppp)))
+		self.gpu.render(size, video, view::upscale_mode(), prims.as_deref().map(|p| (p, ppp)))
 	}
 
 	/// Decode one AU; `show` = present its picture(s) now (a burst's older AUs are decoded

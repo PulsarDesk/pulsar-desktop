@@ -7,6 +7,10 @@
 //!   - picture upscaling = AMD FSR 1 (EASU + RCAS), the HLSL of `win/fsr.rs` ported to MSL:
 //!     the picture is converted into a source-sized texture, EASU scales it to the on-screen
 //!     size, RCAS sharpens it onto the drawable. A shader failure falls back to plain scaling;
+//!   - `upscale auto|ai` = Apple's MetalFX spatial scaler where the system (macOS 13+) and the
+//!     GPU have it (`mac/metalfx.rs`, loaded at run time), else FSR: the picture is converted
+//!     into a source-sized texture, MetalFX scales it to the on-screen size, a plain blit puts
+//!     it on the drawable;
 //!   - the egui overlay is painted over it in the same pass by a minimal egui painter with the
 //!     convention of the Windows one (premultiplied sRGBA treated as linear, non-sRGB target).
 //!
@@ -67,6 +71,18 @@ vertex EguiOut egui_vs(uint vid [[vertex_id]], const device EguiV* v [[buffer(0)
 }
 fragment float4 egui_fs(EguiOut i [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) {
 	return t.sample(s, i.uv) * i.color;
+}
+
+// ---- 1:1 blit (the MetalFX output onto the drawable at the dest rect) ----
+vertex VOut blit_vs(uint vid [[vertex_id]]) {
+	VOut o;
+	float2 uv = float2(float((vid << 1) & 2), float(vid & 2));
+	o.uv = uv;
+	o.pos = float4(uv * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
+	return o;
+}
+fragment float4 blit_fs(VOut i [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) {
+	return float4(t.sample(s, i.uv).rgb, 1.0);
 }
 "#;
 
@@ -243,13 +259,22 @@ pub struct Gpu {
 	easu: Option<Pso>,
 	rcas: Option<Pso>,
 	egui: Pso,
+	blit: Pso,
 	lin: Retained<ProtocolObject<dyn MTLSamplerState>>,
 	pt: Retained<ProtocolObject<dyn MTLSamplerState>>,
 	cache: Cf,
 	fsr_src: Option<Tex>,
 	fsr_mid: Option<Tex>,
 	fsr_failed: bool,
-	logged_fsr: Option<bool>,
+	/// MetalFX spatial scaling: usable on this device (and not failed), the scaler for the
+	/// current sizes, its input + output textures.
+	metalfx_ok: bool,
+	fx: Option<super::metalfx::SpatialScaler>,
+	fx_src: Option<Tex>,
+	fx_out: Option<Tex>,
+	/// Sizes MetalFX refused a scaler for (e.g. a ratio it does not support): FSR there.
+	fx_refused: Option<(u32, u32, u32, u32)>,
+	logged_up: Option<view::Upscaler>,
 	inflight: VecDeque<(Retained<ProtocolObject<dyn MTLCommandBuffer>>, Vec<Cf>)>,
 	textures: HashMap<egui::TextureId, Tex>,
 	/// A command buffer ended in error (GPU reset / removed): the caller rebuilds.
@@ -320,6 +345,9 @@ impl Gpu {
 			.map_err(|e| format!("shader compile: {}", e.localizedDescription()))?;
 		let video = pso(&device, &lib, "video_vs", "video_fs", false)?;
 		let egui = pso(&device, &lib, "egui_vs", "egui_fs", true)?;
+		let blit = pso(&device, &lib, "blit_vs", "blit_fs", false)?;
+		let metalfx_ok = super::metalfx::supported(&device);
+		eprintln!("pulsar-render(mac): MetalFX spatial scaling {}", if metalfx_ok { "available" } else { "unavailable (FSR only)" });
 		// FSR is optional and in its own library: if it doesn't build on this GPU the picture
 		// still shows, with plain scaling.
 		let (easu, rcas) = match device.newLibraryWithSource_options_error(&ns(FSR_SHADERS), None) {
@@ -369,13 +397,19 @@ impl Gpu {
 			easu,
 			rcas,
 			egui,
+			blit,
 			lin,
 			pt,
 			cache: Cf(cache as CFTypeRef),
 			fsr_src: None,
 			fsr_mid: None,
 			fsr_failed: false,
-			logged_fsr: None,
+			metalfx_ok,
+			fx: None,
+			fx_src: None,
+			fx_out: None,
+			fx_refused: None,
+			logged_up: None,
 			inflight: VecDeque::new(),
 			textures: HashMap::new(),
 			lost: false,
@@ -431,7 +465,12 @@ impl Gpu {
 	}
 
 	fn target(device: &Device, w: u32, h: u32) -> Option<Tex> {
-		// SAFETY: a plain 2D render-target descriptor.
+		Self::target_with(device, w, h, MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead)
+	}
+
+	/// A private BGRA8 texture with `usage`.
+	fn target_with(device: &Device, w: u32, h: u32, usage: MTLTextureUsage) -> Option<Tex> {
+		// SAFETY: a plain 2D texture descriptor.
 		unsafe {
 			let d = MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
 				MTLPixelFormat::BGRA8Unorm,
@@ -439,7 +478,7 @@ impl Gpu {
 				h.max(1) as usize,
 				false,
 			);
-			d.setUsage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);
+			d.setUsage(usage);
 			d.setStorageMode(MTLStorageMode::Private);
 			device.newTextureWithDescriptor(&d)
 		}
@@ -626,12 +665,13 @@ impl Gpu {
 
 	/// Draw one frame on the next drawable and present it. `size` = the drawable size in
 	/// pixels. Returns false when no drawable was available (the frame is skipped, like a busy
-	/// swapchain on Windows) or nothing could be drawn.
+	/// swapchain on Windows) or nothing could be drawn. `upscale` = the upscale mode
+	/// (`view::upscale_mode`).
 	pub fn render(
 		&mut self,
 		size: (u32, u32),
 		video: Option<VideoDraw<'_>>,
-		upscale: bool,
+		upscale: u8,
 		overlay: Option<(&[egui::ClippedPrimitive], f32)>,
 	) -> bool {
 		self.retire_inflight();
@@ -667,34 +707,87 @@ impl Gpu {
 
 		let mut fsr_done = false;
 		if let Some((v, y, c, yuv, uvs)) = pic.as_ref() {
-			let want = upscale && view::scales_up(v.src, v.dst) && !self.fsr_failed && self.easu.is_some() && self.rcas.is_some();
-			if self.logged_fsr != Some(want) {
-				self.logged_fsr = Some(want);
-				crate::overlay::set_upscaler_active(if want { "FSR" } else { "" });
+			let fsr_ok = !self.fsr_failed && self.easu.is_some() && self.rcas.is_some();
+			let (cw, ch) = (v.src.2.round().max(1.0) as u32, v.src.3.round().max(1.0) as u32);
+			let (dw, dh) = (v.dst.2.round().max(1.0) as u32, v.dst.3.round().max(1.0) as u32);
+			let metalfx = self.metalfx_ok && self.fx_refused != Some((cw, ch, dw, dh));
+			let mut which = view::pick(upscale, view::scales_up(v.src, v.dst), metalfx, fsr_ok);
+			// The source crop as a full-texture quad (the first pass of both upscalers).
+			let crop_quad = Quad {
+				pos: [[-1.0, 1.0, 0.0, 0.0], [1.0, 1.0, 0.0, 0.0], [-1.0, -1.0, 0.0, 0.0], [1.0, -1.0, 0.0, 0.0]],
+				uv: uvs.map(|u| [u[0], u[1], 0.0, 0.0]),
+			};
+			if which == view::Upscaler::MetalFx {
+				let dims = (cw, ch, dw, dh);
+				if self.fx.as_ref().is_none_or(|f| f.dims != dims) {
+					self.fx = super::metalfx::SpatialScaler::new(&self.device, dims, MTLPixelFormat::BGRA8Unorm);
+					self.fx_src = None;
+					self.fx_out = None;
+				}
+				let dev = &self.device;
+				let tex = self.fx.as_ref().and_then(|fx| {
+					let src = Self::sized(&mut self.fx_src, cw, ch, || {
+						Self::target_with(dev, cw, ch, MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead | fx.color_usage)
+					})?;
+					let out = Self::sized(&mut self.fx_out, dw, dh, || {
+						Self::target_with(dev, dw, dh, MTLTextureUsage::ShaderRead | fx.output_usage)
+					})?;
+					Some((src, out))
+				});
+				match (self.fx.as_ref(), tex) {
+					(Some(fx), Some((src, out))) => {
+						// 1: convert the crop into a source-sized RGB texture.
+						if let Some(enc) = cb.renderCommandEncoderWithDescriptor(&Self::pass(&src, None)) {
+							self.draw_video(&enc, y, c, yuv, &crop_quad, viewport(0.0, 0.0, cw as f64, ch as f64));
+							enc.endEncoding();
+						}
+						// 2: MetalFX to the on-screen size.
+						fx.encode(&cb, &src, &out);
+						// 3: blit onto the drawable at the dest rect (+ the overlay).
+						if let Some(enc) = cb.renderCommandEncoderWithDescriptor(&Self::pass(&target, Some([0.0, 0.0, 0.0, 1.0]))) {
+							enc.setRenderPipelineState(&self.blit);
+							enc.setViewport(viewport(v.dst.0 as f64, v.dst.1 as f64, dw as f64, dh as f64));
+							// SAFETY: bindings match blit_fs.
+							unsafe {
+								enc.setFragmentTexture_atIndex(Some(&out), 0);
+								enc.setFragmentSamplerState_atIndex(Some(&self.pt), 0);
+								enc.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 3);
+							}
+							if let Some((prims, ppp)) = overlay {
+								self.paint_egui(&enc, prims, (tw as u32, th as u32), ppp);
+							}
+							enc.endEncoding();
+							fsr_done = true;
+						}
+					}
+					_ => {
+						eprintln!("pulsar-render(mac): MetalFX scaler {cw}x{ch} -> {dw}x{dh} unavailable — FSR at this size");
+						self.fx_refused = Some((cw, ch, dw, dh));
+						self.fx = None;
+						which = view::pick(upscale, true, false, fsr_ok);
+					}
+				}
+			}
+			if self.logged_up != Some(which) {
+				self.logged_up = Some(which);
+				crate::overlay::set_upscaler_active(view::upscaler_label(which));
 				eprintln!(
-					"pulsar-render(mac): upscaler {} ({:.0}x{:.0} -> {:.0}x{:.0})",
-					if want { "FSR" } else { "none" },
+					"pulsar-render(mac): upscaler {which:?} ({:.0}x{:.0} -> {:.0}x{:.0})",
 					v.src.2,
 					v.src.3,
 					v.dst.2,
 					v.dst.3
 				);
 			}
-			if want {
-				let (cw, ch) = (v.src.2.round().max(1.0) as u32, v.src.3.round().max(1.0) as u32);
-				let (dw, dh) = (v.dst.2.round().max(1.0) as u32, v.dst.3.round().max(1.0) as u32);
+			if which == view::Upscaler::Fsr {
 				let dev = &self.device;
 				let src = Self::sized(&mut self.fsr_src, cw, ch, || Self::target(dev, cw, ch));
 				let mid = Self::sized(&mut self.fsr_mid, dw, dh, || Self::target(dev, dw, dh));
 				match (src, mid) {
 					(Some(src), Some(mid)) => {
-						let quad = Quad {
-							pos: [[-1.0, 1.0, 0.0, 0.0], [1.0, 1.0, 0.0, 0.0], [-1.0, -1.0, 0.0, 0.0], [1.0, -1.0, 0.0, 0.0]],
-							uv: uvs.map(|u| [u[0], u[1], 0.0, 0.0]),
-						};
 						// 1: convert the crop into a source-sized RGB texture.
 						if let Some(enc) = cb.renderCommandEncoderWithDescriptor(&Self::pass(&src, None)) {
-							self.draw_video(&enc, y, c, yuv, &quad, viewport(0.0, 0.0, cw as f64, ch as f64));
+							self.draw_video(&enc, y, c, yuv, &crop_quad, viewport(0.0, 0.0, cw as f64, ch as f64));
 							enc.endEncoding();
 						}
 						let k = FsrParams {

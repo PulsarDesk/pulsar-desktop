@@ -98,23 +98,65 @@ pub fn quad_uvs(rot: u32, iw: f32, ih: f32, s: (f32, f32, f32, f32)) -> [[f32; 2
 	})
 }
 
-/// Picture upscaling (`upscale off|auto|fsr|ai|sgsr`). On macOS every mode but off is AMD
-/// FSR 1 (EASU + RCAS, `mac/metal.rs`): there is no driver video super resolution to hand
-/// "ai" to, and SGSR is not ported to Metal (it is experimental on Windows too).
+/// Picture upscaling (`upscale off|auto|fsr|ai|sgsr`), stored as on Windows: 0 off, 1 auto,
+/// 2 fsr, 3 ai, 4 sgsr. See [`pick`] for what each one runs on macOS.
 static UPSCALE: AtomicU8 = AtomicU8::new(0);
 
 pub fn set_upscale(mode: &str) {
+	// Diagnostics: `PULSAR_UPSCALE=off|auto|fsr|ai|sgsr` pins the mode over the app's setting.
 	let forced = std::env::var("PULSAR_UPSCALE").ok();
 	let mode = forced.as_deref().unwrap_or(mode);
 	let v = match mode.trim() {
-		"auto" | "fsr" | "ai" | "sgsr" => 1,
+		"auto" => 1,
+		"fsr" => 2,
+		"ai" => 3,
+		"sgsr" => 4,
 		_ => 0,
 	};
 	UPSCALE.store(v, Ordering::Relaxed);
 }
 
+pub fn upscale_mode() -> u8 {
+	UPSCALE.load(Ordering::Relaxed)
+}
+
 pub fn upscale_on() -> bool {
-	UPSCALE.load(Ordering::Relaxed) != 0
+	upscale_mode() != 0
+}
+
+/// The upscaler a frame uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Upscaler {
+	None,
+	/// AMD FSR 1 (EASU + RCAS, the shaders of `win/fsr.rs` in MSL).
+	Fsr,
+	/// Apple's MetalFX spatial scaler (macOS 13+, where the GPU supports it) — the analogue of
+	/// the driver video super resolution "ai" / "auto" use on Windows.
+	MetalFx,
+}
+
+/// The upscaler for `mode` (see [`set_upscale`]), as `win/present.rs` `pick` does with the
+/// vendor upscaler: auto and ai take MetalFX when it is available, else FSR; fsr takes FSR;
+/// sgsr (not ported to Metal) takes FSR too. Nothing when the picture is not scaled up or the
+/// chosen pass is unavailable.
+pub fn pick(mode: u8, scales_up: bool, metalfx: bool, fsr: bool) -> Upscaler {
+	if !scales_up {
+		return Upscaler::None;
+	}
+	match mode {
+		1 | 3 if metalfx => Upscaler::MetalFx,
+		1..=4 if fsr => Upscaler::Fsr,
+		_ => Upscaler::None,
+	}
+}
+
+/// The name the overlay shows for the active upscaler ("" = none).
+pub fn upscaler_label(u: Upscaler) -> &'static str {
+	match u {
+		Upscaler::None => "",
+		Upscaler::Fsr => "FSR",
+		Upscaler::MetalFx => "MetalFX",
+	}
 }
 
 /// Whether the placement scales the source crop UP (the only case an upscaler acts on).
@@ -193,11 +235,25 @@ mod tests {
 	}
 
 	#[test]
-	fn upscale_modes_all_mean_fsr() {
+	fn upscale_modes_pick_metalfx_or_fsr() {
 		set_upscale("ai");
 		assert!(upscale_on());
+		assert_eq!(upscale_mode(), 3);
 		set_upscale("off");
 		assert!(!upscale_on());
+		// auto / ai: MetalFX when available, else FSR.
+		assert_eq!(pick(1, true, true, true), Upscaler::MetalFx);
+		assert_eq!(pick(3, true, true, true), Upscaler::MetalFx);
+		assert_eq!(pick(1, true, false, true), Upscaler::Fsr);
+		assert_eq!(pick(3, true, false, true), Upscaler::Fsr);
+		// fsr / sgsr: FSR even when MetalFX exists.
+		assert_eq!(pick(2, true, true, true), Upscaler::Fsr);
+		assert_eq!(pick(4, true, true, true), Upscaler::Fsr);
+		// Off, not scaled up, or nothing available: none.
+		assert_eq!(pick(0, true, true, true), Upscaler::None);
+		assert_eq!(pick(1, false, true, true), Upscaler::None);
+		assert_eq!(pick(2, true, true, false), Upscaler::None);
+		assert_eq!(upscaler_label(Upscaler::MetalFx), "MetalFX");
 		assert!(scales_up((0.0, 0.0, 1280.0, 720.0), (0.0, 0.0, 1920.0, 1080.0)));
 		assert!(!scales_up((0.0, 0.0, 1920.0, 1080.0), (0.0, 0.0, 1920.0, 1080.0)));
 	}
