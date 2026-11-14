@@ -514,24 +514,33 @@ fn spawn_display_list_watch(out: tokio::sync::mpsc::Sender<DataMsg>, epoch: crat
 }
 
 /// Remote-desktop sessions: tell the client while the person AT this host is using their own
-/// mouse (`takeover::active`, Windows + Linux detection), so it can show the host pointer
+/// mouse (`takeover::active`, Windows + Linux + macOS detection), so it can show the host pointer
 /// labelled "Host" next to its own one (issue #7). ~30 Hz while active (only on movement, plus
 /// a 500 ms refresh), one `active: false` when it goes idle. Position = the host pointer within
-/// the streamed monitor, 0..1 — Windows (GetCursorPos against the captured output) and macOS
-/// (the pointer against the streamed CGDirectDisplayID's bounds; no takeover detection there
-/// yet, so it is not sent today); `-1` = unknown (Linux, a window capture, the pointer on
-/// another monitor): the client then shows only the "host is using the mouse" notice. Lives as
-/// long as this stream generation.
+/// the streamed monitor, 0..1 — Windows: GetCursorPos against the captured output; Linux X11:
+/// XQueryPointer against the captured monitor (`takeover::PointerPos`); macOS: the pointer
+/// against the streamed CGDirectDisplayID's bounds (`pulsar_core::displays::pointer_in`, the
+/// live `cur_display`). `-1` = unknown (Wayland, a window capture, the pointer on another
+/// monitor): the client then shows only the "host is using the mouse" notice. Lives as long as
+/// this stream generation.
 fn spawn_host_pointer_watch(
 	out: tokio::sync::mpsc::Sender<DataMsg>,
 	epoch: crate::process::ProcEpoch,
 	#[cfg(any(windows, target_os = "macos"))] display: Arc<std::sync::atomic::AtomicU32>,
+	#[cfg(target_os = "linux")] display_idx: u32,
 	window_capture: bool,
 ) {
 	use std::sync::atomic::Ordering;
 	let born = epoch.load(Ordering::SeqCst);
 	let _ = std::thread::Builder::new().name("host-pointer".into()).spawn(move || {
-		let pos = || -> (f32, f32) {
+		#[cfg(target_os = "linux")]
+		let mut reader = (!window_capture).then(|| crate::host::takeover::PointerPos::new(display_idx));
+		#[allow(unused_mut)]
+		let mut pos = || -> (f32, f32) {
+			#[cfg(target_os = "linux")]
+			if let Some(p) = reader.as_mut().and_then(|r| r.read()) {
+				return p;
+			}
 			#[cfg(windows)]
 			if !window_capture {
 				use windows_sys::Win32::Foundation::POINT;
@@ -4166,6 +4175,8 @@ pub(super) fn make_on_stream(
 				proc_epoch.clone(),
 				#[cfg(any(windows, target_os = "macos"))]
 				cur_display.clone(),
+				#[cfg(target_os = "linux")]
+				req.display_idx,
 				target_hwnd.is_some(),
 			);
 		}

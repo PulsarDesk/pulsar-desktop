@@ -243,3 +243,12 @@ decoder. Both rate-limit AU-overflow / present-stall logs and take
 tests only). The macOS renderer (`src/mac/`) rebuilds its Metal device too (see the macOS
 renderer section of client-video.md).
 Details: [client-video.md](client-video.md) "GL context loss on the Linux renderer".
+
+**Host takeover + host pointer marker parity (2026-11-14, not run on hardware):** the
+"host user takes the mouse back" detection and the client's "Host" pointer marker now exist on
+Windows, Linux (evdev + X11 XInput2 raw events; X11 pointer position) and macOS (listen-only
+CGEventTap, Pulsar's injected events tagged via `kCGEventSourceUserData`; main-display pointer
+position), and the macOS remote-cursor ghost is a system-wide overlay. Wayland without
+`/dev/input` access does not detect it yet (possible via the portal's cursor-metadata mode;
+not built). See [modes.md](modes.md) "Host pointer marker".
+Linux X11 and macOS paths are **untested on hardware**.

@@ -235,6 +235,19 @@ mod webview {
 		match built {
 			Ok(w) => {
 				let _ = w.set_ignore_cursor_events(true);
+				// macOS: an always-on-top window stays on its own Space, under the menu bar and
+				// out of full-screen apps; make it a system-wide overlay instead (AppKit, main
+				// thread).
+				#[cfg(target_os = "macos")]
+				{
+					let mw = w.clone();
+					let _ = w.run_on_main_thread(move || {
+						if let Ok(ns) = mw.ns_window() {
+							// SAFETY: Tauri's live NSWindow, on the main thread.
+							unsafe { pulsar_core::overlay_macos::make_overlay_window(ns) };
+						}
+					});
+				}
 				Some(w)
 			}
 			Err(e) => {

@@ -178,7 +178,9 @@ ffmpeg-sys-next = { version = "8", default-features = false, features = ["avcode
 # Host cursor side-channel (cursor.rs): read the X pointer position (XFixes) + shape so the
 # client draws it over the cursorless KMS-captured video (Moonlight model). `xlib` for the
 # display/query-pointer, `xfixes` for the cursor image+hotspot. Same `x11` 2.21 the renderer uses.
-x11 = { version = "2.21", features = ["xlib", "xfixes", "dpms"] }
+# `xinput` (libXi): XInput2 raw events for the host takeover watch (host/takeover.rs).
+# `dpms`: power_watch/linux.rs polls the X server's DPMS level.
+x11 = { version = "2.21", features = ["xlib", "xfixes", "xinput", "dpms"] }
 # power_watch/linux.rs: logind PrepareForSleep (+ delay inhibitor) and the desktop screen saver's
 # ActiveChanged over D-Bus, blocking API on plain threads. zbus 5 is already in the tree (ashpd).
 # GNOME Wayland screen adaptation (display_mode/linux/gnome.rs): Mutter's DisplayConfig D-Bus

@@ -161,7 +161,7 @@ Behaviour without the service is exactly today's.
    the global desktop path.
 8. Optional UI: poll `s.desktop()`; on `Winlogon` show the client a banner, e.g.
    "Güvenli masaüstü açık — görüntü aktarılamıyor, klavye/fare çalışıyor" (until phase 2).
-9. `host/takeover.rs:69` ignores `LLMHF_INJECTED` — SYSTEM-injected events carry it too, so
+9. `host/takeover.rs` `win::run` (the hook `proc`) ignores `LLMHF_INJECTED` — SYSTEM-injected events carry it too, so
    no change. (A `dwExtraInfo` Pulsar marker from windows-input-plan.md would need adding in
    both injectors.)
 
