@@ -242,8 +242,28 @@ sessions end, and they come back by themselves afterwards:
   (password / approval prompt again where the host asks for one). Split panes come back as
   tabs.
 - The HOST's own sleep is not handled here (its clients see it go silent).
-- **Linux / macOS: not implemented** (`spawn` is a no-op). A real suspend freezes the app and
-  the host times the session out; a display that only turns off is not noticed.
+- **Linux** (`power_watch/linux.rs`, plain threads with blocking zbus / Xlib connections;
+  untested on Linux hardware): logind `PrepareForSleep` on the system bus, with a logind
+  *delay* inhibitor held while awake so the suspend waits (≤ 3 s of our own, capped by
+  `InhibitDelayMaxSec`) until the sessions are stopped; "display off" = the desktop screen
+  saver / lock screen `ActiveChanged(true)` (`org.freedesktop.ScreenSaver`: KDE, Xfce,
+  Cinnamon, MATE, LXQt; `org.gnome.ScreenSaver`: GNOME) or, in an X11 session, the X server's
+  DPMS level ≠ On (polled every 2 s). Locking the screen therefore also ends the sessions.
+  Because the evdev grab hides local input from the desktop's idle timer, every forwarded
+  event (`kbdhook/linux.rs` `fwd` → `power_watch::note_input`) is reported as user activity
+  at most every 20 s: `XResetScreenSaver` on X11, `org.freedesktop.ScreenSaver.SimulateUserActivity`,
+  and on GNOME (no such call) an `org.gnome.SessionManager` idle inhibitor held until 60 s
+  after the last input. **Not possible:** on Wayland compositors with neither screen-saver
+  service (bare wlroots: sway, Hyprland …) display-off is not detectable — there is no
+  portable protocol to read the output power state; only the suspend is seen there.
+- **macOS** (`power_watch/macos.rs`; untested on macOS hardware): NSWorkspace
+  `willSleep` / `didWake` (suspend) and `screensDidSleep` / `screensDidWake` (display off)
+  observers on the workspace notification center, delivered on the main thread's run loop
+  (the app's own NSApplication loop — no extra thread). macOS gives no way to delay a sleep
+  from willSleep for long, so the stops are fired and not awaited. `macos.rs` only uses objc2
+  crates and was type-checked for aarch64-apple-darwin in a scratch crate (`pulsar-tauri` as a
+  whole cannot be checked for macOS from Windows).
+- Same events (`system-sleep` / `system-wake`) and the same stop logic on all three.
 
 ## Free cursor ("Serbest imleç", remote mode, all desktop platforms)
 

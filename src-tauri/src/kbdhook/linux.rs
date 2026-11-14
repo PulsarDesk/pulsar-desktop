@@ -168,6 +168,8 @@ fn build_xkb_state() -> Option<xkb::State> {
 /// its own teardown. Blocking the grab for an UP that the host will release anyway
 /// is strictly worse than a dropped try_send.
 fn fwd(tx: &Sender<InputEvent>, ev: InputEvent) {
+	// The grab hides this input from the desktop's idle timer: report it as user activity.
+	crate::power_watch::note_input();
 	let _ = tx.try_send(ev);
 }
 

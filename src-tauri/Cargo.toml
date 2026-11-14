@@ -132,23 +132,28 @@ gtk = "0.18"
 gdk = "0.18"
 gdkx11 = "0.18"
 
-# macOS: the app window's `windowNumber` for the native renderer (`--wid`), read through the
-# Objective-C runtime (objc2 is already in the tree via tauri/wry).
-[target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6"
-
 # Unix process control (kill/SIGTERM for graceful renderer teardown, PDEATHSIG on
 # Linux): needed on macOS too — `stop_render_child` is cfg(unix).
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-# macOS client-side input capture (kbdhook/mac.rs): a CGEventTap that swallows and forwards
+# Every macOS-only dependency lives in this ONE table (a second
+# `[target.'cfg(target_os = "macos")'.dependencies]` header is a TOML duplicate-key error).
+[target.'cfg(target_os = "macos")'.dependencies]
+# The app window's `windowNumber` for the native renderer (`--wid`), read through the
+# Objective-C runtime (objc2 is already in the tree via tauri/wry).
+objc2 = "0.6"
+# Client-side input capture (kbdhook/mac.rs): a CGEventTap that swallows and forwards
 # every key / mouse event while the user controls a session (Cmd+Tab, Cmd+Space reach the
 # host), relative mouse for game mode / host pointer lock, cursor confine. Its own crate so
 # it type-checks for aarch64-apple-darwin from a non-Mac (`cargo check --target ... -p
 # pulsar-macinput`); no system packages needed (CoreGraphics / ApplicationServices / AppKit).
-[target.'cfg(target_os = "macos")'.dependencies]
 pulsar-macinput = { path = "../crates/pulsar-macinput" }
+# power_watch/macos.rs: NSWorkspace sleep / wake + screens sleep / wake notifications. The
+# same objc2 0.6 family tauri/tao already use on macOS (no new crates in the lock).
+block2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "NSNotification", "NSOperation", "NSString", "NSObject"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSWorkspace"] }
 
 # Linux client-side input capture: grab the local keyboard+mouse (evdev) and forward to
 # the host while the embedded native renderer covers the webview (the Linux analog of the
@@ -164,7 +169,10 @@ ffmpeg-sys-next = { version = "8", default-features = false, features = ["avcode
 # Host cursor side-channel (cursor.rs): read the X pointer position (XFixes) + shape so the
 # client draws it over the cursorless KMS-captured video (Moonlight model). `xlib` for the
 # display/query-pointer, `xfixes` for the cursor image+hotspot. Same `x11` 2.21 the renderer uses.
-x11 = { version = "2.21", features = ["xlib", "xfixes"] }
+x11 = { version = "2.21", features = ["xlib", "xfixes", "dpms"] }
+# power_watch/linux.rs: logind PrepareForSleep (+ delay inhibitor) and the desktop screen saver's
+# ActiveChanged over D-Bus, blocking API on plain threads. zbus 5 is already in the tree (ashpd).
+zbus = { version = "5", default-features = false, features = ["tokio", "blocking-api"] }
 # Self-avatar resolution (avatar.rs): decode the account photo / wallpaper, center-crop
 # + downscale to a 96×96 PNG. Decode-only features kept minimal (png/jpeg/webp/bmp cover
 # AccountsService icons, ~/.face and GNOME wallpapers); Windows has its own block above,
