@@ -1405,6 +1405,10 @@ pub fn set_host_pen_touch(pen: bool, touch: bool) {
 	HOST_TOUCH.store(touch, Ordering::SeqCst);
 }
 
+pub fn host_pen_touch() -> (bool, bool) {
+	(HOST_PEN.load(Ordering::SeqCst), HOST_TOUCH.load(Ordering::SeqCst))
+}
+
 /// Mouse input Windows synthesized from a pen or a finger carries `MI_WP_SIGNATURE`
 /// (0xFF515700) in `dwExtraInfo`; bit 0x80 marks touch. `Some(true)` = touch, `Some(false)` =
 /// pen, `None` = a real mouse.

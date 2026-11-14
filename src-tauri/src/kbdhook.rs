@@ -226,6 +226,15 @@ pub fn set_host_pen_touch(pen: bool, touch: bool) {
 }
 #[cfg(not(windows))]
 pub fn set_host_pen_touch(_pen: bool, _touch: bool) {}
+/// The renderer's `pentouch <pen> <touch>` stdin line: which of pen / touch its window
+/// forwards as WM_POINTER (Windows; the other renderers ignore the line).
+pub fn pen_touch_line() -> String {
+	#[cfg(windows)]
+	let (pen, touch) = imp::host_pen_touch();
+	#[cfg(not(windows))]
+	let (pen, touch) = (false, false);
+	format!("pentouch {} {}", pen as u8, touch as u8)
+}
 #[cfg(windows)]
 pub fn is_engaged() -> bool {
 	imp::is_engaged()

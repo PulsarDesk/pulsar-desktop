@@ -233,6 +233,21 @@ pub(crate) fn start_render_reader(
 				if let (Some(vk), Some(d)) = (it.next().and_then(|v| v.parse::<u16>().ok()), it.next()) {
 					crate::kbdhook::render_key(vk, d == "1", from_hook);
 				}
+			} else if let Some(ev) = parse_pen_touch(&line) {
+				// Pen / touch on the video (Windows renderer, WM_POINTER — only sent while the
+				// host takes them): into this session's input channel like the webview's. Never
+				// dropped (a lost lift would keep the pen down until the host's timeout).
+				use tauri::Manager;
+				let tx = app
+					.state::<crate::state::AppState>()
+					.plays
+					.lock()
+					.unwrap()
+					.get(&cur_id)
+					.map(|p| p.input_tx.clone());
+				if let Some(tx) = tx {
+					let _ = tx.blocking_send(ev);
+				}
 			} else if let Some(rest) = line.strip_prefix("vidsink-dims ") {
 				// The STREAM's pixel size ("<w>x<h>", first frame / live res switch) — the
 				// frontend sizes the windowed session to the host's aspect ratio from this.
@@ -426,4 +441,57 @@ pub(crate) fn start_render_reader(
 			}
 		}
 	});
+}
+
+/// The renderer's `pen …` / `touch …` stdout lines (see `pulsar-render/src/win/pointer.rs`)
+/// → the wire event.
+fn parse_pen_touch(line: &str) -> Option<pulsar_core::service::InputEvent> {
+	use pulsar_core::input::pen_touch::{PenState, TouchFrame, TouchPoint};
+	use pulsar_core::service::InputEvent;
+	if let Some(rest) = line.strip_prefix("pen ") {
+		let v: Vec<f32> = rest.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+		let [x, y, pressure, tilt_x, tilt_y, twist, flags] = v[..] else { return None };
+		let flags = flags as u32;
+		return Some(InputEvent::Pen(PenState {
+			x,
+			y,
+			pressure,
+			tilt_x,
+			tilt_y,
+			twist,
+			in_range: flags & 1 != 0,
+			contact: flags & 2 != 0,
+			eraser: flags & 4 != 0,
+			barrel: flags & 8 != 0,
+		}));
+	}
+	let rest = line.strip_prefix("touch").filter(|r| r.is_empty() || r.starts_with(' '))?;
+	let mut pts = Vec::new();
+	for p in rest.split_whitespace() {
+		let v: Vec<&str> = p.split(',').collect();
+		let [id, x, y, pr] = v[..] else { return None };
+		pts.push(TouchPoint { id: id.parse().ok()?, x: x.parse().ok()?, y: y.parse().ok()?, pressure: pr.parse().ok()? });
+	}
+	Some(InputEvent::Touch(TouchFrame::new(&pts)))
+}
+
+#[cfg(test)]
+mod pen_touch_tests {
+	use super::parse_pen_touch;
+	use pulsar_core::service::InputEvent;
+
+	#[test]
+	fn renderer_pen_and_touch_lines_parse() {
+		let Some(InputEvent::Pen(p)) = parse_pen_touch("pen 0.50000 0.25000 0.7500 30 -5 90 11") else { panic!() };
+		assert!(p.in_range && p.contact && !p.eraser && p.barrel);
+		assert_eq!((p.x, p.y, p.pressure, p.tilt_x, p.tilt_y, p.twist), (0.5, 0.25, 0.75, 30.0, -5.0, 90.0));
+		let Some(InputEvent::Touch(f)) = parse_pen_touch("touch 3,0.5,1.0,0.0 9,0.1,0.2,0.5") else { panic!() };
+		assert_eq!(f.len(), 2);
+		assert_eq!(f.points()[1].id, 9);
+		let Some(InputEvent::Touch(f)) = parse_pen_touch("touch") else { panic!() };
+		assert!(f.is_empty());
+		assert!(parse_pen_touch("touchy 1").is_none());
+		assert!(parse_pen_touch("pen 1 2").is_none());
+		assert!(parse_pen_touch("touch 1,2").is_none());
+	}
 }
