@@ -113,9 +113,22 @@ While another app is focused, Pulsar acts on NO input (maintainer rule, 2026-11-
   **Windows + macOS** `src-tauri/src/touchpad_mouse.rs`, fed by `controllers.rs`
   (`PadView::touch`: SDL3 `SDL_GetGamepadTouchpadFinger` + the TOUCHPAD button, or the
   DualSense passthrough's raw report while it owns the pad); gate = Pulsar focused and the
-  session menu closed (background input does NOT extend to the mouse); a disabled pad or one
-  locked to another split pane is ignored. The touch also still reaches the host's virtual
-  DualSense through the passthrough, as on Linux. **Untested on hardware on all three OSes**
+  session menu closed (background input does NOT extend to the mouse); a disabled pad is
+  ignored. **Routing** = the gamepad forward gate's rule (`focus_gate::PadRouting` →
+  `pulsar_core::input::pad_route::pad_routes_to`, unit-tested in core): several tabs → only
+  the focused tab's host; split screen → the pad's lock owner, else the focused pane, and no
+  pane while "press to join" waits. Linux applies the same rule with "unlocked" (its evdev
+  node is not tied to an SDL pad uuid, so a split-pane lock is not seen there).
+  **The pad click reaches the host twice, on every OS** (maintainer decision pending, not a
+  regression): as the mouse click, and in the forwarded pad state (`button::TOUCHPAD`, the
+  touchpad button of the host's virtual pad) / the DualSense
+  passthrough report; the touch contacts also reach the host's virtual DualSense through
+  the passthrough. A game that reacts to the touchpad button gets it while the pointer
+  clicks. Linux readers mark a new MT tracking id as a new contact (re-seed, no jump when a
+  slot swaps fingers inside one frame); SDL and the raw DualSense report carry no contact
+  id here, so that rare swap can still jump once on Windows / macOS. SDL contacts are
+  scaled back with SDL's own divisors (920 DS4 / 1070 DS5) so motion matches the raw
+  paths. **Untested on hardware on all three OSes**
   (macOS: SDL may serve the pad through its GameController/MFi driver instead of HIDAPI —
   that driver also reports the touchpad, unverified).
 - **Keyboard/mouse capture**: automatic engages (CLI `--connect` kiosk start, game mode's

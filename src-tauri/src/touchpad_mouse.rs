@@ -13,7 +13,11 @@
 //! Gate: only while Pulsar is the focused app and this session's menu is closed (the
 //! controller gate in `focus_gate`; "background controller input" does not extend to the
 //! mouse — moving the host pointer from a pad on a background window would surprise).
-//! A pad disabled in Settings, or locked to another split pane, never drives this session.
+//! Routing: a pad drives this session's pointer only where its buttons go too
+//! (`focus_gate::PadRouting`, the gamepad forward gate's rule): with several tabs only the
+//! focused tab, in split screen the pad's lock owner or else the focused pane, and no pane
+//! while split "press to join" waits for the pad. A pad disabled in Settings never drives
+//! any session.
 //!
 //! Untested on Windows / macOS hardware.
 
@@ -25,15 +29,14 @@ use std::time::Duration;
 use pulsar_core::input::touchpad_mouse::TouchpadMouse;
 use pulsar_core::service::InputEvent;
 
-/// Whether the pad `uuid` may drive session `play`'s pointer: not disabled, and not locked
-/// to a different session (split-screen panes each own their pads).
-pub(crate) fn pad_drives_session(disabled: bool, lock_owner: Option<u64>, play: u64) -> bool {
-	!disabled && lock_owner.is_none_or(|o| o == play)
-}
-
 /// Start the reader for session `play`; it runs until `running` goes false. A silent
 /// no-op when the SDL pad subsystem is unavailable.
-pub fn spawn(play: u64, tx: tokio::sync::mpsc::Sender<InputEvent>, running: Arc<AtomicBool>) {
+pub(crate) fn spawn(
+	play: u64,
+	tx: tokio::sync::mpsc::Sender<InputEvent>,
+	running: Arc<AtomicBool>,
+	routing: crate::focus_gate::PadRouting,
+) {
 	let Some(mgr) = crate::controllers::manager() else {
 		return;
 	};
@@ -64,13 +67,12 @@ pub fn spawn(play: u64, tx: tokio::sync::mpsc::Sender<InputEvent>, running: Arc<
 			});
 			for p in &snap {
 				let Some(frame) = p.touch else { continue };
-				let mine = pad_drives_session(
-					crate::controllers::is_controller_disabled(&p.uuid),
-					crate::controllers::controller_lock_owner(&p.uuid),
-					play,
-				);
+				// Pad routing is the rule pulsar_core::input::pad_route tests.
+				let mine = gate
+					&& !crate::controllers::is_controller_disabled(&p.uuid)
+					&& routing.routes(play, crate::controllers::controller_lock_owner(&p.uuid));
 				let m = pads.entry(p.uuid.clone()).or_default();
-				send(m.update(&frame, gate && mine));
+				send(m.update(&frame, mine));
 			}
 		}
 		// Session over: never leave the host holding a button.
@@ -80,18 +82,5 @@ pub fn spawn(play: u64, tx: tokio::sync::mpsc::Sender<InputEvent>, running: Arc<
 	});
 	if let Err(e) = res {
 		tracing::warn!("touchpad-mouse: reader thread failed to start: {e}");
-	}
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn pad_ownership() {
-		assert!(pad_drives_session(false, None, 7));
-		assert!(pad_drives_session(false, Some(7), 7));
-		assert!(!pad_drives_session(false, Some(8), 7));
-		assert!(!pad_drives_session(true, None, 7));
 	}
 }

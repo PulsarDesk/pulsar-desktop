@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use pulsar_core::input::touchpad_mouse::{
-    ds5_usb_touch, finger_from_normalized, TouchFrame, DS4_PAD_HEIGHT, DS5_PAD_HEIGHT,
+    ds5_usb_touch, finger_from_normalized, TouchFrame, SDL_DS4_Y_SCALE, SDL_DS5_Y_SCALE,
 };
 use pulsar_core::input::{button, vid_pid_from_sdl_guid, GamepadKind, GamepadState};
 use sdl3_sys::events::{
@@ -400,8 +400,8 @@ struct OpenPad {
     kind: GamepadKind,
     name: String,
     path: Option<std::ffi::CString>,
-    /// Raw touchpad height that turns SDL's normalized contacts back into touchpad units
-    /// (`None` = the pad has no touchpad).
+    /// The Y divisor SDL normalized this pad's touchpad with, which turns its contacts back
+    /// into raw touchpad units (`None` = the pad has no touchpad).
     pad_height: Option<f64>,
 }
 
@@ -543,9 +543,10 @@ fn refresh(open: &mut HashMap<u32, OpenPad>) {
                     let path_ptr = SDL_GetGamepadPath(ptr);
                     let path = (!path_ptr.is_null()).then(|| CStr::from_ptr(path_ptr).to_owned());
                     // SDL's HIDAPI drivers expose the DS4 / DualSense touchpad with both
-                    // axes normalized to 0..1; the raw height differs per model.
+                    // axes normalized to 0..1, Y by a per-model divisor (920 / 1070, not
+                    // the raw 942 / 1080): undo exactly SDL's scale.
                     let pad_height = (SDL_GetNumGamepadTouchpads(ptr) > 0).then_some(
-                        if kind == GamepadKind::Ds5 { DS5_PAD_HEIGHT } else { DS4_PAD_HEIGHT },
+                        if kind == GamepadKind::Ds5 { SDL_DS5_Y_SCALE } else { SDL_DS4_Y_SCALE },
                     );
                     open.insert(id.0, OpenPad { ptr, uuid, kind, name, path, pad_height });
                 }
@@ -601,8 +602,8 @@ unsafe fn read_state(gp: *mut SDL_Gamepad) -> GamepadState {
     st
 }
 
-/// Read touchpad 0's first two contacts and the pad click from SDL. `pad_height` turns
-/// SDL's normalized Y back into raw units (X is always 1920 wide).
+/// Read touchpad 0's first two contacts and the pad click from SDL. `pad_height` is SDL's
+/// Y divisor for this model; it turns the normalized Y back into raw units (X is 1920).
 unsafe fn read_touch(gp: *mut SDL_Gamepad, pad_height: f64) -> TouchFrame {
     let mut t = TouchFrame::default();
     let n = SDL_GetNumGamepadTouchpadFingers(gp, 0).clamp(0, 2);

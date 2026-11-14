@@ -1465,15 +1465,11 @@ pub(crate) async fn start_remote_play(
 		// overlay-open set + this play id so the reader can detect it (G6).
 		let ov_open = state.overlay_open.clone();
 		let play_id = id;
-		// SPLIT MODE: the live FOCUSED-pane id, so an UNLOCKED pad forwards only from the
-		// focused session and a pad LOCKED to a session (CONTROLLER_SESSION_LOCK) forwards only
-		// from its owner. With split mode off there is one session and `focused_session` equals
-		// `play_id` (or 0 before the first set_active_session), so the gate is transparent there
-		// â€” see the gate at the per-pad forward below.
-		let focused_session = state.focused_session.clone();
-		// Live play sessions (tabs): with more than one open outside split mode, pads go to the
-		// focused tab only (two hosts must not both get / drive the same pad).
-		let plays_arc = state.plays.clone();
+		// Pad routing (tabs / split panes / locks / "press to join"): the live focused id, the
+		// session map and the pane count, read per pad at the forward gate below. The same
+		// rule routes the touchpad-as-mouse readers, so a pad's buttons and touchpad go to
+		// one host.
+		let pad_routing = crate::focus_gate::PadRouting::from_state(&state);
 		// Whether split mode is active (>1 pane). When it isn't, the focused-session forward gate
 		// is bypassed so single-session behavior is byte-for-byte unchanged (the frontend never
 		// calls set_active_session in the non-split flow, so focused_session would be 0).
@@ -1752,27 +1748,11 @@ pub(crate) async fn start_remote_play(
 						//   * pad UNLOCKED: only the FOCUSED session forwards it.
 						// `lock_owner` is reused for the ctrls line's lock field below.
 						let lock_owner = crate::controllers::controller_lock_owner(uuid);
-						let route_here = if split_pane_count.load(Ordering::SeqCst) <= 1 {
-							// Tabs (split off): one session â†’ it gets every pad. Several open â†’
-							// only the focused tab (set_active_session); if the focused id is not
-							// a live session (none set yet / it closed) every session forwards,
-							// the old behaviour.
-							let f = focused_session.load(Ordering::SeqCst);
-							// try_lock: never block the pad loop on the session map (a busy map
-							// this tick just forwards as before).
-							match plays_arc.try_lock() {
-								Ok(plays) => plays.len() <= 1 || f == play_id || !plays.contains_key(&f),
-								Err(_) => true,
-							}
-						} else if let Some(owner) = lock_owner {
-							owner == play_id
-						} else if crate::split_join::active() {
-							// Gaming split "press to join": an unassigned pad drives no pane until
-							// its A press locks it to one (split_join::tick).
-							false
-						} else {
-							focused_session.load(Ordering::SeqCst) == play_id
-						};
+						// Tabs: only the focused tab (or every tab while no live tab is focused).
+						// Split: lock owner, else no pane during "press to join", else the focused
+						// pane. Shared with the touchpad-as-mouse readers
+						// (focus_gate::PadRouting -> pulsar_core::input::pad_route).
+						let route_here = pad_routing.routes(play_id, lock_owner);
 						// 1 if this pad is locked specifically to THIS session (overlay toggle
 						// checked-state -- appended to the ctrls line below).
 						let locked_here = lock_owner == Some(play_id);
@@ -2067,13 +2047,23 @@ pub(crate) async fn start_remote_play(
 			running.clone(),
 			None,
 			// Same capture gate as the evdev keyboard/mouse: only forward touchpad-mouse
-			// while the session is engaged + focused + not overlay-suspended.
-			std::sync::Arc::new(|| crate::kbdhook::input_active()),
+			// while the session is engaged + focused + not overlay-suspended. Plus the pad
+			// routing (several tabs / split panes: only where an unlocked pad's buttons go;
+			// the evdev node is not tied to an SDL pad uuid, so a pad lock is not seen here).
+			{
+				let routing = crate::focus_gate::PadRouting::from_state(&state);
+				std::sync::Arc::new(move || crate::kbdhook::input_active() && routing.routes(id, None))
+			},
 		);
 	}
 	#[cfg(not(target_os = "linux"))]
 	if touchpad_as_mouse {
-		crate::touchpad_mouse::spawn(id, input_tx.clone(), running.clone());
+		crate::touchpad_mouse::spawn(
+			id,
+			input_tx.clone(),
+			running.clone(),
+			crate::focus_gate::PadRouting::from_state(&state),
+		);
 	}
 
 	// Side-channel queue (clipboard / chat / file / mic audio â†’ host).
