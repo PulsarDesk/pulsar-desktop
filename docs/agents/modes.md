@@ -239,6 +239,31 @@ no splash, the window stays hidden (tray) — shown anyway when there is no tray
 `ui.duplicateSessions`: a repeat connect to the same host/mode/game opens another session
 instead of focusing the open one (`SessionManager.startConnect` de-dup).
 
+## Same-host co-op: per-window input (all desktop OSes, 2026-11-14)
+
+When a session's stream shows ONE window (a game this session launched, or a window the
+client picked), its keyboard/mouse go to that window instead of the global desktop, so two
+panes on one host do not fight over the single focus. `host.rs` `on_input` holds a
+`pulsar_core::input::WindowInput` built from `win_capture_hwnd` — the window the CURRENT
+stream confirmed capturing (`make_on_stream` publishes it). Same API on every OS; when the
+window is in front, keys go through the global injector (`desk_keys` keeps each UP on the
+path its DOWN took).
+
+| OS | Window id | Backend (pulsar-core `input/`) | Reaches | Does not reach |
+| --- | --- | --- | --- | --- |
+| Windows | HWND | `window_win.rs`: PostMessage | Win32 message-pump apps | Raw Input / DirectInput / GetAsyncKeyState games (the ProtoInput co-op isolation in `coop.rs` covers those) |
+| Linux X11 / XWayland | XID | `window_x11.rs`: background = core `SendEvent` to the window (deepest child under the pointer); front = XTest | apps reading core X events; front window = everything | background XI2 clients (GTK3/4, Qt5/6 pointer, SDL relative mouse, most games), Xt apps without `allowSendEvents`, `/dev/input` readers |
+| Linux native Wayland | — | **impossible**: no protocol lets one client inject into another's surface; uinput / RemoteDesktop portal are seat-global | — | everything (global injector stays) |
+| macOS | CGWindowID | `window_mac.rs`: `CGEventPostToPid` to the owning PID (+ window number fields); front = HID tap | AppKit/NSEvent apps, SDL keyboard, many windowed games | IOHID / GameController readers; keyboard of a second window of the SAME process goes to that process's key window |
+
+**Wiring state:** only the Windows WGC path publishes a window today. On Linux/macOS
+`win_capture_hwnd` is reset to `None` per stream (handlers.rs, `#[cfg(not(windows))]`)
+until a per-window capture path there publishes its confirmed XID / CGWindowID — then the
+input side needs no change. The ProtoInput instance isolation (`coop.rs`) is DLL
+injection into a Windows process and has no Linux/macOS counterpart.
+
+**Untested on Linux and macOS hardware** (type-checked only).
+
 ## Reverse direction
 
 The requesting client pre-authorizes the host's E2E key for its connect back (one use, 60 s:
