@@ -28,8 +28,8 @@ reorder wait (`maxdelay`), and on Windows/macOS has a reorder buffer. Test with
 `scripts/netem.sh` + `scripts/validate-log.mjs`. Do not push behaviour changes untested.
 
 **macOS client video (2026-11-14, never run on a Mac):** `pulsar-render` has a real macOS
-backend now (VideoToolbox + Metal in a panel kept over the session tab, FSR, overlay, pacing,
-device-loss rebuild — see [client-video.md](client-video.md) "macOS renderer"); mpv is only the
+backend now (VideoToolbox + Metal in a panel kept over the session tab, MetalFX spatial /
+FSR upscaling, overlay, pacing, device-loss rebuild — see [client-video.md](client-video.md) "macOS renderer"); mpv is only the
 fallback. Type-checked for `aarch64-apple-darwin` only; `src-tauri`'s macOS code could not be
 type-checked here.
 

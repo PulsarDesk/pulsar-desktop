@@ -246,11 +246,18 @@ showed ~600 ms head-of-line holds, "stream stopped" over a live session and a lo
   `fsr` or any other GPU = AMD FSR 1: the VideoProcessor converts into a source-sized texture,
   EASU scales it, RCAS sharpens into the back buffer. Shader failure → plain scaling, never
   black. `cargo test -p pulsar-render fsr` compiles the HLSL.
-- **macOS pulsar-render** (`crates/pulsar-render/src/mac/metal.rs`): every mode but off is FSR
-  1 (the Windows HLSL ported to MSL, compiled at run time): the YUV pass draws the crop into a
-  source-sized texture, EASU scales it, RCAS sharpens onto the drawable; only when the picture
-  is scaled UP, plain scaling if a pipeline does not build. No "AI" upscaler is used on macOS
-  yet (MetalFX spatial / VideoToolbox's low-latency super resolution would be the candidates).
+- **macOS pulsar-render** (`crates/pulsar-render/src/mac/metal.rs`, `metalfx.rs`; choice =
+  `view::pick`, unit-tested): only when the picture is scaled UP. `ai` / `auto` = Apple's
+  **MetalFX spatial scaler** (`MTLFXSpatialScaler`, macOS 13+) when the system has MetalFX and
+  `supportsDevice:` says yes — the analogue of NVIDIA/Intel VSR on Windows. MetalFX is NOT
+  linked: `dlopen` + the Objective-C runtime, so the binary still starts on macOS 12 and older.
+  The YUV pass draws the crop into a source-sized texture, MetalFX scales it (perceptual colour
+  mode), a 1:1 blit puts it on the drawable. A size MetalFX refuses a scaler for falls back to
+  FSR at that size. `fsr` / `sgsr` (SGSR is not ported to Metal) or no MetalFX = FSR 1 (the
+  Windows HLSL ported to MSL, compiled at run time): EASU scales, RCAS sharpens onto the
+  drawable; plain scaling if a pipeline does not build. The overlay shows "MetalFX" / "FSR".
+  VideoToolbox's low-latency super resolution (`VTLowLatencySuperResolutionScaler`, macOS 15+)
+  is not used: it is ML-based, frame-to-frame, and costs far more than a spatial pass.
 - **mpv** (the macOS and Linux mpv fallbacks): `--glsl-shaders=<temp>/pulsar-fsr.glsl`
   (`native_view/FSR.glsl`, AMD FSR 1.0.2 MIT, agyild's port) for any mode but off.
 - **Linux pulsar-render** (`crates/pulsar-render/src/gl_fsr.rs`): the presenter's draw (any
@@ -268,9 +275,10 @@ pulsar-render`); never run on a Mac. The macOS analogue of `win/`:
 | --- | --- |
 | `mod.rs` | args, the stdin protocol (copied from `win/mod.rs`), the AU queue (`AU_SOFT_CAP` / `AU_HARD_CAP` / `AU_BURST`, `OverflowLog`), pacing, stall / recovering, device-loss rebuild, the event loop |
 | `decode.rs` | VideoToolbox: real-time `VTDecompressionSession`, synchronous drive, IOSurface-backed Metal-compatible NV12 / P010 out; `--probe` JSON (`VTIsHardwareDecodeSupported`) |
-| `bitstream.rs` | pure: Annex-B → parameter sets + 4-byte-length samples; AV1 OBUs sized, TDs dropped, `av1C` from the sequence header (tests run on every host) |
-| `metal.rs` | `CVMetalTextureCache` (no copy) → YUV→RGB shader (BT.601/709/2020 from the buffer's attachment, video/full range, 8/10-bit) → `CAMetalLayer`; FSR EASU + RCAS; the egui painter |
-| `view.rs` | pure: fit / stretch / original, rotation (quad UVs), upscale mode, YUV constants (tests on every host) |
+| `bitstream.rs` | pure: Annex-B → parameter sets + 4-byte-length samples; AV1 OBUs sized, TDs dropped, `av1C` from the sequence header; `needs_session` (when the VT session is rebuilt) (tests run on every host) |
+| `metal.rs` | `CVMetalTextureCache` (no copy) → YUV→RGB shader (BT.601/709/2020 from the buffer's attachment, video/full range, 8/10-bit) → `CAMetalLayer`; FSR EASU + RCAS; MetalFX pass + blit; the egui painter |
+| `metalfx.rs` | MetalFX spatial scaler through `dlopen` + `msg_send!` (no link-time dependency) |
+| `view.rs` | pure: fit / stretch / original, rotation (quad UVs), upscale mode + `pick` (MetalFX / FSR / none), YUV constants (tests on every host) |
 | `window.rs` | the panel + `CVDisplayLink` refresh counter |
 | `ffi.rs` | hand-written CF / CM / CV / VT / CG-window-list bindings |
 
@@ -303,8 +311,25 @@ pulsar-render`); never run on a Mac. The macOS analogue of `win/`:
   another GPU (`CGDirectDisplayCopyCurrentMetalDevice`, checked once a second), rebuilds Metal
   + egui in place every 500 ms until it works; the VideoToolbox session is kept, a keyframe is
   asked for. A lost VT session (`kVTInvalidSessionErr`, e.g. after sleep) is rebuilt on the
-  next keyframe from the kept parameter sets.
+  NEXT AU, keyframe or not, from the kept SPS/PPS/VPS or AV1 sequence header
+  (`bitstream::needs_session`): an intra-refresh / RFI stream heals itself (a few broken
+  pictures until the refresh wave has passed) instead of freezing until an IDR; an IDR is still
+  asked for every 500 ms while decoding fails.
+- **Autorelease pools:** the renderer never runs `-[NSApplication run]`, so it drains its own
+  pool: every `event_loop` iteration and the startup run inside `objc2::rc::autoreleasepool`.
+  Without that, NSEvents, command buffers, encoders and above all the `CAMetalLayer` drawables
+  are never released — the drawable pool runs dry, `nextDrawable` blocks for its 1 s timeout
+  and the video freezes, and memory grows every frame. Keep any new AppKit / Metal call inside
+  the loop body (or its own pool).
+- **Errors to the user:** when pulsar-render, mpv and ffplay all fail, `play.rs` sends
+  `!@session.rendererFailed` on `host-stats`; the UI maps `!@<key>` through i18n
+  (`media.svelte.ts` `statsVideoError`) and shows it as the session's video error.
 - **Orphans:** no job object on macOS — the renderer exits when its parent process changes.
-- **Not done / unverified:** HDR (PQ/HLG) is shown as SDR; no "AI" upscaler; every claim above
-  is untested on hardware (window ordering against other apps, Spaces / full screen, Retina
-  scale changes between displays, AV1 on M3, 10-bit HEVC).
+- **Known limitations of the cross-process panel (inherent, not fixable from the renderer):**
+  when the app window is clicked in front of the panel, the panel can be hidden behind it for up
+  to ~30 ms until the re-order runs (a short flicker); moving / dragging the app window makes the
+  panel follow with ≥ 8 ms lag, because the window server is polled (no cross-process
+  window-move notification exists without Accessibility permission).
+- **Not done / unverified:** HDR (PQ/HLG) is shown as SDR; every claim above is untested on
+  hardware (window ordering against other apps, Spaces / full screen, Retina scale changes
+  between displays, AV1 on M3, 10-bit HEVC, MetalFX on Apple silicon / its absence on Intel).
