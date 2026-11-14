@@ -87,6 +87,7 @@ mod toast;
 mod twofa;
 mod ui_start;
 mod pairing;
+mod pkg_update;
 mod update_guard;
 mod util;
 mod viewer;
@@ -783,6 +784,8 @@ pub fn run() {
 			node_port,
 			auto_connect_target,
 			self_update_possible,
+			pkg_update::update_install_kind,
+			pkg_update::linux_package_update,
 			update_guard::mark_update_installing,
 			update_guard::clear_update_installing,
 			update_guard::launch_update_window,

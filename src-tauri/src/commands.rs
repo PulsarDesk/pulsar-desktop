@@ -781,15 +781,8 @@ pub(crate) fn auto_connect_target(app: AppHandle) -> Option<AutoConnect> {
 /// installed app in place, so they're always capable.
 #[tauri::command]
 pub(crate) fn self_update_possible() -> bool {
-	#[cfg(all(unix, not(target_os = "macos")))]
-	{
-		// Self-update only works from a FUSE-mounted AppImage, which exports $APPIMAGE.
-		std::env::var_os("APPIMAGE").is_some()
-	}
-	#[cfg(not(all(unix, not(target_os = "macos"))))]
-	{
-		true
-	}
+	// A .deb/.rpm install updates through the package manager instead (pkg_update.rs).
+	crate::pkg_update::install_kind() == crate::pkg_update::InstallKind::InPlace
 }
 
 /// Sync the "run in system tray" preference from the UI. When `enabled` is true,
