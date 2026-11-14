@@ -1,0 +1,28 @@
+# Pulsar macOS client input capture (the macOS counterpart of src-tauri's Windows
+# kbdhook/imp.rs and Linux kbdhook/linux.rs).
+#
+# A Quartz event tap (CGEventTap) swallows and forwards every key while the user controls
+# a remote session (Cmd+Tab, Cmd+Space, Cmd+Q... reach the host), fires Pulsar's own
+# combos, sends relative mouse (game mode / host pointer lock) or absolute mouse confined
+# to the video, and does click-to-engage + the free-cursor handover.
+#
+# Kept as its own crate, free of Tauri, so it type-checks for `aarch64-apple-darwin` from
+# a non-Mac machine (`cargo check --target aarch64-apple-darwin -p pulsar-macinput`) and
+# its platform-neutral logic (combos, held keys, engage state, mouse decisions, key map,
+# rect math) is unit-tested on every platform (`cargo test -p pulsar-macinput`). On
+# non-macOS targets the OS layer is a stub: nothing is captured.
+[package]
+name = "pulsar-macinput"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "macOS client input capture (CGEventTap) for the Pulsar desktop app."
+
+[dependencies]
+tracing = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# proc_pidinfo (is a window owner one of our renderer children?) and getpid.
+libc = "0.2"
