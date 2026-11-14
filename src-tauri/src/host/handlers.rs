@@ -1736,8 +1736,9 @@ fn live_change(prev: &StreamReq, req: &StreamReq) -> Option<(bool, bool)> {
 ///   adaptation off; e.g. it went full-screen). A `None` adapt with nothing applied is a no-op.
 ///
 /// All mutation goes through the one `Arc<Mutex<AdaptState>>` the [`SessionCleanupGuard`] also
-/// holds, so whatever is left applied here is reverted on teardown. No-op off Windows (the
-/// `set_best_mode`/`revert` calls are stubs and `PrevMode` is never `Some`).
+/// holds, so whatever is left applied here is reverted on teardown. The monitor switch exists on
+/// Windows, Linux (X11 / wlroots / KDE / GNOME Wayland) and macOS; the per-window fit is
+/// Windows-only (a no-op stub elsewhere).
 fn apply_screen_adaptation(
 	req: &StreamReq,
 	adapt_state: &Arc<Mutex<crate::display_mode::AdaptState>>,
