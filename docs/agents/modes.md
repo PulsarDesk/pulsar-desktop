@@ -104,7 +104,7 @@ While another app is focused, Pulsar acts on NO input (maintainer rule, 2026-11-
   capture's focus (Tauri map or standalone render window), always true for a kiosk
   `--connect` launch (Orange Pi). Settings → Genel → "Arka planda kol girdisi" (default off)
   lets the pad keep driving the host (not the in-app UI) in the background.
-- **Controller touchpad as mouse** (Settings → Genel → Kol → "Dokunmatik yüzey fare olarak",
+- **Controller touchpad as mouse** (Settings → Genel → Oyun kolu → "Dokunmatik yüzey fare olarak",
   `ui.touchpadAsMouse`, default on, read at connect): a DS4 / DualSense touchpad drives the
   host pointer with the shared gestures of `pulsar_core::input::touchpad_mouse` — one finger
   = relative pointer, two fingers = scroll (natural direction), pad press = left click,

@@ -41,7 +41,7 @@ was Linux-only (evdev). Windows + macOS now read the DS4 / DualSense touchpad fr
 the DualSense passthrough report) in `touchpad_mouse.rs`; all three share
 `pulsar_core::input::touchpad_mouse` (pointer / two-finger scroll / click / two-finger right
 click — scroll and right click are new on Linux too). Settings toggle added
-(Genel → Kol). Gesture logic unit-tested; see [modes.md](modes.md) "Input only while Pulsar is
+(Genel → Oyun kolu). Gesture logic unit-tested; see [modes.md](modes.md) "Input only while Pulsar is
 focused".
 
 **Host-only / headless host / Pulsar Split seat host (2026-11-13, not run on hardware):**
