@@ -7,7 +7,7 @@ Part of the pulsar-desktop agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
 The old in-webview WebCodecs video path (`h264.ts`) was **removed — too slow**.
 Video renders **natively on every platform** via the separate `pulsar-render`
 process: Linux rkmpp/EGL zero-copy, Windows MF+D3D11 zero-copy (DXVA), macOS
-mpv/VideoToolbox. The egui overlay draws on the video natively. Audio is native
+VideoToolbox+Metal zero-copy (mpv only as a fallback — see "macOS renderer" below). The egui overlay draws on the video natively. Audio is native
 too (`src-tauri/src/native_audio.rs`, libopus + SDL3; see audio.md), so no media
 reaches the webview. Don't resurrect a webview video path.
 
@@ -164,12 +164,12 @@ overflows the renderer's 8-AU queue and drops the recovery frame.
 - **Knobs:**
   - `PULSAR_RFI=0` (client) turns RFI off.
   - `PULSAR_TEST_DROP=N` (renderer) drops 1 of every N packets.
-  - `PULSAR_TEST_DEVICE_LOSS=<after_s>,<failed_attempts>` (Windows renderer) drops the renderer
+  - `PULSAR_TEST_DEVICE_LOSS=<after_s>,<failed_attempts>` (Windows and macOS renderers) drops the renderer
     once as if its D3D device was removed and fails the first rebuilds (see "Device loss").
 
 ## Frame pacing on the Windows renderer ("Kare eşitleme")
 
-Until 2026-11-14 the switch only changed the menu on Windows (and still does on macOS): the
+Until 2026-11-14 the switch only changed the menu on Windows: the
 renderer presented every picture the moment it was decoded. Now (`win/mod.rs` `deliver` /
 `pace_tick`), with the switch on, decoded pictures wait in `pace_q` and leave ONE per display
 refresh, oldest first — the Linux pacer's rule (video.rs `take_frame`, Moonlight's per-vblank
@@ -246,10 +246,65 @@ showed ~600 ms head-of-line holds, "stream stopped" over a live session and a lo
   `fsr` or any other GPU = AMD FSR 1: the VideoProcessor converts into a source-sized texture,
   EASU scales it, RCAS sharpens into the back buffer. Shader failure → plain scaling, never
   black. `cargo test -p pulsar-render fsr` compiles the HLSL.
-- **mpv** (macOS, the Linux mpv fallback): `--glsl-shaders=<temp>/pulsar-fsr.glsl`
+- **macOS pulsar-render** (`crates/pulsar-render/src/mac/metal.rs`): every mode but off is FSR
+  1 (the Windows HLSL ported to MSL, compiled at run time): the YUV pass draws the crop into a
+  source-sized texture, EASU scales it, RCAS sharpens onto the drawable; only when the picture
+  is scaled UP, plain scaling if a pipeline does not build. No "AI" upscaler is used on macOS
+  yet (MetalFX spatial / VideoToolbox's low-latency super resolution would be the candidates).
+- **mpv** (the macOS and Linux mpv fallbacks): `--glsl-shaders=<temp>/pulsar-fsr.glsl`
   (`native_view/FSR.glsl`, AMD FSR 1.0.2 MIT, agyild's port) for any mode but off.
 - **Linux pulsar-render** (`crates/pulsar-render/src/gl_fsr.rs`): the presenter's draw (any
   decode path) is redirected into a stream-sized FBO texture, EASU scales it into a second one,
   RCAS sharpens onto the screen; GLSL ES 1.00 (guarded divisions instead of bit-cast
   reciprocals). Not on the KMS zero-copy (game-mode lease) path, which bypasses GL.
 - ABR: with an upscaler on, game mode uses `min_kbps_scale = 1.25` (gives resolution up earlier).
+
+## macOS renderer (`crates/pulsar-render/src/mac/`, 2026-11-14, UNTESTED on Mac hardware)
+
+Written and type-checked on Windows (`cargo check --target aarch64-apple-darwin -p
+pulsar-render`); never run on a Mac. The macOS analogue of `win/`:
+
+| File | Does |
+| --- | --- |
+| `mod.rs` | args, the stdin protocol (copied from `win/mod.rs`), the AU queue (`AU_SOFT_CAP` / `AU_HARD_CAP` / `AU_BURST`, `OverflowLog`), pacing, stall / recovering, device-loss rebuild, the event loop |
+| `decode.rs` | VideoToolbox: real-time `VTDecompressionSession`, synchronous drive, IOSurface-backed Metal-compatible NV12 / P010 out; `--probe` JSON (`VTIsHardwareDecodeSupported`) |
+| `bitstream.rs` | pure: Annex-B → parameter sets + 4-byte-length samples; AV1 OBUs sized, TDs dropped, `av1C` from the sequence header (tests run on every host) |
+| `metal.rs` | `CVMetalTextureCache` (no copy) → YUV→RGB shader (BT.601/709/2020 from the buffer's attachment, video/full range, 8/10-bit) → `CAMetalLayer`; FSR EASU + RCAS; the egui painter |
+| `view.rs` | pure: fit / stretch / original, rotation (quad UVs), upscale mode, YUV constants (tests on every host) |
+| `window.rs` | the panel + `CVDisplayLink` refresh counter |
+| `ffi.rs` | hand-written CF / CM / CV / VT / CG-window-list bindings |
+
+- **Why a panel, not a child window:** macOS has no cross-process child windows (an `NSView`
+  can't go into another process' window, `addChildWindow:` needs an `NSWindow` of the same
+  process). The renderer is an accessory app (no Dock icon) owning a borderless
+  NON-ACTIVATING `NSPanel` at the normal level, ordered directly above the app window
+  (`orderWindow:NSWindowAbove relativeTo:<windowNumber>`), re-ordered within 30 ms when
+  something comes between them. Its frame = the app window's bounds from the window server
+  (`CGWindowListCopyWindowInfo`, polled ≤ every 8 ms; no permission needed for bounds) + the
+  session tab's rect. Hidden while the app window is off screen (minimized / another Space),
+  on a 0×0 rect, and before the first picture (`--hold-reveal` + `reveal` as on Windows).
+  `CanJoinAllSpaces | FullScreenAuxiliary` so it follows a full-screen app window.
+- **App side:** `play.rs` spawns it with `--wid <windowNumber>` (`process::window_hwnd` /
+  `render_parent`, read on the main thread), `viewrect` is in **points** (CSS px) on macOS
+  (`io_cmds::native_view_rect`), tab tear-off sends `reparent 0x<windowNumber>`
+  (`tabwin::move_video`), codec / monitor switches respawn it (`respawn_render_for_codec`), and
+  `caps.rs` takes the decoders from its `--probe`. mpv (then the bundled ffplay) only plays
+  when the renderer fails to start.
+- **Input:** the keyboard never leaves the app (the panel is never key). The panel ignores the
+  mouse — clicks reach the app's session view, which already does click-to-control and the
+  remote pointer on macOS — except while the overlay is open or the pointer is on the
+  closed-state overlay button (`wants_mouse`, polled every pass). So there is no `key`,
+  `hkey`, `ov kfocus` or `ov engage` line on macOS.
+- **Pacing:** the refresh clock is a `CVDisplayLink` on the panel's display; the layer
+  presents without vsync (`displaySyncEnabled = false`) so presentation never throttles
+  decoding (the Windows `DO_NOT_WAIT` rule). A hidden panel is never drawn (its drawables would
+  never come back), but its frames are still counted (`vidsink-fps`) — the app reveals off them.
+- **GPU loss / GPU switch:** a failed command buffer, or the panel moving to a display driven by
+  another GPU (`CGDirectDisplayCopyCurrentMetalDevice`, checked once a second), rebuilds Metal
+  + egui in place every 500 ms until it works; the VideoToolbox session is kept, a keyframe is
+  asked for. A lost VT session (`kVTInvalidSessionErr`, e.g. after sleep) is rebuilt on the
+  next keyframe from the kept parameter sets.
+- **Orphans:** no job object on macOS — the renderer exits when its parent process changes.
+- **Not done / unverified:** HDR (PQ/HLG) is shown as SDR; no "AI" upscaler; every claim above
+  is untested on hardware (window ordering against other apps, Spaces / full screen, Retina
+  scale changes between displays, AV1 on M3, 10-bit HEVC).

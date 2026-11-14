@@ -12,7 +12,9 @@ pulsar-desktop/
                           #   nvenc_codecs() real-silicon probe via nvEncodeAPI64.dll.
   crates/pulsar-render/   # native renderer PROCESS for ALL platforms: Linux
                           #   rkmpp/EGL, Windows Media Foundation + D3D11 zero-copy
-                          #   decode, egui in-session overlay, `--probe` decoder probe.
+                          #   decode, macOS VideoToolbox + Metal (src/mac/, a panel
+                          #   kept over the app window), egui in-session overlay,
+                          #   `--probe` decoder probe.
   crates/pulsar-setup/    # egui branded Windows bootstrapper installer
                           #   (Discord-style, embedded payload, silent/uninstall).
   src-tauri/              # `pulsar-tauri` crate (bin name `pulsar`)

@@ -27,6 +27,12 @@ sizes FEC parity from the client's `Stats` and encodes with intra-refresh / shor
 reorder wait (`maxdelay`), and on Windows/macOS has a reorder buffer. Test with
 `scripts/netem.sh` + `scripts/validate-log.mjs`. Do not push behaviour changes untested.
 
+**macOS client video (2026-11-14, never run on a Mac):** `pulsar-render` has a real macOS
+backend now (VideoToolbox + Metal in a panel kept over the session tab, FSR, overlay, pacing,
+device-loss rebuild — see [client-video.md](client-video.md) "macOS renderer"); mpv is only the
+fallback. Type-checked for `aarch64-apple-darwin` only; `src-tauri`'s macOS code could not be
+type-checked here.
+
 **Scaffolded / known gaps:** macOS virtual gamepad (no-op stub); HW encode on
 the Wayland/gst path (software x264 only); media-over-the-session for
 symmetric-NAT (media is a direct UDP RTP flow today — fine for LAN/cone-NAT/
