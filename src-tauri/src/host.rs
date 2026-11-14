@@ -1531,6 +1531,10 @@ pub(crate) async fn bring_online(
 					let mut coop = crate::coop::SessionRouter::new(sid);
 					#[cfg(windows)]
 					let coop_app = app_h.clone();
+					// macOS: which display the avfoundation capture streams (pointer / pen / touch
+					// land there, not on the main display).
+					#[cfg(target_os = "macos")]
+					let mac_app = app_h.clone();
 					// Which monitor's geometry is currently applied to the desktop injector, so we
 					// only re-resolve the virtual-desktop rect when the streamed monitor changes.
 					// `u32::MAX` = "none applied yet" (forces the first resolve).
@@ -1861,6 +1865,12 @@ pub(crate) async fn bring_online(
 									match sysinput::HostInput::new() {
 										Ok(d) => desktop = Some(d),
 										Err(e) => tracing::warn!("desktop input unavailable: {e}"),
+									}
+									#[cfg(target_os = "macos")]
+									if let Some(d) = desktop.as_mut() {
+										let id = crate::process::macos_streamed_display(&mac_app);
+										tracing::info!(display = ?id, "input: streamed display (avfoundation)");
+										d.set_display(id);
 									}
 								}
 								// Windows: resolve the streamed monitor's rect for pen / touch (a pen-only

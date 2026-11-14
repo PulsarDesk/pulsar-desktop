@@ -580,6 +580,13 @@ pub(super) async fn hold_session(
 		host_touch,
 		std::time::Instant::now(),
 	);
+	// macOS / Linux webviews report a tablet pen as a mouse: with a native tablet sample at
+	// hand (pulsar-core `pen_touch::tablet`), those mouse events go out as the pen.
+	use pulsar_core::input::pen_touch::tablet;
+	let mut tablet_aug = tablet::TabletAugment::default();
+	if host_pen {
+		tablet::start_native();
+	}
 	let mut pen_tick = tokio::time::interval(std::time::Duration::from_millis(50));
 	pen_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 	// ---- Media-over-session demux state (single-socket transport) ----
@@ -855,10 +862,14 @@ pub(super) async fn hold_session(
 			ev = input_rx.recv() => match ev {
 				Some(ev) => {
 					let mut dead = false;
-					for ev in pen_touch.on_event(std::time::Instant::now(), ev) {
-						if send_input(&mut sess, &ev).await.is_err() {
-							dead = true;
-							break;
+					let now = std::time::Instant::now();
+					let evs = if host_pen { tablet_aug.on_event(now, ev, tablet::latest()) } else { vec![ev] };
+					'send: for ev in evs {
+						for ev in pen_touch.on_event(now, ev) {
+							if send_input(&mut sess, &ev).await.is_err() {
+								dead = true;
+								break 'send;
+							}
 						}
 					}
 					if dead {
@@ -868,7 +879,15 @@ pub(super) async fn hold_session(
 				None => break,
 			},
 			_ = pen_tick.tick() => {
-				for ev in pen_touch.tick(std::time::Instant::now()) {
+				let now = std::time::Instant::now();
+				let mut evs = Vec::new();
+				if host_pen {
+					for ev in tablet_aug.tick(tablet::latest()) {
+						evs.extend(pen_touch.on_event(now, ev));
+					}
+				}
+				evs.extend(pen_touch.tick(now));
+				for ev in evs {
 					let _ = send_input(&mut sess, &ev).await;
 				}
 			}
