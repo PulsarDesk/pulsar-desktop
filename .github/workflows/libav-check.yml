@@ -64,8 +64,9 @@ jobs:
       - name: libav tests one at a time, under gdb for a backtrace
         shell: bash
         run: |
-          cargo test --locked -p pulsar-tauri --lib --no-run 2>&1 | tail -3
-          bin=$(ls -t target/debug/build/pulsar-tauri/*/out/pulsar_tauri-* target/debug/deps/pulsar_tauri-* 2>/dev/null | grep -v '\.d$' | head -1)
+          set +e
+          cargo test --locked -p pulsar-tauri --lib host::libav -- --test-threads=1 2>&1 | grep -vE "^\s*(Compiling|Downloaded)" | tail -25
+          bin=$(find target/debug -type f -executable -name 'pulsar_tauri-*' -newer Cargo.toml | head -1)
           echo "test binary: $bin"
           cd src-tauri
-          gdb -q -batch -ex run -ex bt -ex "info threads" --args "$bin" host::libav --test-threads=1 2>&1 | tail -80
+          gdb -q -batch -ex run -ex bt -ex "info threads" -ex "thread apply all bt 8" --args "../$bin" host::libav --test-threads=1 2>&1 | tail -120
