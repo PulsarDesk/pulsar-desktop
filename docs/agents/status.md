@@ -248,9 +248,41 @@ raw multitouch). Per client platform:
   (`io_cmds.rs`). The macOS pulsar-render panel ignores the mouse, so trackpad gestures still
   reach the webview under it. With the macOS event tap engaged (`parity/mac-input`: canvas
   control is off then) the gesture events are forwarded too (`osEngaged`, since `parity/all`):
-  the tap does not take gesture events. Untested on macOS hardware.
+  the tap passes every gesture event except the Dock swipe (see "Touchpad gestures" below).
+  Untested on macOS hardware.
 Hosts: Windows, Linux and macOS all advertise `FEAT_PINCH` now (`host.rs media_features`);
 the injection is pulsar-core `DesktopInput::pinch` (see `../pulsar-core/docs/agents/modules.md`).
+
+**Touchpad gestures — 3 / 4-finger swipes and taps (2026-11-15, branch `feat/gestures`,
+NOTHING run with real fingers yet).** While control is engaged, a 3- or 4-finger swipe
+(up / down / left / right) or tap on the client's touchpad goes to the host as
+`InputEvent::Gesture { fingers, kind }` (only to hosts advertising `FEAT_GESTURE`; Settings →
+Görüntü → "Touchpad hareketlerini gönder", default on, `ui.touchpadGestures` →
+`set_touchpad_gestures`). The host does **what its own user configured for that gesture**
+(pulsar-core `input::gesture::HostGestures`, settings read per gesture, factory defaults when
+unreadable), as the matching shortcut through the ordinary injector (`host/sysinput.rs`, so the
+SYSTEM helper path too). A swipe up that opened an overview (Task View, Mission Control, GNOME /
+KDE overview) is closed by the next swipe down (same shortcut again, within 30 s).
+Client side, shared: `src-tauri/src/gesture.rs` — flags, `Recognizer` (one gesture per contact
+episode; swipe = centroid of 3+ fingers moves 15 % of the pad's width / height and 1.3× more
+along the axis than across; tap = 3+ fingers down ≤ 300 ms, moved ≤ 3 %; a finger-count change
+re-bases), `MtSlots` (evdev slots → normalized contacts). Unit-tested with recorded sequences.
+
+| | Windows | Linux | macOS |
+| --- | --- | --- | --- |
+| Client: detect | `kbdhook/win_gesture.rs`: Raw Input from the precision touchpad (HID page 0x0D usage 0x05, `RIDEV_INPUTSINK`, hidden window thread), `HidP_*` contact count / tip / X / Y per finger collection, hybrid-mode frames assembled | `kbdhook/linux_pinch.rs` (the touchpad reader of the pinch): MT slots + BTN_TOOL_TRIPLETAP / QUADTAP | event tap (`pulsar-macinput` `gesture.rs`, `tap.rs`): the Dock swipe gesture event (type 29 / 30, HID type 23) → axis + progress → one direction; finger count from the user's trackpad prefs (`gesture::mac::dock_swipe_fingers`). No raw contacts on macOS, so **no taps** and no 3-finger page swipes (NSEventTypeSwipe) |
+| Client: keep it from acting locally | **yes** (live): the four `HKCU\…\PrecisionTouchPad` values `ThreeFingerSlideEnabled`, `FourFingerSlideEnabled`, `ThreeFingerTapEnabled`, `FourFingerTapEnabled` are saved to `<app config dir>\gesture-restore.json`, set to 0 on engage, restored on release / session end / app exit (`RunEvent::Exit`) / sign-out (`WM_ENDSESSION`) / the next start after a crash. Explorer caches the values; each write is followed by the shell refresh System Settings uses (ImmersiveShell `IServiceProvider` → service `{53660488-…}` / `{4214f6fa-…}` slot 3 `(setting id)`; ids 0x0F-0x12) — undocumented, read from the Windows 11 binaries; the call returns S_OK here (ignored tests `shell_refresh_reaches_explorer`, `flip_and_restore`) | **no** — the touchpad is read, not grabbed: GNOME / KDE also perform their gesture locally (grabbing would take the pad from the compositor) | **yes, Dock swipes**: swallowed while engaged (Spaces / Mission Control / App Exposé stay put locally). Taps / page swipes stay local |
+| Host: action | the user's precision-touchpad settings: "Swipes" (nothing / switch apps + show desktop / switch desktops + show desktop / audio + volume), "Taps" (nothing / search / notification center / play-pause / middle click) and **Advanced gestures** (custom mode `0xFFFF`: per-direction codes 0-18 — Task View, show desktop, snap, minimize, create / remove desktop, back / forward, media, volume… — and custom shortcuts `…KeyParams`: low 16 bits modifiers, high 16 VK); HKCU, then HKLM, then Windows' defaults | GNOME: up = overview (Super), left / right = workspace right / left (Super+PageDown / PageUp), down / tap = nothing (GNOME has no gesture settings to read). KDE: up = Overview (Meta+W) unless `kwinrc [Plugins] overviewEnabled=false`, left / right = Meta+Ctrl+Right / Left unless `[Desktops] Number=1`. Other desktops: up = Super. Desktop from `XDG_CURRENT_DESKTOP` | the user's trackpad prefs (`com.apple.AppleMultitouchTrackpad`, then the Magic Trackpad domain; `com.apple.dock` Mission Control / App Exposé gesture switches): Spaces (^← / ^→), Mission Control (^↑), App Exposé (^↓), 3-finger page swipe (⌘[ / ⌘]), 3-finger tap Look up (⌃⌘D); off = nothing; three-finger drag on = 3-finger swipes do nothing |
+
+Direction semantics: the direction the fingers move; desktops / Spaces follow the content
+(fingers left = the desktop on the right). Unverified / known gaps: everything on real hardware;
+the Windows host's media keys (VK_VOLUME_*, VK_MEDIA_*) were added to the injector's key map for
+this; the macOS Dock-swipe progress sign (`H_POSITIVE` / `V_POSITIVE` in
+`pulsar-macinput/src/gesture.rs`) is a guess — flip it if left / right come out swapped; the
+macOS host's ^-arrow shortcuts must be enabled (System Settings → Keyboard → Shortcuts →
+Mission Control, on by default); a headless Windows host running as SYSTEM reads SYSTEM's HKCU
+(→ HKLM / defaults); a Windows client that crashes while engaged leaves its gestures off until
+Pulsar starts again.
 
 **Screen adaptation + display-scale watch on Linux/macOS (2026-11-14, LOCAL branch
 `parity/display-mode`, untested on Linux and macOS hardware).** The host display-mode switch for

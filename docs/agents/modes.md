@@ -203,6 +203,8 @@ pulsar-macinput`). Same surface and rules as the Windows hook (`imp.rs`):
   when the permission was just granted (`SessionInput` `osCapture` keeps the canvas path out
   of the tap's way). TCC binds the grant to the signed app identity: an unsigned dev build may
   have to be re-granted after a rebuild.
+- **Touchpad gestures** (3 / 4 fingers): the tap swallows the Dock swipe while engaged and
+  forwards it as `InputEvent::Gesture` — per-platform table in status.md "Touchpad gestures".
 - **Not done on macOS**: WYSIWYG `Char` typing through the local layout (Linux has xkb; the
   Windows hook is positional too), touchpad pinch -> `InputEvent::Pinch` (separate task),
   media keys (`NX_SYSDEFINED`; no host injector maps media keys and the Windows client leaves
