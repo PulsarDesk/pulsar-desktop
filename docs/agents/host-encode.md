@@ -69,6 +69,43 @@ Part of the pulsar-desktop agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
 
 All paths emit **RTP/H.264(+HEVC/AV1) over UDP**.
 
+## Per-window capture ("Pencere", Phase 2b co-op) — per OS
+
+One application window instead of a monitor: the client's window pick
+(`StreamReq::window_hwnd`, from `QueryWindows` / `list_remote_sources`) or, in game mode, the
+window of the game the session launched (`process::resolve_launched_window` → `launched_hwnd`).
+The id on the wire is an opaque `i64` whose meaning is the HOST's (table in pulsar-core
+`service/wire.rs` `WindowInfo`).
+
+| Host | Picker | Capture | Status |
+| --- | --- | --- | --- |
+| Windows | `pulsar_capture::list_capture_windows` (HWND) | WGC → NVENC (native path); a non-NVENC/HDR/4:4:4 stream falls back to the monitor | shipped |
+| Linux X11 | `_NET_CLIENT_LIST` via pure-Rust `x11rb` (X window id) | libav `x11grab window_id` (`host/libav.rs` `Source::X11Window`), ffmpeg CLI `-window_id` + `scale`, or gst `ximagesrc xid=` (`gst::x11_window_pipeline`, MPP hosts; never KMS) | untested on hardware |
+| Linux Wayland | one entry `WindowInfo::PORTAL_PICK` ("Pencereyi bu bilgisayarda seç") | ScreenCast portal with source type WINDOW only (`capture::start_with(.., Source::Window)`): the person AT THE HOST picks the window in the compositor's dialog; frames scaled into the requested box (`wayland_pipeline_sized`) | untested on hardware |
+| macOS | ScreenCaptureKit `SCShareableContent` (`CGWindowID`) | `SCContentFilter(desktopIndependentWindow:)` → NV12 → loopback TCP → ffmpeg `-f rawvideo` → VideoToolbox (`pulsar_core::window_capture::serve_for`) | untested on hardware |
+
+- Desktop glue: `src-tauri/src/host/window_src.rs` (picker entries, target per backend, encode
+  size = the window's aspect fitted into the requested box, never upscaled) and the
+  `host_window` block in `host/handlers.rs::make_on_stream`. A window that is gone (or a
+  ScreenCaptureKit start that fails) streams the screen, as Windows does.
+- **X11 limits:** x11grab keeps the size it opened with — a window enlarged later is cropped,
+  one shrunk below it / minimized / closed ends the capture (the next restream re-reads the
+  size). Without a compositing manager the parts covered by other windows are undefined.
+- **Wayland:** no program can list or choose other programs' windows, so the pick is always
+  the host person's. The window's restore token is kept per SESSION (`wl_window_token`),
+  apart from the persisted screen token: a re-stream re-opens the same window without the
+  dialog; streaming the screen again forgets it. No pointer region for a window cast (the
+  uinput pointer still maps to the whole desktop).
+- **macOS:** needs macOS 12.3+ (checked at runtime by class lookup) and the Screen Recording
+  permission. The frame server repeats the last frame at the stream fps (ScreenCaptureKit only
+  delivers on change; rawvideo timestamps count frames) and serves one ffmpeg at a time, so the
+  encoder fallback chain can reconnect. `objc2-screen-capture-kit` links ScreenCaptureKit
+  strongly: a build whose deployment target is below 12.3 needs it weak-linked
+  (`-weak_framework ScreenCaptureKit`) to launch on older macOS — not set up yet.
+- **Not done off Windows:** per-window INPUT (Windows routes keys/mouse to the window with
+  PostMessage; elsewhere input goes to the desktop, so the window should be focused), and
+  "fit the window to the pane" (`display_mode::fit_window` is Windows-only).
+
 ## Poor-link host path (2026-11-09, LOCAL, unpushed, untested on a GPU / the field link)
 
 - **Wire pacer** (`src-tauri/src/host/handlers/pacer.rs`, in the media-over-session video

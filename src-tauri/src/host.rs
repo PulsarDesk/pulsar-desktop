@@ -2390,7 +2390,7 @@ pub(crate) async fn bring_online(
 					// on demand when the client opens its window picker. Per OS: WGC windows on
 					// Windows, X11 client windows, ScreenCaptureKit windows on macOS, and on
 					// Wayland ONE entry that opens the portal's window dialog at the host
-					// (`super::window_src::list`).
+					// (`window_src::list`).
 					windows: Box::new(|| {
 						// pulsar-capture (and its WGC/EnumWindows window source) is a Windows-only
 						// dependency; the other OSes list through pulsar-core.
@@ -2406,7 +2406,7 @@ pub(crate) async fn bring_online(
 						}
 						#[cfg(not(windows))]
 						{
-							super::window_src::list()
+							window_src::list()
 						}
 					}),
 					on_nack: Box::new(on_nack),

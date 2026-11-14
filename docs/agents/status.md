@@ -36,6 +36,14 @@ merged (2026-09-02); AMD-on-Windows, macOS and Windows ARM64 are CI-built but **
 on hardware** — read [host-encode.md](host-encode.md) before touching encoder/decoder
 selection.
 
+**Per-window host capture on Linux + macOS (2026-11-14, branch `parity/window-capture`,
+untested on Linux X11 / Wayland / macOS hardware):** the "Pencere" pick and game-mode
+launched-window capture, until now Windows-only (WGC), on X11 (`x11grab -window_id` /
+`ximagesrc xid=`), Wayland (portal WINDOW source — the host person picks) and macOS
+(ScreenCaptureKit window → rawvideo → ffmpeg). Per-OS table + limits:
+[host-encode.md](host-encode.md#per-window-capture-pencere-phase-2b-co-op--per-os). Needs the
+matching pulsar-core branch. Per-window input and window-to-pane fitting stay Windows-only.
+
 **Host-only / headless host / Pulsar Split seat host (2026-11-13, not run on hardware):**
 `--host-only`, `--headless-host`, `--headless-stop`, `--split-seat` — see
 [modes.md](modes.md) "Host-only and headless host". Unit-tested (argv parsing, pipe protocol
