@@ -11,6 +11,18 @@ fn main() {
 	// ffmpeg dev libs are missing we just warn and skip (the client falls back to mpv).
 	#[cfg(target_os = "linux")]
 	build_vidsink();
+
+	// macOS: pulsar-core's per-window capture uses ScreenCaptureKit (macOS 12.3+), and
+	// objc2-screen-capture-kit links that framework STRONGLY. The app's minimum is older
+	// (Tauri's default 10.13), where dyld would refuse to start the whole app over a
+	// missing framework. Weak-link it instead: the framework then loads only where it
+	// exists, and `window_capture::backend()` checks for the classes at runtime (no
+	// per-window source on older macOS). ld64 makes a dylib weak as soon as ONE of its
+	// load options says so, so this wins over the crate's own `-framework`. Target cfg via
+	// the env var: `#[cfg]` here would be the BUILD host's OS. Untested on macOS hardware.
+	if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+		println!("cargo:rustc-link-arg=-Wl,-weak_framework,ScreenCaptureKit");
+	}
 }
 
 #[cfg(target_os = "linux")]

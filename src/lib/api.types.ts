@@ -55,13 +55,19 @@ export interface PlayInfo {
 }
 
 /** One capture-able host window (Phase 2b co-op "Pencere" capture). `hwnd` is the
- * raw Win32 window handle the host echoes back as the capture target; `title` is the
- * window caption shown to the user in the picker. Windows-only — a non-Windows host
- * replies with an empty list (no per-window WGC source). */
+ * per-OS window id the host echoes back as the capture target: the Win32 HWND on a
+ * Windows host, the X window id on Linux X11, the `CGWindowID` on macOS, and on a
+ * Wayland host the single [`PORTAL_PICK`] entry (the person at the host picks the window
+ * in the portal dialog). `title` is the caption shown to the user in the picker. */
 export interface WindowInfo {
 	hwnd: number;
 	title: string;
 }
+
+/** The `hwnd` of a Wayland host's only window entry: "let the host pick in the portal
+ * dialog". Not a real window — every pane that streams it shows its OWN window, so it is
+ * never treated as "already used by pane N". */
+export const PORTAL_PICK = -1;
 
 /** One host monitor advertised by QueryStreamCaps. `idx` is what `setPlayMonitor`
  * echoes back (0 = primary); `name` is human-facing; `width`/`height` are pixels. */

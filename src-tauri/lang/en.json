@@ -29,6 +29,7 @@
 	"host.encodeFailed": "Video encoder failed to start — no encoder worked; tried",
 	"host.captureFailed": "Screen capture failed to start",
 	"host.captureStopped": "Screen capture stopped",
+	"host.windowPortalPick": "Pick the window on this computer (Wayland)",
 	"host.captureNoFrames": "Can't capture the screen: the host gets no picture from its graphics card. Try restarting Pulsar on the host.",
 	"err.identityChanged": "The identity behind this device has changed. Accept the new identity and reconnect?",
 	"err.localRelayBind": "Could not start the in-app relay (the port may be in use)",

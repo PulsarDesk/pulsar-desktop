@@ -64,9 +64,20 @@ selection.
 
 **Picture upscaling parity (2026-11-14, untested on hardware):** Windows = NVIDIA/Intel VSR,
 FSR, SGSR; Linux pulsar-render = FSR, SGSR (`gl_fsr.rs` + `sgsr1.glsl`; not on the KMS lease
-path, which bypasses GL); mpv (macOS / Linux fallback) = FSR. SGSR is hidden in the settings on
+path, which bypasses GL); macOS pulsar-render = MetalFX spatial / FSR; mpv (macOS / Linux
+fallback) = FSR. SGSR is hidden in the settings on
 every OS (`PULSAR_UPSCALE=sgsr` reaches it) until the 2025-math fix is A/B'd — see
 [client-video.md](client-video.md#picture-upscaling-settings--görüntü--görüntü-iyileştirme).
+
+**Per-window host capture on Linux + macOS (2026-11-14, branch `parity/window-capture`,
+untested on Linux X11 / Wayland / macOS hardware):** the "Pencere" pick and game-mode
+launched-window capture, until now Windows-only (WGC), on X11 (`x11grab -window_id` /
+`ximagesrc xid=`), Wayland (portal WINDOW source — the host person picks) and macOS
+(ScreenCaptureKit window → rawvideo → ffmpeg). Per-OS table + limits:
+[host-encode.md](host-encode.md#per-window-capture-pencere-phase-2b-co-op--per-os). Needs the
+matching pulsar-core branch. X11 + macOS also map the pointer into the window, raise it,
+restart the stream when it is resized / closed, and fit it to a split pane (macOS: needs the
+Accessibility grant). Wayland can do none of those (no window positions for programs).
 
 **Host-only / headless host / Pulsar Split seat host (2026-11-13, not run on hardware):**
 `--host-only`, `--headless-host`, `--headless-stop`, `--split-seat` — see

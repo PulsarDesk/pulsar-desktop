@@ -6,6 +6,7 @@
 import { savedStreamPicks } from '#lib/streamPicks.js';
 import { api, isTauri, onHostDisplays, onHostDisplayStreamed, onPeerAvatar, onPeerName, onPlayEnded, onPlayError, onPlayStats, onPlayOptimizing, onPlayReady, onSystemSleep, onSystemWake, setFullscreen } from '#lib/api.js';
 import { recordConnection, setPeerIdentity } from '#lib/peers.svelte.js';
+import { PORTAL_PICK } from '#lib/api.types.js';
 import { ui, saveUi } from '#lib/settings.svelte.js';
 import { t } from '#lib/i18n.svelte.js';
 import type { Game } from '#lib/games.svelte.js';
@@ -337,6 +338,9 @@ export class SessionManager {
 		for (const s of this.#liveSessionsForHost(id)) {
 			const pane = this.panes.indexOf(s.tabId);
 			if (pane < 0) continue;
+			// A Wayland portal pick is no window id: each pane gets its own window in the
+			// host's dialog, so it never marks the single picker entry as taken.
+			if (s.windowHwnd === PORTAL_PICK) continue;
 			if (s.windowHwnd !== undefined) windows[s.windowHwnd] = pane + 1;
 			else if (!s.gameId) displays[s.displayIdx ?? 0] = pane + 1;
 		}

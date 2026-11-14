@@ -63,6 +63,7 @@ vi.mock('#lib/i18n.svelte.js', () => ({ t: (k: string) => k }));
 import { api } from '#lib/api.js';
 import { SessionManager, RESUME_DELAYS_MS } from './sessions.svelte';
 import { ui } from '#lib/settings.svelte.js';
+import { PORTAL_PICK } from '#lib/api.types.js';
 
 function makeManager(mode: 'remote' | 'game' = 'remote') {
 	return new SessionManager({ getMode: () => mode, onAuthDone: () => {} });
@@ -191,6 +192,18 @@ describe('SessionManager — same-host split: per-pane host-display selection (P
 		const u = mgr.paneUsageFor(target.id);
 		expect(u.displays).toEqual({ 0: 1 });
 		expect(u.windows).toEqual({ 4242: 2 });
+	});
+
+	it('paneUsageFor never marks the Wayland portal entry as used', async () => {
+		const mgr = makeManager('game');
+		mgr.enterSplit('grid4', 'game');
+		await mgr.connectIntoPane(0, target, 'game', '', undefined, PORTAL_PICK);
+		await mgr.connectIntoPane(1, target, 'game', '', undefined, 4242);
+		const u = mgr.paneUsageFor(target.id);
+		expect(u.windows).toEqual({ 4242: 2 });
+		expect(u.windows[PORTAL_PICK]).toBeUndefined();
+		// A portal pick is a window session, never a screen one.
+		expect(u.displays).toEqual({});
 	});
 
 	it('an explicit picker choice (displayIdx) is passed through and bypasses de-dup', async () => {

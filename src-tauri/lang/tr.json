@@ -29,6 +29,7 @@
 	"host.encodeFailed": "Ekran kodlayıcısı başlatılamadı — hiçbir kodlayıcı çalışmadı; denenenler",
 	"host.captureFailed": "Ekran yakalama başlatılamadı",
 	"host.captureStopped": "Ekran yakalama durdu",
+	"host.windowPortalPick": "Pencereyi bu bilgisayarda seç (Wayland)",
 	"host.captureNoFrames": "Ekran yakalanamıyor: host ekran kartından görüntü alamıyor. Host'taki Pulsar'ı yeniden başlatmayı deneyin.",
 	"err.identityChanged": "Bu cihazın kimliği değişti. Yeni kimliği kabul edip yeniden bağlanmak ister misiniz?",
 	"err.localRelayBind": "Yerel relay başlatılamadı (port kullanımda olabilir)",

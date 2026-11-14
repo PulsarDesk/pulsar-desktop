@@ -94,6 +94,66 @@ in `src-tauri/lang/{tr,en}.json`).
 Not possible: on Wayland the host cannot choose the captured monitor itself — the portal shows
 its own dialog to the person at the host (the restore token can only bring back an earlier pick).
 
+## Per-window capture ("Pencere", Phase 2b co-op) — per OS
+
+One application window instead of a monitor: the client's window pick
+(`StreamReq::window_hwnd`, from `QueryWindows` / `list_remote_sources`) or, in game mode, the
+window of the game the session launched (`process::resolve_launched_window` → `launched_hwnd`).
+The id on the wire is an opaque `i64` whose meaning is the HOST's (table in pulsar-core
+`service/wire.rs` `WindowInfo`).
+
+| Host | Picker | Capture | Status |
+| --- | --- | --- | --- |
+| Windows | `pulsar_capture::list_capture_windows` (HWND) | WGC → NVENC (native path); a non-NVENC/HDR/4:4:4 stream falls back to the monitor | shipped |
+| Linux X11 | `_NET_CLIENT_LIST` via pure-Rust `x11rb` (X window id) | libav `x11grab window_id` (`host/libav.rs` `Source::X11Window`), ffmpeg CLI `-window_id` + `scale`, or gst `ximagesrc xid=` (`gst::x11_window_pipeline`, MPP hosts; never KMS) | untested on hardware |
+| Linux Wayland | one entry `WindowInfo::PORTAL_PICK` ("Pencereyi bu bilgisayarda seç") | ScreenCast portal with source type WINDOW only (`capture::start_with(.., Source::Window)`): the person AT THE HOST picks the window in the compositor's dialog; frames scaled into the requested box (`wayland_pipeline_sized`) | untested on hardware |
+| macOS | ScreenCaptureKit `SCShareableContent` (`CGWindowID`) | `SCContentFilter(desktopIndependentWindow:)` → NV12 → loopback TCP → ffmpeg `-f rawvideo` → VideoToolbox (`pulsar_core::window_capture::serve_for`) | untested on hardware |
+
+- Desktop glue: `src-tauri/src/host/window_src.rs` (picker entries, target per backend, encode
+  size = the window's aspect fitted into the requested box, never upscaled, and the window
+  each session streams now) and the `host_window` block in `host/handlers.rs::make_on_stream`
+  (run under `block_in_place`: the macOS ScreenCaptureKit query + start can wait ~10 s behind
+  the Screen Recording prompt). A window that is gone (or a ScreenCaptureKit start that fails)
+  streams the screen, as Windows does.
+- **Input (X11 / macOS):** while a session streams a window, the client's 0..1 absolute pointer
+  maps onto THAT window, refreshed every 250 ms while it moves (`window_src::input_area`): X11 =
+  the window's rect in the root (`translate_coordinates` + `get_geometry`) as the uinput
+  pointer region (the absolute device spans the whole root); macOS = the window's
+  `CGWindowListCopyWindowInfo` bounds in global points (`DesktopInput::set_window_rect`). The
+  window is raised + focused once per pick (X11 `_NET_ACTIVE_WINDOW`; macOS
+  `NSRunningApplication activateWithOptions:` + `AXRaise` with the Accessibility grant). Keys
+  go to the focused window (no PostMessage-style per-window routing off Windows: X11 / macOS
+  inject at the desktop, so two co-op panes on two windows of ONE host share one focus).
+- **Size changes:** a host watcher (`host.rs`, 1 s, debounced over two looks) re-issues the
+  last StreamReq when the streamed window settles at a new size or is closed / its
+  ScreenCaptureKit stream stopped (x11grab keeps the size it opened with; a closed window then
+  streams the screen).
+- **Fit to the pane** (`StreamReq::adapt` with a window pick): `display_mode::fit_window` ->
+  `pulsar_core::window_capture::fit` on X11 (unmaximize, `_NET_MOVERESIZE_WINDOW` on the
+  window's RandR monitor clipped to `_NET_WORKAREA`, restored on teardown incl. the maximized
+  state) and macOS (`AXPosition` / `AXSize`, needs the Accessibility grant; the menu bar is
+  kept free with a fixed 38 pt inset, the Dock is not accounted for). Full-screen windows are
+  left alone.
+- **X11 limits:** without a compositing manager the parts covered by other windows are
+  undefined in the grab.
+- **Wayland:** no program can list, choose, move, resize or locate other programs' windows, so
+  the pick is always the host person's, there is no fit to the pane, and the uinput pointer
+  still spans the whole desktop for a window cast (mapping it into the window would need the
+  RemoteDesktop portal's stream-relative `NotifyPointerMotionAbsolute` instead of uinput — not
+  built). The window's restore token is kept per SESSION (`wl_window_token`), apart from the
+  screen token, which is per session too (`host.rs` creates it empty for every connection): a
+  re-stream re-opens the same window without the dialog; streaming the screen again forgets it.
+  Every pane's pick shares `hwnd = PORTAL_PICK` (-1), so the client never marks that entry as
+  "in pane N" (`sessions.svelte.ts` `paneUsageFor`).
+- **macOS:** needs macOS 12.3+ (checked at runtime by class lookup) and the Screen Recording
+  permission. ScreenCaptureKit is **weak-linked** (`src-tauri/build.rs`:
+  `-Wl,-weak_framework,ScreenCaptureKit`, since `objc2-screen-capture-kit` links it strongly),
+  so the app still launches on older macOS and just offers no window source there. The frame
+  server repeats the last frame at the stream fps (ScreenCaptureKit only delivers on change;
+  rawvideo timestamps count frames) and serves one ffmpeg at a time, so the encoder fallback
+  chain can reconnect. `serve_for` returns the frame size from its own `SCShareableContent`
+  query (one query per stream start).
+
 ## Poor-link host path (2026-11-09, LOCAL, unpushed, untested on a GPU / the field link)
 
 - **Wire pacer** (`src-tauri/src/host/handlers/pacer.rs`, in the media-over-session video

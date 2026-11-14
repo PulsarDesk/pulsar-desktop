@@ -1749,8 +1749,8 @@ fn live_change(prev: &StreamReq, req: &StreamReq) -> Option<(bool, bool)> {
 ///
 /// All mutation goes through the one `Arc<Mutex<AdaptState>>` the [`SessionCleanupGuard`] also
 /// holds, so whatever is left applied here is reverted on teardown. The monitor switch exists on
-/// Windows, Linux (X11 / wlroots / KDE / GNOME Wayland) and macOS; the per-window fit is
-/// Windows-only (a no-op stub elsewhere).
+/// Windows, Linux (X11 / wlroots / KDE / GNOME Wayland) and macOS; the per-window fit works on
+/// Windows, Linux X11 and macOS (`display_mode::fit_window`; a no-op stub elsewhere).
 fn apply_screen_adaptation(
 	req: &StreamReq,
 	adapt_state: &Arc<Mutex<crate::display_mode::AdaptState>>,
@@ -1922,6 +1922,13 @@ pub(super) fn make_on_stream(
 	// bitrate / recovery-only re-request is applied live on it instead of restarting.
 	#[cfg(target_os = "linux")]
 	let mut last_libav_req: Option<StreamReq> = None;
+	// Wayland window casts: the portal restore token of THIS session's window pick, kept
+	// apart from the session's screen token so a re-stream (resolution / codec change)
+	// re-opens the same window without the dialog, and a window pick never replaces the
+	// screen pick. Cleared when the session streams the screen again (the next window
+	// request asks anew).
+	#[cfg(target_os = "linux")]
+	let wl_window_token: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 	// The previous request that started a LIVE native (DXGI+NVENC) capture, kept so a re-stream
 	// that only changed `display_idx` can switch the monitor IN PLACE (CaptureHandle::switch_output)
 	// instead of tearing the whole pipeline down. `None` whenever the current stream isn't native
@@ -2359,13 +2366,35 @@ pub(super) fn make_on_stream(
 				(bitrate as f32 / 1000.0).round() as u32,
 				crate::i18n::t("stream.mbitTarget")
 			)));
-			// The portal can't be told which monitor to share: its restore token silently
-			// brings the last pick back. When the client asks for a different monitor than the
-			// one the last portal pick showed, drop the token so the picker opens again and
-			// the person at the host chooses (the dialog decides). Only for a NEW request: a
+			// Per-window capture (the client's "Pencere" pick, or the game this session
+			// launched): Wayland gives no program other programs' windows, so the portal
+			// dialog offers windows only and the person at the host picks one. Scaled into the
+			// client's requested box (`fit_within` of the cast) so a resize never changes the
+			// encoded size. Untested on Wayland hardware.
+			let wl_window = matches!(
+				super::window_src::current_target(req.window_hwnd.or_else(|| *launched_hwnd.lock().unwrap())),
+				Some(super::window_src::Target::Portal)
+			);
+			let source = if wl_window {
+				let w = if req.width > 0 { req.width } else { cfg.width };
+				let h = if req.height > 0 { req.height } else { cfg.height };
+				pulsar_core::capture::Source::Window { max: clamp_dims(w, h) }
+			} else {
+				*wl_window_token.lock().unwrap() = None;
+				pulsar_core::capture::Source::Screen
+			};
+			// The token of the kind being opened (both live for this session only; a new
+			// connection opens the dialog again).
+			let token_slot = if wl_window { wl_window_token.clone() } else { restore_token.clone() };
+			// Screen casts: the portal can't be told which monitor to share: its restore token
+			// silently brings the last pick back. When the client asks for a different monitor
+			// than the one the last portal pick showed, drop the token so the picker opens again
+			// and the person at the host chooses (the dialog decides). Only for a NEW request: a
 			// re-stream of the request already answered restores silently even when the host
 			// person picked another monitor. Untested on Wayland hardware.
-			let token = {
+			let token = if wl_window {
+				token_slot.lock().unwrap().clone()
+			} else {
 				let monitors = pulsar_core::displays::count();
 				let last = *wayland_pick.lock().unwrap();
 				if crate::process::wayland_wants_repick(req.display_idx, last, monitors) {
@@ -2376,7 +2405,7 @@ pub(super) fn make_on_stream(
 					);
 					None
 				} else {
-					restore_token.lock().unwrap().clone()
+					token_slot.lock().unwrap().clone()
 				}
 			};
 			// No token = the picker dialog shows: its answer belongs to THIS request.
@@ -2385,7 +2414,7 @@ pub(super) fn make_on_stream(
 			let wayland_pick = wayland_pick.clone();
 			// AppImage: an encoder that only validated on the system gst runs there.
 			let system_gst = crate::process::gst_on_system(genc, gcodec);
-			let restore_token = restore_token.clone();
+			let restore_token = token_slot;
 			let cap_slot = cap_slot.clone();
 			// This (re-)stream's generation: capture::start can sit in the portal
 			// dialog for seconds; teardown and any newer re-stream bump the counter,
@@ -2420,7 +2449,8 @@ pub(super) fn make_on_stream(
 				// instead of leaving the dialog up — capture.rs's SessionCloseGuard
 				// then closes the portal session and dismisses the picker.
 				let started = {
-					let start_fut = pulsar_core::capture::start(&ip, port, &fragment, token, system_gst);
+					let start_fut =
+						pulsar_core::capture::start_with(&ip, port, &fragment, token, system_gst, source);
 					tokio::pin!(start_fut);
 					loop {
 						tokio::select! {
@@ -2440,29 +2470,32 @@ pub(super) fn make_on_stream(
 							*restore_token.lock().unwrap() = Some(t);
 						}
 						// Which monitor the portal pick actually streams (its geometry in the
-						// output layout), for the next re-stream's repick decision.
-						let picked = cap
-							.stream_rect()
-							.and_then(|(x, y, w, h)| {
-								pulsar_core::displays::index_of_rect(&pulsar_core::displays::list(), x, y, w, h)
-							})
-							.map(|p| p as u32);
-						{
-							let mut pick = wayland_pick.lock().unwrap();
-							if picker_shown || pick.requested.is_none() {
-								pick.requested = Some(requested_idx);
+						// output layout), for the next re-stream's repick decision. Screen casts
+						// only: a window cast has no monitor (and its own token).
+						if !wl_window {
+							let picked = cap
+								.stream_rect()
+								.and_then(|(x, y, w, h)| {
+									pulsar_core::displays::index_of_rect(&pulsar_core::displays::list(), x, y, w, h)
+								})
+								.map(|p| p as u32);
+							{
+								let mut pick = wayland_pick.lock().unwrap();
+								if picker_shown || pick.requested.is_none() {
+									pick.requested = Some(requested_idx);
+								}
+								pick.picked = picked;
 							}
-							pick.picked = picked;
-						}
-						if let Some(p) = picked.filter(|p| *p != requested_idx) {
-							// The person at the host shared another monitor than the client
-							// asked for: move the client's picker (and its next requests) there.
-							tracing::warn!(
-								requested = requested_idx,
-								picked = p,
-								"wayland: the portal pick streams another monitor than the client asked for"
-							);
-							let _ = stats_task.try_send(DataMsg::StreamedDisplay(p));
+							if let Some(p) = picked.filter(|p| *p != requested_idx) {
+								// The person at the host shared another monitor than the client
+								// asked for: move the client's picker (and its next requests) there.
+								tracing::warn!(
+									requested = requested_idx,
+									picked = p,
+									"wayland: the portal pick streams another monitor than the client asked for"
+								);
+								let _ = stats_task.try_send(DataMsg::StreamedDisplay(p));
+							}
 						}
 						// Store under the slot lock ONLY while still current: a session
 						// that tore down (or re-streamed) during the portal dialog gets
@@ -2487,7 +2520,8 @@ pub(super) fn make_on_stream(
 								kind: "stream".into(),
 								peer: peer.clone(),
 								sid,
-								detail: "Wayland · ekran + kontrol".into(),
+								detail: if wl_window { "Wayland · pencere" } else { "Wayland · ekran + kontrol" }
+									.into(),
 							},
 						);
 						// Nothing else notices a pipeline that dies mid-stream (gst error/EOS,
@@ -2553,6 +2587,9 @@ pub(super) fn make_on_stream(
 		// client takes effect). The epoch bump inside also retires the PREVIOUS stream's
 		// encode fallback chain, if one is still walking its candidate list.
 		crate::process::drain_procs(&procs, &proc_epoch);
+		// The previous stream's in-process window source (macOS ScreenCaptureKit), if any.
+		#[cfg(not(windows))]
+		super::window_src::stop(sid);
 		#[cfg(target_os = "linux")]
 		if let Some(engine) = libav_slot.lock().unwrap().take() {
 			engine.stop();
@@ -2648,6 +2685,56 @@ pub(super) fn make_on_stream(
 		// shrinks anyway) → encoder init crash / dead stream. Apply after the Unix
 		// screen-clamp so a legitimately-clamped size is preserved, only floored.
 		let (eff_w, eff_h) = clamp_dims(eff_w, eff_h);
+		// PER-WINDOW capture off Windows (Windows resolves its WGC target further down): the
+		// client's window pick (`req.window_hwnd`), else the window of the game this session
+		// launched. Linux X11 grabs the X window by id; macOS starts a ScreenCaptureKit window
+		// source now and serves its frames to ffmpeg on loopback. The stream is the window's
+		// own aspect fitted into the requested box (never upscaled). A window that is gone (or
+		// a ScreenCaptureKit start that fails) streams the screen instead — as Windows does
+		// when its window capture can't start. A window stream also maps the session's
+		// pointer onto the window and brings it to the front (`window_src::began`); the
+		// host's window watcher restarts the stream when it is resized or closed. Run off
+		// the async workers (`blocking`): the ScreenCaptureKit query + start can wait ~10 s
+		// behind the Screen Recording prompt. Untested on Linux X11 / macOS hardware.
+		#[cfg(not(windows))]
+		let host_window: Option<(super::window_src::Target, (u32, u32), Option<String>)> = {
+			use super::window_src::{self as ws, Target};
+			let want = req.window_hwnd.or_else(|| *launched_hwnd.lock().unwrap());
+			ws::blocking(|| {
+				let picked = match ws::current_target(want) {
+					Some(t @ Target::X11(id)) => match ws::window_size(id) {
+						Some(size) => Some((t, ws::encode_size(size, (eff_w, eff_h)), None)),
+						None => {
+							tracing::warn!(id, "the chosen window is gone, streaming the screen");
+							None
+						}
+					},
+					// One ScreenCaptureKit query gives the window, its size and the stream.
+					Some(t @ Target::Mac(id)) => {
+						match pulsar_core::window_capture::serve_for(sid, id, (eff_w, eff_h), eff_fps) {
+							Ok((url, size)) => Some((t, size, Some(url))),
+							Err(e) => {
+								tracing::warn!(id, "window capture failed to start, streaming the screen: {e}");
+								None
+							}
+						}
+					}
+					_ => None,
+				};
+				if let Some((Target::X11(id) | Target::Mac(id), ..)) = picked {
+					ws::began(sid, id);
+				}
+				picked
+			})
+		};
+		#[cfg(not(windows))]
+		let (eff_w, eff_h) = host_window.as_ref().map_or((eff_w, eff_h), |(_, s, _)| *s);
+		// The X window this stream grabs (gst `ximagesrc xid=` / x11grab `-window_id`).
+		#[cfg(target_os = "linux")]
+		let win_xid: Option<u64> = match host_window {
+			Some((super::window_src::Target::X11(id), ..)) => Some(id),
+			_ => None,
+		};
 		let ffmpeg = ffmpeg_bin(&app_h);
 		// The viewer picks the encoder live from the session menu (sent in the
 		// stream request); an empty request falls back to the host's own setting.
@@ -2883,7 +2970,9 @@ pub(super) fn make_on_stream(
 						// monitor and primary-at-(0,0) stay on the fast zero-copy KMS path.
 						let kms_region_safe =
 							region.map_or(true, |(x, y, _, _)| x == 0 && y == 0);
+						// A window grab never takes KMS (that is the whole scanout).
 						let kms = kms_mode
+							&& win_xid.is_none()
 							&& genc == pipeline::gst::GstEncoder::Mpp
 							&& crate::process::kms_encode_ok(genc, gcodec)
 							&& kms_region_safe;
@@ -2900,10 +2989,21 @@ pub(super) fn make_on_stream(
 							crate::host::cursor::spawn(stats_out.clone(), flag);
 						}
 						// MPP eats BGRx via the RGA blitter — skip the CPU convert.
-						let direct_bgrx = genc == pipeline::gst::GstEncoder::Mpp;
+						// (Not for a window grab: its pipeline always converts + scales.)
+						let direct_bgrx = genc == pipeline::gst::GstEncoder::Mpp && win_xid.is_none();
 						let pipeline_str = if kms {
 							pipeline::gst::kms_pipeline(
 								eff_fps,
+								&metered,
+								&vdest.ip().to_string(),
+								vdest.port(),
+							)
+						} else if let Some(xid) = win_xid {
+							pipeline::gst::x11_window_pipeline(
+								&cfg.display,
+								xid,
+								eff_fps,
+								(eff_w, eff_h),
 								&metered,
 								&vdest.ip().to_string(),
 								vdest.port(),
@@ -3079,7 +3179,10 @@ pub(super) fn make_on_stream(
 		#[cfg(target_os = "linux")]
 		let (cap_display, eff_w, eff_h) = {
 			let displays = crate::process::linux_displays();
-			if let Some((_, x, y, w, h, _)) = displays
+			if win_xid.is_some() {
+				// A window grab: the bare display (no monitor origin), the window's own size.
+				(cfg.display.clone(), eff_w, eff_h)
+			} else if let Some((_, x, y, w, h, _)) = displays
 				.get(req.display_idx as usize)
 				.filter(|_| displays.len() > 1)
 			{
@@ -3134,6 +3237,18 @@ pub(super) fn make_on_stream(
 			hdr: req.hdr,
 			yuv444: req.yuv444,
 			loss_recovery: req.loss_recovery,
+			// Off Windows: the window picked above (Windows' own window capture is WGC on the
+			// native path below; its ffmpeg fallback streams the monitor).
+			#[cfg(not(windows))]
+			window: match host_window {
+				Some((super::window_src::Target::X11(id), ..)) => Some(pipeline::WindowInput::X11 { id }),
+				Some((super::window_src::Target::Mac(_), _, Some(url))) => {
+					Some(pipeline::WindowInput::RawNv12 { url })
+				}
+				_ => None,
+			},
+			#[cfg(windows)]
+			window: None,
 		};
 		// NATIVE WINDOWS path: DXGI Desktop Duplication + NVENC SDK → RTP
 		// (Sunshine-technique, steady client-fps). Used for NVENC on Windows
@@ -3574,6 +3689,7 @@ pub(super) fn make_on_stream(
 						hdr: base.hdr,
 						yuv444: base.yuv444,
 						loss_recovery: base.loss_recovery,
+						window: base.window.clone(),
 					};
 					pipeline::encode_command(&p).1
 				}

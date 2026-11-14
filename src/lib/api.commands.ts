@@ -197,8 +197,9 @@ export const api = {
 		invoke<void>('launch_remote_game', { target, gameId }),
 	/** List the host's capture-able windows (Phase 2b co-op "Pencere" picker), routed
 	 * through an EXISTING live session's control channel (`id` = its Rust play id). The
-	 * user picks one and its `hwnd` becomes the new pane's window-capture target. Empty on
-	 * a non-Windows / old host (no per-window WGC source). */
+	 * user picks one and its `hwnd` becomes the new pane's window-capture target. Filled on
+	 * Windows (WGC), Linux X11 (client windows), macOS (ScreenCaptureKit) and Wayland (ONE
+	 * `PORTAL_PICK` entry: the host picks in the portal dialog); empty on an old host. */
 	hostWindowList: (id: number) => invoke<WindowInfo[]>('host_window_list', { id }),
 	/** Startup-probed local caps (null while the probe is still running — listen to
 	 * the `local-caps` event for the push). */
