@@ -242,8 +242,10 @@ raw multitouch). Per client platform:
 - **macOS / any webview session** — `Session/input.svelte.ts`: WKWebView `gesturestart /
   gesturechange / gestureend` on the video canvas, and a Ctrl + wheel with no Ctrl key held
   (Chromium / WebKit report a pinch that way; idle 200 ms = end) → `input_pinch` command
-  (`io_cmds.rs`). If a macOS native renderer ever covers the webview, the renderer must read
-  `NSEventTypeMagnify` itself and relay it (not done — no such renderer path yet).
+  (`io_cmds.rs`). The macOS pulsar-render panel ignores the mouse, so trackpad gestures still
+  reach the webview under it. With the macOS event tap engaged (`parity/mac-input`: canvas
+  control is off then) the gesture events are forwarded too (`osEngaged`, since `parity/all`):
+  the tap does not take gesture events. Untested on macOS hardware.
 Hosts: Windows, Linux and macOS all advertise `FEAT_PINCH` now (`host.rs media_features`);
 the injection is pulsar-core `DesktopInput::pinch` (see `../pulsar-core/docs/agents/modules.md`).
 

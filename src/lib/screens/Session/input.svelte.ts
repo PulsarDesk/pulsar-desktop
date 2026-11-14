@@ -66,6 +66,10 @@ type Inputs = {
 	 * Windows' hook never lets the click reach this canvas anyway): the canvas path stays out
 	 * of its way, or every click and key would go to the host twice. */
 	osCapture?: () => boolean;
+	/** That OS-level capture is engaged on this session (`kbd-engaged` … `kbd-released`). The
+	 * macOS event tap does not take trackpad gestures, so a pinch still arrives here as WebKit
+	 * gesture events and is forwarded while this is true. */
+	osEngaged?: () => boolean;
 };
 
 export class SessionInput {
@@ -529,18 +533,28 @@ export class SessionInput {
 		this.#pinchOn = false;
 		api.inputPinch(playId, 2, this.#pinchScale).catch(() => {});
 	}
+	// Who may forward a pinch: canvas control, or the engaged OS-level capture (macOS tap).
+	#pinchAllowed() {
+		return this.controlling || (!!this.#in.osCapture?.() && !!this.#in.osEngaged?.());
+	}
 	onGestureStart = (e: GestureLike) => {
-		if (!this.controlling) return;
+		if (!this.#pinchAllowed()) return;
 		e.preventDefault(); // never zoom the webview itself
 		this.#pinchBegin(true);
 	};
 	onGestureChange = (e: GestureLike) => {
-		if (!this.controlling) return;
+		if (!this.#pinchAllowed()) {
+			this.#pinchEnd();
+			return;
+		}
 		e.preventDefault();
 		if (this.#pinchOn && this.#pinchGesture) this.#pinchUpdate(e.scale ?? 1);
 	};
 	onGestureEnd = (e: GestureLike) => {
-		if (!this.controlling) return;
+		if (!this.#pinchAllowed()) {
+			this.#pinchEnd();
+			return;
+		}
 		e.preventDefault();
 		if (!this.#pinchOn || !this.#pinchGesture) return;
 		this.#pinchUpdate(e.scale ?? this.#pinchScale);

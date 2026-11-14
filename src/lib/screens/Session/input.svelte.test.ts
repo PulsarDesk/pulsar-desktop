@@ -25,7 +25,7 @@ import { api } from '#lib/api.js';
 
 // Free cursor ("Serbest imleç") on the canvas path (Linux / macOS): hovering the video takes
 // control, leaving it hands control back, an explicit release waits for a leave.
-function make(opts: { free?: boolean; blocked?: boolean; os?: boolean; game?: boolean } = {}) {
+function make(opts: { free?: boolean; blocked?: boolean; os?: boolean; osEngaged?: boolean; game?: boolean } = {}) {
 	const canvas = document.createElement('canvas');
 	canvas.getBoundingClientRect = () => ({ left: 0, top: 0, width: 100, height: 100, x: 0, y: 0, right: 100, bottom: 100, toJSON() {} }) as DOMRect;
 	let input!: SessionInput;
@@ -41,7 +41,8 @@ function make(opts: { free?: boolean; blocked?: boolean; os?: boolean; game?: bo
 			fitMode: () => 'fit',
 			pointerFree: () => opts.free ?? true,
 			hoverBlocked: () => opts.blocked ?? false,
-			osCapture: () => opts.os ?? false
+			osCapture: () => opts.os ?? false,
+			osEngaged: () => opts.osEngaged ?? false
 		});
 	});
 	return { input, stop };
@@ -207,6 +208,23 @@ describe('SessionInput touchpad pinch', () => {
 		input.stopControl();
 		flushSync();
 		expect(vi.mocked(api.inputPinch).mock.calls.at(-1)?.[1]).toBe(2);
+		stop();
+	});
+
+	it('forwards gesture pinches while the macOS event tap is engaged', () => {
+		const { input, stop } = make({ os: true, osEngaged: true });
+		expect(input.controlling).toBe(false);
+		input.onGestureStart(gesture('gesturestart', 1));
+		input.onGestureChange(gesture('gesturechange', 1.4));
+		input.onGestureEnd(gesture('gestureend', 1.4));
+		expect(vi.mocked(api.inputPinch).mock.calls.map((c) => c[1])).toEqual([0, 1, 1, 2]);
+		stop();
+	});
+
+	it('ignores gesture pinches while the macOS event tap is not engaged', () => {
+		const { input, stop } = make({ os: true, osEngaged: false });
+		input.onGestureStart(gesture('gesturestart', 1));
+		expect(api.inputPinch).not.toHaveBeenCalled();
 		stop();
 	});
 

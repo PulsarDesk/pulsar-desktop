@@ -676,7 +676,8 @@
 		// (kbdhook/imp.rs, pulsar-macinput); this is the canvas path — remote mode only.
 		pointerFree: () => ui.pointerFree && mode === 'remote' && caps.v?.platform !== 'windows',
 		hoverBlocked: () => dock.overlayOpen || media.stalled,
-		osCapture: () => isMac && macCapture
+		osCapture: () => isMac && macCapture,
+		osEngaged: () => nativeEngaged
 	});
 	function stopControl() {
 		input.stopControl();
