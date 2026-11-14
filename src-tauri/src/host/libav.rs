@@ -118,7 +118,7 @@ fn sdk_enabled(env: Option<&str>) -> bool {
 	!matches!(env.map(str::trim), Some("0") | Some("false") | Some("off"))
 }
 
-fn sdk_codec(c: VCodec) -> pulsar_capture::Codec {
+pub(super) fn sdk_codec(c: VCodec) -> pulsar_capture::Codec {
 	match c {
 		VCodec::H264 => pulsar_capture::Codec::H264,
 		VCodec::H265 => pulsar_capture::Codec::H265,
@@ -127,7 +127,7 @@ fn sdk_codec(c: VCodec) -> pulsar_capture::Codec {
 }
 
 /// A capture instant as an RTP 90 kHz timestamp (wrapping), counted from the stream's start.
-fn rtp_ts_90k(since_start: std::time::Duration) -> u32 {
+pub(super) fn rtp_ts_90k(since_start: std::time::Duration) -> u32 {
 	(since_start.as_micros() * 9 / 100) as u64 as u32
 }
 

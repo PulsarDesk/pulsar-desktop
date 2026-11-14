@@ -76,6 +76,9 @@ mod sysinput;
 pub(crate) mod takeover;
 #[cfg(target_os = "linux")]
 mod libav;
+// The NVENC SDK encoder as the Wayland capture's raw-frame encoder (RFI on Wayland hosts).
+#[cfg(target_os = "linux")]
+mod nvenc_frames;
 
 /// Dev aid for UX work: `PULSAR_MOCK_CAPTURE=1` makes this host stream a synthetic test
 /// pattern (`lavfi testsrc2`, software H.264/H.265) instead of the screen, skips the Wayland
@@ -2383,6 +2386,9 @@ pub(crate) async fn bring_online(
 					// drops it).
 					#[cfg(target_os = "linux")]
 					let libav = libav_slot.clone();
+					// Linux Wayland: the raw-frame capture's NVENC SDK encoder.
+					#[cfg(target_os = "linux")]
+					let wl_rfi = cap_slot.clone();
 					move |first: u16, last: u16| {
 						#[cfg(windows)]
 						if let Some(h) = native.lock().unwrap().as_ref() {
@@ -2391,6 +2397,10 @@ pub(crate) async fn bring_online(
 						#[cfg(target_os = "linux")]
 						if let Some(e) = libav.lock().unwrap().as_ref() {
 							e.request_rfi(first, last);
+						}
+						#[cfg(target_os = "linux")]
+						if let Some(c) = wl_rfi.lock().unwrap().as_ref() {
+							c.request_rfi(first, last);
 						}
 						let _ = (first, last);
 					}

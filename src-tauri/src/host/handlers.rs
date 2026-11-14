@@ -2342,6 +2342,45 @@ pub(super) fn make_on_stream(
 				(bitrate as f32 / 1000.0).round() as u32,
 				crate::i18n::t("stream.mbitTarget")
 			)));
+			// NVIDIA host: the NVENC SDK encoder on the portal's raw frames (reference-frame
+			// invalidation on a client-reported loss); pulsar-core falls back to `fragment` on
+			// the same portal session when it cannot be built.
+			let sdk_codec = super::libav::sdk_codec(gcodec);
+			let frames = super::nvenc_frames::wanted(
+				super::linux_nvenc_sdk(),
+				pulsar_capture::nvenc_codecs(),
+				genc,
+				&enc_pref,
+				sdk_codec,
+				std::env::var("PULSAR_NVENC_SDK").ok().as_deref(),
+			)
+			.then(|| {
+				super::nvenc_frames::factory(pulsar_capture::NvencCudaParams {
+					width: 0,
+					height: 0,
+					fps,
+					bitrate_kbps: bitrate,
+					dest: format!("{ip}:{port}"),
+					codec: sdk_codec,
+					low_latency: match req.quality {
+						QualityPref::Quality => false,
+						QualityPref::Latency => true,
+						QualityPref::Balanced => req.game_mode,
+					},
+					intra_refresh: req.loss_recovery == pulsar_core::service::LossRecovery::IntraRefresh,
+					rfi: req.rfi,
+					device: std::env::var("PULSAR_CUDA_DEVICE").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
+				})
+			});
+			// The stats line once the SDK encoder took the stream (the one above names the gst pick).
+			let sdk_label = format!(
+				"{} · {} · — · {} · {} {}",
+				vcodec_label(gcodec),
+				HwEncoder::Nvenc.label(),
+				fps_part,
+				(bitrate as f32 / 1000.0).round() as u32,
+				crate::i18n::t("stream.mbitTarget")
+			);
 			let token = restore_token.lock().unwrap().clone();
 			// AppImage: an encoder that only validated on the system gst runs there.
 			let system_gst = crate::process::gst_on_system(genc, gcodec);
@@ -2380,7 +2419,7 @@ pub(super) fn make_on_stream(
 				// instead of leaving the dialog up — capture.rs's SessionCloseGuard
 				// then closes the portal session and dismisses the picker.
 				let started = {
-					let start_fut = pulsar_core::capture::start(&ip, port, &fragment, token, system_gst);
+					let start_fut = pulsar_core::capture::start_with_frames(&ip, port, &fragment, token, system_gst, frames);
 					tokio::pin!(start_fut);
 					loop {
 						tokio::select! {
@@ -2398,6 +2437,9 @@ pub(super) fn make_on_stream(
 					Ok((cap, new_token)) => {
 						if let Some(t) = new_token {
 							*restore_token.lock().unwrap() = Some(t);
+						}
+						if cap.is_raw_frames() {
+							let _ = stats_task.try_send(DataMsg::Stats(sdk_label));
 						}
 						// Store under the slot lock ONLY while still current: a session
 						// that tore down (or re-streamed) during the portal dialog gets
