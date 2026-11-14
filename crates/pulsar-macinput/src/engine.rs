@@ -343,6 +343,9 @@ pub fn enable(new_sink: Arc<dyn Sink>, arm: Arm) -> bool {
 	);
 	ENABLED.store(true, SeqCst);
 	os::set_tap_enabled(true);
+	if tap {
+		os::refresh_geometry();
+	}
 	let kiosk = KIOSK_ENGAGE.load(SeqCst);
 	KIOSK_SESSION.store(kiosk, SeqCst);
 	if kiosk && !ENGAGED.load(SeqCst) {
@@ -417,6 +420,9 @@ fn engage_edge(click: Option<(f64, f64)>) {
 		*lock(&ENGAGED_AT) = Some(now);
 		*lock(&FOCUS_GRACE) = Some(now);
 		APP_FOCUSED.store(true, SeqCst);
+		if video_rect().is_none() {
+			os::refresh_geometry();
+		}
 		tracing::info!(relative = relative_mode(), "mac kbd capture ENGAGED");
 		apply_pointer_mode(click);
 		signal(&[Signal::Engaged]);

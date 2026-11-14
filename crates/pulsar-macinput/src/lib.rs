@@ -50,6 +50,7 @@ mod os {
 		cfg!(test)
 	}
 	pub fn set_tap_enabled(_on: bool) {}
+	pub fn refresh_geometry() {}
 	pub fn cursor_pos() -> Option<(f64, f64)> {
 		None
 	}

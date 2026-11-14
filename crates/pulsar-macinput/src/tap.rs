@@ -353,6 +353,26 @@ unsafe extern "C" fn tick_cb(_timer: CFRunLoopTimerRef, _info: *mut c_void) {
 		return;
 	}
 	let pool = objc_autoreleasePoolPush();
+	geometry();
+	if let Some(ours) = frontmost_is_ours() {
+		engine::focus_tick(ours);
+	}
+	engine::maintain();
+	objc_autoreleasePoolPop(pool);
+}
+
+/// Measure now (a fresh arm / engage must not wait for the next poll to know the video rect).
+pub fn refresh_geometry() {
+	// SAFETY: window-list reads inside an autorelease pool.
+	unsafe {
+		let pool = objc_autoreleasePoolPush();
+		geometry();
+		objc_autoreleasePoolPop(pool);
+	}
+}
+
+/// The video rect (and the window list for the click hit test) from the on-screen windows.
+unsafe fn geometry() {
 	let wins = window_list();
 	let cursor = cursor_pos();
 	let (frac, view) = engine::rect_inputs();
@@ -378,11 +398,6 @@ unsafe extern "C" fn tick_cb(_timer: CFRunLoopTimerRef, _info: *mut c_void) {
 	});
 	engine::set_geo(Geo { video, render });
 	*WINDOWS.lock().unwrap_or_else(|e| e.into_inner()) = layer0;
-	if let Some(ours) = frontmost_is_ours() {
-		engine::focus_tick(ours);
-	}
-	engine::maintain();
-	objc_autoreleasePoolPop(pool);
 }
 
 unsafe fn dict_i64(d: CFDictionaryRef, key: CFStringRef) -> Option<i64> {
