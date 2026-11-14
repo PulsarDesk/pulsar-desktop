@@ -1,4 +1,4 @@
-# Pulsar native host capture+encode crate (Windows-only).
+# Pulsar native host capture+encode crate (Windows + macOS).
 #
 # Replaces the host ffmpeg `ddagrab → h264_nvenc` hot path with a native
 # DXGI Desktop Duplication capture + NVENC SDK encode → hand-rolled RTP pipeline
@@ -7,10 +7,9 @@
 # and reports Ok/Err over a bounded handshake, so the host falls back cleanly
 # when DXGI/NVENC init fails on the running hardware.
 #
-# The whole crate is Windows-only: on non-Windows targets every public item is a
-# no-op stub returning an error (see lib.rs cfg-gating), so the workspace still
-# builds everywhere — only the `[target.'cfg(windows)'.dependencies]` GPU libs
-# link on Windows.
+# Windows (DXGI/WGC → NVENC/MF) and macOS (ScreenCaptureKit → VideoToolbox, src/mac/) have
+# real paths; on Linux every public item is a no-op stub returning an error (see lib.rs
+# cfg-gating), so the workspace still builds everywhere.
 [package]
 name = "pulsar-capture"
 version.workspace = true
@@ -18,7 +17,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
-description = "Windows native DXGI Desktop Duplication capture + zero-copy h264_nvenc → RTP (Sunshine-technique). Replaces the host ffmpeg ddagrab path; ffmpeg stays as fallback."
+description = "Native host capture + encode → RTP: Windows DXGI/WGC → NVENC (Sunshine technique), macOS ScreenCaptureKit → VideoToolbox. ffmpeg stays as fallback."
 publish = false
 
 [dependencies]
@@ -94,3 +93,12 @@ windows-core = "0.62"
 # NvEncodeAPICreateInstance and fills the fn-pointer table; a missing DLL / driver
 # is just an Err → the host falls back to ffmpeg.
 libloading = "0.9"
+
+# macOS native host path (src/mac/): ScreenCaptureKit capture (pulsar-core `macos_capture`,
+# macOS 12.3+, loaded at run time) → VideoToolbox VTCompressionSession (real-time H.264/HEVC,
+# no B-frames, live bitrate, keyframe on demand; hand-written bindings in src/mac/vt.rs, keys
+# resolved at run time) → the same RTP packetizer (`rtp.rs`). Nothing to install; a host where
+# SCK or VT refuses falls back to the ffmpeg avfoundation CLI path.
+[target.'cfg(target_os = "macos")'.dependencies]
+pulsar-core.workspace = true
+tracing.workspace = true

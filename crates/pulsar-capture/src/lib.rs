@@ -18,6 +18,7 @@
 //! can live in `members` unconditionally without breaking `cargo check` on mac/Linux).
 #![allow(clippy::missing_safety_doc)]
 
+#[cfg(not(target_os = "macos"))]
 use std::io;
 
 // ===========================================================================
@@ -79,7 +80,8 @@ pub enum Codec {
 pub struct CaptureStats {
 	/// `"dxgi"` (Desktop Duplication), `"wgc"` (whole monitor via Windows Graphics Capture),
 	/// `"wgc-window"` (one window) — all NVENC — or `"dxgi-mf"` (Desktop Duplication + the
-	/// display GPU's own encoder through Media Foundation); `""` before the first build.
+	/// display GPU's own encoder through Media Foundation); `"sck"` on macOS (ScreenCaptureKit +
+	/// VideoToolbox); `""` before the first build.
 	pub source: &'static str,
 	/// A fresh frame composed → its access unit handed to RTP (capture wait + any cross-GPU
 	/// hop + colour convert + encode): median / 90th percentile in µs. 0 on a static screen.
@@ -154,6 +156,7 @@ impl LiveStats {
 				2 => "wgc",
 				3 => "wgc-window",
 				4 => "dxgi-mf",
+				5 => "sck",
 				_ => "",
 			},
 			latency_p50_us: self.lat_p50.load(Relaxed),
@@ -371,6 +374,13 @@ pub use rtp::{RtpEgress, RtpSender};
 // Cross-platform module: Windows enumerates real windows; the non-Windows arms are stubs so
 // the workspace builds everywhere and the host uses its display path off Windows.
 pub mod window;
+
+// macOS native path: ScreenCaptureKit (pulsar-core) → VideoToolbox → `rtp.rs`. The pure parts
+// (Annex B rewrite, sizes/rates/timestamps) build and are unit-tested on every target.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod mac;
+#[cfg(target_os = "macos")]
+pub use mac::{display_rect, list_displays, start_capture_encode};
 pub use window::{
 	find_window_for_launch, list_windows as list_capture_windows, window_pid, WindowDesc,
 };
@@ -1095,7 +1105,7 @@ pub fn list_displays() -> Vec<DisplayDesc> {
 }
 
 /// Non-Windows stub (see [`list_displays`]).
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn list_displays() -> Vec<DisplayDesc> {
 	Vec::new()
 }
@@ -1125,19 +1135,19 @@ pub fn display_rect(output_idx: u32) -> Option<DisplayRect> {
 	unsafe { dxgi::CaptureDevice::output_rect(output_idx) }
 }
 
-/// Non-Windows stub (see [`display_rect`]).
-#[cfg(not(windows))]
+/// Stub where no native path exists (see [`display_rect`]; macOS has its own in `mac/`).
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn display_rect(_output_idx: u32) -> Option<DisplayRect> {
 	None
 }
 
-/// Non-Windows stub: the native path is Windows-only, so callers `cfg`-gate the call site and
-/// this exists purely to keep the symbol present for a clean cross-platform `cargo check`.
-#[cfg(not(windows))]
+/// Stub where no native path exists (Linux): callers `cfg`-gate the call site and this keeps
+/// the symbol present for a clean cross-platform `cargo check`. Windows and macOS have real ones.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn start_capture_encode(_cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 	Err(io::Error::new(
 		io::ErrorKind::Unsupported,
-		"native capture is Windows-only",
+		"native capture exists on Windows and macOS only",
 	))
 }
 
