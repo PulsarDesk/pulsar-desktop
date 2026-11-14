@@ -51,9 +51,18 @@ mod stream;
 #[cfg(target_os = "windows")]
 mod win;
 
-// macOS: overlay-only eframe stub for now (native VideoToolbox→Metal video is Task 10).
+// macOS: native zero-copy renderer (borderless panel over the app window + Metal +
+// VideoToolbox decode), the analogue of `win`.
 #[cfg(target_os = "macos")]
-mod desktop;
+mod mac;
+// The macOS backend's pure parts (bitstream conversion for VideoToolbox, picture placement),
+// unit-tested on every host.
+#[cfg(all(test, not(target_os = "macos")))]
+#[path = "mac/bitstream.rs"]
+mod mac_bitstream;
+#[cfg(all(test, not(target_os = "macos")))]
+#[path = "mac/view.rs"]
+mod mac_view;
 
 #[cfg(all(unix, not(target_os = "macos")))]
 fn main() {
@@ -82,8 +91,14 @@ fn main() {
 
 #[cfg(target_os = "macos")]
 fn main() {
+	// `--probe`: which codecs VideoToolbox decodes here (in hardware or not), same JSON as the
+	// Windows / Linux probes.
+	if std::env::args().any(|a| a == "--probe") {
+		println!("{}", mac::decode::probe_json());
+		return;
+	}
 	apply_lang();
-	desktop::run();
+	mac::run();
 }
 
 #[cfg(not(any(

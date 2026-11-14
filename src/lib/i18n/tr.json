@@ -543,6 +543,7 @@
 	"session.videoErr": "Video bağlantısı kurulamadı.",
 	"session.streamStopped": "Yayın durdu — host ekran paylaşımını durdurmuş olabilir.",
 	"session.noVideo": "Görüntü gelmiyor — host kodlayıcıyı başlatamamış olabilir (host tarafında Ayarlar → Kodlayıcı: Software dene).",
+	"session.rendererFailed": "Görüntü gösterilemiyor — yerleşik video oluşturucu başlatılamadı. İsteğe bağlı yedek oynatıcı olarak mpv kurabilirsiniz (brew install mpv).",
 	"session.noDecode": "Veri geliyor ama çözülemiyor — bu cihazın çözücüsü yayını açamadı; başka bir codec dene.",
 	"session.connecting": "Bağlanılıyor…",
 	"session.waiting": "Host görüntüyü hazırlıyor — ekran paylaşım iznini onayla.",

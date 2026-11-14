@@ -485,8 +485,9 @@ pub(crate) fn kbd_web_key(code: u32, down: bool) -> Result<(), String> {
 /// Client (native): position the in-app native video over the session tab's content
 /// area. Linux: moves the pass-through GDK container (viewport CSS px == GDK logical
 /// px). Windows: streams `viewrect` (scaled to PHYSICAL px) to the renderer child over
-/// stdin — same effect, chrome/tabs stay visible. Zero area hides it (the tab went
-/// inactive / the session screen unmounted). No-op on macOS.
+/// stdin — same effect, chrome/tabs stay visible. macOS: the same `viewrect` line in points
+/// (the renderer's panel follows it). Zero area hides it (the tab went inactive / the session
+/// screen unmounted).
 #[tauri::command]
 pub(crate) fn native_view_rect(
 	app: AppHandle,
@@ -528,7 +529,21 @@ pub(crate) fn native_view_rect(
 		}
 	}
 	#[cfg(target_os = "macos")]
-	let _ = (app, state, id, x, y, w, h);
+	{
+		// macOS: the renderer keeps its panel over this rect, in POINTS from the window's
+		// top-left (CSS px == Cocoa points; the panel's backing scale does the rest).
+		let _ = &app;
+		use std::io::Write as _;
+		let stdin = state.plays.lock().unwrap().get(&id).map(|p| {
+			p.render_seed.lock().unwrap().viewrect = Some((x, y, w, h));
+			p.render_stdin.clone()
+		});
+		if let Some(stdin) = stdin {
+			if let Some(si) = stdin.lock().unwrap().as_mut() {
+				let _ = writeln!(si, "viewrect {x} {y} {w} {h}");
+			}
+		}
+	}
 	Ok(())
 }
 

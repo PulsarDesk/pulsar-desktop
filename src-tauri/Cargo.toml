@@ -132,6 +132,11 @@ gtk = "0.18"
 gdk = "0.18"
 gdkx11 = "0.18"
 
+# macOS: the app window's `windowNumber` for the native renderer (`--wid`), read through the
+# Objective-C runtime (objc2 is already in the tree via tauri/wry).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+
 # Unix process control (kill/SIGTERM for graceful renderer teardown, PDEATHSIG on
 # Linux): needed on macOS too — `stop_render_child` is cfg(unix).
 [target.'cfg(unix)'.dependencies]

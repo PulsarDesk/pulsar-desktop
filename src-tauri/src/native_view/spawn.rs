@@ -301,7 +301,6 @@ pub fn spawn_render(
 /// (decoder init failed, decode error, present init failed, device removed) is `eprintln!`;
 /// with stderr inherited it vanishes in a release GUI launch — piping it here is what makes
 /// a black-screen cause visible in the app log at all.
-#[cfg(any(all(unix, not(target_os = "macos")), windows))]
 fn pipe_stderr_to_tracing(child: &mut Child) {
 	if let Some(err) = child.stderr.take() {
 		std::thread::spawn(move || {
@@ -319,7 +318,12 @@ fn pipe_stderr_to_tracing(child: &mut Child) {
 /// on a D3D11 swapchain inside a child HWND of the app window (replacing the webview WebCodecs
 /// path). stdin carries `stat …` / `open|close` / `pace 0|1`; stdout carries `vidsink-fps …`
 /// / `ov …`. Tied to the Job Object so it dies with Pulsar (job.rs). None on spawn failure.
-#[cfg(windows)]
+///
+/// macOS uses it too: `hwnd` is then the app window's `windowNumber` (`process::render_parent`)
+/// and the renderer (VideoToolbox + Metal) keeps a borderless panel over the session tab — macOS
+/// has no cross-process child windows. There the renderer exits by itself when Pulsar dies (it
+/// watches its parent process), as no job object exists.
+#[cfg(any(windows, target_os = "macos"))]
 pub fn spawn_render_win(
 	bin: &str,
 	sdp: &PathBuf,
@@ -346,6 +350,7 @@ pub fn spawn_render_win(
 	crate::no_window(&mut cmd);
 	match cmd.spawn() {
 		Ok(mut child) => {
+			#[cfg(windows)]
 			crate::job::assign(&child);
 			pipe_stderr_to_tracing(&mut child);
 			Some(child)

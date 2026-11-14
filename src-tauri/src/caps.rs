@@ -183,8 +183,22 @@ pub(crate) fn probe_all(app: &AppHandle) -> LocalCaps {
 /// Media Foundation, and reporting NOTHING would grey out every codec in Settings on a box
 /// that can in fact stream. HEVC is deliberately NOT claimed here — it needs the (optional)
 /// HEVC Video Extensions, so an unprobed guess is exactly what steered negotiation into a
-/// black screen. Elsewhere, report nothing rather than guessing.
+/// black screen. macOS keeps the pair its fallback players (mpv / ffplay) decode in software
+/// on every Mac. Elsewhere, report nothing rather than guessing.
 fn probe_unavailable(platform: &str) -> Vec<DecoderCap> {
+	if platform == "macos" {
+		return ["h264", "h265"]
+			.iter()
+			.map(|c| DecoderCap {
+				codec: c.to_string(),
+				ok: true,
+				name: "mpv".into(),
+				hw: false,
+				tier: "software".into(),
+				incompatible_with: Vec::new(),
+			})
+			.collect();
+	}
 	if platform != "windows" {
 		return Vec::new();
 	}
@@ -199,27 +213,11 @@ fn probe_unavailable(platform: &str) -> Vec<DecoderCap> {
 }
 
 fn probe_decoders(app: &AppHandle, platform: &str) -> Vec<DecoderCap> {
-	// macOS: the client is system mpv (no probeable native backend yet) — assume the
-	// universal software pair. Windows falls through to the real renderer probe below
-	// (`pulsar-render --probe`, MFT enumeration): the old hardcoded "MF decodes
-	// h264+h265, always" claim advertised HEVC on machines without the HEVC Video
-	// Extensions / with async-only MFTs, steering negotiation into a black screen.
-	if platform == "macos" {
-		return ["h264", "h265"]
-			.iter()
-			.map(|c| DecoderCap {
-				codec: c.to_string(),
-				ok: true,
-				name: "mpv".into(),
-				hw: false,
-				tier: "software".into(),
-				incompatible_with: Vec::new(),
-			})
-			.collect();
-	}
-	// macOS returned above (mpv client, no probeable backend) — `render_bin` is
-	// configured out there, so the renderer probe only compiles where it exists.
-	#[cfg(not(target_os = "macos"))]
+	// Every platform asks its renderer (`pulsar-render --probe`): Windows enumerates the MFTs
+	// it can drive (the old hardcoded "MF decodes h264+h265, always" advertised HEVC on
+	// machines without the HEVC Video Extensions — a black screen), macOS asks VideoToolbox
+	// (`VTIsHardwareDecodeSupported`: H.264 / HEVC always, in hardware or not; AV1 only in
+	// hardware), Linux decodes canned frames.
 	{
 		let render = crate::process::render_bin(app);
 		let mut cmd = std::process::Command::new(&render);
@@ -275,8 +273,6 @@ fn probe_decoders(app: &AppHandle, platform: &str) -> Vec<DecoderCap> {
 			})
 			.unwrap_or_default()
 	}
-	#[cfg(target_os = "macos")]
-	Vec::new()
 }
 
 /// Spawn the startup probe: runs in the background, stores the result in AppState and
@@ -376,7 +372,6 @@ pub(crate) fn refresh_nvenc(app: &AppHandle) {
 }
 
 /// `Command::output` with a deadline (the child is killed past it → Err TimedOut).
-#[cfg(not(target_os = "macos"))]
 fn output_within(mut cmd: std::process::Command, limit: std::time::Duration) -> std::io::Result<std::process::Output> {
 	use std::io::Read as _;
 	cmd.stdout(std::process::Stdio::piped());

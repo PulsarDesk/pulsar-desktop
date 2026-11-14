@@ -114,7 +114,8 @@ pub(crate) async fn set_play_codec(
 	// known platform constraint).
 	#[cfg(any(
 		all(unix, not(target_os = "macos"), not(target_arch = "aarch64")),
-		windows
+		windows,
+		target_os = "macos"
 	))]
 	respawn_render_for_codec(&app, &state, id, &codec).await;
 	// RK3588: the renderer process must survive (killing it corrupts WebKit's shared
@@ -193,7 +194,8 @@ fn reopen_render_for_codec(state: &State<'_, AppState>, id: u64, codec: &str) {
 /// through); Windows re-resolves the app HWND and respawns the child renderer there.
 #[cfg(any(
 	all(unix, not(target_os = "macos"), not(target_arch = "aarch64")),
-	windows
+	windows,
+	target_os = "macos"
 ))]
 async fn respawn_render_for_codec(
 	app: &AppHandle,
@@ -252,7 +254,7 @@ async fn respawn_render_for_codec(
 			return;
 		}
 	};
-	#[cfg(not(windows))]
+	#[cfg(all(unix, not(target_os = "macos")))]
 	crate::render::set_container_visible(app, id, false);
 	// Kill the old renderer FIRST so it releases its UDP video port before the new
 	// renderer tries to bind the same port. Both processes use the same video_port
@@ -271,7 +273,7 @@ async fn respawn_render_for_codec(
 		.map(|v| v == "1" || v == "on" || v == "true")
 		.unwrap_or(false);
 	let rbin = crate::process::render_bin(app);
-	#[cfg(not(windows))]
+	#[cfg(all(unix, not(target_os = "macos")))]
 	let mut rc = crate::native_view::spawn_render(
 		&rbin,
 		&sdp,
@@ -280,13 +282,12 @@ async fn respawn_render_for_codec(
 		pace_default,
 		crate::i18n::lang(),
 	);
-	#[cfg(windows)]
+	#[cfg(any(windows, target_os = "macos"))]
 	let mut rc = {
-		let _ = wid; // X11 container XID — Linux-only; the HWND is re-resolved fresh
+		let _ = wid; // X11 container XID — Linux-only; the HWND / window number is re-resolved fresh
 		// The window showing this session (a detached tab window, or main).
 		crate::tabwin::window_for_play(app, id)
-			.and_then(|w| w.hwnd().ok())
-			.map(|h| h.0 as u64)
+			.and_then(|w| crate::process::render_parent(&w))
 			.and_then(|h| {
 			crate::native_view::spawn_render_win(
 				&rbin,
@@ -304,7 +305,7 @@ async fn respawn_render_for_codec(
 		// Spawn failed: the old renderer was already reaped, so the session is now
 		// without video. Surface the failure via a warning; the session stays alive
 		// (control channel intact) and the user can retry the codec/monitor switch.
-		#[cfg(not(windows))]
+		#[cfg(all(unix, not(target_os = "macos")))]
 		crate::render::set_container_visible(app, id, true);
 		tracing::warn!(id, codec, "renderer respawn failed after killing old renderer");
 		return;
@@ -497,7 +498,7 @@ async fn respawn_render_for_codec(
 	// re-sends an IDR immediately on restart) — revealing earlier shows its black
 	// GL clear instead of the webview's switching veil. (Linux only: Windows has
 	// no container to reveal.)
-	#[cfg(not(windows))]
+	#[cfg(all(unix, not(target_os = "macos")))]
 	{
 		tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
 		// Re-check session liveness after the sleep: a disconnect during the
@@ -755,7 +756,8 @@ async fn do_monitor_switch(
 	if !codec.is_empty() {
 		#[cfg(any(
 			all(unix, not(target_os = "macos"), not(target_arch = "aarch64")),
-			windows
+			windows,
+			target_os = "macos"
 		))]
 		respawn_render_for_codec(app, state, id, &codec).await;
 		#[cfg(all(unix, not(target_os = "macos"), target_arch = "aarch64"))]
@@ -835,7 +837,8 @@ pub(crate) async fn set_play_window(
 	if !codec.is_empty() {
 		#[cfg(any(
 			all(unix, not(target_os = "macos"), not(target_arch = "aarch64")),
-			windows
+			windows,
+			target_os = "macos"
 		))]
 		respawn_render_for_codec(&app, &state, id, &codec).await;
 		#[cfg(all(unix, not(target_os = "macos"), target_arch = "aarch64"))]
@@ -883,7 +886,8 @@ pub(crate) async fn set_play_adapt(
 	if !codec.is_empty() {
 		#[cfg(any(
 			all(unix, not(target_os = "macos"), not(target_arch = "aarch64")),
-			windows
+			windows,
+			target_os = "macos"
 		))]
 		respawn_render_for_codec(&app, &state, id, &codec).await;
 		#[cfg(all(unix, not(target_os = "macos"), target_arch = "aarch64"))]

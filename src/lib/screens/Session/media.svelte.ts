@@ -9,7 +9,7 @@
 // in the component's reactive scope and tear down with it).
 
 // Video is rendered NATIVELY in-app on every platform now (pulsar-render: rkmpp on Linux,
-// Media Foundation+D3D11 on Windows; mpv/VideoToolbox on macOS) — the webview WebCodecs
+// Media Foundation+D3D11 on Windows; VideoToolbox+Metal on macOS, mpv only as a fallback) — the webview WebCodecs
 // video path was removed (too slow). Audio plays natively too (src-tauri/src/native_audio.rs,
 // libopus + SDL3): nothing of the stream reaches the webview.
 import { onPlayDecoder, onPlayRtt, onPlayStats, onPlayVStats } from '#lib/api.js';
@@ -21,6 +21,15 @@ import { t } from '#lib/i18n.svelte.js';
 // this long; the host's verdict ("!" Stats) overrides the generic text when it arrives.
 const NO_VIDEO_SECS = 12;
 import { listenScope } from '#lib/api.events.js';
+
+/** The video error carried by a `host-stats` label, or null for a plain stats line. A leading
+ * "!" marks a stream ERROR; "!@<key>" is one the app raises itself as an i18n key (e.g. the
+ * macOS renderer and its fallbacks failed to start), shown translated. */
+export function statsVideoError(label: string, tr: (key: string) => string = t): string | null {
+	if (!label.startsWith('!')) return null;
+	const msg = label.slice(1);
+	return msg.startsWith('@') ? tr(msg.slice(1)) : msg;
+}
 
 type Inputs = {
 	playId: () => number;
@@ -94,11 +103,14 @@ export class SessionMedia {
 	constructor(inputs: Inputs, _canvas: () => HTMLCanvasElement) {
 		this.#in = inputs;
 
-		// Real client-side stats from mpv (no WebCodecs sink in the native/single-surface
-		// paths). CRITICAL: the default --wid path has embedded===false but native===true, so
-		// gate on (native || embedded) — otherwise the host's --wid IPC vstats are ignored and
-		// every number stays zero. Win/macOS use native=false here and keep the WebCodecs
-		// videoSink.stats() path below, so the two sources never fight.
+		// Real client-side stats from the native renderer (pulsar-render on Windows, Linux and
+		// macOS — on macOS it runs in a borderless panel that tracks the session tab and gets
+		// its viewrect in points — or the mpv/ffplay fallback). No WebCodecs sink in the
+		// native/single-surface paths. CRITICAL: the default --wid path has embedded===false
+		// but native===true, so gate on (native || embedded) — otherwise the renderer's vstats
+		// are ignored and every number stays zero. Only a session with no native renderer
+		// (native=false) keeps the WebCodecs videoSink.stats() path below, so the two sources
+		// never fight.
 		$effect(() => {
 			if (!(inputs.native() || inputs.embedded()) || inputs.playId() < 0) return;
 			const playId = inputs.playId();
@@ -146,8 +158,11 @@ export class SessionMedia {
 					// A leading "!" marks a stream ERROR from the host (every encoder candidate
 					// died, or its screen capture failed/stopped): the session's video error,
 					// not a stats row.
-					if (e.label.startsWith('!')) {
-						this.videoErr = e.label.slice(1);
+					// "!@<key>" = a client-side error the app raises itself, shown translated
+					// (see statsVideoError).
+					const err = statsVideoError(e.label);
+					if (err !== null) {
+						this.videoErr = err;
 						return;
 					}
 					this.hostStats = e.label;
