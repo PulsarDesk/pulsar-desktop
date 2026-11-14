@@ -2112,7 +2112,8 @@ impl Presenter {
 		// the host→displayed scale for sizing the side-channel pointer (see VIDEO_SRC).
 		*VIDEO_SRC.lock().unwrap() = [vw, vh];
 		// Picture upscaling: when the frame is scaled UP, draw it into a stream-sized texture
-		// first and let FSR (EASU + RCAS) put it on screen — see gl_fsr.rs. Never for the 1:1
+		// first and let the upscaler (FSR = EASU + RCAS, or SGSR) put it on screen — see
+		// gl_fsr.rs. Never for the 1:1
 		// ORIGINAL fit.
 		let mut fsr_prev: Option<Option<glow::Framebuffer>> = None;
 		if crate::gl_fsr::enabled()
@@ -2138,7 +2139,10 @@ impl Presenter {
 			gl.viewport(vx, vy, rw, rh);
 		}
 		// The menu's stream line names the upscaler only while it really runs.
-		crate::overlay::set_upscaler_active(if fsr_prev.is_some() { "FSR" } else { "" });
+		crate::overlay::set_upscaler_active(match (&fsr_prev, self.fsr.as_ref()) {
+			(Some(_), Some(f)) => f.active_name(),
+			_ => "",
+		});
 		let quad: [f32; 24] = [
 			-1.0, -1.0, 0.0, 1.0, 1.0, -1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, -1.0, -1.0, 0.0, 1.0,
 			1.0, 1.0, 1.0, 0.0, -1.0, 1.0, 0.0, 0.0,
@@ -2152,7 +2156,7 @@ impl Presenter {
 		gl.draw_arrays(glow::TRIANGLES, 0, 6);
 		if let (Some(prev), Some(f)) = (fsr_prev, self.fsr.as_mut()) {
 			if !f.finish(gl, prev, vx, vy, rw, rh) {
-				eprintln!("pulsar-render: FSR off (no render target) — plain scaling");
+				eprintln!("pulsar-render: upscaler off (no render target) — plain scaling");
 				self.fsr_failed = true;
 			}
 		}

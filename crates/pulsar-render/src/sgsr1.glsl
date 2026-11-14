@@ -1,12 +1,15 @@
 // Snapdragon Game Super Resolution 1 (SGSR v1), from github.com/quic/snapdragon-gsr
 // (sgsr/v1/include/glsl/sgsr1_shader_mobile.frag), ported to GLSL ES 1.00 for Pulsar's GL
 // presenters (Linux `gl_fsr.rs`; reusable by any GL / GLSL renderer — the Windows HLSL twin is
-// `win/sgsr1.hlsl`). Same math as the upstream mobile variant in its RGBA operation mode (edge
-// analysis on the green channel, no edge direction); the only change is that ES 1.00 has no
-// `textureGather`, so each 2x2 gather is four explicit texel-centre fetches (`gatherG`, same
-// component order as the hardware gather).
+// `win/sgsr1.hlsl`). Same math as the CURRENT upstream mobile variant (2025 revision) in its
+// RGBA operation mode (edge analysis on the green channel, no edge direction):
+// std = 2.181818 / sum, distance weight 0.55, and the luma change limited to +-23/255. The
+// 2023 revision the Windows port started from (std = (10.14185 / sum)^2, weight 0.5, no limit)
+// over-sharpens desktop text into dark halos — the 2026-11-13 Windows A/B. The only other change
+// is that ES 1.00 has no `textureGather`, so each 2x2 gather is four explicit texel-centre
+// fetches (`gatherG`, same component order as the hardware gather).
 /*
-Copyright (c) 2023, Qualcomm Innovation Center, Inc. All rights reserved.
+Copyright (c) 2023-2025, Qualcomm Innovation Center, Inc. All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
@@ -43,6 +46,7 @@ SPDX-License-Identifier: BSD-3-Clause
 
 #define SGSR_EDGE_THRESHOLD (8.0 / 255.0)
 #define SGSR_EDGE_SHARPNESS 2.0
+#define SGSR_MAX_DELTA (23.0 / 255.0)
 
 // Green of texel `t` (integer texel index; the centre fetch is exact under bilinear filtering).
 float sgsrG(vec2 t){ return texture2D(tex, (t + 0.5) * con0.zw).g; }
@@ -61,7 +65,7 @@ float fastLanczos2(float x){
 }
 
 vec2 weightY(float dx, float dy, float c, float std){
-	float x = ((dx * dx) + (dy * dy)) * 0.5 + clamp(abs(c) * std, 0.0, 1.0);
+	float x = ((dx * dx) + (dy * dy)) * 0.55 + clamp(abs(c) * std, 0.0, 1.0);
 	float w = fastLanczos2(x);
 	return vec2(w, w * c);
 }
@@ -90,8 +94,7 @@ void main(){
 			+ abs(upDown.x) + abs(upDown.y) + abs(upDown.z) + abs(upDown.w);
 		// Guarded (upstream divides as is): a flat 4x4 never gets here with highp, but a
 		// mediump-only GPU could round `sum` to 0.
-		float sumMean = 10.14185 / max(sum, 1e-4);
-		float std = sumMean * sumMean;
+		float std = 2.181818 / max(sum, 1e-4);
 		vec2 aWY = weightY(pl.x, pl.y + 1.0, upDown.x, std);
 		aWY += weightY(pl.x - 1.0, pl.y + 1.0, upDown.y, std);
 		aWY += weightY(pl.x - 1.0, pl.y - 2.0, upDown.z, std);
@@ -109,7 +112,7 @@ void main(){
 		float max4 = max(max(left.y, left.z), max(right.x, right.w));
 		float min4 = min(min(left.y, left.z), min(right.x, right.w));
 		finalY = clamp(SGSR_EDGE_SHARPNESS * finalY, min4, max4);
-		float deltaY = finalY - pix.w;
+		float deltaY = clamp(finalY - pix.w, -SGSR_MAX_DELTA, SGSR_MAX_DELTA);
 		pix.xyz = clamp(pix.xyz + deltaY, 0.0, 1.0);
 	}
 	gl_FragColor = vec4(pix.xyz, 1.0);

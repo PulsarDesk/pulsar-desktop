@@ -446,4 +446,14 @@ mod tests {
 		assert!(c.contains("gl_FragColor"));
 		assert!(c.contains("void main()"));
 	}
+
+	/// The 2025 upstream math (the 2023 math put dark halos around desktop text).
+	#[test]
+	fn sgsr_uses_tamed_math() {
+		let c = code(SGSR);
+		assert!(c.contains("2.181818 / max(sum"), "std = 2.181818 / sum");
+		assert!(c.contains("* 0.55 +"), "distance weight 0.55");
+		assert!(c.contains("clamp(finalY - pix.w, -SGSR_MAX_DELTA, SGSR_MAX_DELTA)"), "luma change limit");
+		assert!(!c.contains("10.14185"), "old std constant");
+	}
 }
