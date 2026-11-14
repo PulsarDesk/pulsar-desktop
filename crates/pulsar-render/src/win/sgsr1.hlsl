@@ -1,5 +1,9 @@
 // Snapdragon Game Super Resolution 1 (SGSR v1), from github.com/quic/snapdragon-gsr
-// (sgsr/v1/include/hlsl), unmodified except for the Pulsar wrapper below.
+// (sgsr/v1/include/hlsl), plus the Pulsar wrapper below and three lines brought over from the
+// upstream GLSL mobile shader's 2025 revision (the HLSL there still has the 2023 math):
+// std = 2.181818 / sum instead of (10.14185 / sum)^2, distance weight 0.55 instead of 0.5, and
+// the luma change limited to +-23/255. The 2023 math over-sharpened desktop text into dark halos
+// (2026-11-13 A/B on an Adreno). The GLSL twin for GL presenters is `../sgsr1.glsl`.
 /*
 Copyright (c) 2023, Qualcomm Innovation Center, Inc. All rights reserved.
 
@@ -117,7 +121,7 @@ half2 weightY(half dx, half dy, half c, half data)
 	half x = (((dx*dx)+(dy*dy))+((edgeDis*edgeDis)*((clamp(((c*c)*std),0.0,1.0)*0.7)+-1.0)));
 #else
 	half std = data;
-	half x = ((dx*dx)+(dy* dy))* half(0.5) + clamp(abs(c)*std, 0.0, 1.0);
+	half x = ((dx*dx)+(dy* dy))* half(0.55) + clamp(abs(c)*std, 0.0, 1.0);
 #endif
 
 	half w = fastLanczos2(x);
@@ -182,8 +186,7 @@ void SgsrYuvH(
 			pix.w =pix[mode] - mean;
 
 			half sum = (((((abs(left.x)+abs(left.y))+abs(left.z))+abs(left.w))+(((abs(right.x)+abs(right.y))+abs(right.z))+abs(right.w)))+(((abs(upDown.x)+abs(upDown.y))+abs(upDown.z))+abs(upDown.w)));
-			half sumMean = 1.014185e+01/sum;
-			half std = (sumMean*sumMean);	
+			half std = half(2.181818)/sum;
 
 #if defined(UseEdgeDirection)
 			half3 data = half3(std, edgeDirection(left, right));
@@ -211,6 +214,7 @@ void SgsrYuvH(
 			finalY = clamp(edgeSharpness*finalY, min4, max4);
 					
 			half deltaY = finalY -pix.w;
+			deltaY = clamp(deltaY, half(-23.0/255.0), half(23.0/255.0));
 
 			pix.x = saturate((pix.x+deltaY));
 			pix.y = saturate((pix.y+deltaY));
