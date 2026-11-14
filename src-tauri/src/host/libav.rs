@@ -468,15 +468,24 @@ unsafe fn build_graph(
 }
 
 /// `av_opt_set_int_list` is a macro in C; this is its expansion for a `-1`-terminated
-/// `AVPixelFormat` list on the `pix_fmts` option.
+/// `AVPixelFormat` list on the `pix_fmts` option. Like the macro, the terminator is NOT part of
+/// the value ([`int_list_len`]): buffersink reads every int it is given as a format, and FFmpeg
+/// 4.4 (Ubuntu 22.04, the release Linux build's base) took the `-1` for one and crashed in
+/// `avfilter_graph_config` (2026-11-14, CI). Newer FFmpeg skipped it.
 unsafe fn av_opt_set_int_list_workaround(obj: *mut ff::AVFilterContext, list: &[c_int]) -> c_int {
+	let n = int_list_len(list, -1);
 	ff::av_opt_set_bin(
 		obj as *mut _,
 		cstr("pix_fmts").as_ptr(),
 		list.as_ptr() as *const u8,
-		(list.len() * std::mem::size_of::<c_int>()) as c_int,
+		(n * std::mem::size_of::<c_int>()) as c_int,
 		ff::AV_OPT_SEARCH_CHILDREN as c_int,
 	)
+}
+
+/// `av_int_list_length`: how many entries come before the terminator `term`.
+fn int_list_len(list: &[c_int], term: c_int) -> usize {
+	list.iter().position(|&v| v == term).unwrap_or(list.len())
 }
 
 unsafe fn open_encoder(p: &Params, pix_fmt: ff::AVPixelFormat) -> Result<*mut ff::AVCodecContext, String> {
@@ -870,6 +879,14 @@ mod tests {
 		p.encoder = HwEncoder::Nvenc;
 		p.source = Source::Test;
 		assert!(p.sdk_params().is_none());
+	}
+
+	#[test]
+	fn the_pix_fmts_list_terminator_is_not_a_format() {
+		assert_eq!(int_list_len(&[0, -1], -1), 1);
+		assert_eq!(int_list_len(&[0, 23, -1], -1), 2);
+		assert_eq!(int_list_len(&[-1], -1), 0);
+		assert_eq!(int_list_len(&[5], -1), 1);
 	}
 
 	#[test]
