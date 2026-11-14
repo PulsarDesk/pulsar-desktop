@@ -53,6 +53,18 @@ static STOP: AtomicBool = AtomicBool::new(false);
 /// the decode loop tears the old demuxer+decoder down and reopens in place.
 static REOPEN: AtomicBool = AtomicBool::new(false);
 static REOPEN_SDP: Mutex<Option<String>> = Mutex::new(None);
+/// Set by the presenter side after a GL context loss (GPU reset, NVIDIA suspend/resume purge):
+/// the decode thread reopens its hardware decoder in place on a fresh hw device context. A
+/// VAAPI/CUDA decoder whose device died with the GPU keeps "decoding" into dead surfaces —
+/// errors or garbage, never a picture — and the zero-output fallback does not catch it (it
+/// only watches a decoder that never produced a frame since it was opened).
+static DECODER_RESET: AtomicBool = AtomicBool::new(false);
+
+/// Ask the decode thread to reopen its hardware decoder (see [`DECODER_RESET`]); a no-op for a
+/// software decoder.
+pub fn request_decoder_reset() {
+	DECODER_RESET.store(true, Ordering::Relaxed);
+}
 /// True from the moment a reopen is requested (monitor/codec switch) until the new
 /// stream's first keyframe decodes — the overlay draws a "switching…" indicator over
 /// the held last frame so the user sees the change is in progress, not a hang. Only set
@@ -903,6 +915,42 @@ unsafe fn decode_once(sdp: &CString) {
 			// The env pin wins over the app-derived reorder wait for the whole session.
 			let maxdelay_pinned = std::env::var_os("PULSAR_MAXDELAY").is_some();
 			while !STOP.load(Ordering::Relaxed) && !REOPEN.load(Ordering::Relaxed) {
+				// GL context loss on the presenter side: reopen a hardware decoder on a fresh
+				// device context (its old one may have died with the GPU) and re-sync on the next
+				// keyframe (the renderer asked the host for one). When it no longer opens, the
+				// zero-output fallback below walks on to the next candidate.
+				if DECODER_RESET.swap(false, Ordering::Relaxed) && sel.hwdev.is_some() {
+					eprintln!("pulsar-render: reopening decoder {} after GL context loss", sel.name);
+					ff::avcodec_free_context(&mut dc);
+					dc = open_decoder(par, codec_id, &sel);
+					if dc.is_null() {
+						eprintln!("pulsar-render: decoder {} did not reopen", sel.name);
+						skip.push(sel.key());
+						let mut reopened = false;
+						while let Some(p) = crate::decode::select_skipping(codec_id, &skip) {
+							dc = open_decoder(par, codec_id, &p.sel);
+							if dc.is_null() {
+								skip.push(p.sel.key());
+								continue;
+							}
+							sel = p.sel;
+							announce_decoder(&sel);
+							force_readback = !sel.zero_copy;
+							reopened = true;
+							break;
+						}
+						if !reopened {
+							eprintln!("pulsar-render: every decoder candidate failed after GL context loss");
+							break 'decode;
+						}
+					}
+					gen = DEC_GEN.fetch_add(1, Ordering::Relaxed) + 1;
+					map_failed = false;
+					seen_key = false;
+					au_since_open = 0;
+					frames_since_open = 0;
+					fallback_exhausted = false;
+				}
 				let r = src.read(pkt, maxdelay_pinned);
 				// A switch that never produced its first keyframe within SWITCH_TIMEOUT_MS:
 				// intr_cb has aborted the (otherwise indefinite) demux read, or the RTP feed

@@ -1340,6 +1340,9 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 					// Everything decoded meanwhile was dropped, and a CUDA decoder may have died
 					// with the GPU: restart the picture from a keyframe.
 					crate::stream::rtp::NEED_IDR.store(true, Ordering::Relaxed);
+					// The GPU reset may have taken the hardware decoder's
+					// device with it: reopen it on a fresh one (the test hook exercises this too).
+					video::request_decoder_reset();
 				}
 				Err(e) => {
 					rebuild_fails += 1;
@@ -2374,4 +2377,37 @@ fn emit_cmd(state: &mut OverlayState, c: OverlayCmd) {
 		OverlayCmd::OpenFiles => println!("ov files"),
 	}
 	let _ = std::io::stdout().flush();
+}
+
+#[cfg(test)]
+mod gl_loss_tests {
+	use super::*;
+
+	#[test]
+	fn context_attribs_most_robust_first_plain_last() {
+		let plain = vec![egl::CONTEXT_CLIENT_VERSION, 2, egl::NONE];
+		assert_eq!(context_attrib_lists(false, true), vec![plain.clone()]);
+		let lists = context_attrib_lists(true, true);
+		assert_eq!(lists.len(), 3);
+		assert!(lists[0].contains(&EGL_GENERATE_RESET_ON_VIDEO_MEMORY_PURGE_NV));
+		assert!(!lists[1].contains(&EGL_GENERATE_RESET_ON_VIDEO_MEMORY_PURGE_NV));
+		assert!(lists[1].contains(&EGL_LOSE_CONTEXT_ON_RESET_EXT));
+		assert_eq!(lists[2], plain);
+		assert_eq!(context_attrib_lists(true, false).len(), 2);
+		// Every list is EGL_NONE-terminated, with an even number of key/value entries before it.
+		for l in lists {
+			assert_eq!(*l.last().unwrap(), egl::NONE);
+			assert_eq!(l.len() % 2, 1);
+		}
+	}
+
+	#[test]
+	fn reset_kinds_and_swap_losses() {
+		assert_eq!(reset_kind(GL_PURGED_CONTEXT_RESET_NV), "video memory purged (suspend/resume or VT switch)");
+		assert_eq!(reset_kind(GL_INNOCENT_CONTEXT_RESET), "GPU reset (another process)");
+		assert_eq!(reset_kind(0x1234), "GPU reset");
+		assert!(swap_error_is_loss(egl::Error::ContextLost));
+		assert!(swap_error_is_loss(egl::Error::BadSurface));
+		assert!(!swap_error_is_loss(egl::Error::BadAlloc));
+	}
 }
