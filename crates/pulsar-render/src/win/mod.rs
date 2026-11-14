@@ -386,75 +386,6 @@ mod pace_tests {
 	}
 }
 
-/// AU-backlog overflow reports, at most one line per [`OVERFLOW_LOG_EVERY`] with what happened
-/// since the last one. Every overflow used to print its own line: a renderer that decoded
-/// nothing (its D3D device gone while the display was off) wrote one per arriving frame —
-/// 2.6 million lines, 415 MB of app log, in one night (2026-11-14).
-#[derive(Default)]
-struct OverflowLog {
-	/// Stale AUs dropped ahead of a queued keyframe since the last line.
-	skipped: u32,
-	/// Oldest AUs shed with no keyframe to skip to (each asks for an IDR) since the last line.
-	shed: u32,
-	last: Option<std::time::Instant>,
-}
-
-const OVERFLOW_LOG_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
-
-impl OverflowLog {
-	/// Count one overflow — `dropped` AUs, `shed` = the oldest one went with no keyframe queued
-	/// — and return the line to print when one is due (the first at once).
-	fn note(&mut self, dropped: u32, shed: bool, now: std::time::Instant) -> Option<String> {
-		if shed {
-			self.shed += dropped;
-		} else {
-			self.skipped += dropped;
-		}
-		if self.last.is_some_and(|t| now.duration_since(t) < OVERFLOW_LOG_EVERY) {
-			return None;
-		}
-		self.last = Some(now);
-		let (skipped, shed) = (std::mem::take(&mut self.skipped), std::mem::take(&mut self.shed));
-		let mut parts = Vec::new();
-		if skipped > 0 {
-			parts.push(format!("dropped {skipped} stale AU(s) ahead of newest keyframe"));
-		}
-		if shed > 0 {
-			parts.push(format!("no keyframe queued; dropped the oldest AU {shed} time(s), keyframe requested"));
-		}
-		Some(format!("pulsar-render(win): AU backlog overflow — {}", parts.join("; ")))
-	}
-}
-
-#[cfg(test)]
-mod overflow_log_tests {
-	use super::*;
-
-	#[test]
-	fn one_line_per_two_seconds_with_the_counts_since_the_last() {
-		let t0 = std::time::Instant::now();
-		let at = |ms: u64| t0 + std::time::Duration::from_millis(ms);
-		let mut log = OverflowLog::default();
-		// The first overflow is reported at once.
-		assert_eq!(
-			log.note(40, false, at(0)).as_deref(),
-			Some("pulsar-render(win): AU backlog overflow — dropped 40 stale AU(s) ahead of newest keyframe")
-		);
-		// A frame every 8 ms shed for two seconds: silent, then one line with the count.
-		let mut lines = Vec::new();
-		for i in 1..=250u64 {
-			lines.extend(log.note(1, true, at(i * 8)));
-		}
-		assert_eq!(lines.len(), 1, "{lines:?}");
-		assert!(lines[0].contains("dropped the oldest AU 250 time(s), keyframe requested"), "{lines:?}");
-		// Both kinds within one window share a line.
-		assert_eq!(log.note(63, false, at(2100)), None);
-		assert_eq!(log.note(1, true, at(2200)), None);
-		let line = log.note(1, true, at(4100)).unwrap();
-		assert!(line.contains("dropped 63 stale AU(s)") && line.contains("2 time(s)"), "{line}");
-	}
-}
-
 /// stdin reader (same protocol as linux.rs/desktop.rs): `open`/`close` toggle the overlay,
 /// `stat …` feeds the HUD, `pace 0|1` toggles frame pacing, `chat`/`fsjson`/`kin` feed the
 /// overlay's Chat + Files views (the app sends these platform-agnostically).
@@ -2349,7 +2280,7 @@ unsafe fn event_loop(
 	// `AU_HARD_CAP` (~0.5 s at 120 fps) and is caught up by decoding without presenting.
 	const AU_SOFT_CAP: usize = 8;
 	const AU_HARD_CAP: usize = 64;
-	let mut overflow_log = OverflowLog::default();
+	let mut overflow_log = stream::recovery::OverflowLog::new("pulsar-render(win)");
 	let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 	{
 		let q = queue.clone();
@@ -2446,19 +2377,15 @@ unsafe fn event_loop(
 	let mut lost: Option<(crate::overlay::OverlayState, crate::overlay::UiState, u32, u32)> = None;
 	let mut rebuild_at: Option<std::time::Instant> = None;
 	let mut rebuild_fails: u32 = 0;
-	/// Pause between two rebuild attempts.
-	const REBUILD_EVERY: std::time::Duration = std::time::Duration::from_millis(500);
-	/// A failing rebuild is logged once, then every this many attempts (= once a minute).
-	const REBUILD_LOG_EVERY: u32 = 120;
+	// Pause between two rebuild attempts; a failing rebuild is logged once, then once a minute.
+	use stream::recovery::{rebuild_fail_logged, REBUILD_EVERY};
 	// Test hook `PULSAR_TEST_DEVICE_LOSS=<after_s>,<failed_attempts>`: once, `<after_s>` s in,
 	// the renderer is dropped as if its D3D device was removed, and the first
 	// `<failed_attempts>` rebuilds fail like they do while the display is off.
-	let mut test_loss: Option<(std::time::Instant, u32)> =
-		std::env::var("PULSAR_TEST_DEVICE_LOSS").ok().and_then(|v| {
-			let (after, fails) = v.split_once(',')?;
-			let after = std::time::Duration::from_secs_f32(after.trim().parse().ok()?);
-			Some((std::time::Instant::now() + after, fails.trim().parse().ok()?))
-		});
+	let mut test_loss: Option<(std::time::Instant, u32)> = std::env::var("PULSAR_TEST_DEVICE_LOSS")
+		.ok()
+		.and_then(|v| stream::recovery::parse_device_loss_test(&v))
+		.map(|(after, fails)| (std::time::Instant::now() + after, fails));
 	let mut test_fails_left: u32 = 0;
 	loop {
 		// GPU device-loss recovery (driver TDR / reset / update mid-session — common while
@@ -2520,7 +2447,7 @@ unsafe fn event_loop(
 				}
 				Err(e) => {
 					rebuild_fails += 1;
-					if rebuild_fails == 1 || rebuild_fails % REBUILD_LOG_EVERY == 0 {
+					if rebuild_fail_logged(rebuild_fails) {
 						eprintln!(
 							"pulsar-render(win): renderer rebuild failed: {e} — retrying (attempt {rebuild_fails})"
 						);

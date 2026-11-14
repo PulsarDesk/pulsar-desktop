@@ -612,6 +612,8 @@ unsafe fn open_rtp(path: &str, name: &str) -> Option<Source> {
 		.spawn(move || {
 			// Rate limit for `vidsink-needidr` (at most 2/s, the Windows renderer's cadence).
 			let mut last_needidr = std::time::Instant::now() - std::time::Duration::from_secs(1);
+			// Overflow lines at most once per 2 s, with counts (one per AU flooded the log).
+			let mut overflow_log = crate::stream::recovery::OverflowLog::new("pulsar-render");
 			rtp::recv_loop_unix(
 				&name,
 				codec,
@@ -626,11 +628,15 @@ unsafe fn open_rtp(path: &str, name: &str) -> Option<Source> {
 					match crate::stream::recovery::bound_backlog(&mut g, AU_QCAP, AU_HARD_CAP) {
 						crate::stream::recovery::Backlog::Kept => {}
 						crate::stream::recovery::Backlog::DroppedLeadIn(k) => {
-							eprintln!("pulsar-render: AU backlog overflow — dropped {k} stale AU(s) ahead of newest keyframe");
+							if let Some(line) = overflow_log.note(k as u32, false, std::time::Instant::now()) {
+								eprintln!("{line}");
+							}
 						}
 						crate::stream::recovery::Backlog::ShedOldest => {
 							rtp::NEED_IDR.store(true, Ordering::Relaxed);
-							eprintln!("pulsar-render: AU backlog overflow — no keyframe queued; dropped the oldest AU, keyframe requested");
+							if let Some(line) = overflow_log.note(1, true, std::time::Instant::now()) {
+								eprintln!("{line}");
+							}
 						}
 					}
 					g.push_back(au);
@@ -1248,6 +1254,17 @@ pub fn signal_stop() {
 	STOP.store(true, Ordering::Relaxed);
 }
 
+/// Free every decoded frame waiting for the presenter (the decode thread keeps going): used
+/// while the GL context is lost, so nothing piles up and the first frame after the rebuild
+/// is a fresh one.
+pub fn drop_frames() {
+	let mut q = MBX.lock().unwrap();
+	while let Some(f) = q.pop_front() {
+		let mut o = f.0;
+		unsafe { ff::av_frame_free(&mut o) };
+	}
+}
+
 pub fn stop_decode() {
 	STOP.store(true, Ordering::Relaxed);
 	// Drain + free any queued frames so none leak on teardown.
@@ -1679,6 +1696,31 @@ impl Presenter {
 		if let Some(cu) = self.cuda.as_mut() {
 			cu.release();
 		}
+	}
+
+	/// The GL context this presenter was built on is lost (or about to be replaced): unregister
+	/// the CUDA interop, free the held + queued frames, delete every GL object (no-ops on a
+	/// context that is really gone). The presenter is not drawn with afterwards — linux.rs
+	/// builds a fresh one on the new context.
+	pub unsafe fn destroy_gl(&mut self, gl: &glow::Context) {
+		use glow::HasContext;
+		self.release();
+		self.cuda = None;
+		self.reset();
+		for p in [self.prog, self.sw_prog, self.nv_prog, self.rg_prog] {
+			gl.delete_program(p);
+		}
+		gl.delete_buffer(self.vbo);
+		for t in [self.tex].iter().chain(&self.sw_tex).chain(&self.zc_tex).chain(&self.cuda_tex) {
+			gl.delete_texture(*t);
+		}
+		if let Some(f) = self.fsr.take() {
+			f.destroy(gl);
+		}
+		crate::overlay::set_upscaler_active("");
+		// A zero-copy import that failed against the dying context must not pin the decoder to
+		// readback for good: the new context gets another try.
+		ZC_FAILED_GEN.store(0, Ordering::Relaxed);
 	}
 
 	/// EGLImage for layer `li` of a DRM_PRIME descriptor at `w`×`h` (null on failure).

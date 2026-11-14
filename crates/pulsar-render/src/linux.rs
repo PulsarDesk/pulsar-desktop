@@ -841,6 +841,203 @@ unsafe extern "C" fn x_error_ignore(
 	0
 }
 
+// --- GL context loss (GPU reset, driver update, NVIDIA suspend/resume) ---
+// EGL_EXT_create_context_robustness: ask for reset notifications, so a GPU reset is reported
+// through glGetGraphicsResetStatus instead of a context that silently draws nothing.
+const EGL_CONTEXT_OPENGL_ROBUST_ACCESS_EXT: egl::Int = 0x30BF;
+const EGL_CONTEXT_OPENGL_RESET_NOTIFICATION_STRATEGY_EXT: egl::Int = 0x3138;
+const EGL_LOSE_CONTEXT_ON_RESET_EXT: egl::Int = 0x31BF;
+// EGL_NV_robustness_video_memory_purge: the NVIDIA driver drops video memory on suspend /
+// resume and VT switches; with this it reports that as a reset (GL_PURGED_CONTEXT_RESET_NV)
+// instead of leaving the textures garbage.
+const EGL_GENERATE_RESET_ON_VIDEO_MEMORY_PURGE_NV: egl::Int = 0x334C;
+const GL_GUILTY_CONTEXT_RESET: u32 = 0x8253;
+const GL_INNOCENT_CONTEXT_RESET: u32 = 0x8254;
+const GL_UNKNOWN_CONTEXT_RESET: u32 = 0x8255;
+const GL_PURGED_CONTEXT_RESET_NV: u32 = 0x92BB;
+type GlGetGraphicsResetStatus = unsafe extern "C" fn() -> u32;
+
+/// The context attribute lists to try, most robust first: robust access + lose-on-reset
+/// (+ the NVIDIA purge report when offered), then the plain ES2 context the renderer always
+/// used. A driver that lists the extension but refuses an attribute falls through to the next.
+/// `PULSAR_GL_ROBUST=0` skips straight to the plain context.
+fn context_attrib_lists(robustness: bool, nv_purge: bool) -> Vec<Vec<egl::Int>> {
+	let mut out = Vec::new();
+	if robustness {
+		let robust = vec![
+			egl::CONTEXT_CLIENT_VERSION,
+			2,
+			EGL_CONTEXT_OPENGL_ROBUST_ACCESS_EXT,
+			egl::TRUE as egl::Int,
+			EGL_CONTEXT_OPENGL_RESET_NOTIFICATION_STRATEGY_EXT,
+			EGL_LOSE_CONTEXT_ON_RESET_EXT,
+		];
+		if nv_purge {
+			let mut l = robust.clone();
+			l.extend([EGL_GENERATE_RESET_ON_VIDEO_MEMORY_PURGE_NV, egl::TRUE as egl::Int]);
+			out.push(l);
+		}
+		out.push(robust);
+	}
+	out.push(vec![egl::CONTEXT_CLIENT_VERSION, 2]);
+	for l in &mut out {
+		l.push(egl::NONE);
+	}
+	out
+}
+
+/// What a non-zero glGetGraphicsResetStatus means, for the log.
+fn reset_kind(status: u32) -> &'static str {
+	match status {
+		GL_GUILTY_CONTEXT_RESET => "GPU reset caused by this context",
+		GL_INNOCENT_CONTEXT_RESET => "GPU reset (another process)",
+		GL_UNKNOWN_CONTEXT_RESET => "GPU reset (cause unknown)",
+		GL_PURGED_CONTEXT_RESET_NV => "video memory purged (suspend/resume or VT switch)",
+		_ => "GPU reset",
+	}
+}
+
+/// Whether an eglSwapBuffers failure means the context / surface is gone (rebuild) rather than
+/// a one-off.
+fn swap_error_is_loss(e: egl::Error) -> bool {
+	matches!(
+		e,
+		egl::Error::ContextLost | egl::Error::BadContext | egl::Error::BadSurface | egl::Error::BadNativeWindow
+	)
+}
+
+/// Everything that lives on the renderer's GL context. Built once at start and again after a
+/// context loss (`real_run`), on the same X window; the overlay state lives outside it.
+struct GlStack {
+	context: egl::Context,
+	surface: egl::Surface,
+	gl: Arc<glow::Context>,
+	painter: egui_glow::Painter,
+	presenter: video::Presenter,
+	/// A fresh egui context per GL context: egui re-sends a texture (the font atlas, the cursor)
+	/// only to a context that never had it, and the old painter's textures died with the old GL.
+	egui_ctx: egui::Context,
+	/// glGetGraphicsResetStatus, when the context was made with reset notification.
+	reset_status: Option<GlGetGraphicsResetStatus>,
+	/// GL_RENDERER (a Mali context is never destroyed, see `retire_context`).
+	renderer: String,
+}
+
+/// Create the GL context (robust when the driver offers it), make it current on `surface` —
+/// the window surface of the previous context when there is one (it outlives a context loss
+/// on every driver we know; a second window surface on the same X window would be refused
+/// with EGL_BAD_ALLOC), else a new one — and build the painter + presenter on it.
+#[allow(clippy::too_many_arguments)]
+unsafe fn build_gl(
+	egl: &egl::Instance<egl::Static>,
+	display: egl::Display,
+	config: egl::Config,
+	win: u64,
+	surface: Option<egl::Surface>,
+	vsync: i32,
+	ppp: f32,
+) -> Result<GlStack, String> {
+	let exts = egl
+		.query_string(Some(display), egl::EXTENSIONS)
+		.map(|s| s.to_string_lossy().into_owned())
+		.unwrap_or_default();
+	let has = |e: &str| exts.split_whitespace().any(|x| x == e);
+	let robust_allowed = std::env::var("PULSAR_GL_ROBUST").map_or(true, |v| v != "0");
+	egl.bind_api(egl::OPENGL_ES_API).ok();
+	let mut context = None;
+	let mut robust = false;
+	let mut last_err = None;
+	for attribs in context_attrib_lists(robust_allowed && has("EGL_EXT_create_context_robustness"), has("EGL_NV_robustness_video_memory_purge")) {
+		match egl.create_context(display, config, None, &attribs) {
+			Ok(c) => {
+				robust = attribs.contains(&EGL_LOSE_CONTEXT_ON_RESET_EXT);
+				context = Some(c);
+				break;
+			}
+			Err(e) => last_err = Some(e),
+		}
+	}
+	let Some(context) = context else {
+		return Err(format!("eglCreateContext: {last_err:?}"));
+	};
+	// Reuse the old surface when it still binds; else replace it.
+	let surface = match surface {
+		Some(s) if egl.make_current(display, Some(s), Some(s), Some(context)).is_ok() => s,
+		old => {
+			if let Some(s) = old {
+				let _ = egl.destroy_surface(display, s);
+			}
+			let s = match egl.create_window_surface(display, config, win as egl::NativeWindowType, None) {
+				Ok(s) => s,
+				Err(e) => {
+					let _ = egl.destroy_context(display, context);
+					return Err(format!("eglCreateWindowSurface: {e}"));
+				}
+			};
+			if let Err(e) = egl.make_current(display, Some(s), Some(s), Some(context)) {
+				let _ = egl.make_current(display, None, None, None);
+				let _ = egl.destroy_context(display, context);
+				// Keep no half-made surface: the next attempt creates it again.
+				let _ = egl.destroy_surface(display, s);
+				return Err(format!("eglMakeCurrent: {e}"));
+			}
+			s
+		}
+	};
+	egl.swap_interval(display, vsync).ok();
+	let get_proc = |s: &str| -> *const c_void {
+		match egl.get_proc_address(s) {
+			Some(p) => p as *const c_void,
+			None => std::ptr::null(),
+		}
+	};
+	let gl = Arc::new(glow::Context::from_loader_function(|s| get_proc(s)));
+	use glow::HasContext;
+	let renderer = gl.get_parameter_string(glow::RENDERER);
+	let reset_status = if robust {
+		let gl_exts = gl.supported_extensions();
+		["glGetGraphicsResetStatusEXT", "glGetGraphicsResetStatusKHR", "glGetGraphicsResetStatus"]
+			.iter()
+			.zip(["GL_EXT_robustness", "GL_KHR_robustness", ""])
+			.filter(|(_, ext)| ext.is_empty() || gl_exts.contains(*ext))
+			.map(|(f, _)| get_proc(*f))
+			.find(|p| !p.is_null())
+			.map(|p| std::mem::transmute::<*const c_void, GlGetGraphicsResetStatus>(p))
+	} else {
+		None
+	};
+	eprintln!(
+		"pulsar-render: GL context on {renderer:?} (reset notification {})",
+		if reset_status.is_some() { "on" } else { "off" }
+	);
+	let painter = match egui_glow::Painter::new(gl.clone(), "", None, false) {
+		Ok(p) => p,
+		Err(e) => {
+			let _ = egl.make_current(display, None, None, None);
+			let _ = egl.destroy_context(display, context);
+			return Err(format!("egui painter: {e}"));
+		}
+	};
+	let presenter = video::Presenter::new(&gl, display.as_ptr(), &get_proc);
+	let egui_ctx = egui::Context::default();
+	overlay::apply_theme(&egui_ctx);
+	egui_ctx.set_pixels_per_point(ppp);
+	Ok(GlStack { context, surface, gl, painter, presenter, egui_ctx, reset_status, renderer })
+}
+
+/// The GL context was lost: free what can be freed while it is still current, then let it go.
+/// The surface is kept for the rebuild (`build_gl`). A Mali context is left alive (leaked):
+/// destroying this process's context corrupted WebKit's shared Mali GL on the RK3588 (see
+/// `IDLE`), and one dead context per GPU reset is a small price.
+unsafe fn retire_context(egl: &egl::Instance<egl::Static>, display: egl::Display, g: &mut GlStack) {
+	g.presenter.destroy_gl(&g.gl);
+	g.painter.destroy();
+	let _ = egl.make_current(display, None, None, None);
+	if !g.renderer.contains("Mali") {
+		let _ = egl.destroy_context(display, g.context);
+	}
+}
+
 unsafe fn real_run(wid: u64, mode: Mode) {
 	let xd = xlib::XOpenDisplay(std::ptr::null());
 	if xd.is_null() {
@@ -988,16 +1185,6 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 	// host) with the overlay closed — see the per-frame cursor sync in the loop.
 	xlib::XSync(xd, xlib::False);
 
-	egl.bind_api(egl::OPENGL_ES_API).ok();
-	let ctx_attribs = [egl::CONTEXT_CLIENT_VERSION, 2, egl::NONE];
-	let context = egl
-		.create_context(display, config, None, &ctx_attribs)
-		.expect("ctx");
-	let surface = egl
-		.create_window_surface(display, config, win as egl::NativeWindowType, None)
-		.expect("surface");
-	egl.make_current(display, Some(surface), Some(surface), Some(context))
-		.expect("make_current");
 	// VSync. Under a compositing manager (GNOME/mutter on X11) the COMPOSITOR is what syncs
 	// to vblank: it copies our buffer into its scene and presents that on vblank, so our
 	// frames never tear. Waiting for vblank ourselves as well (interval 1) only makes every
@@ -1007,14 +1194,13 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 	// decode and audio carried on (gdb, 2026-11-09). It also beat against the compositor's
 	// redraw (periodic judder). So: interval 0 with a compositor, 1 without one (bare X, e.g.
 	// the Orange Pi image's openbox: there our swap IS the presentation and would tear).
-	// PULSAR_VSYNC=0|1 overrides.
+	// PULSAR_VSYNC=0|1 overrides. (Applied by build_gl to every context it makes current.)
 	let compositor = compositor_running(xd);
 	let vsync: i32 = std::env::var("PULSAR_VSYNC")
 		.ok()
 		.and_then(|s| s.parse().ok())
 		.unwrap_or(if compositor { 0 } else { 1 });
 	eprintln!("pulsar-render: compositor={compositor} → swap interval {vsync}");
-	egl.swap_interval(display, vsync).ok();
 
 	let get_proc = |s: &str| -> *const c_void {
 		match egl.get_proc_address(s) {
@@ -1022,10 +1208,7 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 			None => std::ptr::null(),
 		}
 	};
-	let gl = Arc::new(glow::Context::from_loader_function(|s| get_proc(s)));
 
-	let egui_ctx = egui::Context::default();
-	overlay::apply_theme(&egui_ctx);
 	// 1.25 at 100 % scaling (same look as Windows at 96 DPI), times the app window's display
 	// scale (`PULSAR_UI_SCALE`, from Tauri's scale factor): a fixed 1.25 left the overlay at
 	// half the app UI's size on a 2x HiDPI screen.
@@ -1036,11 +1219,14 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 		.unwrap_or(1.0)
 		.clamp(0.5, 4.0);
 	let ppp = 1.25_f32 * ui_scale;
-	egui_ctx.set_pixels_per_point(ppp);
-	let mut painter = egui_glow::Painter::new(gl.clone(), "", None, false).expect("painter");
+	// The GL context + everything on it (rebuilt in place after a context loss, see the top of
+	// the loop).
+	let mut g = match build_gl(&egl, display, config, win, None, vsync, ppp) {
+		Ok(g) => g,
+		Err(e) => panic!("pulsar-render: GL setup failed: {e}"),
+	};
 
 	let dpy_ptr = display.as_ptr();
-	let mut presenter = video::Presenter::new(&gl, dpy_ptr, &get_proc);
 	// KMS-LEASE: fullscreen DRM-lease presenter (kms_lease.rs). While it holds a lease, video
 	// goes straight to a KMS plane and the egui chrome to another; otherwise the EGL/X path runs.
 	let mut kms = crate::kms_lease::Ctl::new();
@@ -1076,7 +1262,128 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 	let mut ov_ui = overlay::UiState::default();
 
 	let mut frame_seen: u64 = 0;
+	// GL context loss (see the top of the loop): why it was lost (set by a swap failure, read
+	// at the next pass), whether there is no context right now, when the last rebuild was
+	// tried and how many failed.
+	let mut loss: Option<String> = None;
+	let mut gl_lost = false;
+	let mut rebuild_at: Option<std::time::Instant> = None;
+	let mut rebuild_fails: u32 = 0;
+	use crate::stream::recovery::{held_suffix, rebuild_fail_logged, RateLog, REBUILD_EVERY};
+	// Test hook `PULSAR_TEST_DEVICE_LOSS=<after_s>,<failed_attempts>` (the Windows renderer's
+	// knob): once, `<after_s>` s in, the context is dropped as if the GPU was reset, and the
+	// first `<failed_attempts>` rebuilds fail like they do while the GPU is still resetting.
+	let mut test_loss: Option<(std::time::Instant, u32)> = std::env::var("PULSAR_TEST_DEVICE_LOSS")
+		.ok()
+		.and_then(|v| crate::stream::recovery::parse_device_loss_test(&v))
+		.map(|(after, fails)| (std::time::Instant::now() + after, fails));
+	let mut test_fails_left: u32 = 0;
+	// Per-frame failure lines, rate-limited (a stalling or failing present repeats every frame).
+	let mut swap_stall_log = RateLog::new(std::time::Duration::from_secs(5));
+	let mut swap_err_log = RateLog::new(std::time::Duration::from_secs(5));
 	while !STOP.load(Ordering::SeqCst) {
+		// GL context loss — a GPU reset (amdgpu/i915 hang recovery, a driver update), NVIDIA's
+		// video-memory purge on suspend/resume or a VT switch: every draw on the old context
+		// fails or draws nothing, and the picture froze for good (the Linux twin of the Windows
+		// renderer's lost D3D device, 2026-11-14). Detected by the robust context's reset status
+		// (cheap, once per pass), by a swap that reports the context or surface gone, or by the
+		// test hook. The whole GL side is rebuilt IN PLACE on the same X window (the app does
+		// not respawn the renderer); the overlay state lives outside it and survives.
+		if !gl_lost {
+			if test_loss.is_some_and(|(at, _)| std::time::Instant::now() >= at) {
+				test_fails_left = test_loss.take().map_or(0, |(_, fails)| fails);
+				loss = Some("simulated (PULSAR_TEST_DEVICE_LOSS)".into());
+			}
+			if loss.is_none() {
+				if let Some(f) = g.reset_status {
+					let st = f();
+					if st != 0 {
+						loss = Some(format!("{} (0x{st:04X})", reset_kind(st)));
+					}
+				}
+			}
+			if let Some(why) = loss.take() {
+				eprintln!("pulsar-render: GL context lost: {why} — rebuilding renderer");
+				kms.release(&g.gl, "GL context lost"); // KMS-LEASE (its GL objects die with the context)
+				retire_context(&egl, display, &mut g);
+				gl_lost = true;
+				rebuild_at = None;
+				rebuild_fails = 0;
+				std::thread::sleep(std::time::Duration::from_millis(200)); // let the driver settle
+			}
+		}
+		// The rebuild, tried every REBUILD_EVERY until it works (a reset can take seconds; a
+		// suspended GPU refuses until resume). The Windows renderer's first version tried
+		// once and stayed dead after one failure — never again.
+		if gl_lost && rebuild_at.is_none_or(|t| t.elapsed() >= REBUILD_EVERY) {
+			rebuild_at = Some(std::time::Instant::now());
+			let built = if test_fails_left > 0 {
+				test_fails_left -= 1;
+				Err("simulated failure (PULSAR_TEST_DEVICE_LOSS)".to_string())
+			} else {
+				build_gl(&egl, display, config, win, Some(g.surface), vsync, ppp)
+			};
+			match built {
+				Ok(fresh) => {
+					if rebuild_fails > 0 {
+						eprintln!("pulsar-render: renderer rebuilt after {rebuild_fails} failed attempt(s)");
+					} else {
+						eprintln!("pulsar-render: renderer rebuilt");
+					}
+					g = fresh;
+					gl_lost = false;
+					rebuild_fails = 0;
+					// The new egui context has none of the old textures: upload the host cursor
+					// again on this pass.
+					cursor_tex = None;
+					cursor_tex_gen = CURSOR_IMG_GEN.load(Ordering::SeqCst).wrapping_add(1);
+					// Everything decoded meanwhile was dropped, and a CUDA decoder may have died
+					// with the GPU: restart the picture from a keyframe.
+					crate::stream::rtp::NEED_IDR.store(true, Ordering::Relaxed);
+				}
+				Err(e) => {
+					rebuild_fails += 1;
+					if rebuild_fail_logged(rebuild_fails) {
+						eprintln!("pulsar-render: renderer rebuild failed: {e} — retrying (attempt {rebuild_fails})");
+					}
+				}
+			}
+		}
+		if gl_lost {
+			// No context for now. Keep the X side alive meanwhile — answer the connection (an
+			// unread queue only grows), follow the parent's size, honour the WM close button —
+			// and drop the decoded frames (nothing can show them; the first one after the
+			// rebuild must be fresh). X has no shared input queue, so unlike the Windows child
+			// window this one cannot hang the app's UI; it must still not stop answering.
+			while xlib::XPending(xd) > 0 {
+				let mut ev: xlib::XEvent = std::mem::zeroed();
+				xlib::XNextEvent(xd, &mut ev);
+				match ev.get_type() {
+					xlib::ConfigureNotify if standalone => {
+						let c = ev.configure;
+						(w, h) = (c.width.max(1) as u32, c.height.max(1) as u32);
+					}
+					xlib::ClientMessage
+						if standalone
+							&& wm_delete != 0 && ev.client_message.data.get_long(0) as xlib::Atom == wm_delete =>
+					{
+						STOP.store(true, Ordering::SeqCst);
+						video::signal_stop();
+					}
+					_ => {}
+				}
+			}
+			if !standalone {
+				let (nw, nh) = win_size(xd, parent);
+				if (nw, nh) != (w, h) {
+					(w, h) = (nw, nh);
+					xlib::XResizeWindow(xd, win, w, h);
+				}
+			}
+			video::drop_frames();
+			std::thread::sleep(std::time::Duration::from_millis(40));
+			continue;
+		}
 		// Idle (post-disconnect): unmap the video window so the WebKitGTK webview underneath is
 		// revealed + interactive, but keep this process + its EGL context resident (exiting would
 		// destroy the GL context and corrupt WebKit's shared Mali GL → the webview wedges with no
@@ -1084,7 +1391,7 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 		let idle = IDLE.load(Ordering::SeqCst);
 		if idle != prev_idle {
 			if idle {
-				kms.release(&gl, "session idle"); // KMS-LEASE
+				kms.release(&g.gl, "session idle"); // KMS-LEASE
 				xlib::XUnmapWindow(xd, win);
 				win_visible = false; // re-hide until the NEXT stream's first frame
 			}
@@ -1251,7 +1558,7 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 			eprintln!("pulsar-render: debug: forced disengaged={dbg_disengaged}");
 		}
 		if crate::kms_lease::DBG_RELEASE.swap(false, Ordering::SeqCst) {
-			kms.debug_release(&gl);
+			kms.debug_release(&g.gl);
 		}
 		if crate::kms_lease::DBG_END.swap(false, Ordering::SeqCst) {
 			println!("ov end");
@@ -1524,7 +1831,7 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 		// file manager stay visible, and the session is not a fullscreen game). `update` itself
 		// also requires the window to be fullscreen.
 		let game = !MODE_REMOTE.load(Ordering::SeqCst);
-		kms.update(win_visible && game, xd, win, w, h, &gl, dpy_ptr, &get_proc);
+		kms.update(win_visible && game, xd, win, w, h, &g.gl, dpy_ptr, &get_proc);
 		// KMS-LEASE: the renderer-drawn local cursor (egui points), when X would show one.
 		let local_ptr = if want_hidden {
 			None
@@ -1541,17 +1848,17 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 		// chrome out at the leased mode for the rest of this iteration.
 		let (w, h) = kms.draw_size().unwrap_or((w, h));
 		if !kms.active() {
-			gl.disable(glow::BLEND);
-			gl.viewport(0, 0, w as i32, h as i32);
-			gl.clear_color(0.0, 0.0, 0.0, 1.0);
-			gl.clear(glow::COLOR_BUFFER_BIT);
+			g.gl.disable(glow::BLEND);
+			g.gl.viewport(0, 0, w as i32, h as i32);
+			g.gl.clear_color(0.0, 0.0, 0.0, 1.0);
+			g.gl.clear(glow::COLOR_BUFFER_BIT);
 		}
 		// New-host reuse (app sent `show`): drop the previous host's held frame + hide the
 		// window so its last view isn't shown while the new stream spins up (the webview
 		// "waiting" loader shows until the new first frame maps below). Chrome-tab reset.
 		if video::RESET_VIEW.swap(false, Ordering::SeqCst) {
-			kms.release(&gl, "new host"); // KMS-LEASE
-			presenter.reset();
+			kms.release(&g.gl, "new host"); // KMS-LEASE
+			g.presenter.reset();
 			if win_visible {
 				xlib::XUnmapWindow(xd, win);
 				xlib::XSync(xd, xlib::False);
@@ -1561,13 +1868,13 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 		// KMS-LEASE: while leased only pick the frame here; `kms.present` below puts it on a plane.
 		let mut kms_frame = (std::ptr::null_mut(), false);
 		let have_video = if kms.active() {
-			kms_frame = presenter.take_frame();
-			presenter.stats_tick();
+			kms_frame = g.presenter.take_frame();
+			g.presenter.stats_tick();
 			!kms_frame.0.is_null()
 		} else {
-			presenter.draw(&gl, w as i32, h as i32)
+			g.presenter.draw(&g.gl, w as i32, h as i32)
 		};
-		kms.frame_ok = crate::kms_lease::frame_ok(presenter.current_frame());
+		kms.frame_ok = crate::kms_lease::frame_ok(g.presenter.current_frame());
 		let mut kms_ov = crate::kms_lease::Overlay::Empty;
 		let mut kms_hash = 0u64;
 
@@ -1587,7 +1894,7 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 			cursor_tex_gen = cur_gen;
 			if let Some(img) = CURSOR_IMG.lock().unwrap().clone() {
 				let ci = egui::ColorImage::from_rgba_unmultiplied([img.w, img.h], &img.rgba);
-				cursor_tex = Some(egui_ctx.load_texture("pulsar-cursor", ci, egui::TextureOptions::LINEAR));
+				cursor_tex = Some(g.egui_ctx.load_texture("pulsar-cursor", ci, egui::TextureOptions::LINEAR));
 				cursor_hot = (img.hot_x, img.hot_y);
 				cursor_dims = (img.w as f32, img.h as f32);
 			} else {
@@ -1680,7 +1987,7 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 				..Default::default()
 			};
 			let mut cmds: Vec<OverlayCmd> = Vec::new();
-			let mut full = egui_ctx.run_pass(raw_input, |ctx| {
+			let mut full = g.egui_ctx.run_pass(raw_input, |ctx| {
 				cmds = overlay::draw(ctx, &state, &mut ov_ui);
 				// "Switching screen…" or "stream stopped" indicator over the held last frame.
 				if video::SWITCHING.load(Ordering::Relaxed) {
@@ -1698,10 +2005,10 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 			for c in cmds {
 				emit_cmd(&mut state, c);
 			}
-			let prims = egui_ctx.tessellate(full.shapes, full.pixels_per_point);
+			let prims = g.egui_ctx.tessellate(full.shapes, full.pixels_per_point);
 			paint_egui(
-				&gl,
-				&mut painter,
+				&g.gl,
+				&mut g.painter,
 				&mut kms,
 				[w, h],
 				full.pixels_per_point,
@@ -1755,7 +2062,7 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 					events: Vec::new(),
 					..Default::default()
 				};
-				let mut full = egui_ctx.run_pass(raw_input, |ctx| {
+				let mut full = g.egui_ctx.run_pass(raw_input, |ctx| {
 					if switching {
 						overlay::draw_switching(ctx);
 					} else if stalled {
@@ -1783,10 +2090,10 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 						overlay::draw_host_pointer(ctx, p, a);
 					}
 				});
-				let prims = egui_ctx.tessellate(full.shapes, full.pixels_per_point);
+				let prims = g.egui_ctx.tessellate(full.shapes, full.pixels_per_point);
 				paint_egui(
-					&gl,
-					&mut painter,
+					&g.gl,
+					&mut g.painter,
 					&mut kms,
 					[w, h],
 					full.pixels_per_point,
@@ -1801,17 +2108,27 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 		if kms.active() {
 			// KMS-LEASE: atomic commit to the planes; paces the loop on the page flip (any
 			// failure hands the output back and the next iteration draws through X again).
-			kms.present(&gl, kms_frame.0, kms_frame.1, kms_ov, kms_hash, &mut frame_seen);
+			kms.present(&g.gl, kms_frame.0, kms_frame.1, kms_ov, kms_hash, &mut frame_seen);
 			if crate::kms_lease::DBG_DUMP.swap(false, Ordering::SeqCst) {
-				kms.debug_dump(&gl);
+				kms.debug_dump(&g.gl);
 			}
 		} else {
 			let swap_t0 = std::time::Instant::now();
-			egl.swap_buffers(display, surface).ok();
+			if let Err(e) = egl.swap_buffers(display, g.surface) {
+				if swap_error_is_loss(e) {
+					// Rebuilt at the top of the next pass.
+					loss = Some(format!("eglSwapBuffers: {e:?}"));
+				} else if let Some(n) = swap_err_log.hit(std::time::Instant::now()) {
+					eprintln!("pulsar-render: eglSwapBuffers failed: {e:?}{}", held_suffix(n));
+				}
+			}
 			let swap_ms = swap_t0.elapsed().as_millis();
 			if swap_ms >= 250 {
 				// A present that blocks this long is a stall, not pacing (the freeze above).
-				eprintln!("pulsar-render: present stalled {swap_ms} ms in eglSwapBuffers");
+				// Rate-limited: a display that stays off can make every swap block.
+				if let Some(n) = swap_stall_log.hit(std::time::Instant::now()) {
+					eprintln!("pulsar-render: present stalled {swap_ms} ms in eglSwapBuffers{}", held_suffix(n));
+				}
 			}
 			// Without a vblank wait (swap interval 0) nothing else paces this loop: after presenting, sleep
 			// until the decoder publishes a new frame, redrawing at least ~60×/s so the overlay, hints and
@@ -1843,9 +2160,11 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 	// The render loop has exited, so the main thread no longer holds MBX: do the real
 	// drain+free here (the SIGINT/SIGTERM handler only set the atomic — see on_stop).
 	video::stop_decode();
-	kms.release(&gl, "exit"); // KMS-LEASE
-	presenter.release();
-	painter.destroy();
+	kms.release(&g.gl, "exit"); // KMS-LEASE
+	if !gl_lost {
+		g.presenter.release();
+		g.painter.destroy();
+	}
 	egl.make_current(display, None, None, None).ok();
 	xlib::XDestroyWindow(xd, win);
 	xlib::XCloseDisplay(xd);
