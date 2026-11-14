@@ -164,8 +164,10 @@ overflows the renderer's 8-AU queue and drops the recovery frame.
 - **Knobs:**
   - `PULSAR_RFI=0` (client) turns RFI off.
   - `PULSAR_TEST_DROP=N` (renderer) drops 1 of every N packets.
-  - `PULSAR_TEST_DEVICE_LOSS=<after_s>,<failed_attempts>` (Windows renderer) drops the renderer
-    once as if its D3D device was removed and fails the first rebuilds (see "Device loss").
+  - `PULSAR_TEST_DEVICE_LOSS=<after_s>,<failed_attempts>` (Windows + Linux renderers) drops
+    the renderer once as if its D3D device was removed / its GL context was lost, and fails the
+    first rebuilds (see "Device loss" and "GL context loss").
+  - `PULSAR_GL_ROBUST=0` (Linux renderer) makes a plain GL context, no reset notification.
 
 ## Frame pacing on the Windows renderer ("Kare eşitleme")
 
@@ -205,6 +207,49 @@ answering, the log shows "renderer rebuilt after 8 failed attempt(s)", the pictu
 Still open (not a renderer matter): a connected session keeps the client's audio stream
 running, so Windows never enters Modern Standby while one is up (sleep study: "Audio Active"
 100 %), and the stream goes on all night with the screen off.
+
+## GL context loss on the Linux renderer (GPU reset, suspend/resume)
+
+The Linux twin of the section above (2026-11-14, **untested on Linux hardware**: type-checked
+in WSL and unit-tested only). `linux.rs` keeps everything that lives on the GL context in a
+`GlStack` (EGL context + window surface, glow, egui painter, `video::Presenter` with its
+FSR/CUDA/dmabuf state, and a fresh `egui::Context`) and rebuilds it IN PLACE on the same X
+window; the overlay state (`OverlayState`, `UiState`) lives outside it and survives.
+
+- **Detection.** The context is made with `EGL_EXT_create_context_robustness`
+  (robust access + `EGL_LOSE_CONTEXT_ON_RESET`, plus `EGL_NV_robustness_video_memory_purge`
+  on NVIDIA, whose driver drops video memory on suspend/resume and VT switches); every pass
+  reads `glGetGraphicsResetStatus`. Drivers without the extension get the old plain ES2
+  context (attribute lists tried most-robust first, `context_attrib_lists`). An
+  `eglSwapBuffers` failing with CONTEXT_LOST / BAD_CONTEXT / BAD_SURFACE /
+  BAD_NATIVE_WINDOW also counts as a loss.
+- **Teardown** (`retire_context`): release the KMS lease, delete the presenter's GL objects
+  (`Presenter::destroy_gl`, `GlFsr::destroy`; no-ops on a dead context), drop queued frames,
+  destroy the context. A Mali context is leaked instead (destroying it corrupted WebKit's
+  shared Mali GL on the RK3588, see `IDLE`). The window surface is kept and reused by the
+  rebuild; when it no longer binds a new one is made.
+- **Retry until it works**, every 500 ms, logged once and then once a minute (shared with
+  Windows: `stream/recovery.rs` `REBUILD_EVERY`, `rebuild_fail_logged`).
+- **Keep answering X meanwhile**: the loop keeps reading X events (resize, WM close), follows
+  the parent's size, drops decoded frames (`video::drop_frames`). An X child window cannot
+  hang the app's UI the way a Windows child window can, but the connection must not back up.
+- **After the rebuild**: the host cursor texture is uploaded again (new egui context), a
+  keyframe is requested (`NEED_IDR`) and the decode thread reopens a hardware decoder on a
+  fresh hw device context (`video::request_decoder_reset`; a VAAPI/CUDA decoder whose device
+  died with the GPU never gives a picture again, and the zero-output fallback only watches a
+  decoder that never produced one). If it no longer opens, the next candidate is tried.
+- **Rate-limited logs**: AU backlog overflow lines go through the shared `OverflowLog`
+  (one per 2 s, with counts; it was one per overflow on Linux too); "present stalled" and
+  non-loss `eglSwapBuffers` errors through `RateLog` (one per 5 s, with the held count).
+
+Not covered (no OS mechanism reports it to a GL client): Mesa drivers that ignore the
+robustness extension report nothing on a reset — the picture can then still freeze; a
+display/monitor change needs nothing (the EGL window surface follows the X window, the
+X display connection stays).
+
+Try it: `PULSAR_TEST_DEVICE_LOSS=6,8` — the log shows "GL context lost: simulated", "renderer
+rebuilt after 8 failed attempt(s)", "reopening decoder … after GL context loss" (HW decoders),
+and the picture returns with the overlay as it was.
 
 ## Poor-link client behaviour (2026-11-09, LOCAL, unpushed, untested on the field link)
 

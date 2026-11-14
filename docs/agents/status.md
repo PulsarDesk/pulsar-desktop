@@ -59,3 +59,11 @@ self-pipe instead of an inherited blocked mask, and the stop event grants the sa
 `EVENT_MODIFY_STATE` with a Medium label (`--headless-stop` exit 7 = access denied).
 Unverified: the elevated-GUI / elevated-host cases (needs an elevated run), the Unix signal
 path (not compiled on Linux here), and `--headless-host` on Linux needs a display.
+
+**Renderer GPU-loss recovery (2026-11-14):** Windows rebuilds a lost D3D device in place
+(screen off, driver reset); Linux rebuilds a lost GL context in place (GPU reset, NVIDIA
+suspend/resume purge; robust EGL context + `glGetGraphicsResetStatus`) and reopens the HW
+decoder. Both rate-limit AU-overflow / present-stall logs and take
+`PULSAR_TEST_DEVICE_LOSS`. **Linux path untested on Linux hardware** (WSL type-check + unit
+tests only); macOS renderer has no equivalent yet (Metal device loss is a separate task).
+Details: [client-video.md](client-video.md) "GL context loss on the Linux renderer".
