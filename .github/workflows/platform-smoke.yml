@@ -66,8 +66,21 @@ jobs:
           bun install --frozen-lockfile
           bun run build
 
-      - name: Build app + renderer
-        run: cargo build --locked -p pulsar-tauri -p pulsar-render
+      # The app bundles ffmpeg (+ ffplay on macOS) and pulsar-render as resources; the build
+      # script refuses to run without them (same preparation as release.yml).
+      - name: Bundled ffmpeg / ffplay
+        shell: bash
+        run: |
+          bun scripts/fetch-ffmpeg.mjs
+          if [ "$RUNNER_OS" = "macOS" ]; then bun scripts/fetch-player.mjs; fi
+
+      - name: Build renderer, then the app
+        shell: bash
+        run: |
+          cargo build --locked -p pulsar-render
+          mkdir -p src-tauri/resources
+          cp target/debug/pulsar-render src-tauri/resources/pulsar-render
+          cargo build --locked -p pulsar-tauri
 
       - name: Tests (app, renderer, platform crates)
         shell: bash
