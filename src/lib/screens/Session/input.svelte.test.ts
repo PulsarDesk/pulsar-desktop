@@ -10,6 +10,7 @@ vi.mock('#lib/api.js', () => {
 			inputKey: vi.fn(ok),
 			inputChar: vi.fn(ok),
 			inputScroll: vi.fn(ok),
+			inputPinch: vi.fn(ok),
 			kbdCaptureStart: vi.fn(ok),
 			kbdCaptureStop: vi.fn(ok),
 			kbdEngage: vi.fn(ok)
@@ -17,7 +18,8 @@ vi.mock('#lib/api.js', () => {
 	};
 });
 
-import { SessionInput } from './input.svelte.js';
+import { SessionInput, pinchWheelFactor, PINCH_IDLE_MS } from './input.svelte.js';
+import { api } from '#lib/api.js';
 
 // Free cursor ("Serbest imleç") on the canvas path (Linux / macOS): hovering the video takes
 // control, leaving it hands control back, an explicit release waits for a leave.
@@ -104,5 +106,86 @@ describe('SessionInput free cursor (canvas path)', () => {
 		unfocused.input.onEnter(ev());
 		expect(unfocused.input.controlling).toBe(false);
 		unfocused.stop();
+	});
+});
+
+describe('SessionInput touchpad pinch', () => {
+	const wheel = (deltaY: number, ctrlKey = true) =>
+		({ deltaX: 0, deltaY, deltaMode: 0, ctrlKey, preventDefault() {} }) as unknown as WheelEvent;
+	const gesture = (type: string, scale: number) => {
+		const e = new Event(type, { cancelable: true }) as Event & { scale: number };
+		e.scale = scale;
+		return e;
+	};
+	beforeEach(() => {
+		vi.spyOn(document, 'hasFocus').mockReturnValue(true);
+		vi.mocked(api.inputPinch).mockClear();
+		vi.mocked(api.inputScroll).mockClear();
+	});
+
+	it('maps pinch wheel deltas to zoom factors', () => {
+		expect(pinchWheelFactor(0)).toBe(1);
+		expect(pinchWheelFactor(-100)).toBeCloseTo(Math.E);
+		expect(pinchWheelFactor(100)).toBeCloseTo(1 / Math.E);
+		expect(pinchWheelFactor(Number.NaN)).toBe(1);
+		expect(pinchWheelFactor(-1e9)).toBeCloseTo(Math.exp(3));
+	});
+
+	it('forwards a synthesized Ctrl + wheel pinch and ends it when idle', () => {
+		vi.useFakeTimers();
+		const { input, stop } = make({ free: false });
+		input.startControl();
+		flushSync();
+		input.onWheel(wheel(-10));
+		input.onWheel(wheel(-10));
+		const calls = vi.mocked(api.inputPinch).mock.calls;
+		expect(calls[0]).toEqual([1, 0, 1]);
+		expect(calls[1][1]).toBe(1);
+		expect(calls[2][2]).toBeCloseTo(Math.exp(0.2));
+		expect(api.inputScroll).not.toHaveBeenCalled();
+		vi.advanceTimersByTime(PINCH_IDLE_MS + 1);
+		expect(calls.at(-1)?.[1]).toBe(2);
+		// A plain wheel still scrolls.
+		input.onWheel(wheel(30, false));
+		expect(api.inputScroll).toHaveBeenCalledTimes(1);
+		stop();
+		vi.useRealTimers();
+	});
+
+	it('forwards WebKit gesture events and ignores their duplicate wheel', () => {
+		const { input, stop } = make({ free: false });
+		input.startControl();
+		flushSync();
+		input.onGestureStart(gesture('gesturestart', 1));
+		input.onGestureChange(gesture('gesturechange', 1.5));
+		input.onWheel(wheel(-10));
+		input.onGestureEnd(gesture('gestureend', 1.6));
+		const calls = vi.mocked(api.inputPinch).mock.calls.map((c) => [c[1], c[2]]);
+		expect(calls).toEqual([
+			[0, 1],
+			[1, 1.5],
+			[1, 1.6],
+			[2, 1.6]
+		]);
+		stop();
+	});
+
+	it('closes an open pinch when control stops', () => {
+		const { input, stop } = make({ free: false });
+		input.startControl();
+		flushSync();
+		input.onGestureStart(gesture('gesturestart', 1));
+		input.stopControl();
+		flushSync();
+		expect(vi.mocked(api.inputPinch).mock.calls.at(-1)?.[1]).toBe(2);
+		stop();
+	});
+
+	it('ignores pinches while not controlling', () => {
+		const { input, stop } = make({ free: false });
+		input.onGestureStart(gesture('gesturestart', 1));
+		input.onWheel(wheel(-10));
+		expect(api.inputPinch).not.toHaveBeenCalled();
+		stop();
 	});
 });

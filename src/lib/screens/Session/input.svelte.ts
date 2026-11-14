@@ -33,6 +33,20 @@ function emitTauri(event: string) {
 		.catch(() => {});
 }
 
+/** Zoom factor of one synthesized pinch wheel event (Chromium and WebKit report a touchpad
+ * pinch as `wheel` with `ctrlKey`; Chromium's own page zoom uses exp(-deltaY / 100)). */
+export function pinchWheelFactor(deltaY: number, deltaMode = 0): number {
+	if (!Number.isFinite(deltaY)) return 1;
+	const px = deltaMode === 1 ? deltaY * 40 : deltaMode === 2 ? deltaY * 800 : deltaY;
+	return Math.exp(Math.min(3, Math.max(-3, -px / 100)));
+}
+
+/** No pinch wheel step for this long = the synthesized pinch ended (Windows hook: 200 ms). */
+export const PINCH_IDLE_MS = 200;
+
+/** WebKit's (non-standard) GestureEvent: a trackpad pinch on macOS. */
+type GestureLike = Event & { scale?: number };
+
 type Inputs = {
 	playId: () => number;
 	wsPort: () => number;
@@ -93,6 +107,12 @@ export class SessionInput {
 	// quiet (it would flash on every pass over the video).
 	quietHint = $state(false);
 	#hoverEngaged = false;
+	// Touchpad pinch being forwarded (`input_pinch`). `gesture` = it comes from WebKit's
+	// gesture* events (macOS), else from synthesized Ctrl + wheel (ended by an idle timer).
+	#pinchOn = false;
+	#pinchGesture = false;
+	#pinchScale = 1;
+	#pinchTimer: ReturnType<typeof setTimeout> | undefined;
 
 	constructor(inputs: Inputs) {
 		this.#in = inputs;
@@ -117,6 +137,7 @@ export class SessionInput {
 			const onBlur = () => {
 				this.#releaseButtons();
 				this.#releaseHeldKeys();
+				this.#pinchEnd(playId);
 				// Don't keep the OS cursor confined while another window has focus.
 				grabCursor(false);
 			};
@@ -129,6 +150,11 @@ export class SessionInput {
 			window.addEventListener('keyup', ku, true);
 			window.addEventListener('blur', onBlur);
 			window.addEventListener('focus', onFocus);
+			// macOS trackpad pinch (WKWebView). Not in Svelte's element typings → addEventListener.
+			const cv = this.#in.canvas();
+			cv.addEventListener('gesturestart', this.onGestureStart);
+			cv.addEventListener('gesturechange', this.onGestureChange);
+			cv.addEventListener('gestureend', this.onGestureEnd);
 			// Confined to this session's video container (falls back to the app window).
 			if (!free) grabCursor(true, this.#in.playId());
 			return () => {
@@ -137,6 +163,10 @@ export class SessionInput {
 				window.removeEventListener('keyup', ku, true);
 				window.removeEventListener('blur', onBlur);
 				window.removeEventListener('focus', onFocus);
+				cv.removeEventListener('gesturestart', this.onGestureStart);
+				cv.removeEventListener('gesturechange', this.onGestureChange);
+				cv.removeEventListener('gestureend', this.onGestureEnd);
+				this.#pinchEnd(playId);
 				// Covers stopControl AND component unmount while controlling.
 				grabCursor(false);
 			};
@@ -305,9 +335,57 @@ export class SessionInput {
 		e.preventDefault();
 		api.inputButton(this.#in.playId(), this.#hostButton(e.button), false).catch(() => {});
 	};
+	#pinchBegin(gesture: boolean) {
+		const playId = this.#in.playId();
+		this.#pinchEnd(playId);
+		this.#pinchOn = true;
+		this.#pinchGesture = gesture;
+		this.#pinchScale = 1;
+		api.inputPinch(playId, 0, 1).catch(() => {});
+	}
+	#pinchUpdate(scale: number) {
+		if (!this.#pinchOn || !Number.isFinite(scale) || scale <= 0) return;
+		this.#pinchScale = Math.min(20, Math.max(0.05, scale));
+		api.inputPinch(this.#in.playId(), 1, this.#pinchScale).catch(() => {});
+	}
+	#pinchEnd(playId = this.#in.playId()) {
+		clearTimeout(this.#pinchTimer);
+		this.#pinchTimer = undefined;
+		if (!this.#pinchOn) return;
+		this.#pinchOn = false;
+		api.inputPinch(playId, 2, this.#pinchScale).catch(() => {});
+	}
+	onGestureStart = (e: GestureLike) => {
+		if (!this.controlling) return;
+		e.preventDefault(); // never zoom the webview itself
+		this.#pinchBegin(true);
+	};
+	onGestureChange = (e: GestureLike) => {
+		if (!this.controlling) return;
+		e.preventDefault();
+		if (this.#pinchOn && this.#pinchGesture) this.#pinchUpdate(e.scale ?? 1);
+	};
+	onGestureEnd = (e: GestureLike) => {
+		if (!this.controlling) return;
+		e.preventDefault();
+		if (!this.#pinchOn || !this.#pinchGesture) return;
+		this.#pinchUpdate(e.scale ?? this.#pinchScale);
+		this.#pinchEnd();
+	};
 	onWheel = (e: WheelEvent) => {
 		if (!this.controlling) return;
 		e.preventDefault();
+		// Touchpad pinch: the engine reports it as Ctrl + wheel with NO Ctrl key held (a Ctrl
+		// the user holds was forwarded as a key and is in #heldKeys — that is a real Ctrl +
+		// wheel and scrolls below, zooming on the host because its Ctrl is down).
+		if (e.ctrlKey && !this.#heldKeys.has(29) && !this.#heldKeys.has(97)) {
+			if (this.#pinchOn && this.#pinchGesture) return; // WebKit already sends gesture*
+			if (!this.#pinchOn) this.#pinchBegin(false);
+			this.#pinchUpdate(this.#pinchScale * pinchWheelFactor(e.deltaY, e.deltaMode));
+			clearTimeout(this.#pinchTimer);
+			this.#pinchTimer = setTimeout(() => this.#pinchEnd(), PINCH_IDLE_MS);
+			return;
+		}
 		const now = performance.now();
 		if (now - this.#lastScroll < 30) return;
 		this.#lastScroll = now;

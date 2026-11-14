@@ -286,6 +286,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 		case 'input_pointer':
 		case 'input_button':
 		case 'input_scroll':
+		case 'input_pinch':
 		case 'input_key':
 		case 'input_char':
 		case 'kbd_capture_start':
