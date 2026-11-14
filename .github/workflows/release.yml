@@ -228,6 +228,49 @@ jobs:
           EOF
           cat "$RUNNER_TEMP/appimage.conf.json"
 
+      # macOS host virtual gamepad (pulsar-core input/mac_hid.rs) needs the RESTRICTED
+      # entitlement com.apple.developer.hid.virtual.device: a Developer ID signature plus an
+      # embedded provisioning profile that grants it. Only when those secrets exist is the
+      # build signed with src-tauri/entitlements/virtual-hid.plist; otherwise it stays
+      # ad-hoc WITHOUT the entitlement (claiming it without the profile makes macOS refuse
+      # to launch the app) and the host falls back to a no-op pad + a notice on both ends.
+      # Secrets: APPLE_CERTIFICATE (base64 .p12), APPLE_CERTIFICATE_PASSWORD,
+      # APPLE_SIGNING_IDENTITY, APPLE_TEAM_ID, APPLE_PROVISIONING_PROFILE (base64).
+      # Untested: no Apple Developer account is set up for this repo yet.
+      - name: macOS signing overlay (virtual HID entitlement)
+        id: macsign
+        if: startsWith(matrix.os, 'macos')
+        shell: bash
+        env:
+          PROFILE_B64: ${{ secrets.APPLE_PROVISIONING_PROFILE }}
+          CERT_B64: ${{ secrets.APPLE_CERTIFICATE }}
+          CERT_PW: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          SIGN_ID: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -z "$PROFILE_B64" ] || [ -z "$CERT_B64" ] || [ -z "$SIGN_ID" ] || [ -z "$TEAM_ID" ]; then
+            echo "No Apple signing secrets: ad-hoc build, macOS virtual gamepad unavailable."
+            echo "args=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "$PROFILE_B64" | base64 --decode > "$RUNNER_TEMP/embedded.provisionprofile"
+          APP_ID="$(python3 -c 'import json;print(json.load(open("src-tauri/tauri.conf.json"))["identifier"])')"
+          ENT="$RUNNER_TEMP/entitlements.plist"
+          cp src-tauri/entitlements/virtual-hid.plist "$ENT"
+          /usr/libexec/PlistBuddy -c "Add :com.apple.application-identifier string $TEAM_ID.$APP_ID" "$ENT"
+          /usr/libexec/PlistBuddy -c "Add :com.apple.developer.team-identifier string $TEAM_ID" "$ENT"
+          cat > "$RUNNER_TEMP/macsign.conf.json" <<EOF
+          {"bundle":{"macOS":{"signingIdentity":"$SIGN_ID","entitlements":"$ENT",
+            "files":{"embedded.provisionprofile":"$RUNNER_TEMP/embedded.provisionprofile"}}}}
+          EOF
+          # tauri-bundler imports the certificate into a temporary keychain from these.
+          {
+            echo "APPLE_CERTIFICATE=$CERT_B64"
+            echo "APPLE_CERTIFICATE_PASSWORD=$CERT_PW"
+            echo "APPLE_SIGNING_IDENTITY=$SIGN_ID"
+          } >> "$GITHUB_ENV"
+          echo "args=--config $RUNNER_TEMP/macsign.conf.json" >> "$GITHUB_OUTPUT"
+
       - name: Build app bundles
         id: tauri
         uses: tauri-apps/tauri-action@v0
@@ -237,7 +280,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: .
-          args: ${{ matrix.args }} ${{ startsWith(matrix.os, 'ubuntu') && format('--config {0}/appimage.conf.json', runner.temp) || '' }}
+          args: ${{ matrix.args }} ${{ startsWith(matrix.os, 'ubuntu') && format('--config {0}/appimage.conf.json', runner.temp) || '' }} ${{ steps.macsign.outputs.args }}
 
       # The AppImage must start and stream on distros other than the 22.04 it was built on:
       # run its `--selftest` (bundled gst encode, pulsar-render libs, ffmpeg) in clean
