@@ -232,7 +232,7 @@ export const api = {
 		gameMode = false,
 		/** 'auto' | 'hq' | 'fast' — from Settings → Display 'Varsayılan kalite'. */
 		quality?: string,
-		/** Treat the DS4/DS5 touchpad as a relative mouse (Linux only; Feature 2B). */
+		/** Treat the DS4/DS5 touchpad as a mouse (pointer / two-finger scroll / click; all desktop OSes). */
 		touchpadAsMouse = true,
 		/** Initial host monitor to capture (0 = primary; null = host default). A second
 		 * same-host split pane passes a FREE display so two panes capture DIFFERENT

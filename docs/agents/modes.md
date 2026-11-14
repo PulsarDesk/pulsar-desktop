@@ -104,6 +104,20 @@ While another app is focused, Pulsar acts on NO input (maintainer rule, 2026-11-
   capture's focus (Tauri map or standalone render window), always true for a kiosk
   `--connect` launch (Orange Pi). Settings → Genel → "Arka planda kol girdisi" (default off)
   lets the pad keep driving the host (not the in-app UI) in the background.
+- **Controller touchpad as mouse** (Settings → Genel → Kol → "Dokunmatik yüzey fare olarak",
+  `ui.touchpadAsMouse`, default on, read at connect): a DS4 / DualSense touchpad drives the
+  host pointer with the shared gestures of `pulsar_core::input::touchpad_mouse` — one finger
+  = relative pointer, two fingers = scroll (natural direction), pad press = left click,
+  two-finger press = right click. Readers per OS: **Linux** the pad's evdev touchpad node
+  (`pulsar_core::input::touchpad_linux`, both MT slots; gate = `kbdhook::input_active`);
+  **Windows + macOS** `src-tauri/src/touchpad_mouse.rs`, fed by `controllers.rs`
+  (`PadView::touch`: SDL3 `SDL_GetGamepadTouchpadFinger` + the TOUCHPAD button, or the
+  DualSense passthrough's raw report while it owns the pad); gate = Pulsar focused and the
+  session menu closed (background input does NOT extend to the mouse); a disabled pad or one
+  locked to another split pane is ignored. The touch also still reaches the host's virtual
+  DualSense through the passthrough, as on Linux. **Untested on hardware on all three OSes**
+  (macOS: SDL may serve the pad through its GameController/MFi driver instead of HIDAPI —
+  that driver also reports the touchpad, unverified).
 - **Keyboard/mouse capture**: automatic engages (CLI `--connect` kiosk start, game mode's
   connect-time engage — `kbd_engage { auto: true }`) only happen while Pulsar is focused;
   otherwise they wait and engage when Pulsar gets the focus (Windows `PENDING_ENGAGE` in
