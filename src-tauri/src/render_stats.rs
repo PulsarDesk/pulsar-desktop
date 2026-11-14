@@ -27,6 +27,26 @@ pub(crate) static FIRST_FRAMES_ID: std::sync::atomic::AtomicU64 = std::sync::ato
 /// The Windows renderer's average decode time per frame (ms, f32 bits) from its last
 /// `vidsink-fps` line; play::hold steps the fps down when the decoder can't keep up.
 pub(crate) static DECODE_MS_BITS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// Access units the Windows renderer decoded per second (f32 bits; 0 = not reported), from the
+/// same line's 5th field.
+pub(crate) static DECODED_FPS_BITS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// When those two were last written (ms on [`stats_clock_ms`]; 0 = never). play::hold ignores
+/// them once stale, and clears all three when a session starts: a value from the previous
+/// session used to drop a new session's fps before its first frame (2026-11-14).
+pub(crate) static DECODE_AT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A monotonic ms clock for [`DECODE_AT_MS`].
+pub(crate) fn stats_clock_ms() -> u64 {
+	static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+	T0.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64 + 1
+}
+
+/// Forget the renderer's decode stats (a new session starts).
+pub(crate) fn clear_decode_stats() {
+	DECODE_MS_BITS.store(0, std::sync::atomic::Ordering::Relaxed);
+	DECODED_FPS_BITS.store(0, std::sync::atomic::Ordering::Relaxed);
+	DECODE_AT_MS.store(0, std::sync::atomic::Ordering::Relaxed);
+}
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -167,8 +187,11 @@ pub(crate) fn start_render_reader(
 				}
 				let mbps = it.next().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
 				let ms = it.next().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-				tracing::debug!(fps, mbps, decode_ms = ms, "render stats");
+				let decoded = it.next().and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.0);
+				tracing::debug!(fps, mbps, decode_ms = ms, decoded, "render stats");
 				DECODE_MS_BITS.store((ms as f32).to_bits(), std::sync::atomic::Ordering::Relaxed);
+				DECODED_FPS_BITS.store(decoded.to_bits(), std::sync::atomic::Ordering::Relaxed);
+				DECODE_AT_MS.store(stats_clock_ms(), std::sync::atomic::Ordering::Relaxed);
 				let _ = app.emit(
 					"play-vstats",
 					PlayVStats {

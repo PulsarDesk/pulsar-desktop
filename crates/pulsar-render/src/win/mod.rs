@@ -2049,8 +2049,12 @@ impl Renderer {
 			};
 			// 4-field line like the Linux backends (fps, dims, mbit, decode-ms) so the
 			// app's render_stats reader gets real values for the webview HUD too.
+			// 5th field: access units decoded per second. Presented fps can be lower (a burst
+			// presents only its newest picture); a decoder that really cannot keep up decodes
+			// fewer AUs than the stream sends (the backlog overflows and sheds them).
+			let decoded = self.dec_n as f32 / dt.as_secs_f32();
 			let (vw, vh) = present::displayed_dims(self.src_w, self.src_h);
-			println!("vidsink-fps {fps:.0} {vw}x{vh} {mbps:.1} {dec:.1}");
+			println!("vidsink-fps {fps:.0} {vw}x{vh} {mbps:.1} {dec:.1} {decoded:.0}");
 			use std::io::Write;
 			let _ = std::io::stdout().flush();
 			// Feed the overlay directly: no stdin `stat` echo exists on Windows; these

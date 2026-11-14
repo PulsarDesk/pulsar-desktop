@@ -105,6 +105,21 @@ fn median_ms(v: &std::collections::VecDeque<f32>, fallback: f32) -> f32 {
 	s[s.len() / 2]
 }
 
+/// The client decoder cannot keep up with `fps`: each access unit takes most of the frame time
+/// (`decode_ms`) AND fewer AUs get decoded than the stream sends (`decoded` per second; 0 = the
+/// renderer does not report it). The time alone misleads: the Windows decode call returns when
+/// the picture is out, so on a decoder that is merely pipelined it reads about one frame
+/// interval at ANY fps — 11 ms at 120, 17 ms at 60 — and the old rule stepped 120 → 60 → 30
+/// on a laptop whose decoder had room to spare (2026-11-14). A decoder that is really behind
+/// sheds AUs (the backlog overflows), so its decoded rate falls below the stream's.
+fn decoder_overloaded(decode_ms: f32, decoded: f32, fps: u32) -> bool {
+	if !(decode_ms > 0.0) || !(decoded > 0.0) || fps == 0 {
+		return false;
+	}
+	let budget = 1000.0 / fps as f32;
+	decode_ms >= budget * 0.8 && decoded < fps as f32 * 0.85
+}
+
 /// The repair window in ms (see `REPAIR_MIN_MS`): a NACK retransmit lands ~1 RTT after the
 /// NACK, so wait the median RTT plus twice its jitter (the mean absolute deviation of the
 /// recent samples) — an answer that is late but normal for this link still makes it, a lost one
@@ -732,6 +747,11 @@ pub(super) async fn hold_session(
 	let mut cur_codec = codec_h;
 	let mut cur_fps = req_fps;
 	let mut cur_transmit = true;
+	// The renderer's decode numbers belong to the previous session until this one's arrive.
+	crate::render_stats::clear_decode_stats();
+	// Consecutive stats windows in which the client decoder looked overloaded (see
+	// `decoder_overloaded`); the fps steps down at 2.
+	let mut dec_over_windows: u32 = 0;
 	// Host-silent intent: game mode requests it by default (seeds the initial play.rs request);
 	// the host honors it by REDIRECTING its default output to a virtual sink (never muting the
 	// captured endpoint — see play.rs). Preserved across every re-request; the user can flip it
@@ -1970,14 +1990,24 @@ pub(super) async fn hold_session(
 					// Windows: the client's own decoder is the limit when it can't decode the
 					// current fps in real time — step the fps down instead of freezing.
 					if cfg!(windows) && d.point.is_none() {
-						let dec_ms = f32::from_bits(
-							crate::render_stats::DECODE_MS_BITS.load(std::sync::atomic::Ordering::Relaxed),
-						);
-						let cb = ctl.client_decode_bound(dec_ms);
-						if let Some(p) = cb.point {
-							tracing::info!(decode_ms = dec_ms, to = %p.label(), "client decoder can't keep up → lower fps");
-							d.point = Some(p);
-							d.reason = cb.reason;
+						use std::sync::atomic::Ordering::Relaxed;
+						let dec_ms = f32::from_bits(crate::render_stats::DECODE_MS_BITS.load(Relaxed));
+						let decoded = f32::from_bits(crate::render_stats::DECODED_FPS_BITS.load(Relaxed));
+						let at = crate::render_stats::DECODE_AT_MS.load(Relaxed);
+						let fresh = at > 0 && crate::render_stats::stats_clock_ms().saturating_sub(at) <= 2500;
+						if fresh && decoder_overloaded(dec_ms, decoded, cur_fps) {
+							dec_over_windows += 1;
+						} else {
+							dec_over_windows = 0;
+						}
+						if dec_over_windows >= 2 {
+							let cb = ctl.client_decode_bound(dec_ms);
+							if let Some(p) = cb.point {
+								tracing::info!(decode_ms = dec_ms, decoded, to = %p.label(), "client decoder can't keep up → lower fps");
+								d.point = Some(p);
+								d.reason = cb.reason;
+								dec_over_windows = 0;
+							}
 						}
 					}
 					let sig = ctl.last();
@@ -2399,6 +2429,20 @@ mod kf_tests {
 
 	fn rtts(v: &[f32]) -> std::collections::VecDeque<f32> {
 		v.iter().copied().collect()
+	}
+
+	#[test]
+	fn a_pipelined_decoder_is_not_overloaded() {
+		// The 2026-11-14 laptop: decode time ≈ the frame interval, every AU decoded.
+		assert!(!decoder_overloaded(11.3, 119.0, 120));
+		assert!(!decoder_overloaded(17.4, 60.0, 60));
+		// Behind for real: most of the frame time AND AUs shed.
+		assert!(decoder_overloaded(11.3, 80.0, 120));
+		// Not reported (an older renderer, other platforms) or no stats yet: never.
+		assert!(!decoder_overloaded(11.3, 0.0, 120));
+		assert!(!decoder_overloaded(0.0, 80.0, 120));
+		// Fast decoding with few AUs is a thin stream, not a slow decoder.
+		assert!(!decoder_overloaded(2.0, 30.0, 120));
 	}
 
 	#[test]
