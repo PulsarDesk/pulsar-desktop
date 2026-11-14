@@ -2083,3 +2083,20 @@ fn emit_cmd(state: &mut OverlayState, c: OverlayCmd) {
 	}
 	let _ = std::io::stdout().flush();
 }
+
+#[cfg(test)]
+mod ui_scale_tests {
+	use super::parse_ui_scale;
+
+	#[test]
+	fn parses_and_clamps_the_live_scale() {
+		assert_eq!(parse_ui_scale("2"), Some(2.0));
+		assert_eq!(parse_ui_scale("1.5"), Some(1.5));
+		assert_eq!(parse_ui_scale("9"), Some(4.0));
+		assert_eq!(parse_ui_scale("0.1"), Some(0.5));
+		assert_eq!(parse_ui_scale("0"), None);
+		assert_eq!(parse_ui_scale("-1"), None);
+		assert_eq!(parse_ui_scale("NaN"), None);
+		assert_eq!(parse_ui_scale("x"), None);
+	}
+}
