@@ -77,6 +77,8 @@ mod render_stats;
 // working where the evdev node has no EV_FF: BT DualSense, RK3588). Replaces gilrs;
 // see controllers.rs.
 mod controllers;
+#[cfg(not(target_os = "linux"))]
+mod touchpad_mouse;
 mod session_cmds;
 mod remote_cursor;
 mod splash;

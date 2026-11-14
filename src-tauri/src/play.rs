@@ -2055,10 +2055,11 @@ pub(crate) async fn start_remote_play(
 		});
 	}
 
-	// DS4/DS5 touchpad-as-mouse: Linux only. Synthesizes PointerRelative /
-	// PointerButton events from the physical touchpad surface and sends them
-	// through the SAME input channel as the gamepad and keyboard readers.
-	// No-ops silently when the device isn't found or isn't accessible.
+	// DS4/DS5 touchpad-as-mouse: one finger = pointer, two = scroll, press = click (the
+	// shared `pulsar_core::input::touchpad_mouse` gestures). Sent through the SAME input
+	// channel as the gamepad and keyboard readers. Linux reads the pad's evdev touchpad
+	// node; Windows / macOS read the contacts SDL3 (or the DualSense passthrough) already
+	// parses (`touchpad_mouse.rs`). No-ops silently when no device is accessible.
 	#[cfg(target_os = "linux")]
 	if touchpad_as_mouse {
 		pulsar_core::input::touchpad_linux::spawn_touchpad_reader(
@@ -2071,7 +2072,9 @@ pub(crate) async fn start_remote_play(
 		);
 	}
 	#[cfg(not(target_os = "linux"))]
-	let _ = touchpad_as_mouse; // suppress unused-variable warning on Windows/macOS
+	if touchpad_as_mouse {
+		crate::touchpad_mouse::spawn(id, input_tx.clone(), running.clone());
+	}
 
 	// Side-channel queue (clipboard / chat / file / mic audio â†’ host).
 	let (data_tx, data_rx) = tokio::sync::mpsc::channel::<DataMsg>(512);
