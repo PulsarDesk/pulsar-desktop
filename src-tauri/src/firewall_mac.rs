@@ -87,7 +87,7 @@ pub(crate) fn setup(app: &tauri::AppHandle) {
 		let missing: Vec<String> = paths
 			.into_iter()
 			.filter(|p| std::path::Path::new(p).is_file())
-			.filter(|p| sfw(&["--getappblocked", p]).is_none_or(|o| needs_rule(&o)))
+			.filter(|p| sfw(&["--getappblocked", p.as_str()]).is_none_or(|o| needs_rule(&o)))
 			.collect();
 		if missing.is_empty() || marker.exists() {
 			return;
