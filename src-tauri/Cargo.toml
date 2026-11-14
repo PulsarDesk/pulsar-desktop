@@ -95,6 +95,7 @@ windows-sys = { version = "0.61", features = [
 	"Win32_UI_WindowsAndMessaging",
 	"Win32_UI_Accessibility", # kbdhook: EVENT_SYSTEM_FOREGROUND watcher (drop control when another app takes over)
 	"Win32_UI_Input", # kbdhook: raw mouse deltas while the host holds a pointer lock
+	"Win32_Devices_HumanInterfaceDevice", # kbdhook/win_gesture: HidP_* parse of the precision touchpad reports
 	"Win32_UI_Input_KeyboardAndMouse",
 	"Win32_Devices_Display", # util: QueryDisplayConfig — the configured refresh under Dynamic refresh rate
 	"Win32_Devices_DeviceAndDriverInstallation", # ds5/endpoint.rs: CfgMgr32 container-id match of a USB DualSense to its audio endpoints

@@ -190,6 +190,16 @@ fn fwd(tx: &Sender<InputEvent>, ev: InputEvent) {
 	let _ = q.lock().unwrap_or_else(|e| e.into_inner()).send((tx.clone(), ev));
 }
 
+/// The active play's input channel (touchpad gesture reader, `win_gesture`). Never blocks.
+pub(super) fn session_tx() -> Option<Sender<InputEvent>> {
+	globals().try_lock().ok().and_then(|g| g.tx.clone())
+}
+
+/// [`fwd`] for the other capture threads of this module family.
+pub(super) fn forward(tx: &Sender<InputEvent>, ev: InputEvent) {
+	fwd(tx, ev)
+}
+
 /// Windows switches the keyboard layout on a bare Ctrl+Shift (and the input language on
 /// Alt+Shift): modifiers pressed and released with no other key seen in between. While merely
 /// app-focused the modifiers of a Ctrl+Shift combo DO reach the OS, but the hook swallows the

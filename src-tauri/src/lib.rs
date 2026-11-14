@@ -60,6 +60,7 @@ mod kbdhook;
 mod native_audio;
 mod native_view;
 mod focus_gate;
+mod gesture;
 mod headless;
 // `pulsar --headless-host` / `--split-seat …`: the host with no window, tray or webview.
 pub mod headless_host;
@@ -137,7 +138,7 @@ use play::{start_remote_play, stop_stream};
 use session_cmds::{
 	fs_get, fs_list, host_window_list, render_banner, render_chat, render_fs, render_hint,
 	render_kin, render_nav, render_toast, reverse_play, set_cursor_label, set_frame_pacing, set_overlay,
-	set_overlay_button, set_overlay_button_pos, set_mouse_sensitivity, set_pointer_free, set_host_cursor, set_ds4_headset, set_play_adapt, set_play_audio, set_play_audio_quality, set_play_bitrate,
+	set_overlay_button, set_overlay_button_pos, set_mouse_sensitivity, set_touchpad_gestures, set_pointer_free, set_host_cursor, set_ds4_headset, set_play_adapt, set_play_audio, set_play_audio_quality, set_play_bitrate,
 	set_play_codec, set_play_encoder, set_play_fps, set_play_monitor, set_play_quality,
 	set_play_resolution, set_play_window, set_stats_hud,
 };
@@ -543,6 +544,11 @@ pub fn run() {
 			crate::clipboard_sync::spawn_watcher(app.handle().clone());
 			crate::remote_cursor::start(app.handle());
 			crate::host::takeover::start();
+			// Touchpad gestures (Windows: the Raw Input reader, and the local gesture settings a
+			// crashed run left switched off are put back here).
+			crate::kbdhook::gesture_startup(
+				app.path().app_config_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+			);
 			// Linux: put back a display mode a crashed earlier run left adapted (screen
 			// adaptation; macOS needs nothing — its change is app-scoped and dies with us).
 			#[cfg(target_os = "linux")]
@@ -865,6 +871,7 @@ pub fn run() {
 			set_play_audio,
 			set_play_audio_quality,
 			set_mouse_sensitivity,
+			set_touchpad_gestures,
 			set_pointer_free,
 			crate::session_cmds::set_upscale,
 			set_ds4_headset,
@@ -956,6 +963,12 @@ pub fn run() {
 			mic_stop,
 			forget_peer
 		])
-		.run(context())
-		.expect("error while running Pulsar");
+		.build(context())
+		.expect("error while running Pulsar")
+		.run(|_app, ev| {
+			if let tauri::RunEvent::Exit = ev {
+				// Local touchpad gestures switched off while engaged come back on exit.
+				crate::kbdhook::gesture_shutdown();
+			}
+		});
 }

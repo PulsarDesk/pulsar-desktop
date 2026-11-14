@@ -131,6 +131,8 @@ mod confine;
 #[cfg(windows)]
 mod imp;
 #[cfg(windows)]
+mod win_gesture;
+#[cfg(windows)]
 pub use imp::{disable, enable, overlay_suspend, set_focused};
 
 #[cfg(target_os = "macos")]
@@ -256,6 +258,21 @@ pub fn set_pointer_lock(_id: u64, _on: bool) {}
 pub fn set_host_pinch(on: bool) {
 	crate::pinch::set_host_pinch(on)
 }
+/// App start: the touchpad gesture reader (Windows: Raw Input + the crash recovery of the
+/// local gesture settings it switches off while engaged; `dir` holds the saved settings).
+#[cfg(windows)]
+pub fn gesture_startup(dir: std::path::PathBuf) {
+	win_gesture::startup(dir)
+}
+#[cfg(not(windows))]
+pub fn gesture_startup(_dir: std::path::PathBuf) {}
+/// App exit: give back any local touchpad gesture setting switched off while engaged.
+#[cfg(windows)]
+pub fn gesture_shutdown() {
+	win_gesture::shutdown()
+}
+#[cfg(not(windows))]
+pub fn gesture_shutdown() {}
 /// Whether the connected host injects real pen / touch (`FEAT_PEN` / `FEAT_TOUCH`): the
 /// Windows mouse hook then leaves the mouse synthesized from pen / touch to the renderer's
 /// WM_POINTER forwarding. Elsewhere the webview's PointerEvents carry pen / touch.
