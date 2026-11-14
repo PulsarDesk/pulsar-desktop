@@ -310,6 +310,22 @@ pub(crate) fn start_render_reader(
 								let _ = app.emit("overlay-cmd", (cur_id, field.to_string(), val.to_string()));
 								continue 'lines;
 							}
+							// The Ses section's device pickers (`micdev` / `spkdev <token>`): apply
+							// Rust-side at once, then hand the decoded name to the webview to save
+							// (ui.micDevice / ui.speakerDevice).
+							if field == "micdev" || field == "spkdev" {
+								let Some(name) = crate::audio_devices::decode(val) else {
+									continue 'lines;
+								};
+								let kind = if field == "micdev" {
+									crate::audio_devices::Kind::Mic
+								} else {
+									crate::audio_devices::Kind::Speaker
+								};
+								crate::audio_devices::set_pref(kind, &name);
+								let _ = app.emit("overlay-cmd", (cur_id, field.to_string(), name));
+								continue 'lines;
+							}
 							tracing::info!(field, val, "overlay-cmd from renderer");
 							// Mirror stream-selection fields into RenderSeed so a codec-switch
 							// respawn can replay the user's choices onto the fresh renderer

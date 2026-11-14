@@ -406,6 +406,9 @@ async fn respawn_render_for_codec(
 					let _ = writeln!(si, "{}", crate::kbdhook::pen_touch_line(host_pen, host_touch));
 					let _ = writeln!(si, "upscale {}", crate::native_view::upscale_mode());
 					let _ = writeln!(si, "hostptrshow {}", if crate::kbdhook::host_cursor() { 1 } else { 0 });
+					for l in crate::audio_devices::seed_lines() {
+						let _ = writeln!(si, "{l}");
+					}
 					if let Some((tx, mute, mic)) = seed.audio {
 						let _ = writeln!(
 							si,
@@ -1464,6 +1467,17 @@ pub(crate) async fn set_mouse_sensitivity(value: f32) -> Result<(), String> {
 #[tauri::command]
 pub(crate) async fn set_touchpad_gestures(on: bool) -> Result<(), String> {
 	crate::gesture::set_enabled(on);
+	Ok(())
+}
+
+/// Client: which microphone goes to the host and which output plays the session (names as
+/// SDL reports them; empty = the system default). Saved by the webview (`ui.micDevice` /
+/// `ui.speakerDevice`); running captures and players move within half a second
+/// (`audio_devices`).
+#[tauri::command]
+pub(crate) async fn set_audio_devices(mic: String, speaker: String) -> Result<(), String> {
+	crate::audio_devices::set_pref(crate::audio_devices::Kind::Mic, &mic);
+	crate::audio_devices::set_pref(crate::audio_devices::Kind::Speaker, &speaker);
 	Ok(())
 }
 

@@ -31,11 +31,20 @@
 //!
 //! Headphones in a USB DualShock 4's jack (`ds4_headset.rs`, experimental): local playback
 //! moves to the pad's own audio device; the SDL stream is reopened on the switch.
+//!
+//! Output device: the session menu's pick (`audio_devices`, by name; default = the system
+//! default), checked every half second. The pick unplugged → the system default; back →
+//! moved back. A stream on the default follows the OS default by itself (SDL migrates it).
+//! A stream whose queue stops draining for `audio_devices::STALL` (driver reset, a device
+//! SDL lost without telling) is reopened. No device opens at all → the packets are decoded
+//! and dropped (the session keeps going, silent) and the open is retried every second.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use crate::audio_devices::{self as devs, Kind, Opened, Retry};
 
 /// The host's Opus rate (`pulsar_core::audio::SAMPLE_RATE`).
 const RATE: u32 = 48_000;
@@ -175,8 +184,24 @@ struct Route {
 	away: bool,
 	/// The next local packet fades in.
 	fade_in: bool,
-	/// The SDL device the open local stream plays on (0 = the default output).
-	dev: u32,
+	/// What the open local stream plays on.
+	on: Opened,
+	/// Gate for (re)opening the local output after a failure.
+	retry: Retry,
+	/// When the open stream next checks its device.
+	next_check: Instant,
+	/// Reopens of a stalled stream in a row (only the first is logged loudly).
+	stalls: u32,
+}
+
+/// Where the local output should play: a DS4's headset jack, else the menu's pick when it is
+/// connected, else the system default (`None`). Also returns the playback devices present
+/// (`None` = SDL can't list them: no device checks then).
+fn want_output() -> (Option<u32>, Option<Vec<devs::Dev>>) {
+	let list = devs::devices(Kind::Speaker);
+	let w = crate::ds4_headset::target()
+		.or_else(|| list.as_deref().and_then(|l| devs::resolve(&devs::pref(Kind::Speaker), l)));
+	(w, list)
 }
 
 /// Fade length on a switch, frames (5 ms).
@@ -205,6 +230,82 @@ fn fade(pcm: &mut [f32], up: bool) {
 }
 
 impl Route {
+	fn new(play_id: u64) -> Route {
+		Route {
+			play_id,
+			away: false,
+			fade_in: false,
+			on: Opened::Default,
+			retry: Retry::default(),
+			next_check: Instant::now(),
+			stalls: 0,
+		}
+	}
+
+	/// Open the local output on the wanted device, else the default; on failure stay silent
+	/// and let the next packet after [`devs::RETRY`] try again.
+	fn open_local(&mut self, out: &mut Option<SdlOut>) {
+		let now = Instant::now();
+		if !self.retry.due(now) {
+			return;
+		}
+		let (want, _) = want_output();
+		let quiet = self.stalls > 1;
+		let mut opened = want.and_then(|id| SdlOut::open(id, quiet).map(|s| (s, Opened::Device(id))));
+		if opened.is_none() {
+			opened = SdlOut::open(0, quiet).map(|s| (s, Opened::Default));
+		}
+		match opened {
+			Some((s, on)) => {
+				let failures = self.retry.ok();
+				if failures > 0 || on != Opened::Default || want.is_some() {
+					tracing::info!(?on, ?want, after_failures = failures, "audio: output device open");
+				}
+				self.on = on;
+				self.next_check = now + devs::CHECK_EVERY;
+				*out = Some(s);
+			}
+			None => {
+				if self.retry.failed(now) {
+					tracing::warn!(
+						err = %devs::sdl_error(),
+						"audio: no output device opens — the session plays silently, retrying every second"
+					);
+				}
+			}
+		}
+	}
+
+	/// Every [`devs::CHECK_EVERY`]: close the local output when it is on the wrong device (the
+	/// pick or a DS4 jack changed, its device went away) or stalled; the next packet reopens it.
+	fn check_local(&mut self, out: &mut Option<SdlOut>) {
+		let now = Instant::now();
+		if now < self.next_check {
+			return;
+		}
+		self.next_check = now + devs::CHECK_EVERY;
+		let Some(s) = out.as_ref() else { return };
+		let (want, list) = want_output();
+		let moved = list.as_deref().is_some_and(|l| devs::needs_reopen(self.on, want, l));
+		let stalled = s.stalled(now);
+		if !moved && !stalled {
+			if !s.stalled_since_open() {
+				self.stalls = 0;
+			}
+			return;
+		}
+		if moved || self.stalls == 0 {
+			tracing::info!(on = ?self.on, ?want, moved, stalled, "audio: reopening the output device");
+		}
+		if stalled && !moved {
+			self.stalls += 1;
+		} else {
+			self.stalls = 0;
+		}
+		*out = None;
+		self.fade_in = true;
+	}
+
 	/// Deliver one decoded packet. Opens the SDL device only for local playback.
 	fn emit(&mut self, out: &mut Option<SdlOut>, pcm: &mut [f32]) {
 		if pcm.is_empty() {
@@ -220,28 +321,19 @@ impl Route {
 					}
 					tracing::info!("audio: back on the client output");
 				}
-				// A DS4's headset jack took over (or gave back) the local output: reopen there.
-				let want = crate::ds4_headset::target().unwrap_or(0);
-				if out.is_some() && self.dev != want {
-					tracing::info!(device = want, "audio: local output moves (DS4 headset jack)");
-					*out = None;
-					self.fade_in = true;
-				}
 				if out.is_none() {
-					*out = SdlOut::open(want);
-					self.dev = want;
-					if out.is_none() && want != 0 {
-						*out = SdlOut::open(0); // the pad's device failed: default output
-						self.dev = 0;
-					}
+					self.open_local(out);
 				}
-				if self.fade_in {
+				if self.fade_in && out.is_some() {
 					self.fade_in = false;
 					fade(pcm, true);
 				}
 				if let Some(s) = out.as_mut() {
 					s.push(pcm);
 				}
+				// After the push, so a queue that drained during a pause in the stream counts as
+				// draining. A DS4 jack / the menu pick moving the output is caught here too.
+				self.check_local(out);
 			}
 			tap => {
 				if !self.away {
@@ -283,12 +375,7 @@ fn run(packets: mpsc::Receiver<Vec<u8>>, stop: Arc<AtomicBool>, play_id: u64) {
 	let mut last_arrival: Option<std::time::Instant> = None;
 	// The last uncompressed packet (L16), replayed (faded) for a lost one.
 	let mut last_l16: Vec<f32> = Vec::new();
-	let mut route = Route {
-		play_id,
-		away: false,
-		fade_in: false,
-		dev: 0,
-	};
+	let mut route = Route::new(play_id);
 	// Counters kept while no local device is open (the stats live on the device).
 	let mut spare = Stats::default();
 	while !stop.load(Ordering::Relaxed) {
@@ -300,17 +387,8 @@ fn run(packets: mpsc::Receiver<Vec<u8>>, stop: Arc<AtomicBool>, play_id: u64) {
 		let Some((pt, n, payload)) = rtp_audio(&pkt) else {
 			continue;
 		};
-		if out.is_none() && matches!(crate::ds5::headset::tap(play_id), crate::ds5::headset::Tap::Local) {
-			route.dev = crate::ds4_headset::target().unwrap_or(0);
-			out = SdlOut::open(route.dev);
-			if out.is_none() && route.dev != 0 {
-				route.dev = 0;
-				out = SdlOut::open(0);
-			}
-			if out.is_none() {
-				return; // logged by open()
-			}
-		}
+		// The local output opens on the first packet played locally (Route::emit); without
+		// one the packets are still decoded (sequence, PLC state) and dropped.
 		macro_rules! stats {
 			() => {
 				match out.as_mut() {
@@ -440,11 +518,21 @@ struct SdlOut {
 	last_dry: std::time::Instant,
 	stats: Stats,
 	stats_at: std::time::Instant,
+	/// Queue level right after the last push (ms; 0 after a clear).
+	last_after_ms: f32,
+	/// When the queue was last seen draining (or the stream (re)started): a device that stops
+	/// pulling is reopened after `audio_devices::STALL`.
+	last_drain: std::time::Instant,
+	/// The queue has drained at least once since the open.
+	drained: bool,
+	/// The last push (a pause in the stream longer than STALL is not a stalled device).
+	last_push: std::time::Instant,
 }
 
 impl SdlOut {
-	/// Open on SDL playback device `dev` (0 = the default output).
-	fn open(dev: u32) -> Option<SdlOut> {
+	/// Open on SDL playback device `dev` (0 = the default output). `quiet`: a retry in a
+	/// stall streak (no info line).
+	fn open(dev: u32, quiet: bool) -> Option<SdlOut> {
 		use sdl3_sys::audio::{
 			SDL_AudioSpec, SDL_OpenAudioDeviceStream, SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,
 			SDL_AUDIO_F32,
@@ -459,7 +547,7 @@ impl SdlOut {
 				DEVICE_FRAMES.as_ptr(),
 			);
 			if !SDL_InitSubSystem(SDL_INIT_AUDIO) {
-				tracing::warn!("audio: SDL_InitSubSystem(AUDIO) failed — no client audio");
+				tracing::debug!(err = %devs::sdl_error(), "audio: SDL_InitSubSystem(AUDIO) failed");
 				return None;
 			}
 			let spec = SDL_AudioSpec {
@@ -474,7 +562,7 @@ impl SdlOut {
 				std::ptr::null_mut(),
 			);
 			if stream.is_null() {
-				tracing::warn!("audio: SDL_OpenAudioDeviceStream failed — no client audio");
+				tracing::debug!(dev, err = %devs::sdl_error(), "audio: SDL_OpenAudioDeviceStream failed");
 				SDL_QuitSubSystem(SDL_INIT_AUDIO);
 				return None;
 			}
@@ -495,13 +583,15 @@ impl SdlOut {
 			} else {
 				10.0
 			};
-			tracing::info!(
-				target_ms,
-				device_ms,
-				device_hz = dev_spec.freq,
-				device_frames = dev_frames,
-				"audio: native player up (libopus + SDL3)"
-			);
+			if !quiet {
+				tracing::info!(
+					target_ms,
+					device_ms,
+					device_hz = dev_spec.freq,
+					device_frames = dev_frames,
+					"audio: native player up (libopus + SDL3)"
+				);
+			}
 			let now = std::time::Instant::now();
 			Some(SdlOut {
 				stream,
@@ -517,6 +607,10 @@ impl SdlOut {
 				last_dry: now,
 				stats: Stats::default(),
 				stats_at: now,
+				last_after_ms: 0.0,
+				last_drain: now,
+				drained: false,
+				last_push: now,
 			})
 		}
 	}
@@ -531,6 +625,18 @@ impl SdlOut {
 		self.set_ratio(1.0);
 		self.set_playing(false);
 		self.level_ms = None;
+		self.last_after_ms = 0.0;
+		self.last_drain = std::time::Instant::now();
+	}
+
+	/// The device stopped pulling: nothing drained for `audio_devices::STALL`.
+	fn stalled(&self, now: std::time::Instant) -> bool {
+		now.duration_since(self.last_drain) > devs::STALL
+	}
+
+	/// No drain seen since this stream opened (a reopen in a stall streak that did not help).
+	fn stalled_since_open(&self) -> bool {
+		!self.drained
 	}
 
 	fn queued_ms(&self) -> f32 {
@@ -575,6 +681,13 @@ impl SdlOut {
 		}
 		let now = std::time::Instant::now();
 		let before = self.queued_ms();
+		if before + 0.5 < self.last_after_ms {
+			self.last_drain = now;
+			self.drained = true;
+		} else if now.duration_since(self.last_push) > devs::STALL {
+			self.last_drain = now;
+		}
+		self.last_push = now;
 		if self.playing && before <= 0.0 {
 			// Ran dry: the device has been playing silence — a crackle. Buffer more.
 			self.stats.dry += 1;
@@ -611,6 +724,7 @@ impl SdlOut {
 			unsafe {
 				SDL_ClearAudioStream(self.stream);
 			}
+			self.last_after_ms = 0.0;
 			self.stats.flushes += 1;
 			self.set_ratio(1.0);
 			self.set_playing(false);
@@ -634,6 +748,9 @@ impl SdlOut {
 				};
 				self.set_ratio(1.0 + adj);
 			}
+		}
+		if self.playing || after < full {
+			self.last_after_ms = after;
 		}
 		let ratio = self.ratio;
 		let st = &mut self.stats;

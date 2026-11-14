@@ -712,6 +712,9 @@ fn stdin_control() {
 					});
 				}
 			}
+		} else if crate::overlay::audio_devices_line(l) {
+			// This computer's mic / output devices for the Ses pickers: `micdevs <cur> <dev>…`,
+			// `spkdevs …` (percent-encoded names, `*` = system default; overlay.rs).
 		} else if l.trim_end() == "hpvol" || l.starts_with("hpvol ") {
 			// DualSense headphone volume bars: `hpvol uuid:volume:rrggbb,...` (overlay.rs).
 			crate::overlay::set_headsets(l.trim_end().strip_prefix("hpvol").unwrap_or(""));

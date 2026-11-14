@@ -15,6 +15,7 @@
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 
 mod adapt_memory;
+mod audio_devices;
 mod audio_io;
 mod auth;
 mod device_creds;
@@ -57,6 +58,7 @@ mod io_cmds;
 mod job;
 mod legacy_install;
 mod kbdhook;
+mod mic_capture;
 mod native_audio;
 mod native_view;
 mod focus_gate;
@@ -528,6 +530,8 @@ pub fn run() {
 			#[cfg(target_os = "macos")]
 			crate::firewall_mac::setup(app.handle());
 			crate::ui_start::start(app.handle());
+			// Client mic / output device lists for the session menu (idle without sessions).
+			crate::audio_devices::start_watcher(app.handle().clone());
 			// Shared mode: the machine-wide host lease (one host per PC, follows the active session).
 			crate::shared_mode::lease::start(app.handle().clone());
 
@@ -876,6 +880,7 @@ pub fn run() {
 			set_pointer_free,
 			crate::session_cmds::set_upscale,
 			set_ds4_headset,
+			crate::session_cmds::set_audio_devices,
 			set_host_cursor,
 			reverse_play,
 			set_window_fullscreen,

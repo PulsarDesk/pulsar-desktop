@@ -329,8 +329,8 @@ pub(crate) struct PlaySession {
 	pub(crate) input_tx: tokio::sync::mpsc::Sender<InputEvent>,
 	/// Side-channel sender (clipboard / chat / file / mic audio → host).
 	pub(crate) data_tx: tokio::sync::mpsc::Sender<DataMsg>,
-	/// Running mic recorder (`parecord`), if the user enabled the microphone.
-	pub(crate) mic: Arc<Mutex<Option<Child>>>,
+	/// Running mic capture (`mic_capture`), if the user enabled the microphone.
+	pub(crate) mic: Arc<Mutex<Option<crate::mic_capture::Mic>>>,
 	pub(crate) running: Arc<AtomicBool>,
 	/// Live stream re-configuration from the session menu (resolution / encoder): each
 	/// message re-requests the stream so the host restarts ffmpeg with the new setting.

@@ -546,6 +546,9 @@ pub(crate) async fn start_remote_play(
 									let _ = writeln!(si, "{}", crate::kbdhook::pen_touch_line(host_pen, host_touch));
 									let _ = writeln!(si, "upscale {}", crate::native_view::upscale_mode());
 									let _ = writeln!(si, "hostptrshow {}", if crate::kbdhook::host_cursor() { 1 } else { 0 });
+									for l in crate::audio_devices::seed_lines() {
+										let _ = writeln!(si, "{l}");
+									}
 								}
 								*caps_line.lock().unwrap() = line;
 								render_seed.lock().unwrap().audio = Some((true, game_mode, false));
@@ -853,6 +856,9 @@ pub(crate) async fn start_remote_play(
 										let _ = writeln!(si, "{}", crate::kbdhook::pen_touch_line(host_pen, host_touch));
 										let _ = writeln!(si, "upscale {}", crate::native_view::upscale_mode());
 										let _ = writeln!(si, "hostptrshow {}", if crate::kbdhook::host_cursor() { 1 } else { 0 });
+										for l in crate::audio_devices::seed_lines() {
+											let _ = writeln!(si, "{l}");
+										}
 									}
 									*caps_line.lock().unwrap() = line;
 									render_seed.lock().unwrap().audio =
@@ -2283,10 +2289,8 @@ pub(crate) async fn stop_stream(
 	if let Some(mut play) = play {
 		play.running.store(false, Ordering::SeqCst);
 		play.viewer.stop();
-		if let Some(mut mic) = play.mic.lock().unwrap().take() {
-			let _ = mic.kill();
-			let _ = mic.wait(); // reap â€” kill alone leaves a unix zombie until app exit
-		}
+		// Stops the capture thread (and a fallback recorder process) and waits for it.
+		drop(play.mic.lock().unwrap().take());
 		// Close the ffplay fallback renderer (Windows/Linux mpv-fallback), if any. GRACEFUL
 		// (SIGTERM-first, see stop_render_child) â€” kills a separate window process cleanly.
 		// The pulsar-render child is handled separately below (Linux: kept resident).

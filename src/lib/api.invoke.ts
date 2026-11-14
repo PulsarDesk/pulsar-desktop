@@ -281,6 +281,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 		case 'set_touchpad_gestures':
 		case 'set_host_cursor':
 		case 'set_ds4_headset':
+		case 'set_audio_devices':
 		case 'set_play_monitor':
 		case 'set_frame_pacing':
 		case 'set_stats_hud':

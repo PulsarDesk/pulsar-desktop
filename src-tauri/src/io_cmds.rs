@@ -2,12 +2,10 @@
 //! input forwarding, the Windows keyboard-capture toggle, and the fullscreen
 //! window toggle (with the Win32 borderless-fullscreen helper).
 
-use std::io::Read;
 
 use pulsar_core::service::{DataMsg, InputEvent};
 use tauri::{AppHandle, State};
 
-use crate::audio_io::spawn_mic_recorder;
 use crate::kbdhook;
 use crate::process::ffmpeg_bin;
 use crate::state::AppState;
@@ -150,20 +148,18 @@ pub(crate) async fn mic_start(
 		let p = plays.get(&id).ok_or(crate::i18n::t("err.session"))?;
 		(p.data_tx.clone(), p.mic.clone(), p.render_seed.clone())
 	};
-	// Hold the slot lock across check→spawn→insert (spawn_mic_recorder is
-	// synchronous, no await): two concurrent invocations could otherwise both
-	// pass the is_some() check, and the loser's parecord would be dropped
-	// without kill() — recording and sending duplicate Audio frames for the
-	// session's lifetime.
+	// Hold the slot lock across check→start→insert (no await): two concurrent
+	// invocations could otherwise both pass the is_some() check and both capture,
+	// sending duplicate Audio frames for the session's lifetime.
 	let mut slot = mic_slot.lock().unwrap();
 	if slot.is_some() {
 		return Ok(()); // already on
 	}
-	let ffmpeg = ffmpeg_bin(&app);
-	let mut child =
-		spawn_mic_recorder(&ffmpeg).ok_or(crate::i18n::t("err.micRecorder"))?;
-	let stdout = child.stdout.take().ok_or(crate::i18n::t("err.micOutput"))?;
-	*slot = Some(child);
+	// The capture thread picks the device (session menu → Mikrofon cihazı), falls back to
+	// the system default and retries on its own (`mic_capture`).
+	let mic = crate::mic_capture::start(tx, ffmpeg_bin(&app))
+		.map_err(|_| crate::i18n::t("err.micRecorder").to_string())?;
+	*slot = Some(mic);
 	drop(slot);
 	// Record the mic-on bit in the audio truth so a codec/monitor-switch respawn
 	// re-seeds the fresh renderer's overlay with mic=1 (set_play_audio preserves
@@ -171,21 +167,6 @@ pub(crate) async fn mic_start(
 	if let Some(seed) = render_seed.lock().unwrap().audio.as_mut() {
 		seed.2 = true;
 	}
-	// Blocking read loop on a dedicated thread; killing the child ends it.
-	std::thread::spawn(move || {
-		let mut rdr = stdout;
-		let mut buf = [0u8; 3840]; // ~20 ms @ 48 kHz mono s16
-		loop {
-			match rdr.read(&mut buf) {
-				Ok(0) | Err(_) => break,
-				Ok(n) => {
-					if tx.blocking_send(DataMsg::Audio(buf[..n].to_vec())).is_err() {
-						break;
-					}
-				}
-			}
-		}
-	});
 	Ok(())
 }
 
@@ -199,12 +180,9 @@ pub(crate) async fn mic_stop(state: State<'_, AppState>, id: u64) -> Result<(), 
 		};
 		(p.data_tx.clone(), p.mic.clone(), p.render_seed.clone())
 	};
-	if let Some(mut c) = mic_slot.lock().unwrap().take() {
-		let _ = c.kill();
-		// Reap immediately — kill() alone leaves the recorder as a zombie until
-		// session teardown (visible as a defunct parecord for the session's life).
-		let _ = c.wait();
-	}
+	// Dropping the capture stops its thread (and reaps a fallback recorder process).
+	let mic = mic_slot.lock().unwrap().take();
+	drop(mic);
 	// Clear the mic-on bit in the audio truth so a later respawn re-seeds mic=0
 	// (mirrors mic_start; set_play_audio preserves but never sets this bit).
 	if let Some(seed) = render_seed.lock().unwrap().audio.as_mut() {

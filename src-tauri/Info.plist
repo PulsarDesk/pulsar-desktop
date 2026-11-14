@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Merged by Tauri into the macOS app's Info.plist (and embedded into the dev binary).
+  NSMicrophoneUsageDescription: the client's microphone side channel captures in-process
+  (src/mic_capture.rs, SDL3 / CoreAudio); without this key macOS terminates an app that opens
+  a recording device.
+-->
+<plist version="1.0">
+<dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Pulsar sends your microphone to the computer you are connected to while you turn the microphone on in a session.</string>
+</dict>
+</plist>
