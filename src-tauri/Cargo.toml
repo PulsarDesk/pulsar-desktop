@@ -151,7 +151,8 @@ ffmpeg-sys-next = { version = "8", default-features = false, features = ["avcode
 # Host cursor side-channel (cursor.rs): read the X pointer position (XFixes) + shape so the
 # client draws it over the cursorless KMS-captured video (Moonlight model). `xlib` for the
 # display/query-pointer, `xfixes` for the cursor image+hotspot. Same `x11` 2.21 the renderer uses.
-x11 = { version = "2.21", features = ["xlib", "xfixes"] }
+# `xinput` (libXi): XInput2 raw events for the host takeover watch (host/takeover.rs).
+x11 = { version = "2.21", features = ["xlib", "xfixes", "xinput"] }
 # Self-avatar resolution (avatar.rs): decode the account photo / wallpaper, center-crop
 # + downscale to a 96×96 PNG. Decode-only features kept minimal (png/jpeg/webp/bmp cover
 # AccountsService icons, ~/.face and GNOME wallpapers); Windows has its own block above,
