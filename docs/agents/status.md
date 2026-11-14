@@ -16,6 +16,11 @@ Games library + folder scan, gamepad-driven UI nav (`gamepadNav.svelte.ts`),
 auto-updater, relay mode, VNC-mode client path (`io_cmds.rs`), the SvelteKit UI
 and the Tauri bridge.
 
+**Sleep / display-off ends the viewed sessions, wake reconnects (2026-11-14):** Windows,
+Linux (logind + screen saver + X11 DPMS) and macOS (NSWorkspace) — all untested on real
+hardware; Linux/macOS details and the one gap (display-off on bare wlroots Wayland) in
+[modes.md](modes.md) "Sleep ends the viewed sessions".
+
 **Adaptive streaming (shipped 2026-09-03 in v0.11.0, refined in v0.12.0 — still awaiting the
 maintainer's real-session test):** the shared
 controller is `pulsar_core::adapt` (design + status in `../pulsar-core/docs/adaptive-streaming.md`).
