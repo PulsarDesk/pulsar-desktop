@@ -312,6 +312,8 @@
 	"settings.mouseSensDesc": "Oyun fareyi yakaladığında hareket bu katsayıyla gönderilir. 1× = farenin kendi hızı.",
 	"settings.pointerFree": "Serbest imleç",
 	"settings.pointerFreeDesc": "İmleç videodan çıkınca kontrol bu PC'ye döner, girince karşıya geçer. Sadece uzak masaüstü.",
+	"settings.touchpadGestures": "Touchpad hareketlerini gönder",
+	"settings.touchpadGesturesDesc": "Karşı bilgisayarı kontrol ederken 3 ve 4 parmaklı kaydırma ve dokunmalar oraya gider; karşı taraf, kendi ayarlarında o hareket için ne seçiliyse onu yapar. Bu sırada bu bilgisayardaki aynı hareketler kapatılır (Windows, macOS).",
 	"settings.darkTheme": "Koyu tema",
 	"settings.darkThemeDesc": "Uygulamayı koyu renklerle gösterir.",
 	"settings.autostart": "Bilgisayar açılınca başlat",

@@ -221,6 +221,13 @@
 </div>
 <div class="srow">
 	<div class="st">
+		<b>{t('settings.touchpadGestures')}</b>
+		<span>{t('settings.touchpadGesturesDesc')}</span>
+	</div>
+	<button class="toggle" aria-label={t('settings.touchpadGestures')} class:on={ui.touchpadGestures} aria-pressed={ui.touchpadGestures} onclick={() => { ui.touchpadGestures = !ui.touchpadGestures; saveUi(); }}><span class="knob"></span></button>
+</div>
+<div class="srow">
+	<div class="st">
 		<b>{t('settings.upscale')}</b>
 		<span>{t('settings.upscaleDesc')}</span>
 	</div>

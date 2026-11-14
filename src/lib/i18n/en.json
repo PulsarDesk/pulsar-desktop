@@ -312,6 +312,8 @@
 	"settings.mouseSensDesc": "When a game grabs the mouse, motion is scaled by this. 1× = the mouse's own speed.",
 	"settings.pointerFree": "Free cursor",
 	"settings.pointerFreeDesc": "Leaving the video gives control back to this PC; entering it takes control again. Remote desktop only.",
+	"settings.touchpadGestures": "Send touchpad gestures",
+	"settings.touchpadGesturesDesc": "While you control the remote PC, 3- and 4-finger swipes and taps go there; it does what its own settings say for that gesture. Meanwhile the same gestures are turned off on this PC (Windows, macOS).",
 	"settings.darkTheme": "Dark theme",
 	"settings.darkThemeDesc": "Shows the app in dark colours.",
 	"settings.autostart": "Start with the computer",
