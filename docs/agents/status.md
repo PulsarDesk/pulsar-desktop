@@ -25,8 +25,20 @@ hardware; Linux/macOS details and the one gap (display-off on bare wlroots Wayla
 Wayland hardware):** macOS and Linux Wayland now advertise the host's monitors and watch for
 display changes like Windows does — see host-encode.md "Host monitor picker". On Wayland the
 portal dialog still picks the monitor; the client's picker follows what it picked
-(`DataMsg::StreamedDisplay`). macOS host-pointer marker position is wired but the macOS host has
-no takeover detection, so it is never sent yet.
+(`DataMsg::StreamedDisplay`). The macOS host-pointer marker is positioned on the streamed display
+and sent since the `parity/host-takeover` merge (macOS takeover detection).
+
+**Same-host co-op per-window input (2026-11-14, branch parity/coop-window-input):**
+`WindowInput` now exists on Windows (PostMessage), Linux X11/XWayland (SendEvent/XTest) and
+macOS (CGEventPostToPid); routing in `host.rs` is cross-platform. Since the `parity/all`
+merge the per-window capture SOURCE off Windows is `parity/window-capture`'s (`window_src`:
+X11 `x11grab -window_id` / libav / gst `ximagesrc xid=`, macOS ScreenCaptureKit window →
+rawvideo); `make_on_stream` publishes the streamed window's id (X11 XID / `CGWindowID`) to
+`win_capture_hwnd` + `coop::set_capture`, so the per-window injector runs end to end on X11
+AND macOS. The co-op branch's own X11 capture plumbing (`StreamPlan.window_id`, its
+`x11_window` block) was folded into that path; `pulsar_core::x11win` stays for its pid-tree
+helpers. Native Wayland is impossible. Untested on Linux and macOS hardware — see
+[modes.md](modes.md#same-host-co-op-per-window-input-all-desktop-oses-2026-11-14).
 
 **Adaptive streaming (shipped 2026-09-03 in v0.11.0, refined in v0.12.0 — still awaiting the
 maintainer's real-session test):** the shared

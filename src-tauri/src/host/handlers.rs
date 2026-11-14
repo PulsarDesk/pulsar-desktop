@@ -2011,7 +2011,8 @@ pub(super) fn make_on_stream(
 	// to `None` on every other outcome (whole-monitor ddagrab, ffmpeg fallback, HDR/4:4:4, or a
 	// capture-start error). `on_input` gates its per-window PostMessage routing on THIS — never on
 	// the raw `launched_hwnd`, which can point at a window the stream isn't actually showing.
-	#[cfg(windows)] win_capture_hwnd: Arc<Mutex<Option<i64>>>,
+	// The id is per OS (HWND / X11 XID / CGWindowID), matching `pulsar_core::input::WindowInput`.
+	win_capture_hwnd: Arc<Mutex<Option<i64>>>,
 	// Per-window (WGC) capture target discovered when THIS session launched a game in game mode
 	// (Phase 2b co-op): `on_launch`'s resolver thread stores the launched app's top-level HWND
 	// here. When the StreamReq does NOT itself carry a `window_hwnd`, this is used so a game-mode
@@ -3658,6 +3659,8 @@ pub(super) fn make_on_stream(
 		#[cfg(target_os = "macos")]
 		let native_started = if encoder == HwEncoder::VideoToolbox
 			&& capture == CaptureMethod::AvFoundation
+			// A window pick streams through the ScreenCaptureKit window source + ffmpeg below.
+			&& plan.window.is_none()
 			&& codec != pipeline::VCodec::Av1
 			&& !req.hdr
 			&& !req.yuv444
@@ -3723,6 +3726,21 @@ pub(super) fn make_on_stream(
 			// Same-host co-op: which window this session captures (another pane may play a
 			// second instance of the same game — see coop.rs).
 			crate::coop::set_capture(sid, if native_started { target_hwnd } else { None });
+		}
+		// Linux X11 / macOS: the window `host_window` resolved above is what this stream shows
+		// (X11: x11grab -window_id / libav / gst ximagesrc xid=; macOS: the ScreenCaptureKit
+		// window source over rawvideo — the native display path never takes a window plan), so
+		// its id is the input target: `WindowInput` (X11 SendEvent / XTest when in front, macOS
+		// CGEventPostToPid). A screen stream (Wayland window casts included: no id) clears it.
+		#[cfg(not(windows))]
+		{
+			let w = match &host_window {
+				Some((super::window_src::Target::X11(id), ..)) => i64::try_from(*id).ok(),
+				Some((super::window_src::Target::Mac(id), _, Some(_))) => Some(*id as i64),
+				_ => None,
+			};
+			*win_capture_hwnd.lock().unwrap() = w;
+			crate::coop::set_capture(sid, w);
 		}
 
 		// Remember this request for the in-place monitor-switch fast path — but ONLY when the

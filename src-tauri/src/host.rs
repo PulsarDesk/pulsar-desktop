@@ -114,18 +114,6 @@ mod nvenc_frames;
 /// Dev aid for UX work: `PULSAR_MOCK_CAPTURE=1` makes this host stream a synthetic test
 /// pattern (`lavfi testsrc2`, software H.264/H.265) instead of the screen, skips the Wayland
 /// portal, and ignores remote mouse/keyboard (nothing reaches the real desktop). Linux only.
-/// True when `hwnd` (a captured window) is the foreground window, or its top-level owner is.
-#[cfg(windows)]
-fn window_in_front(hwnd: i64) -> bool {
-	use windows_sys::Win32::UI::WindowsAndMessaging::{GetAncestor, GetForegroundWindow, GA_ROOT};
-	let target = hwnd as windows_sys::Win32::Foundation::HWND;
-	let fg = unsafe { GetForegroundWindow() };
-	if fg.is_null() || target.is_null() {
-		return false;
-	}
-	fg == target || unsafe { GetAncestor(fg, GA_ROOT) == GetAncestor(target, GA_ROOT) }
-}
-
 pub(crate) fn mock_capture() -> bool {
 	cfg!(target_os = "linux") && std::env::var_os("PULSAR_MOCK_CAPTURE").is_some_and(|v| v == "1")
 }
@@ -1449,8 +1437,10 @@ pub(crate) async fn bring_online(
 				// routing on THIS (the confirmed capture target) — NOT on `launched_hwnd` — so kb/
 				// mouse never diverts into a window the client can't even see. Set to the target only
 				// when the native WGC path started with that window; cleared to `None` on every other
-				// path. Windows-only (WGC + WindowInput are Windows-only).
-				#[cfg(windows)]
+				// path. The id is per OS: HWND (Windows, WGC), X11 XID (Linux), CGWindowID (macOS);
+				// `WindowInput` exists on all three. Only the Windows capture path publishes a
+				// window today; Linux/macOS stay `None` (global injector) until their per-window
+				// capture sets it (see make_on_stream).
 				let win_capture_hwnd: Arc<Mutex<Option<i64>>> = Arc::new(Mutex::new(None));
 				let provider = {
 					let games = games.clone();
@@ -1564,7 +1554,6 @@ pub(crate) async fn bring_online(
 					native_out_arc.clone(),
 					#[cfg(windows)]
 					native_gen_arc.clone(),
-					#[cfg(windows)]
 					win_capture_hwnd.clone(),
 					launched_hwnd.clone(),
 					stats_out.clone(),
@@ -1621,17 +1610,15 @@ pub(crate) async fn bring_online(
 					// `launched_hwnd` directly here routed kb/mouse into the window even when the stream
 					// fell back to whole-monitor capture (non-NVENC host / HDR / 4:4:4 / capture error) —
 					// clicks remapped onto an invisible window while the video showed the monitor.
-					#[cfg(windows)]
+					// Linux (X11 SendEvent/XTest) and macOS (CGEventPostToPid) have the same
+					// `WindowInput` API; each backend documents its own ceiling.
 					let win_capture_hwnd_in = win_capture_hwnd.clone();
-					#[cfg(windows)]
 					let mut window_input: Option<pulsar_core::input::WindowInput> = None;
-					// The HWND currently bound to `window_input` (so we only rebuild when it changes).
-					#[cfg(windows)]
+					// The window id currently bound to `window_input` (so we only rebuild when it changes).
 					let mut bound_hwnd: Option<i64> = None;
-					// Keys whose DOWN went through the global `SendInput` path while the captured
-					// window was in front (see `window_in_front`): their UP takes the same path even
-					// if the focus moved meanwhile, or the key would stay latched.
-					#[cfg(windows)]
+					// Keys whose DOWN went through the global desktop injector while the captured
+					// window was in front (see `WindowInput::in_front`): their UP takes the same path
+					// even if the focus moved meanwhile, or the key would stay latched.
 					let mut desk_keys: std::collections::HashSet<u32> = std::collections::HashSet::new();
 					// Same-host co-op isolation (opt-in): when another pane plays a second instance
 					// of the game THIS session captures, its controllers/keyboard/mouse go to this
@@ -1755,7 +1742,6 @@ pub(crate) async fn bring_online(
 								// Release anything held on the per-window injector too (Phase 3B), so a
 								// window-captured session can't latch a key/drag in the target window
 								// when control is revoked mid-press.
-								#[cfg(windows)]
 								if let Some(w) = window_input.as_mut() {
 									w.flush_held();
 								}
@@ -1899,9 +1885,7 @@ pub(crate) async fn bring_online(
 								// of the global desktop (`DesktopInput`/SendInput). The HWND resolves async
 								// after launch; rebuild the injector when the stashed target changes, and
 								// fall back to the global path if the window is gone or none is set.
-								#[cfg(windows)]
 								let mut routed_to_window = false;
-								#[cfg(windows)]
 								{
 									let target = *win_capture_hwnd_in.lock().unwrap();
 									if target != bound_hwnd {
@@ -1941,7 +1925,7 @@ pub(crate) async fn bring_online(
 										// the selection (Steam Input never saw them), and Raw-Input /
 										// GetAsyncKeyState games ignored them. The mouse stays on the window
 										// path: its coordinates are relative to the captured window.
-										let front = bound_hwnd.is_some_and(window_in_front);
+										let front = w.in_front();
 										match &other {
 											InputEvent::Key { code, down } => {
 												let via_desktop = if *down { front } else { desk_keys.contains(code) };
@@ -1982,10 +1966,8 @@ pub(crate) async fn bring_online(
 										}
 									}
 								}
-								// Global desktop path: used when there's no window target (display capture)
-								// OR on non-Windows (per-window injection is Windows-only). Skipped when the
-								// event was already delivered to the target window above.
-								#[cfg(windows)]
+								// Global desktop path: used when there's no window target (display capture).
+								// Skipped when the event was already delivered to the target window above.
 								if routed_to_window {
 									return;
 								}

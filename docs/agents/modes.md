@@ -365,6 +365,51 @@ no splash, the window stays hidden (tray) — shown anyway when there is no tray
 `ui.duplicateSessions`: a repeat connect to the same host/mode/game opens another session
 instead of focusing the open one (`SessionManager.startConnect` de-dup).
 
+## Same-host co-op: per-window input (all desktop OSes, 2026-11-14)
+
+When a session's stream shows ONE window (a game this session launched, or a window the
+client picked), its keyboard/mouse go to that window instead of the global desktop, so two
+panes on one host do not fight over the single focus. `host.rs` `on_input` holds a
+`pulsar_core::input::WindowInput` built from `win_capture_hwnd` — the window the CURRENT
+stream confirmed capturing (`make_on_stream` publishes it). Same API on every OS; when the
+window is in front, keys go through the global injector (`desk_keys` keeps each UP on the
+path its DOWN took).
+
+| OS | Window id | Backend (pulsar-core `input/`) | Reaches | Does not reach |
+| --- | --- | --- | --- | --- |
+| Windows | HWND | `window_win.rs`: PostMessage | Win32 message-pump apps | Raw Input / DirectInput / GetAsyncKeyState games (the ProtoInput co-op isolation in `coop.rs` covers those) |
+| Linux X11 / XWayland | XID | `window_x11.rs`: background = core `SendEvent` to the window (deepest child under the pointer); front = XTest | apps reading core X events; front window = everything | background XI2 clients (GTK3/4, Qt5/6 pointer, SDL relative mouse, most games), Xt apps without `allowSendEvents`, `/dev/input` readers |
+| Linux native Wayland | — | **impossible**: no protocol lets one client inject into another's surface; uinput / RemoteDesktop portal are seat-global | — | everything (global injector stays) |
+| macOS | CGWindowID | `window_mac.rs`: `CGEventPostToPid` to the owning PID (+ window number fields); front = HID tap | AppKit/NSEvent apps, SDL keyboard, many windowed games | IOHID / GameController readers; keyboard of a second window of the SAME process goes to that process's key window |
+
+**Per-window capture source (what publishes `win_capture_hwnd`), per OS:**
+
+| OS | Window list (client picker, `QueryWindows`) | Launched game → window | Capture | State |
+| --- | --- | --- | --- | --- |
+| Windows | `pulsar_capture::list_capture_windows` (EnumWindows) | `find_window_for_launch` (PID + child PIDs) | native WGC + NVENC | wired |
+| Linux X11 | `window_src::list` → `pulsar_core::window_capture` (`_NET_CLIENT_LIST`) | `window_capture::find_for_launch` (largest window of the pid tree), polled 10 s | `window_src` (`parity/window-capture`): libav `x11grab window_id`, ffmpeg `x11grab -window_id` (ffmpeg 5.1+) or gst `ximagesrc xid=`, the window's aspect fitted into the request | wired 2026-11-14 |
+| Linux Wayland | one portal entry (`PORTAL_PICK`) | none | portal WINDOW cast (no window id) | impossible for input (see above); global injector |
+| macOS | `window_src::list` → ScreenCaptureKit `SCShareableContent` | `window_capture::find_for_launch` | ScreenCaptureKit window → rawvideo → ffmpeg (VideoToolbox) | wired at the `parity/all` merge |
+
+Since the `parity/all` merge, `make_on_stream` publishes the window `host_window` resolved
+(X11 XID, or the `CGWindowID` once its ScreenCaptureKit stream started) as the input target
+and in `coop::set_capture`; a screen stream clears it. The co-op branch's own X11 capture
+block (`x11_window`, `StreamPlan.window_id`) was folded into that path. A resized window
+re-streams through the window watcher (see host-encode.md "Per-window capture"); an unmapped
+(minimized) X11 window captures black.
+
+`WindowInput` caches its window-server answers (`is_alive`, `in_front`, size, X11 child
+under the pointer) for 200 ms, because the host asks on every input event. X11 "front"
+needs the X input focus inside the target AND (with EWMH) `_NET_ACTIVE_WINDOW` naming it
+(XWayland keeps `_NET_ACTIVE_WINDOW` stale when a Wayland window takes focus). macOS
+"front" = owner pid is `NSWorkspace.frontmostApplication` AND the window is that pid's
+top on-screen window; relative mouse deltas are divided by the display's backing scale.
+
+The ProtoInput instance isolation (`coop.rs`) is DLL injection into a Windows process
+and has no Linux/macOS counterpart.
+
+**Untested on Linux and macOS hardware** (type-checked + unit tests only).
+
 ## Reverse direction
 
 The requesting client pre-authorizes the host's E2E key for its connect back (one use, 60 s:
