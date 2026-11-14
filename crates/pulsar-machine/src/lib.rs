@@ -160,7 +160,10 @@ pub fn valid_group_name(s: &str) -> bool {
 /// The `/bin/sh` script the privileged run executes (as root). It creates / verifies both
 /// dirs with the same rules [`check_machine_dir`] / [`check_shared_dir`] apply — a path that
 /// is a symlink or not a dir (exit 3), owned by someone else than root (exit 4) — re-applies
-/// owner and mode, and atomically writes `mode.json`. `None` for an unsafe group name.
+/// owner and mode, gives the regular files already in the shared dir the admin group + 0660
+/// (e.g. an `identity.key` left 0600 by a Pulsar that exited before hardening it; `find
+/// -type f` never matches a symlink), and atomically writes `mode.json`. `None` for an unsafe
+/// group name.
 pub fn setup_script(os: Os, group: &str, enable: bool) -> Option<String> {
 	setup_script_at(os, machine_dir_for(os), group, enable)
 }
@@ -188,6 +191,7 @@ pub fn setup_script_at(os: Os, m: &str, group: &str, enable: bool) -> Option<Str
 		 chown 0:0 \"$M\"; chmod {MACHINE_DIR_MODE:o} \"$M\"\n\
 		 chk \"$S\"; mkdir -p \"$S\"; chk \"$S\"; own \"$S\"\n\
 		 chown 0:\"$G\" \"$S\"; chmod {SHARED_DIR_MODE:o} \"$S\"\n\
+		 find \"$S\" -mindepth 1 -maxdepth 1 -type f -exec chgrp \"$G\" {{}} + -exec chmod {SHARED_FILE_MODE:o} {{}} +\n\
 		 T=\"$M/mode.json.tmp\"; rm -f \"$T\"\n\
 		 printf '{{\"shared\":{shared}}}\\n' > \"$T\"; chmod 644 \"$T\"; mv -f \"$T\" \"$M/mode.json\"\n"
 	))
@@ -382,6 +386,7 @@ mod tests {
 		assert!(s.contains("G='sudo'"));
 		assert!(s.contains("stat -c %u"));
 		assert!(s.contains("chown 0:\"$G\" \"$S\"; chmod 2770 \"$S\""));
+		assert!(s.contains("-type f -exec chgrp \"$G\" {} + -exec chmod 660 {} +"));
 		assert!(s.contains("chmod 755 \"$M\""));
 		assert!(s.contains(r#"printf '{"shared":true}\n'"#));
 		assert!(s.contains("mv -f \"$T\" \"$M/mode.json\""));

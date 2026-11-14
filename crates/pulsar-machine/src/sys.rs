@@ -430,8 +430,14 @@ mod tests {
 		let mj = m.join("mode.json");
 		assert_eq!(std::fs::read_to_string(&mj).unwrap().trim(), r#"{"shared":true}"#);
 		assert_eq!(meta(&mj).unwrap().mode & 0o777, 0o644);
+		// A file left 0600 in the shared dir is repaired on the next run.
+		let key = m.join("shared").join("identity.key");
+		std::fs::write(&key, [0u8; 32]).unwrap();
+		std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
 		// Turning it off rewrites the marker, keeps the shared dir.
 		assert!(run(false).status.success());
+		let km = meta(&key).unwrap();
+		assert_eq!((km.mode & 0o777, km.gid), (0o660, gid));
 		assert_eq!(std::fs::read_to_string(&mj).unwrap().trim(), r#"{"shared":false}"#);
 		assert!(m.join("shared").is_dir());
 		// A user-owned shared dir is refused (exit 4) — never re-owned.
