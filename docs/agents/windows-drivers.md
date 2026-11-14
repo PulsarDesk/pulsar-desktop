@@ -87,6 +87,8 @@ post-install / pre-uninstall hooks (already elevated). pulsar-setup checks the r
 prompt (`src/firewall.rs`); the headless `/S` path skips it. An elevated app also re-checks at
 startup. Rules are per path, so the per-user installs of several Windows users on one PC each
 keep their own rule; removal deletes only this install's.
+Linux (ufw/firewalld, LAN discovery only) and macOS (Application Firewall, one admin prompt):
+[status.md](status.md) "Platform parity".
 
 **usbipd-win coexistence:** usbipd-win (Microsoft's WSL USB tool, a USB/IP *server*) often
 owns TCP 3240 on dev machines. Our server binds an ephemeral loopback port and passes it with
