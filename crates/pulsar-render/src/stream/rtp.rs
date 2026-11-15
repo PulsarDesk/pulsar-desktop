@@ -151,6 +151,20 @@ pub fn take_rfi_request() -> Option<(u16, u16)> {
 	RFI_REQ.lock().unwrap().take()
 }
 
+/// Print the pending lost range for the host's reference-frame invalidation
+/// (`vidsink-rfi <first> <last>`) at once. Every backend calls it from its receive thread's
+/// [`pump`] tick, right after the reorder buffer raised the report: the host can only reach a
+/// recent frame, and the render loop's next turn (a decode + present, up to a display refresh)
+/// is too late at 120 fps. The Windows and macOS renderers used to print it from there.
+pub fn report_rfi() {
+	if let Some((first, last)) = take_rfi_request() {
+		use std::io::Write as _;
+		let mut o = std::io::stdout().lock();
+		let _ = writeln!(o, "vidsink-rfi {first} {last}");
+		let _ = o.flush();
+	}
+}
+
 fn report_lost(first: u16, last: u16) {
 	let mut r = RFI_REQ.lock().unwrap();
 	*r = Some(match *r {
@@ -1107,11 +1121,13 @@ fn inspect_av1_tu(tu: &[u8]) -> (bool, bool) {
 
 /// Bind `0.0.0.0:<port>` (large SO_RCVBUF if easy), receive RTP, depacketize, and push completed
 /// `AccessUnit`s into `sink`. Blocks; run on a thread. Stops when `stop` is set. Loss handling
-/// (seq gaps → await keyframe) lives in `Depacketizer`.
+/// (seq gaps → await keyframe) lives in `Depacketizer`. `tick` runs after every datagram and
+/// every receive timeout (see [`pump`]); the Windows and macOS renderers report RFI holes from it.
 pub fn recv_loop(
 	port: u16,
 	codec: Codec,
 	sink: impl FnMut(AccessUnit),
+	tick: impl FnMut(),
 	stop: &std::sync::atomic::AtomicBool,
 ) {
 	use std::net::UdpSocket;
@@ -1169,7 +1185,7 @@ pub fn recv_loop(
 	// buffer's time-based release runs while the socket is quiet (a hole with nothing
 	// arriving behind it must still be skipped after `max_delay`).
 	let _ = sock.set_read_timeout(Some(Duration::from_millis(20)));
-	pump(|b| sock.recv(b), codec, sink, || {}, stop);
+	pump(|b| sock.recv(b), codec, sink, tick, stop);
 }
 
 /// Linux: bind the abstract-namespace Unix datagram socket `name` (the app writes it into the
@@ -1223,8 +1239,9 @@ pub fn recv_loop_unix(
 /// The receive → reorder → depacketize loop behind [`recv_loop`], over any datagram source
 /// (`recv` must time out every ~20 ms with `WouldBlock`/`TimedOut` so `stop` and the reorder
 /// buffer's time-based release run while the source is quiet). `tick` runs after every
-/// datagram and every timeout — the Linux backend reports RFI holes / keyframe requests
-/// from it the moment the reorder buffer raises them. Blocks until `stop` or a hard error.
+/// datagram and every timeout — every backend reports RFI holes ([`report_rfi`]) from it the
+/// moment the reorder buffer raises them (Linux its keyframe requests too). Blocks until
+/// `stop` or a hard error.
 pub fn pump(
 	mut recv: impl FnMut(&mut [u8]) -> std::io::Result<usize>,
 	codec: Codec,

@@ -659,10 +659,7 @@ unsafe fn open_rtp(path: &str, name: &str) -> Option<Source> {
 					use std::io::Write as _;
 					// A lost range for the host's reference-frame invalidation: report at once
 					// (the host can only reach a recent frame).
-					if let Some((first, last)) = rtp::take_rfi_request() {
-						println!("vidsink-rfi {first} {last}");
-						let _ = std::io::stdout().flush();
-					}
+					rtp::report_rfi();
 					// The depacketizer lost the reference picture: ask the app for an IDR now
 					// instead of waiting out the host's periodic keyframe.
 					if last_needidr.elapsed() >= std::time::Duration::from_millis(500)
@@ -912,6 +909,12 @@ unsafe fn decode_once(sdp: &CString) {
 			// look exactly like that. One stderr line per such gap tells it from a network gap.
 			let mut last_out_ms: u64 = 0;
 			let mut fed_since_out: u32 = 0;
+			// …and the safety net for such a gap, as on Windows / macOS (`recovery::DecodeStall`):
+			// a keyframe is asked for (`vidsink-needidr`, Rust RTP path) once the decoder took
+			// `STALL_AUS` access units over `STALL_MS` without a picture. On an RFI or intra-
+			// refresh stream no IDR comes by itself; libavcodec's software / VA-API / CUDA
+			// decoders conceal a missing reference, a hardware one (rkmpp) may not.
+			let mut dec_stall = crate::stream::recovery::DecodeStall::default();
 			// The env pin wins over the app-derived reorder wait for the whole session.
 			let maxdelay_pinned = std::env::var_os("PULSAR_MAXDELAY").is_some();
 			while !STOP.load(Ordering::Relaxed) && !REOPEN.load(Ordering::Relaxed) {
@@ -1202,6 +1205,10 @@ unsafe fn decode_once(sdp: &CString) {
 					}
 				}
 				if let Some(t0) = dec_t0 {
+					if dec_stall.on_decode(mono_ms(), got_frames > 0) {
+						eprintln!("pulsar-render: decoder stalled (access units in, no picture out) — asking for a keyframe");
+						crate::stream::rtp::NEED_IDR.store(true, Ordering::Relaxed);
+					}
 					if got_frames > 0 {
 						let us = t0.elapsed().as_micros() as u64 / got_frames;
 						let prev = DEC_US.load(Ordering::Relaxed);
