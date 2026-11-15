@@ -1219,10 +1219,13 @@ pub(crate) async fn start_remote_play(
 		None => 0.0,
 	};
 	let wan_like = link.is_mobile() || path_class != crate::adapt_memory::PathClass::Lan || start_rtt_ms >= 30.0;
+	// OFF by default (opt-in PULSAR_IR=1) since its first real tether session (2026-11-15):
+	// with holes dropped fast on IR the Windows renderer froze every few seconds ("AU burst of
+	// 8 — presenting the newest only"), the same decoder stall IR showed on 2026-11-08. RFI
+	// heals the dropped holes instead until IR is fixed and re-measured.
 	let ir_bad_link = match std::env::var("PULSAR_IR").as_deref() {
-		Ok("0") => false,
-		Ok("1") => mos,
-		_ => cfg!(windows) && game_mode && mos && host_ir && wan_like && codec_h != "av1",
+		Ok("1") => cfg!(windows) && game_mode && mos && host_ir && wan_like && codec_h != "av1",
+		_ => false,
 	};
 	if ir_bad_link {
 		acfg.ir_capable = true;
