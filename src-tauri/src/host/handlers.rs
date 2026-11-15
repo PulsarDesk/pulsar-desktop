@@ -2050,10 +2050,11 @@ pub(super) fn make_on_stream(
 	// restart capture at the new geometry.  On Windows this is only populated when
 	// native_started=false (ffmpeg fallback); native DXGI sessions self-heal via ACCESS_LOST.
 	last_req_store: Arc<Mutex<Option<StreamReq>>>,
-	// Every OS: set by the host's own re-issues of the stored request (display-mode watcher,
-	// window watcher, the CLI keyframe restart, a dead in-process engine — host.rs). The request
-	// is identical to the running one, so neither the in-process libav fast path nor the CLI
-	// bitrate-step absorb may take it: it is a full restart (new capture geometry / an IDR).
+	// Raised by the host's own watchers (display mode / streamed window / keyframe-by-restart /
+	// a dead in-process engine, `host::send_host_restart`) right before they re-issue the stored
+	// request: an IDENTICAL request that must restart capture in full, so neither the "nothing
+	// changed" fast paths (in-process libav / X11 gst) nor the bitrate-step absorbs below take
+	// it (new capture geometry / an IDR). Every OS.
 	host_restart: Arc<std::sync::atomic::AtomicBool>,
 	// Set by failover.rs right before it re-issues a request through the restream channel: the
 	// next request is a restart the host ordered (this session's native capture stalled, or
@@ -2093,6 +2094,13 @@ pub(super) fn make_on_stream(
 	// bitrate / recovery-only re-request is applied live on it instead of restarting.
 	#[cfg(target_os = "linux")]
 	let mut last_libav_req: Option<StreamReq> = None;
+	// X11 gst hosts (RK3588 / Orange Pi MPP): the IN-PROCESS `ximagesrc` pipeline (held in
+	// `cap_slot`, `pulsar_core::capture::start_pipeline`) and its request — a bitrate /
+	// recovery-only re-request is applied live on it, no restart — or the `gst-launch` child.
+	// Shared with the thread that starts that pipeline off the session loop (it can fall back
+	// to a `gst-launch` child, recorded here too). See `x11_gst::X11GstRun`.
+	#[cfg(target_os = "linux")]
+	let x11_run: Arc<Mutex<super::x11_gst::X11GstRun>> = Arc::new(Mutex::new(Default::default()));
 	// Wayland window casts: the portal restore token of THIS session's window pick, kept
 	// apart from the session's screen token so a re-stream (resolution / codec change)
 	// re-opens the same window without the dialog, and a window pick never replaces the
@@ -2157,7 +2165,10 @@ pub(super) fn make_on_stream(
 		let forced = force_restart.swap(false, std::sync::atomic::Ordering::SeqCst);
 		#[cfg(not(windows))]
 		let forced = false;
-		// A restart the host's own watchers ordered (see `host_restart` above).
+		// A restart the host's own watchers ordered (`host::send_host_restart`): an identical
+		// request that must rebuild capture (new display geometry, a closed window, an IDR by
+		// restart on an encoder with no live keyframe hook) — no "unchanged" fast path or bitrate
+		// absorb may take it. The Wayland portal capture follows size changes itself and ignores it.
 		let host_ordered = host_restart.swap(false, std::sync::atomic::Ordering::SeqCst);
 		// last_req_store is updated below (after native_started is resolved) so the
 		// display-mode watcher only fires for ffmpeg-path sessions on Windows.
@@ -2180,7 +2191,7 @@ pub(super) fn make_on_stream(
 				let mut probe = prev.clone();
 				probe.bitrate_kbps = req.bitrate_kbps;
 				probe.loss_recovery = req.loss_recovery;
-				if probe == req && engine.is_alive() {
+				if probe == req && engine.is_alive() && !host_ordered {
 					if req.bitrate_kbps > 0 && req.bitrate_kbps != prev.bitrate_kbps {
 						engine.set_bitrate(req.bitrate_kbps);
 					}
@@ -2189,6 +2200,7 @@ pub(super) fn make_on_stream(
 					}
 					drop(slot);
 					last_libav_req = Some(req.clone());
+					refresh_last_req(&last_req_store, &req);
 					tracing::info!(
 						bitrate_kbps = req.bitrate_kbps,
 						recovery = ?req.loss_recovery,
@@ -2196,6 +2208,38 @@ pub(super) fn make_on_stream(
 					);
 					return;
 				}
+			}
+		}
+		// X11 GST FAST PATHS (RK3588 / Orange Pi MPP hosts, `x11_gst.rs`). In-process `ximagesrc`
+		// pipeline: a bitrate step goes to the running encoder (`bps`), a recovery flip to the
+		// forced-key-unit timer — no restart, no gap. Full restart instead: a host-ordered restart
+		// (new geometry / closed window), a dead pipeline (bus error), or one whose encoded-frame
+		// count stopped moving (a driver call hung without a bus error — the Windows
+		// NATIVE_WEDGED_AFTER lesson). While it is still STARTING (off the session loop), a
+		// same-shape request only updates what it applies once up.
+		#[cfg(target_os = "linux")]
+		if !(pulsar_core::capture::is_wayland() && !super::mock_capture())
+			&& super::x11_gst::try_live(&x11_run, &cap_slot, &req, host_ordered)
+		{
+			refresh_last_req(&last_req_store, &req);
+			return;
+		}
+		// `gst-launch` child (KMS zero-copy / no in-process gst): it can't change its bitrate, so
+		// a bitrate-only step it can live with is absorbed (`cli_bitrate_absorbs`: never a real
+		// down-step, an up-step at most every 6 s) — the same rule as the ffmpeg CLI path on
+		// Windows/macOS. The forwarder's pacer keeps the rate the child really encodes at. A dead
+		// child, a host-ordered restart or any other change restarts.
+		#[cfg(target_os = "linux")]
+		if !host_ordered {
+			if let Some(running) = super::x11_gst::child_absorbs(&x11_run, &procs, &req, cli_bitrate_absorbs) {
+				pace_target_kbps.store(running, std::sync::atomic::Ordering::Relaxed);
+				refresh_last_req(&last_req_store, &req);
+				tracing::info!(
+					from = running,
+					to = req.bitrate_kbps,
+					"gst child restream: bitrate-only step absorbed (a restart is a visible gap)"
+				);
+				return;
 			}
 		}
 		// Wayland: a host-ordered re-issue (`host_ordered`) is absorbed here as before — tearing
@@ -2216,6 +2260,7 @@ pub(super) fn make_on_stream(
 					let sdk = if cap.is_raw_frames() { wl_heals.as_ref().and_then(|h| h.get()) } else { None };
 					cap.set_short_gop(super::nvenc_frames::short_gop(req.loss_recovery, sdk));
 					last_wl_req = Some(req.clone());
+					refresh_last_req(&last_req_store, &req);
 					tracing::info!(
 						bitrate_kbps = req.bitrate_kbps,
 						applied,
@@ -2377,33 +2422,35 @@ pub(super) fn make_on_stream(
 				}
 			};
 			if handled {
+				// The watchers re-issue the stored request: keep its bitrate the live one.
+				refresh_last_req(&last_req_store, &req);
 				tracing::info!(display_idx = req.display_idx, disp, bitrate, "macOS native live restream (fast path)");
 				return;
 			}
 		}
-		// FFMPEG BITRATE-ONLY: restart only for a large step (≥ 30 % down / 40 % up) and at most
-		// once per 6 s; anything else keeps the running encode at its rate. A deferred step is not
-		// lost — the client keeps adapting, and a later request compares against what ffmpeg is
-		// actually streaming. A recovery-mode flip still restarts (short GOP needs a new encoder).
-		// Every OS: Linux X11 hosts on the CLI chain (AMD/Intel VA-API / QSV when the in-process
-		// engine could not start, kmsgrab) restarted ffmpeg on every ABR step before 2026-11-15.
-		// Never for a restart the host ordered itself (`forced` / `host_ordered`): that request is
-		// identical to the running one ON PURPOSE (new geometry, or a keyframe the CLI can only
-		// give by restarting).
+		// FFMPEG BITRATE-ONLY: ffmpeg can't change its bitrate live, so a step it can live with is
+		// absorbed (`cli_bitrate_absorbs`: a down-step beyond the small band always restarts — the
+		// link is the limit, latency first — an up-step at most once per 6 s). A deferred up-step
+		// is not lost: the client keeps re-sending, and each request compares against what ffmpeg
+		// is actually streaming. The pacer keeps that real rate. A recovery-mode flip still
+		// restarts (short GOP needs a new encoder). Every OS: Linux X11 hosts on the CLI chain
+		// (AMD/Intel VA-API / QSV when the in-process engine could not start, kmsgrab) restarted
+		// ffmpeg on every ABR step before 2026-11-15 (a stream on an in-process engine, Wayland or
+		// X11 gst clears `last_ff_req`). Never for a restart the host ordered itself (`forced` /
+		// `host_ordered`): that request is identical to the running one ON PURPOSE (new geometry,
+		// or a keyframe the CLI can only give by restarting).
 		if let Some((prev, at)) = last_ff_req.as_ref().filter(|_| !forced && !host_ordered) {
 			let mut probe = prev.clone();
 			probe.bitrate_kbps = req.bitrate_kbps;
-			if probe == req && req.bitrate_kbps > 0 && prev.bitrate_kbps > 0 {
-				let ratio = req.bitrate_kbps as f32 / prev.bitrate_kbps as f32;
-				let large = !(0.7..=1.4).contains(&ratio);
-				if !large || at.elapsed() < std::time::Duration::from_secs(6) {
-					tracing::info!(
-						from = prev.bitrate_kbps,
-						to = req.bitrate_kbps,
-						"ffmpeg restream: bitrate-only step absorbed (a restart is a visible gap)"
-					);
-					return;
-				}
+			if probe == req && cli_bitrate_absorbs(prev.bitrate_kbps, req.bitrate_kbps, at.elapsed()) {
+				pace_target_kbps.store(prev.bitrate_kbps, std::sync::atomic::Ordering::Relaxed);
+				refresh_last_req(&last_req_store, &req);
+				tracing::info!(
+					from = prev.bitrate_kbps,
+					to = req.bitrate_kbps,
+					"ffmpeg restream: bitrate-only step absorbed (a restart is a visible gap)"
+				);
+				return;
 			}
 		}
 		last_ff_req = Some((req.clone(), std::time::Instant::now()));
@@ -2891,6 +2938,16 @@ pub(super) fn make_on_stream(
 			engine.stop();
 			last_libav_req = None;
 		}
+		// X11 gst: retire the prior in-process `ximagesrc` pipeline (in `cap_slot` — on an X11
+		// host the slot never holds a portal capture) without blocking this loop: taken out of
+		// the slot at once, torn down on a helper thread that an in-process start below joins
+		// first (`x11_gst::retire`). The child (`procs`) was killed by the drain above.
+		#[cfg(target_os = "linux")]
+		let x11_teardown = if !(pulsar_core::capture::is_wayland() && !super::mock_capture()) {
+			super::x11_gst::retire(&x11_run, &cap_slot, &cap_gen)
+		} else {
+			None
+		};
 		// The generation THIS stream's children (and its fallback chain) belong to.
 		let stream_epoch = proc_epoch.load(std::sync::atomic::Ordering::SeqCst);
 		// Same for the native capture thread, if the prior (re)stream used it.
@@ -3294,33 +3351,34 @@ pub(super) fn make_on_stream(
 						// MPP eats BGRx via the RGA blitter — skip the CPU convert.
 						// (Not for a window grab: its pipeline always converts + scales.)
 						let direct_bgrx = genc == pipeline::gst::GstEncoder::Mpp && win_xid.is_none();
-						let pipeline_str = if kms {
-							pipeline::gst::kms_pipeline(
-								eff_fps,
-								&metered,
-								&vdest.ip().to_string(),
-								vdest.port(),
-							)
-						} else if let Some(xid) = win_xid {
-							pipeline::gst::x11_window_pipeline(
-								&cfg.display,
-								xid,
-								eff_fps,
-								(eff_w, eff_h),
-								&metered,
-								&vdest.ip().to_string(),
-								vdest.port(),
-							)
-						} else {
-							pipeline::gst::x11_pipeline(
-								&cfg.display,
-								eff_fps,
-								&metered,
-								&vdest.ip().to_string(),
-								vdest.port(),
-								direct_bgrx,
-								region,
-							)
+						// One description builder for both runners: the in-process pipeline takes
+						// the plain `fragment` (its encode meter is pad probes on the encoder), a
+						// `gst-launch` child the `encpace`-metered one.
+						let vip = vdest.ip().to_string();
+						let build = |frag: &str, bgrx: bool| -> String {
+							if kms {
+								pipeline::gst::kms_pipeline(eff_fps, frag, &vip, vdest.port())
+							} else if let Some(xid) = win_xid {
+								pipeline::gst::x11_window_pipeline(
+									&cfg.display,
+									xid,
+									eff_fps,
+									(eff_w, eff_h),
+									frag,
+									&vip,
+									vdest.port(),
+								)
+							} else {
+								pipeline::gst::x11_pipeline(
+									&cfg.display,
+									eff_fps,
+									frag,
+									&vip,
+									vdest.port(),
+									bgrx,
+									region,
+								)
+							}
 						};
 						let fps_part = if eff_fps != req_fps {
 							format!(
@@ -3355,86 +3413,94 @@ pub(super) fn make_on_stream(
 							(eff_bitrate as f32 / 1000.0).round() as u32,
 							crate::i18n::t("stream.mbitTarget")
 						);
-						let stats_enc = stats_out.clone();
-						let label_enc = base_label.clone();
-						// `PULSAR_GST_METER=0` bypasses the pace meter (plain -q spawn) —
-						// the regression-bisect knob for the encode-ms instrumentation.
-						let started = if std::env::var("PULSAR_GST_METER").as_deref() == Ok("0") {
-							spawn_gst_tracked(&procs, &pipeline_str).is_ok()
-						} else {
-							match spawn_gst_paced(&procs, &pipeline_str, move |ms| {
-								let _ = stats_enc.try_send(DataMsg::Stats(format!(
-									"{label_enc} · {ms:.1} {}",
-									crate::i18n::t("stream.msEncode")
-								)));
-							}) {
-								Ok((pid, ticked)) => {
-									if !kms && direct_bgrx {
-										// RGA >4G watchdog. The BGRx-direct path hands
-										// ximagesrc's malloc'd pool straight to the RGA
-										// blitter, and the RGA2 core can't map memory
-										// above 4 GiB phys (dmesg: "RGA_MMU unsupported
-										// Memory larger than 4G!"). The pool is allocated
-										// once per spawn, so it's allocation luck: same
-										// pipeline sometimes runs at 76 fps, sometimes
-										// never emits a single frame (black screen). No
-										// first frame within 2.6 s → kill + respawn with
-										// the CPU-convert (I420) variant, which feeds the
-										// encoder RGA-safe buffers.
-										let fb_pipeline = pipeline::gst::x11_pipeline(
-											&cfg.display,
-											eff_fps,
-											&metered,
-											&vdest.ip().to_string(),
-											vdest.port(),
-											false,
-											region,
-										);
-										let procs_fb = procs.clone();
-										let stats_fb = stats_out.clone();
-										let label_fb = base_label.clone();
-										std::thread::spawn(move || {
-											std::thread::sleep(std::time::Duration::from_millis(
-												2600,
-											));
-											if ticked.load(std::sync::atomic::Ordering::Relaxed) {
-												return;
-											}
-											// The whole kill-and-respawn runs under the procs lock,
-											// keyed to the ORIGINAL child: teardown and a re-stream
-											// drain `procs` under this same lock, so once our child
-											// is gone from it the session moved on — a fallback
-											// spawned past that point would run as an untracked
-											// orphan (or duplicate the new encode's RTP).
-											let mut g = procs_fb.lock().unwrap();
-											let Some(idx) = g.iter().position(|c| c.id() == pid)
-											else {
-												return;
-											};
-											tracing::warn!(
-												pid,
-												"gst BGRx-direct produced no frames in 2.6 s (RGA >4G map failure) — respawning with CPU convert"
-											);
-											let mut old = g.remove(idx);
-											let _ = old.kill();
-											let _ = old.wait();
-											let _ = spawn_gst_paced_locked(
-												&mut g,
-												&fb_pipeline,
-												move |ms| {
-													let _ = stats_fb.try_send(DataMsg::Stats(
-														format!("{label_fb} · {ms:.1} {}", crate::i18n::t("stream.msEncode")),
-													));
-												},
-											);
-										});
-									}
-									true
-								}
-								Err(_) => false,
-							}
+						// The `gst-launch` child runner: the `encpace`-metered description (built with
+						// the request's recovery GOP — a child restarts on every recovery flip) and,
+						// for BGRx-direct, its CPU-convert twin for the RGA >4G watchdog.
+						let child_run = super::x11_gst::X11GstChild {
+							procs: procs.clone(),
+							proc_epoch: proc_epoch.clone(),
+							stream_epoch,
+							desc_bgrx: (!kms && direct_bgrx).then(|| build(&metered, true)),
+							desc_plain: build(&metered, false),
+							stats: stats_out.clone(),
+							label: base_label.clone(),
 						};
-						tracing::info!(encoder = ?genc, codec = ?gcodec, started, "x11 gst encode spawned");
+						// IN-PROCESS first (every pipeline but KMS): the same description runs
+						// inside the app, so ABR steps / keyframe requests / recovery flips apply
+						// live (fast path above, `on_nack` via `cap_slot`). KMS keeps the child:
+						// only the CAP_SYS_ADMIN `~/pulsar-gst-launch` may read the scanout FB.
+						// The start (MPP init + the first encoded frame, up to 2 × 2.6 s when the
+						// BGRx variant fails) runs on its own thread, never on this session loop;
+						// it falls back to the child itself. Its description is built with the
+						// NORMAL GOP: recovery runs only through the short-GOP key-unit timer, so a
+						// later flip back to Normal really returns to the long GOP.
+						let in_process = !kms && super::x11_gst::in_process_wanted();
+						let started = if in_process {
+							let my_gen = cap_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+							let inproc_fragment = pipeline::gst::encoder_fragment_with(
+								genc,
+								gcodec,
+								eff_bitrate,
+								eff_fps,
+								pulsar_core::service::LossRecovery::Normal,
+							)
+							.unwrap_or_else(|| fragment.clone());
+							let now = std::time::Instant::now();
+							x11_run.lock().unwrap().inproc = Some(super::x11_gst::X11InProc {
+								req: req.clone(),
+								since: now,
+								starting: true,
+								frames: 0,
+								frames_at: now,
+							});
+							let job = super::x11_gst::X11InProcStart {
+								cap_slot: cap_slot.clone(),
+								cap_gen: cap_gen.clone(),
+								my_gen,
+								x11_run: x11_run.clone(),
+								teardown: x11_teardown,
+								desc_bgrx: direct_bgrx.then(|| build(&inproc_fragment, true)),
+								desc_plain: build(&inproc_fragment, false),
+								start_req: req.clone(),
+								stats: stats_out.clone(),
+								label: base_label.clone(),
+								child: child_run,
+								app_h: app_h.clone(),
+								peer: peer.clone(),
+								sid,
+								detail: format!("{} · {}p", genc.label(), eff_h),
+							};
+							match std::thread::Builder::new()
+								.name("pulsar-x11-gst-start".into())
+								.spawn(move || job.run())
+							{
+								Ok(_) => true,
+								Err(e) => {
+									tracing::warn!("x11 gst start thread could not spawn: {e}");
+									x11_run.lock().unwrap().inproc = None;
+									false
+								}
+							}
+						} else {
+							// Not waited for: a child spawn is milliseconds; only the in-process
+							// start must not overlap the old pipeline's teardown.
+							drop(x11_teardown);
+							let pid = child_run.spawn(true);
+							if let Some(pid) = pid.clone() {
+								// Remembered for the bitrate-step absorb (fast path above); the
+								// RGA fallback swaps in its new child's pid.
+								x11_run.lock().unwrap().child = Some((req.clone(), std::time::Instant::now(), pid));
+							}
+							pid.is_some()
+						};
+						// The host's watchers (display mode / streamed window / keyframe-by-restart)
+						// re-issue this request — before 2026-11-15 the gst path returned without
+						// storing it, so they never fired on an X11 gst host.
+						*last_req_store.lock().unwrap() = Some(req.clone());
+						// Not an ffmpeg CLI stream: its steps go to `x11_gst` (live / child absorb
+						// above), never to the ffmpeg CLI absorb, which would keep a dead pipeline.
+						last_ff_req = None;
+						tracing::info!(encoder = ?genc, codec = ?gcodec, started, in_process, "x11 gst encode spawned");
 						let _ = stats_out.try_send(DataMsg::Stats(base_label));
 						let _ = stats_out.try_send(DataMsg::DisplayRotation(display_rotation(None)));
 						// No per-process audio loopback on the x11/gst (Linux) path (Windows-only).
@@ -4325,161 +4391,67 @@ fn vcodec_label(c: pipeline::VCodec) -> &'static str {
 	}
 }
 
-/// Like `spawn_gst_tracked`, but with the ENCODE-PACE meter: the pipeline carries an
-/// `identity name=encpace silent=false` right after the encoder, and `-v` makes
-/// gst-launch print one `last-message = chain …` line per encoded frame. The parser
-/// thread times the line gaps (Δwall per frame ≈ encode pace, same semantics as the
-/// ffmpeg `-progress` meter) and calls `on_ms` about once a second — so a gst host
-/// (Pi MPP) finally feeds the client's "Kodlama ms" tile instead of "—".
-/// Returns the child's pid + a flag that flips on the FIRST encoded frame — the
-/// caller's no-output watchdog reads it (see the BGRx-direct RGA fallback).
-#[cfg(target_os = "linux")]
-fn spawn_gst_paced(
-	procs: &Arc<Mutex<Vec<Child>>>,
-	pipeline: &str,
-	on_ms: impl Fn(f32) + Send + 'static,
-) -> Result<(u32, Arc<std::sync::atomic::AtomicBool>), String> {
-	let mut g = procs.lock().unwrap();
-	spawn_gst_paced_locked(&mut g, pipeline, on_ms)
+/// Whether a bitrate-only re-request can leave a running CLI encoder — the ffmpeg CLI
+/// (Windows/macOS fallback) or a `gst-launch` child (Linux KMS / no in-process gst), neither of
+/// which can change its bitrate — streaming at `running_kbps` instead of restarting it (a
+/// visible gap plus a keyframe, and the gap itself reads as congestion to the client's ABR):
+/// - the same rate (the client's periodic re-send, `0` = auto included): keep it;
+/// - a DOWN-step beyond a 10 % band: never absorbed, at any time — the client stepped down
+///   because the link can't carry the rate; holding it means sustained queueing / loss on the
+///   latency-critical path, so latency wins over the gap;
+/// - an UP-step beyond 10 %: at most once per 6 s since the encoder started (a deferred one
+///   isn't lost: the client keeps re-sending and each request compares against what really
+///   runs);
+/// - `0` (auto → the host default) on one side only: never absorbed (re-resolve in full).
+fn cli_bitrate_absorbs(running_kbps: u32, new_kbps: u32, since_start: std::time::Duration) -> bool {
+	if new_kbps == running_kbps {
+		return true;
+	}
+	if running_kbps == 0 || new_kbps == 0 {
+		return false;
+	}
+	let ratio = new_kbps as f32 / running_kbps as f32;
+	if ratio < 0.9 {
+		return false;
+	}
+	ratio <= 1.1 || since_start < std::time::Duration::from_secs(6)
 }
 
-/// `spawn_gst_paced` with the `procs` lock already held: the BGRx-direct RGA
-/// watchdog needs its find-dead → kill → respawn → push sequence atomic against
-/// the teardown/re-stream drains (which run under this same lock).
-#[cfg(target_os = "linux")]
-fn spawn_gst_paced_locked(
-	procs: &mut Vec<Child>,
-	pipeline: &str,
-	on_ms: impl Fn(f32) + Send + 'static,
-) -> Result<(u32, Arc<std::sync::atomic::AtomicBool>), String> {
-	use std::os::unix::process::CommandExt;
-	let mut cmd = std::process::Command::new(crate::process::gst_launch_bin());
-	pulsar_core::capture::use_system_gst_env(&mut cmd);
-	cmd.arg("-v").args(pipeline.split_whitespace());
-	cmd.stdout(std::process::Stdio::piped());
-	// stderr to a per-host scratch file (truncated each spawn): gst dying at start
-	// is otherwise invisible — this is the only channel that says WHY.
-	let errlog = std::fs::File::create(std::env::temp_dir().join("pulsar-gst-stderr.log")).ok();
-	match errlog {
-		Some(f) => {
-			cmd.stderr(f);
-		}
-		None => {
-			cmd.stderr(std::process::Stdio::null());
-		}
-	}
-	unsafe {
-		cmd.pre_exec(|| {
-			// SAFETY: async-signal-safe libc calls only.
-			libc::prctl(
-				libc::PR_SET_PDEATHSIG,
-				libc::SIGKILL as libc::c_ulong,
-				0,
-				0,
-				0,
-			);
-			if libc::getppid() == 1 {
-				libc::_exit(0);
-			}
-			Ok(())
-		});
-	}
-	let ticked = Arc::new(std::sync::atomic::AtomicBool::new(false));
-	match cmd.spawn() {
-		Ok(mut child) => {
-			if let Some(mut stdout) = child.stdout.take() {
-				let ticked = ticked.clone();
-				std::thread::spawn(move || {
-					use std::io::Read;
-					// BYTE-safe line scan — `BufRead::lines()` returns Err on any
-					// non-UTF-8 byte in the `-v` dump and a `break` there DROPS the
-					// pipe: gst-launch then dies of SIGPIPE on its next print (the
-					// "video never starts" regression). This reader only ends at EOF,
-					// i.e. when gst itself exited.
-					let mut buf = [0u8; 8192];
-					let mut line: Vec<u8> = Vec::with_capacity(256);
-					let mut last: Option<std::time::Instant> = None;
-					let mut ema_ms: f32 = 0.0;
-					let mut last_push = std::time::Instant::now();
-					loop {
-						let n = match stdout.read(&mut buf) {
-							Ok(0) | Err(_) => break,
-							Ok(n) => n,
-						};
-						for &b in &buf[..n] {
-							if b != b'\n' {
-								// Cap pathological unterminated lines; the marker fits well within.
-								if line.len() < 4096 {
-									line.push(b);
-								}
-								continue;
-							}
-							let is_tick = {
-								let s = String::from_utf8_lossy(&line);
-								s.contains("encpace") && s.contains("last-message")
-							};
-							line.clear();
-							if !is_tick {
-								continue;
-							}
-							ticked.store(true, std::sync::atomic::Ordering::Relaxed);
-							let now = std::time::Instant::now();
-							if let Some(t0) = last {
-								let ms = now.duration_since(t0).as_secs_f32() * 1000.0;
-								ema_ms = if ema_ms == 0.0 {
-									ms
-								} else {
-									ema_ms * 0.9 + ms * 0.1
-								};
-								if last_push.elapsed().as_millis() >= 1000 {
-									on_ms(ema_ms);
-									last_push = now;
-								}
-							}
-							last = Some(now);
-						}
-					}
-				});
-			}
-			let pid = child.id();
-			procs.push(child);
-			Ok((pid, ticked))
-		}
-		Err(e) => Err(format!("gst-launch-1.0 {}: {e}", crate::i18n::t("err.spawn"))),
+/// Keep the stored request (`last_req_store`, which the host's watchers re-issue) on the latest
+/// one when a fast path absorbs it: a re-issued stale request used to put an old bitrate back
+/// on the encoder, over the client's ABR. Only an already-stored request is replaced — on
+/// Windows the store stays empty for native sessions (they self-heal), and must.
+fn refresh_last_req(store: &Mutex<Option<StreamReq>>, req: &StreamReq) {
+	if let Some(stored) = store.lock().unwrap().as_mut() {
+		*stored = req.clone();
 	}
 }
 
-/// Spawn a `gst-launch-1.0` encode pipeline tracked in `procs` (killed on
-/// (re-)stream/teardown like the ffmpeg children). `PR_SET_PDEATHSIG` mirrors the
-/// Wayland capture spawn so an app crash can never orphan a streaming encoder.
-#[cfg(target_os = "linux")]
-fn spawn_gst_tracked(procs: &Arc<Mutex<Vec<Child>>>, pipeline: &str) -> Result<(), String> {
-	use std::os::unix::process::CommandExt;
-	let mut cmd = std::process::Command::new(crate::process::gst_launch_bin());
-	pulsar_core::capture::use_system_gst_env(&mut cmd);
-	cmd.arg("-q").args(pipeline.split_whitespace());
-	unsafe {
-		cmd.pre_exec(|| {
-			// SAFETY: async-signal-safe libc calls only.
-			libc::prctl(
-				libc::PR_SET_PDEATHSIG,
-				libc::SIGKILL as libc::c_ulong,
-				0,
-				0,
-				0,
-			);
-			if libc::getppid() == 1 {
-				libc::_exit(0);
-			}
-			Ok(())
-		});
-	}
-	match cmd.spawn() {
-		Ok(child) => {
-			procs.lock().unwrap().push(child);
-			Ok(())
-		}
-		Err(e) => Err(format!("gst-launch-1.0 {}: {e}", crate::i18n::t("err.spawn"))),
+#[cfg(test)]
+mod cli_bitrate_absorb_tests {
+	use super::cli_bitrate_absorbs;
+	use std::time::Duration;
+
+	#[test]
+	fn down_steps_restart_up_steps_at_most_every_6s() {
+		let early = Duration::from_secs(2);
+		let late = Duration::from_secs(10);
+		// The same rate (a periodic re-send, auto included) and a step inside the band: keep it.
+		assert!(cli_bitrate_absorbs(20_000, 20_000, early));
+		assert!(cli_bitrate_absorbs(0, 0, early));
+		assert!(cli_bitrate_absorbs(20_000, 18_500, late));
+		assert!(cli_bitrate_absorbs(20_000, 21_500, late));
+		// A real down-step restarts at once, however soon after the start (the 2026-11-15
+		// review: 20 → 8 Mbit/s within 6 s used to keep sending 20).
+		assert!(!cli_bitrate_absorbs(20_000, 8_000, early));
+		assert!(!cli_bitrate_absorbs(20_000, 15_000, late));
+		assert!(!cli_bitrate_absorbs(20_000, 17_000, Duration::ZERO));
+		// An up-step: deferred within 6 s of the start, taken after.
+		assert!(cli_bitrate_absorbs(20_000, 27_000, early));
+		assert!(!cli_bitrate_absorbs(20_000, 27_000, late));
+		// Auto (0) on one side re-resolves the host default: full restart.
+		assert!(!cli_bitrate_absorbs(0, 10_000, Duration::ZERO));
+		assert!(!cli_bitrate_absorbs(20_000, 0, Duration::ZERO));
 	}
 }
 

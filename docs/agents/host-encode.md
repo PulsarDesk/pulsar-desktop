@@ -99,9 +99,10 @@ Part of the pulsar-desktop agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
     elements open GStreamer's default/first VA device, so a hybrid Wayland box may encode on
     the other GPU. Mapping the node there needs the per-device element names
     (`varenderD129h264enc`) or a device env in pulsar-core — not done.
-  - **CLI fallback absorbs ABR steps on Linux too** (as Windows/macOS): a bitrate-only step
-    under 30 % down / 40 % up, or within 6 s of the last restart, keeps the running ffmpeg —
-    only while the stream is actually on the CLI (a libav / Wayland stream clears it).
+  - **CLI fallback absorbs ABR steps on Linux too** (as Windows/macOS, same rule —
+    `cli_bitrate_absorbs`): a bitrate-only step inside a 10 % band, or an up-step within 6 s of
+    the last restart, keeps the running ffmpeg; a real down-step always restarts — only while
+    the stream is actually on the CLI (a libav / Wayland / X11 gst stream clears it).
   - **Host-ordered restarts are never absorbed** (every OS): the display-mode watcher, the
     per-window watcher (window resized / closed), the CLI keyframe restart (`on_nack`, desktop)
     and the dead-engine watcher re-send the stored request unchanged; they set the session's
@@ -112,6 +113,64 @@ Part of the pulsar-desktop agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
   - **NVENC there goes through the NVENC SDK** (2026-11-14, untested on Linux hardware):
     `pulsar_capture::NvencCuda` (`crates/pulsar-capture/src/encode/cuda_enc.rs`) instead of
     libavcodec's `h264_nvenc`. See "Linux NVENC SDK" below.
+- **Linux X11 with a GStreamer-only HW encoder** (RK3588 / Orange Pi 5: `mpph26Xenc`; also
+  gst VA-API/NVENC when ffmpeg has none) — `handlers.rs` "x11 gst" branch, runners in
+  `host/x11_gst.rs`. Two runners (2026-11-15, untested on the Pi):
+  - **In-process** (`pulsar_core::capture::start_pipeline`, core `capture/live.rs`) for every
+    `ximagesrc` pipeline (whole screen / monitor region / one window): the description runs
+    inside the app, held in the session's `cap_slot`. ABR steps set `bps` on the running
+    encoder, `MediaNack([0])` forces a key unit, a recovery flip toggles the 500 ms forced
+    key-unit timer — all live, no restart (`x11_gst::try_live`). Its description is built with
+    the NORMAL GOP (`gop=fps`) and recovery runs only through that timer, so a flip back to
+    Normal really returns to the long GOP (a baked `gop=fps/2` used to stay for the whole
+    stream). The encode meter is pad probes on the encoder: frames out and the real per-frame
+    time inside it (`pipeline::gst::EncodeTimer`), not the frame gap the `-v` meter reads.
+    - **Start off the session loop** (`X11InProcStart`, own thread keyed to `cap_gen`): a live
+      `ximagesrc` pipeline never prerolls, so `start_pipeline` waits for the encoder's FIRST
+      frame and says why it failed (`StartError::Failed` bus error / `NoFirstFrame` /
+      `Unavailable`). BGRx-direct that fails (the RGA >4G case) retries in-process with the
+      CPU-convert I420 variant at once (2.6 s, not 2.6 + 3 + 2.6) and BGRx-direct is then off
+      for the process; anything else falls back to the child (I420 if BGRx just failed). The
+      old pipeline's teardown also runs off the loop (taken out of `cap_slot` in its own
+      statement — the input path locks it per event) and the start joins it first.
+    - **Watchdogs:** a pipeline whose `frames_encoded()` stayed flat 2 s (a driver call hung
+      with no bus error) or that died is not absorbed: the next request restarts it.
+      `LATCH_AFTER` (2) failed starts in a row turn the in-process runner off for the process;
+      a frame resets the count. `PULSAR_GST_INPROC=0` forces the child.
+    - **Trade-off (unverified on the Pi):** the vendor stack (`mpph26xenc` + librga/libmpp)
+      now runs INSIDE the app — a crash or abort there kills the whole host app (UI, every
+      session, audio), where it used to kill only the child. A marker
+      (`$TMPDIR/pulsar-gst-inproc-start.marker`) is written before each in-process start and
+      removed 10 s after it is up; a launch that finds it left behind runs the child for that
+      whole run (and removes it, so the launch after tries in-process again).
+  - **`gst-launch` child** for **KMS** (`kmssrc` zero-copy, game mode / `cursor_external`)
+    and the fallback above. KMS must stay a child: reading the scanout FB needs
+    `CAP_SYS_ADMIN`, carried only by the user-made `~/pulsar-gst-launch` copy, and the app
+    itself never gets that capability. gst-launch has no control channel, so a bitrate-only
+    step goes through `cli_bitrate_absorbs` (the same rule as the ffmpeg CLI on Windows /
+    macOS): the same rate is kept, a **down-step beyond 10 % always restarts** (holding a rate
+    above what the link carries means sustained queueing — latency first), an up-step beyond
+    10 % restarts at most once per 6 s since the start; the pacer keeps the child's real rate.
+    A recovery flip / dead child / host-ordered restart restarts it. A real live control for
+    KMS would need the privileged child to only capture and hand DMABufs to an in-process
+    encoder (`unixfdsink`/`unixfdsrc`, gst ≥ 1.24) — the Pi's gst 1.20 has no such element.
+    KMS also stays primary-CRTC only (a non-primary monitor takes `ximagesrc`).
+  - **Host-ordered restarts** (every OS): the display-mode watcher, the window watcher and the
+    keyframe-by-restart in `on_nack` re-issue the stored request through
+    `host::send_host_restart`, which raises `host_restart`; `make_on_stream` then skips every
+    "nothing changed" fast path and bitrate absorb for it (the Wayland portal capture excepted:
+    PipeWire follows the size itself). Before this an identical re-issue was swallowed by the
+    absorbs (Linux child / in-process, and the ffmpeg CLI on Windows/macOS). `on_nack` skips
+    the restart when a live encoder took the keyframe request (native NVENC / VideoToolbox,
+    in-process gst, libav). Every fast path keeps `last_req_store` on the latest request
+    (`refresh_last_req`) so a re-issue never puts a stale bitrate back over the client's ABR.
+    The gst branch now stores its request too (it returned before the store, so the watchers
+    never fired on an X11 gst host).
+  - Windows / macOS: no GStreamer host path there (native NVENC / MF / VideoToolbox capture
+    with their own live controls, ffmpeg CLI fallback with the same absorb rule).
+    Wayland's in-process portal pipeline still bakes the recovery GOP into its description
+    (x264's `intra-refresh` can't be driven by a timer, and a portal restart per flip is worse
+    than the leftover short GOP) — a known gap.
 - **Windows (non-NVENC) / macOS fallback** (and the Linux fallback) — ffmpeg CLI (`ddagrab`/
   `gdigrab`/`avfoundation`/`x11grab` → HW encode or libx264 → RTP). Arg builders are pure
   functions in pulsar-core `pipeline/` (unit-tested); spawning is here (`process.rs`, `host/`).
