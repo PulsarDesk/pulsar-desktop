@@ -11,6 +11,10 @@
 
 mod i18n;
 mod overlay;
+// The colour description of a decoded picture (SDR = BT.709 limited unless the stream says
+// otherwise) and the YCbCr → RGB constants every backend uses. Pure Rust, tested everywhere.
+#[allow(dead_code)] // each backend uses its own part
+mod colour;
 
 /// `--lang tr|en` (from the app's `Config.language`) — picks the native UI language
 /// for the overlay/hints (the renderer can't share the webview's i18n tables; the

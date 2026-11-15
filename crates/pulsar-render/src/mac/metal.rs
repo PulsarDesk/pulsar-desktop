@@ -384,6 +384,19 @@ impl Gpu {
 		layer.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
 		layer.setFramebufferOnly(true);
 		layer.setOpaque(true);
+		// The YUV→RGB shader yields BT.709 R'G'B' (Pulsar's SDR rule: BT.709 limited range on
+		// every host). Tag the layer so macOS colour-matches it to the display; with no colour
+		// space the values went to the panel as they are, over-saturated on a P3 / wide-gamut
+		// Mac. (The egui overlay on the same layer is matched the same way: sRGB and BT.709
+		// share their primaries.)
+		// SAFETY: a +1 CGColorSpace handed to the layer (which retains it), then released.
+		unsafe {
+			let cs = CGColorSpaceCreateWithName(kCGColorSpaceITUR_709);
+			if !cs.is_null() {
+				let _: () = objc2::msg_send![&layer, setColorspace: cs];
+				CGColorSpaceRelease(cs);
+			}
+		}
 		// Never let presentation pace the DECODE (see win/mod.rs show_frame): the pacer meters
 		// pictures by the display link, the layer presents at once.
 		layer.setDisplaySyncEnabled(false);

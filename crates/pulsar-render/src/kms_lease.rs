@@ -1162,6 +1162,12 @@ void main(){ gl_FragColor = texture2D(t, uv); }
 			r.place(&self.vplane, self.crtc, fb, src, dst)?;
 			r.opt(&self.vplane, "zpos", 0);
 			r.opt(&self.vplane, "rotation", ROTATE_0);
+			// The plane converts YCbCr → RGB itself: give it the frame's matrix + range
+			// (`colour.rs`; a plane left alone converts with its default, BT.601 on most
+			// drivers). Optional properties: a plane without them keeps its default.
+			let (enc, range) = crate::colour::kms_props(crate::video::frame_colour(frame));
+			r.opt(&self.vplane, "COLOR_ENCODING", enc);
+			r.opt(&self.vplane, "COLOR_RANGE", range);
 			// The cursor side-channel maps into this rect (GL convention: bottom-left origin).
 			*crate::video::VIDEO_RECT.lock().unwrap() =
 				[dst.0, self.h as i32 - (dst.1 + dst.3 as i32), dst.2 as i32, dst.3 as i32];

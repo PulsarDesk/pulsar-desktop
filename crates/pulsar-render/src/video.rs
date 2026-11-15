@@ -25,6 +25,9 @@ const PITCH_EXT: [i32; 3] = [0x3274, 0x3277, 0x327A];
 const MOD_LO_EXT: [i32; 3] = [0x3443, 0x3445, 0x3447];
 const MOD_HI_EXT: [i32; 3] = [0x3444, 0x3446, 0x3448];
 const EGL_NONE_I: i32 = 0x3038;
+// EGL_EXT_image_dma_buf_import colour hints (values in `colour::egl_hints`).
+const EGL_YUV_COLOR_SPACE_HINT_EXT: i32 = 0x327B;
+const EGL_SAMPLE_RANGE_HINT_EXT: i32 = 0x327C;
 pub const GL_TEXTURE_EXTERNAL_OES: u32 = 0x8D65;
 const DRM_FORMAT_MOD_INVALID: u64 = 0x00ff_ffff_ffff_ffff;
 // DRM fourccs of the per-plane layers VAAPI exports for NV12 / P010 (separate layers).
@@ -1500,13 +1503,85 @@ pub struct Presenter {
 
 const VERT: &str = "attribute vec2 pos;\nattribute vec2 uvin;\nvarying vec2 uv;\nvoid main(){ uv=uvin; gl_Position=vec4(pos,0.0,1.0); }\n";
 const FRAG: &str = "#extension GL_OES_EGL_image_external : require\nprecision mediump float;\nvarying vec2 uv;\nuniform samplerExternalOES tex;\nvoid main(){ gl_FragColor=vec4(texture2D(tex,uv).rgb,1.0); }\n";
-// Planar YUV → RGB, BT.709 limited range (the stream is HD H.264/HEVC/AV1).
-const FRAG_YUV: &str = "precision mediump float;\nvarying vec2 uv;\nuniform sampler2D ty;\nuniform sampler2D tu;\nuniform sampler2D tv;\nvoid main(){\n  float y = (texture2D(ty, uv).r - 0.0627) * 1.1644;\n  float u = texture2D(tu, uv).r - 0.5;\n  float v = texture2D(tv, uv).r - 0.5;\n  gl_FragColor = vec4(y + 1.5748*v, y - 0.1873*u - 0.4681*v, y + 1.8556*u, 1.0);\n}\n";
-// NV12 (2-plane, interleaved UV) → RGB, BT.709 limited. The UV plane uploads as
+// YUV → RGB with the picture's own matrix and range (`colour.rs`: BT.709 limited unless the
+// stream says otherwise): `yr` = (luma scale, luma offset, chroma scale, chroma offset) turns a
+// sampled value into Y' 0..1 / C −0.5..0.5, `ym` = the matrix (R = Y + ym.x·Cr,
+// G = Y − ym.y·Cb − ym.z·Cr, B = Y + ym.w·Cb). Set per draw by `set_colour`. (The constants
+// used to be fixed BT.709 with full-range chroma gains: limited-range chroma came out ~12 %
+// desaturated, and a BT.601 / full-range stream was drawn wrong.)
+const FRAG_YUV: &str = "precision mediump float;
+varying vec2 uv;
+uniform sampler2D ty;
+uniform sampler2D tu;
+uniform sampler2D tv;
+uniform vec4 yr;
+uniform vec4 ym;
+void main(){
+  float y = texture2D(ty, uv).r * yr.x + yr.y;
+  float u = texture2D(tu, uv).r * yr.z + yr.w;
+  float v = texture2D(tv, uv).r * yr.z + yr.w;
+  gl_FragColor = vec4(y + ym.x*v, y - ym.y*u - ym.z*v, y + ym.w*u, 1.0);
+}
+";
+// NV12 (2-plane, interleaved UV) → RGB. The UV plane uploads as
 // LUMINANCE_ALPHA: U lands in .r (=L), V in .a.
 // The same for a dmabuf chroma layer imported as GR88/GR1616: U in .r, V in .g.
-const FRAG_NV12_RG: &str = "precision mediump float;\nvarying vec2 uv;\nuniform sampler2D ty;\nuniform sampler2D tuv;\nvoid main(){\n  float y = (texture2D(ty, uv).r - 0.0627) * 1.1644;\n  float u = texture2D(tuv, uv).r - 0.5;\n  float v = texture2D(tuv, uv).g - 0.5;\n  gl_FragColor = vec4(y + 1.5748*v, y - 0.1873*u - 0.4681*v, y + 1.8556*u, 1.0);\n}\n";
-const FRAG_NV12: &str = "precision mediump float;\nvarying vec2 uv;\nuniform sampler2D ty;\nuniform sampler2D tuv;\nvoid main(){\n  float y = (texture2D(ty, uv).r - 0.0627) * 1.1644;\n  float u = texture2D(tuv, uv).r - 0.5;\n  float v = texture2D(tuv, uv).a - 0.5;\n  gl_FragColor = vec4(y + 1.5748*v, y - 0.1873*u - 0.4681*v, y + 1.8556*u, 1.0);\n}\n";
+const FRAG_NV12_RG: &str = "precision mediump float;
+varying vec2 uv;
+uniform sampler2D ty;
+uniform sampler2D tuv;
+uniform vec4 yr;
+uniform vec4 ym;
+void main(){
+  float y = texture2D(ty, uv).r * yr.x + yr.y;
+  float u = texture2D(tuv, uv).r * yr.z + yr.w;
+  float v = texture2D(tuv, uv).g * yr.z + yr.w;
+  gl_FragColor = vec4(y + ym.x*v, y - ym.y*u - ym.z*v, y + ym.w*u, 1.0);
+}
+";
+const FRAG_NV12: &str = "precision mediump float;
+varying vec2 uv;
+uniform sampler2D ty;
+uniform sampler2D tuv;
+uniform vec4 yr;
+uniform vec4 ym;
+void main(){
+  float y = texture2D(ty, uv).r * yr.x + yr.y;
+  float u = texture2D(tuv, uv).r * yr.z + yr.w;
+  float v = texture2D(tuv, uv).a * yr.z + yr.w;
+  gl_FragColor = vec4(y + ym.x*v, y - ym.y*u - ym.z*v, y + ym.w*u, 1.0);
+}
+";
+
+/// The colour description libav put on a decoded frame (from the stream's VUI / AV1 colour
+/// config; rkmpp and VA-API frames carry it too). Unspecified = BT.709 limited. (A full-range
+/// stream also sets `color_range` = JPEG when an old libavcodec picks a `yuvj*` format.)
+pub(crate) unsafe fn frame_colour(f: *const ff::AVFrame) -> crate::colour::Colour {
+	crate::colour::Colour::from_av((*f).colorspace as i32, (*f).color_range as i32, false)
+}
+
+/// Point the YUV program in use at the frame's matrix + range (`bits` per sample; `msb16` =
+/// 10-bit samples in the top bits of 16-bit texels, the P010 dmabuf layers).
+unsafe fn set_colour(gl: &glow::Context, prog: glow::Program, c: crate::colour::Colour, bits: u32, msb16: bool) {
+	use glow::HasContext;
+	let (r, m) = crate::colour::yuv_consts(c.matrix, bits, c.full_range, msb16);
+	if let Some(loc) = gl.get_uniform_location(prog, "yr") {
+		gl.uniform_4_f32(Some(&loc), r[0], r[1], r[2], r[3]);
+	}
+	if let Some(loc) = gl.get_uniform_location(prog, "ym") {
+		gl.uniform_4_f32(Some(&loc), m[0], m[1], m[2], m[3]);
+	}
+}
+
+/// DRM fourccs of the YUV layouts a decoder exports as ONE composed dmabuf layer (rkmpp NV12 /
+/// NV15 / NV16, a P010 or planar 4:2:0 export): those take the EGL colour hints.
+fn is_yuv_fourcc(f: u32) -> bool {
+	const fn cc(s: &[u8; 4]) -> u32 {
+		(s[0] as u32) | (s[1] as u32) << 8 | (s[2] as u32) << 16 | (s[3] as u32) << 24
+	}
+	[cc(b"NV12"), cc(b"NV21"), cc(b"NV15"), cc(b"NV16"), cc(b"NV20"), cc(b"NV24"), cc(b"P010"), cc(b"YU12"), cc(b"YV12")]
+		.contains(&f)
+}
 
 impl Presenter {
 	/// `get_proc` resolves EGL/GL functions (egl.get_proc_address). `dpy` = raw EGLDisplay.
@@ -1548,6 +1623,7 @@ impl Presenter {
 				gl.uniform_1_i32(Some(&loc), i as i32);
 			}
 		}
+		set_colour(gl, sw_prog, crate::colour::Colour::default(), 8, false);
 		for p in [nv_prog, rg_prog] {
 			gl.use_program(Some(p));
 			for (i, name) in ["ty", "tuv"].iter().enumerate() {
@@ -1555,6 +1631,7 @@ impl Presenter {
 					gl.uniform_1_i32(Some(&loc), i as i32);
 				}
 			}
+			set_colour(gl, p, crate::colour::Colour::default(), 8, false);
 		}
 		gl.use_program(None);
 
@@ -1772,12 +1849,16 @@ impl Presenter {
 	}
 
 	/// EGLImage for layer `li` of a DRM_PRIME descriptor at `w`×`h` (null on failure).
+	/// `colour` = the frame's colour description, passed to EGL as the YUV conversion hints
+	/// for a composed YUV layer (the external sampler converts it; without the hints Mesa and
+	/// the Mali blob use BT.601 — the rkmpp / Pi picture was drawn with the wrong matrix).
 	unsafe fn dmabuf_image(
 		&self,
 		d: *const ff::AVDRMFrameDescriptor,
 		li: usize,
 		w: i32,
 		h: i32,
+		colour: Option<crate::colour::Colour>,
 	) -> *mut c_void {
 		let layer = &(*d).layers[li];
 		let mut a: Vec<i32> = Vec::with_capacity(64);
@@ -1825,6 +1906,10 @@ impl Presenter {
 				a.push(MOD_HI_EXT[i]);
 				a.push((o.format_modifier >> 32) as i32);
 			}
+		}
+		if let Some(c) = colour.filter(|_| is_yuv_fourcc(layer.format)) {
+			let (space, range) = crate::colour::egl_hints(c);
+			a.extend([EGL_YUV_COLOR_SPACE_HINT_EXT, space, EGL_SAMPLE_RANGE_HINT_EXT, range]);
 		}
 		a.push(EGL_NONE_I);
 		(self.create_image)(
@@ -2080,13 +2165,16 @@ impl Presenter {
 				let dims = [(vw, vh), ((vw + 1) / 2, (vh + 1) / 2)];
 				if pair_ok {
 					for i in 0..2 {
-						imgs[i] = self.dmabuf_image(d, i, dims[i].0, dims[i].1);
+						imgs[i] = self.dmabuf_image(d, i, dims[i].0, dims[i].1, None);
 					}
 				}
 				if imgs.iter().any(|i| i.is_null()) {
 					return self.zero_copy_failed(&imgs, "multi-layer dmabuf import");
 				}
 				gl.use_program(Some(self.rg_prog));
+				// R16 / GR1616 = P010: 10-bit samples in the top bits.
+				let p010 = l0.format == DRM_FORMAT_R16;
+				set_colour(gl, self.rg_prog, frame_colour(cur), if p010 { 10 } else { 8 }, p010);
 				for i in 0..2 {
 					gl.active_texture(glow::TEXTURE0 + i as u32);
 					gl.bind_texture(glow::TEXTURE_2D, Some(self.zc_tex[i]));
@@ -2096,7 +2184,7 @@ impl Presenter {
 			} else {
 				// One composed layer (rkmpp NV12, single-plane RGB): the external sampler
 				// does the YUV→RGB conversion.
-				imgs[0] = self.dmabuf_image(d, 0, vw, vh);
+				imgs[0] = self.dmabuf_image(d, 0, vw, vh, Some(frame_colour(cur)));
 				if imgs[0].is_null() {
 					return self.zero_copy_failed(&imgs, "dmabuf import");
 				}
@@ -2111,6 +2199,7 @@ impl Presenter {
 				return self.zero_copy_failed(&imgs, "CUDA-GL interop");
 			}
 			gl.use_program(Some(self.nv_prog));
+			set_colour(gl, self.nv_prog, frame_colour(cur), 8, false);
 			for i in 0..2 {
 				gl.active_texture(glow::TEXTURE0 + i as u32);
 				gl.bind_texture(glow::TEXTURE_2D, Some(self.cuda_tex[i]));
@@ -2148,6 +2237,7 @@ impl Presenter {
 				self.sw_dims = (vw, vh, fmt);
 			}
 			gl.use_program(Some(self.nv_prog));
+			set_colour(gl, self.nv_prog, frame_colour(cur), 8, false);
 			path = PresentPath::Nv12Upload;
 		} else {
 			// Planar YUV: full-res Y + per-format chroma planes (half for 4:2:0, full for
@@ -2169,6 +2259,7 @@ impl Presenter {
 				self.sw_dims = (vw, vh, fmt);
 			}
 			gl.use_program(Some(self.sw_prog));
+			set_colour(gl, self.sw_prog, frame_colour(cur), 8, false);
 			// upload_plane left each plane bound on its unit (0/1/2), matching the sampler
 			// uniforms set at init.
 			path = PresentPath::YuvUpload;

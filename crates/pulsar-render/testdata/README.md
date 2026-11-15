@@ -49,3 +49,16 @@ Commit the resulting non-empty fixture. Verify:
 cargo build --release -p pulsar-render
 target/release/pulsar-render --probe   # h265 entry should show "incompatible_with":["nvenc"] on rkmpp
 ```
+
+## Colour-bar fixtures — `colour-{bt709,untagged,bt601}.h264`
+
+Two frames of red / green / blue / white bars (256×128, 64 px each) for the Windows decode +
+present harness (`src/win/colour_bars.rs`). Made with the bundled ffmpeg (7.1+):
+
+```
+SRC="color=c=red:s=64x128:r=30[a];color=c=lime:s=64x128:r=30[b];color=c=blue:s=64x128:r=30[c];color=c=white:s=64x128:r=30[d];[a][b][c][d]hstack=4,format=bgr0"
+X="-c:v libx264 -profile:v high -pix_fmt yuv420p -bf 0 -g 30 -preset veryslow -crf 10"
+ffmpeg -filter_complex "$SRC,setparams=color_primaries=bt709:color_trc=bt709" -frames:v 2 $X -colorspace bt709 -color_range tv -f h264 colour-bt709.h264
+ffmpeg -filter_complex "$SRC,setparams=color_primaries=smpte170m:color_trc=smpte170m" -frames:v 2 $X -colorspace smpte170m -color_range tv -f h264 colour-bt601.h264
+ffmpeg -filter_complex "$SRC,scale=out_color_matrix=bt709:out_range=tv,format=yuv420p,setparams=colorspace=unknown:range=unknown" -frames:v 2 $X -f h264 colour-untagged.h264
+```

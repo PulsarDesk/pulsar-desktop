@@ -347,6 +347,11 @@ extern "C" {
 	) -> i32;
 	/// Retained `id<MTLDevice>` driving `display` (macOS 10.11+).
 	pub fn CGDirectDisplayCopyCurrentMetalDevice(display: CGDirectDisplayID) -> *mut c_void;
+	/// `kCGColorSpaceITUR_709` (macOS 10.11+): the colour space of an SDR Pulsar stream.
+	pub static kCGColorSpaceITUR_709: CFStringRef;
+	/// +1 `CGColorSpaceRef` (null when the name is unknown).
+	pub fn CGColorSpaceCreateWithName(name: CFStringRef) -> *mut c_void;
+	pub fn CGColorSpaceRelease(space: *mut c_void);
 }
 
 #[link(name = "Metal", kind = "framework")]

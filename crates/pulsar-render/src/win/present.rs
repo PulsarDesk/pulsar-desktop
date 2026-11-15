@@ -18,7 +18,38 @@ use windows::Win32::Graphics::Direct3D11::{
 	D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VPIV_DIMENSION_TEXTURE2D,
 	D3D11_VPOV_DIMENSION_TEXTURE2D,
 };
-use windows::Win32::Graphics::Dxgi::Common::DXGI_RATIONAL;
+use windows::Win32::Graphics::Dxgi::Common::{
+	DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709, DXGI_COLOR_SPACE_TYPE, DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P2020,
+	DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P709, DXGI_COLOR_SPACE_YCBCR_FULL_G22_NONE_P709_X601,
+	DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P2020, DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P601,
+	DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709, DXGI_RATIONAL,
+};
+
+use crate::colour::{Colour, Matrix};
+
+/// The VideoProcessor input colour space of a decoded picture (`ID3D11VideoContext1`).
+/// Without one the processor converts with its default — the BT.601 matrix — while every
+/// Pulsar host encodes BT.709 (`colour.rs`): reds and greens came out shifted.
+pub fn dxgi_input_space(c: Colour) -> DXGI_COLOR_SPACE_TYPE {
+	match (c.matrix, c.full_range) {
+		(Matrix::Bt709, false) => DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709,
+		(Matrix::Bt709, true) => DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P709,
+		(Matrix::Bt601, false) => DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P601,
+		// The JPEG one: BT.601 matrix, full range.
+		(Matrix::Bt601, true) => DXGI_COLOR_SPACE_YCBCR_FULL_G22_NONE_P709_X601,
+		(Matrix::Bt2020, false) => DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P2020,
+		(Matrix::Bt2020, true) => DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P2020,
+	}
+}
+
+/// The same for a context without `ID3D11VideoContext1` (pre-8.1): the legacy bitfield
+/// (Usage:1, RGB_Range:1, YCbCr_Matrix:1 (1 = BT.709), YCbCr_xvYCC:1, Nominal_Range:2
+/// (1 = 16–235, 2 = 0–255)). It has no BT.2020: that falls back to BT.709.
+pub fn legacy_input_space(c: Colour) -> u32 {
+	let matrix = u32::from(c.matrix != Matrix::Bt601) << 2;
+	let range = if c.full_range { 2 } else { 1 } << 4;
+	matrix | range
+}
 
 /// View-fit mode for presenting the video (AnyDesk-style), mirroring the Linux
 /// backend's `video::FIT_MODE`: 0 = FIT (letterbox, default), 1 = STRETCH (fill,
@@ -183,6 +214,8 @@ pub struct Present {
 	fsr: std::cell::RefCell<Option<super::fsr::Fsr>>,
 	fsr_failed: std::cell::Cell<bool>,
 	logged: std::cell::Cell<Option<Upscaler>>,
+	/// The colour description applied to `vproc` (None = not yet / a fresh processor).
+	colour: std::cell::Cell<Option<Colour>>,
 }
 
 impl Present {
@@ -212,6 +245,7 @@ impl Present {
 			fsr: std::cell::RefCell::new(None),
 			fsr_failed: std::cell::Cell::new(false),
 			logged: std::cell::Cell::new(None),
+			colour: std::cell::Cell::new(None),
 		};
 		// Black bars for letterboxing.
 		s.set_black_background();
@@ -278,8 +312,9 @@ impl Present {
 		// which resets all state, so the letterbox bars would show swapchain garbage
 		// (FLIP_DISCARD = back buffer undefined) without this call.
 		self.set_black_background();
-		// A fresh processor has no stream extension set.
+		// A fresh processor has no stream extension set, and default colour spaces.
 		self.vendor_on.set(false);
+		self.colour.set(None);
 		self.in_w = in_w;
 		self.in_h = in_h;
 		self.out_w = out_w;
@@ -383,6 +418,27 @@ impl Present {
 
 	/// Convert+scale the NV12 `src` onto the swapchain `back` buffer (RGB): one GPU Blt — with
 	/// the GPU's own upscaler on it, or into a source-sized texture that FSR scales up.
+	/// Convert with the decoded pictures' colour description (`Decoder::colour`): the input
+	/// stream's YCbCr space, full-range RGB (sRGB-like gamma, BT.709 primaries) out. Applied
+	/// when it changes or the processor was rebuilt.
+	pub unsafe fn set_colour(&self, c: Colour) {
+		if self.colour.get() == Some(c) {
+			return;
+		}
+		self.colour.set(Some(c));
+		if let Ok(v1) = self.vctx.cast::<windows::Win32::Graphics::Direct3D11::ID3D11VideoContext1>() {
+			v1.VideoProcessorSetStreamColorSpace1(&self.vproc, 0, dxgi_input_space(c));
+			v1.VideoProcessorSetOutputColorSpace1(&self.vproc, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+			return;
+		}
+		use windows::Win32::Graphics::Direct3D11::D3D11_VIDEO_PROCESSOR_COLOR_SPACE;
+		let input = D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: legacy_input_space(c) };
+		// RGB_Range 0 = full 0–255 output.
+		let output = D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: 0 };
+		self.vctx.VideoProcessorSetStreamColorSpace(&self.vproc, 0, &input);
+		self.vctx.VideoProcessorSetOutputColorSpace(&self.vproc, &output);
+	}
+
 	pub unsafe fn blt(&self, src: &ID3D11Texture2D, back: &ID3D11Texture2D) -> Result<()> {
 		let (_, dst, crop) = self.blt_rects_crop();
 		let up = (dst.right - dst.left) as u32 > crop.0 || (dst.bottom - dst.top) as u32 > crop.1;
@@ -535,5 +591,22 @@ mod pick_tests {
 		assert_eq!(pick(2, VENDOR_QUALCOMM), Upscaler::Fsr);
 		assert_eq!(pick(4, VENDOR_NVIDIA), Upscaler::Sgsr);
 		assert_eq!(pick(0, VENDOR_QUALCOMM), Upscaler::None);
+	}
+}
+
+#[cfg(test)]
+mod colour_tests {
+	use super::*;
+
+	#[test]
+	fn pulsar_sdr_is_studio_709_and_others_follow_the_stream() {
+		assert_eq!(dxgi_input_space(Colour::default()), DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709);
+		let c601 = Colour { matrix: Matrix::Bt601, full_range: false };
+		assert_eq!(dxgi_input_space(c601), DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P601);
+		let full = Colour { matrix: Matrix::Bt709, full_range: true };
+		assert_eq!(dxgi_input_space(full), DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P709);
+		// Legacy words: BT.709 + 16–235; BT.601 + 0–255.
+		assert_eq!(legacy_input_space(Colour::default()), (1 << 2) | (1 << 4));
+		assert_eq!(legacy_input_space(Colour { matrix: Matrix::Bt601, full_range: true }), 2 << 4);
 	}
 }
