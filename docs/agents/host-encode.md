@@ -230,9 +230,22 @@ GPU runs the **same NVENC SDK session as Windows**:
 - **Untested on hardware**: no Linux machine with an NVIDIA GPU was available; only type
   checks, unit tests (the no-driver path of `NvencCuda::new`, plane-size rules, the gst handoff
   plumbing with `videotestsrc`) and the libav end-to-end x264 test ran.
-- Which clients use it: the Windows client asks for RFI (`play.rs` `host_rfi` is
-  `cfg!(windows)`). The Linux renderer already reports `vidsink-rfi` and resumes at the tag, but
-  the Linux client does not ask yet.
+- Which clients use it: every desktop client on pulsar-render (Windows, macOS, Linux on its
+  Rust RTP path; `play.rs` `rfi_client`), see client-video.md.
+- **Recovery flip absorbed** (2026-11-15): the client's loss flip (short GOP) no longer forces
+  an IDR every 0.5 s on top of an SDK encoder that heals losses itself — X11:
+  `libav::recovery_cadence` skips it when `NvencCuda::heals_losses` (RFI or intra refresh);
+  Wayland: `nvenc_frames::short_gop` keeps the capture's key-unit timer off on the raw-frame
+  SDK encoder of an RFI stream. The Windows native path always absorbed it (`live_change`).
+- The FEAT_RFI probe (`host.rs` `linux_nvenc_sdk`) honours the encoders' own
+  `PULSAR_NVENC_SDK` switch (`0` / `false` / `off`, `libav::sdk_enabled`): `off` used to keep
+  advertising RFI with the SDK encoder disabled.
+- Reviewed against the Windows encoder (2026-11-15): `NvencCuda` matches `Encoder` /
+  `submit.rs` in the RFI DPB / `numRefL0` config (shared `nvsession::configure`), the
+  `RefTracker` record / plan / `invalidate_failed` calls, the IDR detection, the keyframe
+  policy and the recovery-SEI prefix. Difference kept: the Wayland path stamps the RTP time at
+  encode, not at capture (`RawFrame` carries no capture time) — a few ms of the GStreamer
+  convert, constant per frame.
 - **VA-API / Intel / AMD**: no equivalent through the encoders we use. libavcodec's
   `*_vaapi`/`*_qsv` and GStreamer's `va*`/`vaapi*` encoders expose no reference invalidation.
   Possible only with an encoder of our own: raw VA-API (the app owns the DPB and the
