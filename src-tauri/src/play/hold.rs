@@ -71,6 +71,19 @@ const FAST_DROP_MIN_MS: f32 = 30.0;
 const FAST_DROP_MAX_MS: f32 = 80.0;
 
 /// Whether the fast drop is on (`prev` = its last state; hysteresis on the median RTT).
+/// Whether this host takes `ev`. Mouse side buttons (3 = back, 4 = forward) go only to hosts
+/// that advertise `FEAT_MOUSE_X`: older hosts turned every button id they did not know into a
+/// LEFT click, so a back-button press clicked on the remote. Ids past forward never go out.
+fn host_takes(ev: &InputEvent, host_mouse_x: bool) -> bool {
+	use pulsar_core::input::mouse_button;
+	match *ev {
+		InputEvent::PointerButton { button, .. } => {
+			mouse_button::is_known(button) && (host_mouse_x || !mouse_button::is_side(button))
+		}
+		_ => true,
+	}
+}
+
 fn fast_drop_on(prev: bool, game_mode: bool, keyframe_free: bool, rtt_med_ms: f32) -> bool {
 	if !game_mode || !keyframe_free || !(rtt_med_ms > 0.0) {
 		return false;
@@ -631,6 +644,8 @@ pub(super) async fn hold_session(
 	host_touch: bool,
 	// "Otomatik ayar" off at the start: the fixed rate play.rs requested (None = adaptive).
 	fixed_kbps: Option<u32>,
+	// The host injects the mouse side buttons (`FEAT_MOUSE_X`, see `host_takes`).
+	host_mouse_x: bool,
 ) {
 	// A relayed session keeps punching in the background (core `punch_in_background`) and may
 	// upgrade to a direct path mid-stream; the adaptive rate then starts over on it.
@@ -951,6 +966,7 @@ pub(super) async fn hold_session(
 		let win_deadline = pending_windows.as_ref().map(|(_, d)| *d);
 		tokio::select! {
 			ev = input_rx.recv() => match ev {
+				Some(ev) if !host_takes(&ev, host_mouse_x) => {}
 				Some(ev) => {
 					let mut dead = false;
 					let now = std::time::Instant::now();
@@ -2469,6 +2485,26 @@ pub(super) async fn hold_session(
 	crate::files_window::close(&app_ev, id);
 	let _ = pulsar_core::service::send_bye(&mut sess).await;
 	drop(sess);
+}
+
+#[cfg(test)]
+mod input_gate_tests {
+	use super::*;
+
+	#[test]
+	fn side_buttons_only_reach_hosts_that_inject_them() {
+		let b = |button| InputEvent::PointerButton { button, down: true };
+		for button in 0..=2 {
+			assert!(host_takes(&b(button), false));
+			assert!(host_takes(&b(button), true));
+		}
+		assert!(!host_takes(&b(3), false));
+		assert!(!host_takes(&b(4), false));
+		assert!(host_takes(&b(3), true));
+		assert!(host_takes(&b(4), true));
+		assert!(!host_takes(&b(5), true));
+		assert!(host_takes(&InputEvent::Key { code: 30, down: true }, false));
+	}
 }
 
 #[cfg(test)]

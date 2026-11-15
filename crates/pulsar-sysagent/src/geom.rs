@@ -69,16 +69,18 @@ pub fn absolute_move(x: f64, y: f64, monitor: Option<MonitorRect>) -> (i32, i32,
 	}
 }
 
-/// 0=left, 1=right, 2=middle (anything else = left, as in DesktopInput).
-pub fn button_flag(button: u8, down: bool) -> u32 {
-	match (button, down) {
+/// 0=left, 1=right, 2=middle. Anything else (the side buttons 3 / 4 included: the helper
+/// protocol carries no XBUTTON flags) is `None` and ignored, never a left click.
+pub fn button_flag(button: u8, down: bool) -> Option<u32> {
+	Some(match (button, down) {
+		(0, true) => MOUSEEVENTF_LEFTDOWN,
+		(0, false) => MOUSEEVENTF_LEFTUP,
 		(1, true) => MOUSEEVENTF_RIGHTDOWN,
 		(1, false) => MOUSEEVENTF_RIGHTUP,
 		(2, true) => MOUSEEVENTF_MIDDLEDOWN,
 		(2, false) => MOUSEEVENTF_MIDDLEUP,
-		(_, true) => MOUSEEVENTF_LEFTDOWN,
-		(_, false) => MOUSEEVENTF_LEFTUP,
-	}
+		_ => return None,
+	})
 }
 
 /// Fractional wheel accumulator (browser pixels → notches, remainder carried).
@@ -165,9 +167,10 @@ mod tests {
 
 	#[test]
 	fn buttons() {
-		assert_eq!(button_flag(0, true), MOUSEEVENTF_LEFTDOWN);
-		assert_eq!(button_flag(1, false), MOUSEEVENTF_RIGHTUP);
-		assert_eq!(button_flag(2, true), MOUSEEVENTF_MIDDLEDOWN);
-		assert_eq!(button_flag(9, false), MOUSEEVENTF_LEFTUP);
+		assert_eq!(button_flag(0, true), Some(MOUSEEVENTF_LEFTDOWN));
+		assert_eq!(button_flag(1, false), Some(MOUSEEVENTF_RIGHTUP));
+		assert_eq!(button_flag(2, true), Some(MOUSEEVENTF_MIDDLEDOWN));
+		assert_eq!(button_flag(3, true), None);
+		assert_eq!(button_flag(9, false), None);
 	}
 }

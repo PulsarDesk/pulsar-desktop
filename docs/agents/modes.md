@@ -171,8 +171,8 @@ pulsar-macinput`). Same surface and rules as the Windows hook (`imp.rs`):
   Remote mode: absolute, normalized to the video rect, the move passes locally; an overshoot
   is re-located and `CGWarpMouseCursorPosition`ed to the edge (the confine), re-checked every
   100 ms (window moves). Free cursor ("Serbest imlec"): no confine, leaving the video
-  releases, hovering it engages, same rules as Windows. Buttons 0-2 are forwarded;
-  back/forward are swallowed (no host injector knows them). Wheel: point deltas (trackpad)
+  releases, hovering it engages, same rules as Windows. Buttons 0-4 are forwarded
+  (3 = back, 4 = forward; see "Keys and mouse buttons on the wire"); higher ones are swallowed. Wheel: point deltas (trackpad)
   or lines x 100 (notched wheel), browser-pixel units like every other client. macOS's
   "natural scrolling" setting is already applied to those deltas and is **kept on purpose**:
   the remote content moves the way the Mac's own content does for this user (the webview
@@ -220,6 +220,35 @@ pulsar-macinput`). Same surface and rules as the Windows hook (`imp.rs`):
   Lock; the window-list geometry with Retina and several displays; that the `src-tauri` side
   compiles (`pulsar-tauri` cannot be type-checked for macOS from Windows).
 
+
+## Keys and mouse buttons on the wire (2026-11-15, untested on hardware)
+
+- **Game mode = positional keys only, on every client.** The Windows hook / Interception and
+  the macOS tap only ever send `Key`; the webview and the Linux evdev grab send a printable key
+  as `Char` (the client's own layout, WYSIWYG) in REMOTE mode only (`SESSION_REMOTE`). Games
+  read DirectInput / RawInput / scancodes, which never see a Unicode insert, so a `Char` WASD
+  or digit never moved and could not be held.
+- **Key tables are symmetric.** pulsar-core `input::keytables::CLIENT_KEYS` lists every evdev
+  code a client may send (ISO `<>|` 86, JIS Ro / Yen / Henkan / Muhenkan / Kana, Lang1/2,
+  Print Screen 99, Pause 119, keypad = and comma, F13-F24). Tests check the Windows host table,
+  the macOS host table (`keytables::mac_vk`, ISO section/grave swap from `KBGetLayoutType`),
+  the Windows client VK + Interception tables (`kbdhook/imp/keymap.rs`) and the webview
+  `keymap.ts` against it. Engaged, the Windows LL hook swallows a VK it cannot map instead of
+  letting it act locally, except the volume / media / browser keys (stay local). Pause via
+  Interception is its E1 1D 45 pair.
+- **`Char` on a Linux host** is typed with the HOST layout's key and level
+  (pulsar-core `input/host_keymap_linux.rs`: the compositor's `wl_keyboard` keymap on
+  Wayland, `_XKB_RULES_NAMES` on X11, else `XKB_DEFAULT_*` / `00-keyboard.conf` /
+  `/etc/default/keyboard`). Not on the layout: X11 borrows a free keycode (as `xdotool type`);
+  GNOME / IBus get Ctrl+Shift+U + hex + Space; other Wayland desktops drop it (logged once).
+  Limits: first layout group only; host Caps Lock tracked only for keys Pulsar injected.
+- **Mouse side buttons**: `PointerButton` 3 = back (X1), 4 = forward (X2), from every client
+  (webview, Windows LL hook + Interception, Linux `BTN_SIDE`/`BTN_EXTRA`/`BTN_BACK`/
+  `BTN_FORWARD`, macOS other-button 3/4). Hosts advertise `FEAT_MOUSE_X` (Windows XBUTTON,
+  Linux uinput, macOS other-mouse 3/4, and the per-window injectors); `play/hold.rs` drops 3/4
+  for hosts without it, because older hosts turned an unknown button into a LEFT click. Every
+  host now ignores ids it does not know. The Windows secure-desktop helper (pulsar-sysagent) and
+  the Android host ignore the side buttons.
 
 ## Ctrl+Shift+M toggles the Pulsar menu — the second press has to arrive too
 

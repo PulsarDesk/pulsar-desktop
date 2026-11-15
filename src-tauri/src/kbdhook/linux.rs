@@ -12,6 +12,7 @@
 
 use super::*;
 use evdev::{EventSummary, KeyCode, RelativeAxisCode};
+use pulsar_core::input::mouse_button;
 use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tauri::Emitter;
@@ -318,9 +319,10 @@ fn flush_held(
 			let tx = kbm_route(app, &dev_key_of(d), default_tx);
 			for key in st.iter() {
 				let code = key.code();
-				// 272..=274 = BTN_LEFT/RIGHT/MIDDLE — released via held_buttons below, never here
-				// (querying them would re-introduce the phantom right/middle-click).
-				if !(272..=274).contains(&code) {
+				// Mouse buttons (BTN_LEFT/RIGHT/MIDDLE + the side buttons) — released via
+				// held_buttons below, never here (querying them would re-introduce the phantom
+				// right/middle-click).
+				if !mouse_button::is_evdev_button(code) {
 					fwd(&tx, InputEvent::Key { code: code as u32, down: false });
 				}
 			}
@@ -330,12 +332,11 @@ fn flush_held(
 	// still reports it down (get_key_state is a routing PROBE only — the emit stays gated by
 	// held_buttons, so no phantom right/middle-click), falling back to the default session.
 	for button in held_buttons.drain() {
-		let code = 272u16 + button as u16;
 		let tx = grabbed
 			.iter()
 			.find(|d| {
 				d.get_key_state()
-					.map_or(false, |st| st.iter().any(|k| k.code() == code))
+					.map_or(false, |st| st.iter().any(|k| mouse_button::from_evdev(k.code()) == Some(button)))
 			})
 			.map(|d| kbm_route(app, &dev_key_of(d), default_tx))
 			.unwrap_or_else(|| default_tx.clone());
@@ -855,9 +856,11 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, star
 								continue;
 							}
 							// Mouse buttons also arrive as EV_KEY (BTN_LEFT/RIGHT/MIDDLE
-							// = 272/273/274 → 0/1/2).
+							// = 272/273/274 → 0/1/2; BTN_SIDE/BTN_BACK → 3 = back,
+							// BTN_EXTRA/BTN_FORWARD → 4 = forward). Side buttons reach only
+							// hosts with FEAT_MOUSE_X (play/hold.rs drops them for the rest).
 							match code {
-								272 | 273 | 274 => {
+								_ if mouse_button::is_evdev_button(code) => {
 									// EV_KEY values: 0=up, 1=down, 2=KERNEL AUTOREPEAT. EV_REP
 									// devices soft-repeat BTN_* too (Logitech Unifying combo
 									// nodes do — the MX Master 3 here), so a held button emits
@@ -865,8 +868,7 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, star
 									// ev.value() == 1` sent a RELEASE mid-hold → every drag
 									// self-released after ~0.28 s. A repeat is neither a press
 									// nor a release — skip it.
-									if ev.value() != 2 {
-										let button = (code - 272) as u8;
+									if let (Some(button), true) = (mouse_button::from_evdev(code), ev.value() != 2) {
 										let down = ev.value() == 1;
 										// Track real held state so a disengage flush releases only
 										// down buttons (no phantom right/middle-up).
@@ -907,7 +909,13 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, star
 									// stale modifier latched every later printable onto the raw-VK path ->
 									// Turkish-Q keys mis-typed on the host (s->;). A key already in char-mode
 									// keeps re-sending Char on autorepeat and short-circuits the kernel query.
-									let ch = if char_keys.contains(&code) || !shortcut_held(&grabbed) {
+									// GAME mode never sends Char: games read keys positionally
+									// (DirectInput / RawInput / scancodes never see a Unicode
+									// insert), so WASD, digits, hold and push-to-talk need the raw
+									// key — same rule as the webview path and the Windows / macOS
+									// hooks (which only ever send keys).
+									let remote = super::SESSION_REMOTE.load(Ordering::SeqCst);
+									let ch = if remote && (char_keys.contains(&code) || !shortcut_held(&grabbed)) {
 										xkb_state
 											.as_ref()
 											.map(|st| {
@@ -1009,10 +1017,10 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, star
 					let route = kbm_route(&app, &dev_key_of(d), &default_tx);
 					for key in st.iter() {
 						let code = key.code();
-						// Mouse buttons (272..=274) are flushed explicitly below as
+						// Mouse buttons (BTN_LEFT..BTN_EXTRA) are flushed explicitly below as
 						// PointerButton; everything else is a keyboard key. No cross-device
 						// dedup — each device flushes to its own route.
-						if !(272..=274).contains(&code) {
+						if !mouse_button::is_evdev_button(code) {
 							pending_keys
 								.push((route.clone(), InputEvent::Key { code: code as u32, down: false }));
 						}
@@ -1024,12 +1032,11 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, star
 			// independently of `grabbed`.
 			let mut pending_buttons: Vec<(Sender<InputEvent>, u8)> = Vec::new();
 			for button in held_buttons.drain() {
-				let code = 272u16 + button as u16;
 				let route = grabbed
 					.iter()
 					.find(|d| {
 						d.get_key_state()
-							.map_or(false, |st| st.iter().any(|k| k.code() == code))
+							.map_or(false, |st| st.iter().any(|k| mouse_button::from_evdev(k.code()) == Some(button)))
 					})
 					.map(|d| kbm_route(&app, &dev_key_of(d), &default_tx))
 					.unwrap_or_else(|| default_tx.clone());

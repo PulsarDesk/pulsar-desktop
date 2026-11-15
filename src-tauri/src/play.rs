@@ -2183,6 +2183,7 @@ pub(crate) async fn start_remote_play(
 		host_pen,
 		host_touch,
 		fixed_kbps,
+		host_caps.features.iter().any(|f| f == pulsar_core::service::media::FEAT_MOUSE_X),
 	));
 
 	state.plays.lock().unwrap().insert(

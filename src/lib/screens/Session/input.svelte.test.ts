@@ -90,6 +90,26 @@ describe('SessionInput free cursor (canvas path)', () => {
 		stop();
 	});
 
+	it('mouse buttons map to the wire ids; back / forward are sent, unknown buttons are not', () => {
+		const { input, stop } = make({ free: false });
+		input.onDown(ev()); // the engaging click is swallowed
+		input.onUp(ev());
+		vi.mocked(api.inputButton).mockClear();
+		const btn = (button: number) => ({ ...ev(), button, preventDefault() {} }) as unknown as PointerEvent;
+		for (const b of [0, 1, 2, 3, 4, 5]) {
+			input.onDown(btn(b));
+			input.onUp(btn(b));
+		}
+		expect(vi.mocked(api.inputButton).mock.calls).toEqual([
+			[1, 0, true], [1, 0, false],
+			[1, 2, true], [1, 2, false], // browser middle → wire middle (2)
+			[1, 1, true], [1, 1, false], // browser right → wire right (1)
+			[1, 3, true], [1, 3, false], // back
+			[1, 4, true], [1, 4, false] // forward; button 5 (pen eraser id) never goes out
+		]);
+		stop();
+	});
+
 	it('no hover engage while blocked, unfocused, or with the setting off', () => {
 		const blocked = make({ blocked: true });
 		blocked.input.onEnter(ev());

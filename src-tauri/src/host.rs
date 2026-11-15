@@ -192,6 +192,12 @@ fn media_features() -> Vec<String> {
 	// the matching shortcut. Untested on hardware.
 	#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 	v.push(pulsar_core::service::media::FEAT_GESTURE.to_string());
+	// Mouse side buttons (back / forward): SendInput XBUTTON1/2 on Windows, uinput
+	// BTN_SIDE/BTN_EXTRA on Linux, "other" mouse buttons 3/4 on macOS — the global injectors
+	// and the per-window ones (pulsar-core `input::mouse_button`). The Windows secure-desktop
+	// helper (pulsar-sysagent) drops them: its protocol has no XBUTTON flags.
+	#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+	v.push(pulsar_core::service::media::FEAT_MOUSE_X.to_string());
 	// The session-start bandwidth probe (pulsar-core serve loop answers it on every platform).
 	v.push(pulsar_core::service::media::FEAT_PROBE.to_string());
 	// DualSense passthrough: a virtual wired DualSense over USB/IP (usbip-win2 / vhci-hcd).

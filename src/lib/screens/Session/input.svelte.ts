@@ -357,9 +357,7 @@ export class SessionInput {
 	#releaseButtons() {
 		const playId = this.#in.playId();
 		if (playId < 0) return;
-		api.inputButton(playId, 0, false).catch(() => {});
-		api.inputButton(playId, 1, false).catch(() => {});
-		api.inputButton(playId, 2, false).catch(() => {});
+		for (const b of [0, 1, 2, 3, 4]) api.inputButton(playId, b, false).catch(() => {});
 	}
 	#releaseHeldKeys() {
 		// Char keys are one-shot (no held VK on the host), so there's nothing to release —
@@ -414,7 +412,10 @@ export class SessionInput {
 			this.#releaseHeldKeys();
 		}
 	};
-	#hostButton = (b: number) => (b === 2 ? 1 : b === 1 ? 2 : 0);
+	// Browser button (0 left, 1 middle, 2 right, 3 back, 4 forward) → the wire id (0 left,
+	// 1 right, 2 middle, 3 back, 4 forward); -1 = a button no host injects. The session layer
+	// drops back / forward for hosts without the side-button feature (play/hold.rs).
+	#hostButton = (b: number) => (b === 2 ? 1 : b === 1 ? 2 : b === 0 || b === 3 || b === 4 ? b : -1);
 
 	// Free cursor: the pointer is over the video with no button down, Pulsar is focused and
 	// nothing blocks it → take control without a click.
@@ -496,7 +497,8 @@ export class SessionInput {
 		}
 		this.#norm(e);
 		this.#moveDirty = true;
-		api.inputButton(this.#in.playId(), this.#hostButton(e.button), true).catch(() => {});
+		const b = this.#hostButton(e.button);
+		if (b >= 0) api.inputButton(this.#in.playId(), b, true).catch(() => {});
 	};
 	onUp = (e: PointerEvent) => {
 		if (this.#gamePenTouch(e)) {
@@ -511,7 +513,8 @@ export class SessionInput {
 		if (!this.controlling) return;
 		e.preventDefault();
 		if (this.#penTouch(e, 'up')) return;
-		api.inputButton(this.#in.playId(), this.#hostButton(e.button), false).catch(() => {});
+		const b = this.#hostButton(e.button);
+		if (b >= 0) api.inputButton(this.#in.playId(), b, false).catch(() => {});
 	};
 	#pinchBegin(gesture: boolean) {
 		const playId = this.#in.playId();

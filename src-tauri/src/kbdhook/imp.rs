@@ -17,11 +17,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 	TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, LLKHF_UP,
 	LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_LBUTTONDOWN,
 	WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT,
-	WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
+	WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_XBUTTONDOWN, WM_XBUTTONUP,
 };
 
 mod keymap;
-use keymap::{scancode_to_evdev, vk_to_evdev};
+use keymap::{local_only_vk, scancode_to_evdev, vk_to_evdev};
+use pulsar_core::input::mouse_button;
 use windows_sys::Win32::UI::WindowsAndMessaging::{KillTimer, PeekMessageW, SetTimer, PM_NOREMOVE, WM_TIMER};
 
 
@@ -957,6 +958,9 @@ fn capture_thread() {
 	// the active one (multi-instance on the same ASTER box). The thread just blocks
 	// until a filtered key arrives.
 	let mut stroke = [0u8; 24];
+	// Pause arrives as two strokes, E1 1D then 45 (the second looks like Num Lock): the
+	// verdict of the first (suppress or pass), applied to the tail when it comes.
+	let mut pause_tail: Option<bool> = None;
 	loop {
 		let device = unsafe { (it.wait)(it.ctx) }; // blocks until a keystroke
 		if device <= 0 {
@@ -973,8 +977,18 @@ fn capture_thread() {
 			// Keyboard stroke: code@0, state@2 (KEY_UP 0x01, E0 0x02, E1 0x04).
 			let code = u16::from_le_bytes([stroke[0], stroke[1]]);
 			let state = u16::from_le_bytes([stroke[2], stroke[3]]);
-			if state & 0x04 != 0 {
-				false // E1 (Pause/Break) 2-stroke seq we can't map cleanly — pass it
+			if let (Some(verdict), 0x45) = (pause_tail.take(), code) {
+				verdict // the 45 half of Pause's E1 1D 45: same fate as its first half
+			} else if state & 0x04 != 0 {
+				// E1 sequence = Pause (E1 1D 45): the 1D stroke carries the edge as evdev
+				// KEY_PAUSE, the 45 stroke that follows is swallowed or passed with it.
+				if code == 0x1D {
+					let verdict = handle_key(119, state & 0x01 == 0);
+					pause_tail = Some(verdict);
+					verdict
+				} else {
+					false
+				}
 			} else {
 				match scancode_to_evdev(code, state & 0x02 != 0) {
 					Some(ev) => handle_key(ev, state & 0x01 == 0),
@@ -1332,7 +1346,8 @@ fn handle_mouse(state: u16, flags: u16, rolling: i16, x: i32, y: i32) -> bool {
 			let _ = tx.try_send(InputEvent::PointerRelative { dx, dy });
 		}
 	}
-	// Buttons (Interception mouse-state bitflags → 0=left, 1=right, 2=middle).
+	// Buttons (Interception mouse-state bitflags → 0=left, 1=right, 2=middle, 3=back,
+	// 4=forward). Side buttons reach only hosts with FEAT_MOUSE_X (play/hold.rs).
 	for (bit, button, down) in [
 		(0x001u16, 0u8, true),
 		(0x002, 0, false),
@@ -1340,6 +1355,11 @@ fn handle_mouse(state: u16, flags: u16, rolling: i16, x: i32, y: i32) -> bool {
 		(0x008, 1, false),
 		(0x010, 2, true),
 		(0x020, 2, false),
+		// BUTTON_4 / BUTTON_5 = the side buttons X1 (back) / X2 (forward).
+		(0x040, mouse_button::BACK, true),
+		(0x080, mouse_button::BACK, false),
+		(0x100, mouse_button::FORWARD, true),
+		(0x200, mouse_button::FORWARD, false),
 	] {
 		if state & bit != 0 {
 			if down {
@@ -1367,6 +1387,11 @@ fn handle_mouse(state: u16, flags: u16, rolling: i16, x: i32, y: i32) -> bool {
 		(0x008, 1, false),
 		(0x010, 2, true),
 		(0x020, 2, false),
+		// BUTTON_4 / BUTTON_5 = the side buttons X1 (back) / X2 (forward).
+		(0x040, mouse_button::BACK, true),
+		(0x080, mouse_button::BACK, false),
+		(0x100, mouse_button::FORWARD, true),
+		(0x200, mouse_button::FORWARD, false),
 	] {
 		if state & bit != 0 {
 			if down {
@@ -1679,14 +1704,24 @@ fn handle_mouse_wh(msg: u32, x: i32, y: i32, data: u32) -> bool {
 			return false;
 		}
 		WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MBUTTONDOWN
-		| WM_MBUTTONUP => {
+		| WM_MBUTTONUP | WM_XBUTTONDOWN | WM_XBUTTONUP => {
 			let (button, down) = match msg {
 				WM_LBUTTONDOWN => (0u8, true),
 				WM_LBUTTONUP => (0, false),
 				WM_RBUTTONDOWN => (1, true),
 				WM_RBUTTONUP => (1, false),
 				WM_MBUTTONDOWN => (2, true),
-				_ => (2, false),
+				WM_MBUTTONUP => (2, false),
+				// MSLLHOOKSTRUCT.mouseData high word = XBUTTON1 / XBUTTON2. Engaged, the side
+				// buttons act on the remote only (they used to be swallowed and dropped);
+				// hosts without FEAT_MOUSE_X never get them (play/hold.rs).
+				_ => {
+					let Some(b) = mouse_button::from_win_xbutton((data >> 16) as u16) else {
+						drop(g);
+						return true;
+					};
+					(b, msg == WM_XBUTTONDOWN)
+				}
 			};
 			if down {
 				g.held_buttons.insert(button);
@@ -2379,7 +2414,14 @@ unsafe extern "system" fn ll_keyboard_proc(ncode: i32, wparam: WPARAM, lparam: L
 	let msg = wparam as u32;
 	let down = matches!(msg, WM_KEYDOWN | WM_SYSKEYDOWN) && (kb.flags & LLKHF_UP == 0);
 	let Some(evdev) = vk_to_evdev(kb.vkCode as u16) else {
-		// Unknown VK (no evdev mapping): don't break the local machine — let it through.
+		// Unknown VK (no evdev mapping). Engaged, every key belongs to the remote: one the
+		// remote cannot take must not act on the desktop behind the session (a Kana / IME key
+		// switching the local input method, an OEM key typing into the local app), so it is
+		// swallowed — except the volume / media keys, which keep driving THIS machine.
+		// Disengaged it types locally as always.
+		if ENGAGED.load(Ordering::SeqCst) && !local_only_vk(kb.vkCode as u16) {
+			return 1;
+		}
 		return CallNextHookEx(std::ptr::null_mut(), ncode, wparam, lparam);
 	};
 	match evdev {

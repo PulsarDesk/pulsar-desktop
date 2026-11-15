@@ -993,9 +993,11 @@ pub(crate) fn mouse(ev: MouseEv) -> Verdict {
 				}
 			}
 			MouseEv::Button { button, down, x, y, hit_ours, .. } => {
-				if button > 2 {
-					// No host injector knows back/forward buttons: never act locally while
-					// controlling, never forward.
+				if button > 4 {
+					// Buttons past back (3) / forward (4): no host injects them. Never act
+					// locally while controlling, never forward. Back / forward themselves are
+					// forwarded below (the session layer drops them for hosts without
+					// FEAT_MOUSE_X, which turned unknown buttons into a left click).
 					Verdict::Swallow
 				} else if down
 					&& !hit_ours
@@ -1318,8 +1320,13 @@ pub(crate) mod tests {
 		// An up whose down was never forwarded (the engaging click) stays local.
 		assert_eq!(mouse(MouseEv::Button { button: 1, down: false, x: 150.0, y: 150.0, hit_ours: true, hit_video: true }), Verdict::Pass);
 		assert!(rec.take_out().is_empty());
-		// Back/forward buttons: swallowed, not forwarded.
+		// Back/forward buttons: forwarded like any button (swallowed locally).
 		assert_eq!(mouse(MouseEv::Button { button: 3, down: true, x: 150.0, y: 150.0, hit_ours: true, hit_video: true }), Verdict::Swallow);
+		assert_eq!(mouse(MouseEv::Button { button: 3, down: false, x: 150.0, y: 150.0, hit_ours: true, hit_video: true }), Verdict::Swallow);
+		assert_eq!(rec.take_out(), vec![Out::Button { button: 3, down: true }, Out::Button { button: 3, down: false }]);
+		// Higher buttons: swallowed, not forwarded.
+		assert_eq!(mouse(MouseEv::Button { button: 5, down: true, x: 150.0, y: 150.0, hit_ours: true, hit_video: true }), Verdict::Swallow);
+		assert!(rec.take_out().is_empty());
 		assert_eq!(mouse(MouseEv::Scroll { dx: 0.0, dy: 30.0 }), Verdict::Swallow);
 		assert_eq!(rec.take_out(), vec![Out::Scroll { dx: 0.0, dy: 30.0 }]);
 		// A held drag is released on the host when control drops.
