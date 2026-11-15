@@ -47,7 +47,7 @@ chacha20poly1305 = "0.10"
 sha2 = "0.11"
 gilrs = "0.10"
 # Shared crates, now external repos (git dependencies).
-pulsar-core = { git = "https://github.com/PulsarDesk/pulsar-core" }
+pulsar-core = { git = "https://github.com/PulsarDesk/pulsar-core", branch = "ci/all" }
 pulsar-proto = { git = "https://github.com/PulsarDesk/pulsar-proto" }
 pulsar-relay = { git = "https://github.com/PulsarDesk/relay" }
 
@@ -55,6 +55,6 @@ pulsar-relay = { git = "https://github.com/PulsarDesk/relay" }
 # The fork lives in the pulsar-core repo; patch crates.io to it so the ViGEmBus
 # gamepad path resolves the same way it did in the monorepo.
 [patch.crates-io]
-vigem-client = { git = "https://github.com/PulsarDesk/pulsar-core" }
+vigem-client = { git = "https://github.com/PulsarDesk/pulsar-core", branch = "ci/all" }
 # reed-solomon-erasure 6.0.0 with lru bumped (RUSTSEC-2026-0253) — vendored in pulsar-core.
-reed-solomon-erasure = { git = "https://github.com/PulsarDesk/pulsar-core" }
+reed-solomon-erasure = { git = "https://github.com/PulsarDesk/pulsar-core", branch = "ci/all" }

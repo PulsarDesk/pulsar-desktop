@@ -1,0 +1,32 @@
+name: CI branch · opi5 deb
+
+# Test-only: builds the Orange Pi 5 .deb from a ci/** branch (no release, no updater manifest,
+# unsigned). Never merged to main.
+
+on:
+  push:
+    branches: ['ci/**']
+
+permissions:
+  contents: read
+
+jobs:
+  opi5:
+    runs-on: ubuntu-22.04-arm
+    container: ubuntu:22.04
+    timeout-minutes: 120
+    steps:
+      - name: Install git
+        run: apt-get update && apt-get install -y --no-install-recommends git ca-certificates
+      - uses: actions/checkout@v4
+      - name: Build the OPi5 .deb
+        env:
+          HOME: /root
+          INSTALL_DEPS: '1'
+          PULSAR_VERSION: 0.30.2-ci.${{ github.run_number }}
+        run: bash scripts/opi5-image/build-deb.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: opi5-deb
+          path: target/release/bundle/deb/*.deb
+          if-no-files-found: error

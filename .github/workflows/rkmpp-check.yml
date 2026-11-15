@@ -9,6 +9,8 @@ name: Rockchip renderer check
 # vendor kernel the h264/h265 entries should read `*_rkmpp` / `hw-zerocopy`.
 
 on:
+  push:
+    branches: ['ci/**']
   workflow_dispatch:
     inputs:
       ref:
