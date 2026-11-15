@@ -158,6 +158,12 @@ struct GetProperty {
 	count_values: u32,
 	count_enum_blobs: u32,
 }
+/// `drm_mode_property_enum`: one entry of an enum property's list.
+#[repr(C)]
+struct PropEnum {
+	value: u64,
+	name: [u8; 32],
+}
 #[repr(C)]
 struct CreateDumb {
 	height: u32,
@@ -252,11 +258,36 @@ unsafe fn obj_props(fd: c_int, obj: u32, ty: u32) -> Result<Vec<(String, u32, u6
 	Ok(out)
 }
 
+/// The values an enum property lists. The kernel creates only what the plane supports
+/// (`drm_plane_create_color_properties` takes a bitmask: an older i915 plane has no BT.2020, a
+/// limited-only plane no full range). Empty when the list cannot be read.
+unsafe fn enum_values(fd: c_int, prop_id: u32) -> Vec<u64> {
+	let mut p: GetProperty = std::mem::zeroed();
+	p.prop_id = prop_id;
+	if io(fd, IOCTL_MODE_GETPROPERTY, &mut p).is_err() || p.count_enum_blobs == 0 {
+		return Vec::new();
+	}
+	// SAFETY (zeroed): plain integers and bytes.
+	let mut enums: Vec<PropEnum> = (0..p.count_enum_blobs).map(|_| std::mem::zeroed()).collect();
+	let mut values = vec![0u64; p.count_values as usize];
+	p.enum_blob_ptr = enums.as_mut_ptr() as u64;
+	p.values_ptr = values.as_mut_ptr() as u64;
+	if io(fd, IOCTL_MODE_GETPROPERTY, &mut p).is_err() {
+		return Vec::new();
+	}
+	enums.iter().take(p.count_enum_blobs as usize).map(|e| e.value).collect()
+}
+
+/// The enum properties whose values are checked before a write (`Req::opt_enum`).
+const CHECKED_ENUMS: [&str; 2] = ["COLOR_ENCODING", "COLOR_RANGE"];
+
 struct Plane {
 	id: u32,
 	fb_id: u32,
 	formats: Vec<u32>,
 	props: Vec<(String, u32, u64)>,
+	/// (name, listed values) of the [`CHECKED_ENUMS`] the plane has.
+	enums: Vec<(String, Vec<u64>)>,
 }
 
 impl Plane {
@@ -282,6 +313,14 @@ impl Req {
 	fn opt(&mut self, p: &Plane, name: &str, v: u64) {
 		if let Some(id) = p.prop(name) {
 			self.0.push((p.id, id, v));
+		}
+	}
+	/// Like `opt` for one of the [`CHECKED_ENUMS`]: written only when the plane lists `v` (a
+	/// value outside the list fails the WHOLE atomic commit with EINVAL); else the plane keeps
+	/// its current value.
+	fn opt_enum(&mut self, p: &Plane, name: &str, v: u64) {
+		if p.enums.iter().any(|(n, vals)| n == name && vals.contains(&v)) {
+			self.opt(p, name, v);
 		}
 	}
 	/// Put `fb` on `p`: source rect in pixels → 16.16, destination rect on the CRTC.
@@ -658,8 +697,8 @@ impl KmsLease {
 			crtc: 0,
 			w: 0,
 			h: 0,
-			vplane: Plane { id: 0, fb_id: 0, formats: Vec::new(), props: Vec::new() },
-			oplane: Plane { id: 0, fb_id: 0, formats: Vec::new(), props: Vec::new() },
+			vplane: Plane { id: 0, fb_id: 0, formats: Vec::new(), props: Vec::new(), enums: Vec::new() },
+			oplane: Plane { id: 0, fb_id: 0, formats: Vec::new(), props: Vec::new(), enums: Vec::new() },
 			x_fb: 0,
 			can_hide_primary: false,
 			egl_dpy,
@@ -741,7 +780,13 @@ impl KmsLease {
 				continue;
 			}
 			fmts.truncate(p.count_format_types as usize);
-			planes.push(Plane { id, fb_id: p.fb_id, formats: fmts, props: obj_props(fd, id, DRM_MODE_OBJECT_PLANE)? });
+			let props = obj_props(fd, id, DRM_MODE_OBJECT_PLANE)?;
+			let enums = props
+				.iter()
+				.filter(|p| CHECKED_ENUMS.contains(&p.0.as_str()))
+				.map(|p| (p.0.clone(), enum_values(fd, p.1)))
+				.collect();
+			planes.push(Plane { id, fb_id: p.fb_id, formats: fmts, props, enums });
 		}
 		let nv12 = fourcc(b"NV12");
 		let oi = planes
@@ -1164,10 +1209,11 @@ void main(){ gl_FragColor = texture2D(t, uv); }
 			r.opt(&self.vplane, "rotation", ROTATE_0);
 			// The plane converts YCbCr → RGB itself: give it the frame's matrix + range
 			// (`colour.rs`; a plane left alone converts with its default, BT.601 on most
-			// drivers). Optional properties: a plane without them keeps its default.
+			// drivers). Optional properties, and only values the plane lists (`opt_enum`): a
+			// plane without them, or without that encoding / range, keeps its current one.
 			let (enc, range) = crate::colour::kms_props(crate::video::frame_colour(frame));
-			r.opt(&self.vplane, "COLOR_ENCODING", enc);
-			r.opt(&self.vplane, "COLOR_RANGE", range);
+			r.opt_enum(&self.vplane, "COLOR_ENCODING", enc);
+			r.opt_enum(&self.vplane, "COLOR_RANGE", range);
 			// The cursor side-channel maps into this rect (GL convention: bottom-left origin).
 			*crate::video::VIDEO_RECT.lock().unwrap() =
 				[dst.0, self.h as i32 - (dst.1 + dst.3 as i32), dst.2 as i32, dst.3 as i32];

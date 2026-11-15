@@ -1107,6 +1107,13 @@ unsafe fn decode_once(sdp: &CString) {
 								}
 								mapped = sw;
 							}
+							// Neither av_hwframe_map nor av_hwframe_transfer_data copies the frame
+							// properties (ffmpeg's hwmap / hwdownload filters call
+							// av_frame_copy_props themselves): without it the presented frame says
+							// colorspace / range UNSPECIFIED and `frame_colour` falls back to BT.709
+							// limited whatever the stream's VUI says. (Idempotent: feat/hdr copies
+							// them on the readback too.)
+							ff::av_frame_copy_props(mapped, frame);
 							ff::av_frame_unref(frame);
 							nf = mapped;
 						} else {
@@ -1479,6 +1486,7 @@ pub struct Presenter {
 	// Zero-copy multi-layer dmabuf (VAAPI NV12/P010: R8|R16 luma + GR88|GR1616 chroma
 	// layers, each its own EGLImage on a TEXTURE_2D) → NV12 shader reading UV from .rg.
 	rg_prog: glow::Program,
+	colour_u: ColourUniforms,
 	zc_tex: [glow::Texture; 2],
 	// CUDA↔GL interop targets (LUMINANCE + LUMINANCE_ALPHA) — the NV12 shader.
 	cuda_tex: [glow::Texture; 2],
@@ -1506,7 +1514,7 @@ const FRAG: &str = "#extension GL_OES_EGL_image_external : require\nprecision me
 // YUV → RGB with the picture's own matrix and range (`colour.rs`: BT.709 limited unless the
 // stream says otherwise): `yr` = (luma scale, luma offset, chroma scale, chroma offset) turns a
 // sampled value into Y' 0..1 / C −0.5..0.5, `ym` = the matrix (R = Y + ym.x·Cr,
-// G = Y − ym.y·Cb − ym.z·Cr, B = Y + ym.w·Cb). Set per draw by `set_colour`. (The constants
+// G = Y − ym.y·Cb − ym.z·Cr, B = Y + ym.w·Cb). Set by `ColourUniforms::apply`. (The constants
 // used to be fixed BT.709 with full-range chroma gains: limited-range chroma came out ~12 %
 // desaturated, and a BT.601 / full-range stream was drawn wrong.)
 const FRAG_YUV: &str = "precision mediump float;
@@ -1560,16 +1568,51 @@ pub(crate) unsafe fn frame_colour(f: *const ff::AVFrame) -> crate::colour::Colou
 	crate::colour::Colour::from_av((*f).colorspace as i32, (*f).color_range as i32, false)
 }
 
-/// Point the YUV program in use at the frame's matrix + range (`bits` per sample; `msb16` =
-/// 10-bit samples in the top bits of 16-bit texels, the P010 dmabuf layers).
-unsafe fn set_colour(gl: &glow::Context, prog: glow::Program, c: crate::colour::Colour, bits: u32, msb16: bool) {
-	use glow::HasContext;
-	let (r, m) = crate::colour::yuv_consts(c.matrix, bits, c.full_range, msb16);
-	if let Some(loc) = gl.get_uniform_location(prog, "yr") {
-		gl.uniform_4_f32(Some(&loc), r[0], r[1], r[2], r[3]);
-	}
-	if let Some(loc) = gl.get_uniform_location(prog, "ym") {
-		gl.uniform_4_f32(Some(&loc), m[0], m[1], m[2], m[3]);
+/// The `yr` / `ym` uniforms of the YUV programs: locations looked up once per program, and
+/// the colour last uploaded into each (program uniforms persist), so a draw touches the
+/// driver only when a frame's colour description changes (it almost never does: the Pi /
+/// Mali GL path draws every vsync).
+#[derive(Default)]
+struct ColourUniforms {
+	progs: Vec<ColourProg>,
+}
+
+struct ColourProg {
+	prog: glow::Program,
+	yr: Option<glow::UniformLocation>,
+	ym: Option<glow::UniformLocation>,
+	last: Option<(crate::colour::Colour, u32, bool)>,
+}
+
+impl ColourUniforms {
+	/// Point `prog` (the program in use) at the frame's matrix + range (`bits` per sample;
+	/// `msb16` = 10-bit samples in the top bits of 16-bit texels, the P010 dmabuf layers).
+	unsafe fn apply(&mut self, gl: &glow::Context, prog: glow::Program, c: crate::colour::Colour, bits: u32, msb16: bool) {
+		use glow::HasContext;
+		let i = match self.progs.iter().position(|p| p.prog == prog) {
+			Some(i) => i,
+			None => {
+				self.progs.push(ColourProg {
+					prog,
+					yr: gl.get_uniform_location(prog, "yr"),
+					ym: gl.get_uniform_location(prog, "ym"),
+					last: None,
+				});
+				self.progs.len() - 1
+			}
+		};
+		let p = &mut self.progs[i];
+		if p.last == Some((c, bits, msb16)) {
+			return;
+		}
+		p.last = Some((c, bits, msb16));
+		let (r, m) = crate::colour::yuv_consts(c.matrix, bits, c.full_range, msb16);
+		if let Some(loc) = &p.yr {
+			gl.uniform_4_f32(Some(loc), r[0], r[1], r[2], r[3]);
+		}
+		if let Some(loc) = &p.ym {
+			gl.uniform_4_f32(Some(loc), m[0], m[1], m[2], m[3]);
+		}
 	}
 }
 
@@ -1623,7 +1666,8 @@ impl Presenter {
 				gl.uniform_1_i32(Some(&loc), i as i32);
 			}
 		}
-		set_colour(gl, sw_prog, crate::colour::Colour::default(), 8, false);
+		let mut colour_u = ColourUniforms::default();
+		colour_u.apply(gl, sw_prog, crate::colour::Colour::default(), 8, false);
 		for p in [nv_prog, rg_prog] {
 			gl.use_program(Some(p));
 			for (i, name) in ["ty", "tuv"].iter().enumerate() {
@@ -1631,7 +1675,7 @@ impl Presenter {
 					gl.uniform_1_i32(Some(&loc), i as i32);
 				}
 			}
-			set_colour(gl, p, crate::colour::Colour::default(), 8, false);
+			colour_u.apply(gl, p, crate::colour::Colour::default(), 8, false);
 		}
 		gl.use_program(None);
 
@@ -1702,6 +1746,7 @@ impl Presenter {
 			vid_dims: (0, 0),
 			sw_scratch: Vec::new(),
 			rg_prog,
+			colour_u,
 			zc_tex,
 			cuda_tex,
 			cuda: None,
@@ -2174,7 +2219,7 @@ impl Presenter {
 				gl.use_program(Some(self.rg_prog));
 				// R16 / GR1616 = P010: 10-bit samples in the top bits.
 				let p010 = l0.format == DRM_FORMAT_R16;
-				set_colour(gl, self.rg_prog, frame_colour(cur), if p010 { 10 } else { 8 }, p010);
+				self.colour_u.apply(gl, self.rg_prog, frame_colour(cur), if p010 { 10 } else { 8 }, p010);
 				for i in 0..2 {
 					gl.active_texture(glow::TEXTURE0 + i as u32);
 					gl.bind_texture(glow::TEXTURE_2D, Some(self.zc_tex[i]));
@@ -2199,7 +2244,7 @@ impl Presenter {
 				return self.zero_copy_failed(&imgs, "CUDA-GL interop");
 			}
 			gl.use_program(Some(self.nv_prog));
-			set_colour(gl, self.nv_prog, frame_colour(cur), 8, false);
+			self.colour_u.apply(gl, self.nv_prog, frame_colour(cur), 8, false);
 			for i in 0..2 {
 				gl.active_texture(glow::TEXTURE0 + i as u32);
 				gl.bind_texture(glow::TEXTURE_2D, Some(self.cuda_tex[i]));
@@ -2237,7 +2282,7 @@ impl Presenter {
 				self.sw_dims = (vw, vh, fmt);
 			}
 			gl.use_program(Some(self.nv_prog));
-			set_colour(gl, self.nv_prog, frame_colour(cur), 8, false);
+			self.colour_u.apply(gl, self.nv_prog, frame_colour(cur), 8, false);
 			path = PresentPath::Nv12Upload;
 		} else {
 			// Planar YUV: full-res Y + per-format chroma planes (half for 4:2:0, full for
@@ -2259,7 +2304,7 @@ impl Presenter {
 				self.sw_dims = (vw, vh, fmt);
 			}
 			gl.use_program(Some(self.sw_prog));
-			set_colour(gl, self.sw_prog, frame_colour(cur), 8, false);
+			self.colour_u.apply(gl, self.sw_prog, frame_colour(cur), 8, false);
 			// upload_plane left each plane bound on its unit (0/1/2), matching the sampler
 			// uniforms set at init.
 			path = PresentPath::YuvUpload;

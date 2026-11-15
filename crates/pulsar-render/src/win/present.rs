@@ -416,8 +416,6 @@ impl Present {
 		(d.left as f32 / w, d.top as f32 / h, d.right as f32 / w, d.bottom as f32 / h)
 	}
 
-	/// Convert+scale the NV12 `src` onto the swapchain `back` buffer (RGB): one GPU Blt — with
-	/// the GPU's own upscaler on it, or into a source-sized texture that FSR scales up.
 	/// Convert with the decoded pictures' colour description (`Decoder::colour`): the input
 	/// stream's YCbCr space, full-range RGB (sRGB-like gamma, BT.709 primaries) out. Applied
 	/// when it changes or the processor was rebuilt.
@@ -439,6 +437,8 @@ impl Present {
 		self.vctx.VideoProcessorSetOutputColorSpace(&self.vproc, &output);
 	}
 
+	/// Convert+scale the NV12 `src` onto the swapchain `back` buffer (RGB): one GPU Blt — with
+	/// the GPU's own upscaler on it, or into a source-sized texture that FSR scales up.
 	pub unsafe fn blt(&self, src: &ID3D11Texture2D, back: &ID3D11Texture2D) -> Result<()> {
 		let (_, dst, crop) = self.blt_rects_crop();
 		let up = (dst.right - dst.left) as u32 > crop.0 || (dst.bottom - dst.top) as u32 > crop.1;
