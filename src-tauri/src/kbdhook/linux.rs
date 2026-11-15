@@ -173,6 +173,62 @@ fn fwd(tx: &Sender<InputEvent>, ev: InputEvent) {
 	let _ = tx.try_send(ev);
 }
 
+/// `fwd` for one batch's motion / wheel: on a FULL session channel the event comes back
+/// (`Some`) so the reader keeps it in its [`MotionCarry`] instead of dropping it. Still
+/// non-blocking (the grab must never stall, see `fwd`).
+fn fwd_motion(tx: &Sender<InputEvent>, ev: InputEvent) -> Option<InputEvent> {
+	crate::power_watch::note_input();
+	match tx.try_send(ev) {
+		Err(tokio::sync::mpsc::error::TrySendError::Full(ev)) => Some(ev),
+		_ => None,
+	}
+}
+
+/// Relative motion + wheel a full session channel refused, added to the next batch for the
+/// same channel — so a stall costs packets, not mouse distance or scroll (the Windows hook /
+/// macOS tap forwarders merge the same way, `util::input_forwarder_loop`). Edges keep
+/// `fwd`'s plain try_send.
+#[derive(Default)]
+struct MotionCarry {
+	tx: Option<Sender<InputEvent>>,
+	dx: f64,
+	dy: f64,
+	scroll_dx: f64,
+	scroll_dy: f64,
+}
+
+impl MotionCarry {
+	/// The carry for `tx`, cleared — `(dx, dy, scroll_dx, scroll_dy)`, zeros when it belongs to
+	/// another channel (left in place for that one).
+	fn take(&mut self, tx: &Sender<InputEvent>) -> (f64, f64, f64, f64) {
+		if !self.tx.as_ref().is_some_and(|c| c.same_channel(tx)) {
+			return (0.0, 0.0, 0.0, 0.0);
+		}
+		self.tx = None;
+		let out = (self.dx, self.dy, self.scroll_dx, self.scroll_dy);
+		(self.dx, self.dy, self.scroll_dx, self.scroll_dy) = (0.0, 0.0, 0.0, 0.0);
+		out
+	}
+
+	/// Keep a refused motion / scroll event for `tx`.
+	fn keep(&mut self, tx: &Sender<InputEvent>, ev: InputEvent) {
+		if !self.tx.as_ref().is_some_and(|c| c.same_channel(tx)) {
+			*self = Self { tx: Some(tx.clone()), ..Self::default() };
+		}
+		match ev {
+			InputEvent::PointerRelative { dx, dy } => {
+				self.dx += dx;
+				self.dy += dy;
+			}
+			InputEvent::Scroll { dx, dy } => {
+				self.scroll_dx += dx;
+				self.scroll_dy += dy;
+			}
+			_ => {}
+		}
+	}
+}
+
 /// Which wheel axes a captured device reads from (see [`WheelAcc`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct WheelAxes {
@@ -449,6 +505,8 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, star
 		let mut diag_logged_at = std::time::Instant::now();
 		let mut diag_last: Option<(bool, bool, bool, usize)> = None;
 		let (mut diag_events, mut diag_fwd) = (0u32, 0u32);
+		// Motion / wheel a full session channel refused (see `MotionCarry`).
+		let mut carry = MotionCarry::default();
 		let mut grabbed: Vec<evdev::Device> = Vec::new();
 		// Event node of grabbed[i] (parallel array) — needed to purge a VANISHED device's
 		// entry so a later device reusing the same event number can be grabbed again.
@@ -1010,12 +1068,20 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, star
 					}
 				}
 				let (adx, ady) = super::scale_relative(adx, ady);
+				let (cdx, cdy, csx, csy) = carry.take(&tx);
+				let (adx, ady) = (adx + cdx, ady + cdy);
 				if adx != 0.0 || ady != 0.0 {
 					diag_fwd += 1;
-					fwd(&tx, InputEvent::PointerRelative { dx: adx, dy: ady });
+					if let Some(ev) = fwd_motion(&tx, InputEvent::PointerRelative { dx: adx, dy: ady }) {
+						carry.keep(&tx, ev);
+					}
 				}
+				wheel_acc.dx += csx;
+				wheel_acc.dy += csy;
 				if let Some(ev) = wheel_acc.event() {
-					fwd(&tx, ev);
+					if let Some(ev) = fwd_motion(&tx, ev) {
+						carry.keep(&tx, ev);
+					}
 				}
 			}
 		}
@@ -1184,6 +1250,24 @@ mod wheel_tests {
 		let mut w = WheelAcc::default();
 		w.add(axes, RelativeAxisCode::REL_HWHEEL_HI_RES, 15);
 		assert_eq!(w.event(), Some(InputEvent::Scroll { dx: 12.5, dy: 0.0 }));
+	}
+
+	#[test]
+	fn a_full_channel_carries_motion_and_scroll() {
+		let (tx, mut rx) = tokio::sync::mpsc::channel::<InputEvent>(1);
+		let mut carry = MotionCarry::default();
+		assert!(fwd_motion(&tx, InputEvent::PointerRelative { dx: 1.0, dy: 1.0 }).is_none());
+		// Full: both come back and are kept.
+		let ev = fwd_motion(&tx, InputEvent::PointerRelative { dx: 2.0, dy: -3.0 }).unwrap();
+		carry.keep(&tx, ev);
+		let ev = fwd_motion(&tx, InputEvent::Scroll { dx: 0.0, dy: 12.5 }).unwrap();
+		carry.keep(&tx, ev);
+		// Another session's channel doesn't get them.
+		let (other, _orx) = tokio::sync::mpsc::channel::<InputEvent>(1);
+		assert_eq!(carry.take(&other), (0.0, 0.0, 0.0, 0.0));
+		assert!(rx.try_recv().is_ok());
+		assert_eq!(carry.take(&tx), (2.0, -3.0, 0.0, 12.5));
+		assert_eq!(carry.take(&tx), (0.0, 0.0, 0.0, 0.0));
 	}
 
 	#[test]

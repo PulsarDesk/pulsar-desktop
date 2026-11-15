@@ -382,6 +382,12 @@ impl SysInput {
 		self.mouse(0, 0, 0, button_flag(button, down))
 	}
 
+	/// Whole-notch wheel output for a game session / relative pointer (see
+	/// [`ScrollAcc::set_whole_notches`]); hi-res `mouseData` otherwise.
+	pub fn set_whole_notch_wheel(&mut self, on: bool) {
+		self.scroll.set_whole_notches(on);
+	}
+
 	pub fn scroll(&mut self, dx: f64, dy: f64) -> Result<()> {
 		let (v, h) = self.scroll.push(dx, dy);
 		if v != 0 {
