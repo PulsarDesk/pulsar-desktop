@@ -1743,7 +1743,126 @@ pub fn render_bin(app: &AppHandle) -> String {
 	if let Some(p) = std::env::var_os("PULSAR_RENDER_BIN").filter(|p| !p.is_empty()) {
 		return p.to_string_lossy().into_owned();
 	}
+	// Rockchip boards: the generic linux-arm64 bundle also carries `pulsar-render-rkmpp`,
+	// the same renderer linked against a private ffmpeg-rockchip (hardware rkmpp decode).
+	#[cfg(target_os = "linux")]
+	if let Some(p) = rkmpp_render_bin(app) {
+		return p;
+	}
 	bundled_bin(app, "pulsar-render")
+}
+
+/// File name of the Rockchip renderer variant (generic linux-arm64 bundles only).
+#[cfg(any(target_os = "linux", test))]
+const RKMPP_RENDER: &str = "pulsar-render-rkmpp";
+/// Its private library dir, next to the binary: ffmpeg-rockchip's libavcodec/libavformat/
+/// libavutil and Rockchip MPP, each under its soname. Built and staged by
+/// `scripts/rkmpp/build-rkmpp-render.sh` (release workflow, linux-arm64 job).
+#[cfg(any(target_os = "linux", test))]
+const RKMPP_LIB_DIR: &str = "pulsar-rkmpp";
+
+/// Kernel device nodes of the Rockchip MPP decoder: `mpp_service` on the vendor kernels
+/// (RK3588/RK356x, 4.19 / 5.10 / 6.1), `vpu_service` / `vpu-service` on older vendor kernels
+/// (the names MPP's own `osal/mpp_runtime.c` looks for). Mainline kernels have none of them
+/// (their hantro/rkvdec drivers are V4L2), and MPP cannot use those.
+#[cfg(target_os = "linux")]
+const RKMPP_DEVICES: [&str; 3] = ["/dev/mpp_service", "/dev/vpu_service", "/dev/vpu-service"];
+
+/// `PULSAR_RKMPP_RENDER`: `0`/`off`/`false` never uses the Rockchip renderer, `1`/`on`/`true`
+/// uses it whenever it is bundled (skips the device check and the probe), anything else
+/// (unset) is auto.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum RkmppMode {
+	Off,
+	Force,
+	Auto,
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn rkmpp_mode(var: Option<&str>) -> RkmppMode {
+	match var.map(str::trim) {
+		Some("0") | Some("off") | Some("false") => RkmppMode::Off,
+		Some("1") | Some("on") | Some("true") => RkmppMode::Force,
+		_ => RkmppMode::Auto,
+	}
+}
+
+/// Did the Rockchip renderer's `--probe` find an MPP decoder that works here? True when at
+/// least one codec landed on a zero-copy hardware decoder named `*_rkmpp`. Anything else
+/// (no device access, a broken bundle, unparseable output) keeps the generic renderer, so a
+/// board where MPP does not work behaves exactly as before.
+#[cfg(any(target_os = "linux", test))]
+fn rkmpp_probe_ok(probe_stdout: &str) -> bool {
+	let Ok(v) = serde_json::from_str::<serde_json::Value>(probe_stdout.trim()) else {
+		return false;
+	};
+	v.as_array().is_some_and(|arr| {
+		arr.iter().any(|e| {
+			e["ok"].as_bool() == Some(true)
+				&& e["tier"].as_str() == Some("hw-zerocopy")
+				&& e["decoder"].as_str().is_some_and(|d| d.ends_with("_rkmpp"))
+		})
+	})
+}
+
+/// The Rockchip renderer to run instead of `pulsar-render`, decided once per app run:
+/// only when it is bundled, an MPP device node exists, and its own `--probe` decodes a canned
+/// keyframe on an rkmpp decoder (see [`rkmpp_probe_ok`]). x64, non-Rockchip arm64 boards, the
+/// Orange Pi image's `.deb` (built without it) and dev builds never get here past the file check.
+#[cfg(target_os = "linux")]
+fn rkmpp_render_bin(app: &AppHandle) -> Option<String> {
+	static CHOICE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+	CHOICE
+		.get_or_init(|| {
+			let mode = rkmpp_mode(std::env::var("PULSAR_RKMPP_RENDER").ok().as_deref());
+			if mode == RkmppMode::Off {
+				return None;
+			}
+			let bin = bundled_bin(app, RKMPP_RENDER);
+			if !std::path::Path::new(&bin).is_file() {
+				return None; // not bundled (x64, opi5 .deb, dev build): `bundled_bin` gave the bare name
+			}
+			if mode == RkmppMode::Force {
+				tracing::info!(%bin, "renderer: Rockchip variant forced (PULSAR_RKMPP_RENDER)");
+				return Some(bin);
+			}
+			if !RKMPP_DEVICES.iter().any(|d| std::path::Path::new(d).exists()) {
+				return None;
+			}
+			let mut cmd = std::process::Command::new(&bin);
+			cmd.arg("--probe").stderr(std::process::Stdio::null());
+			apply_render_lib_env(&mut cmd);
+			let out = crate::caps::output_within(cmd, std::time::Duration::from_secs(15));
+			let stdout = out
+				.as_ref()
+				.map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+				.unwrap_or_default();
+			if rkmpp_probe_ok(&stdout) {
+				tracing::info!(%bin, probe = %stdout.trim(), "renderer: Rockchip MPP variant selected");
+				Some(bin)
+			} else {
+				tracing::warn!(
+					%bin,
+					probe = %stdout.trim(),
+					err = ?out.as_ref().err(),
+					"renderer: MPP device present but the Rockchip variant found no working rkmpp decoder — keeping pulsar-render"
+				);
+				None
+			}
+		})
+		.clone()
+}
+
+/// The private lib dir a Rockchip renderer binary loads its ffmpeg-rockchip + MPP from, when
+/// `program` is that variant (by file name, so a `PULSAR_RENDER_BIN` copy works too).
+#[cfg(any(target_os = "linux", test))]
+fn rkmpp_lib_dir(program: &std::ffi::OsStr) -> Option<std::path::PathBuf> {
+	let p = std::path::Path::new(program);
+	if p.file_name()? != RKMPP_RENDER {
+		return None;
+	}
+	Some(p.parent()?.join(RKMPP_LIB_DIR))
 }
 
 /// Make a `pulsar-render` child resolve the HOST's system ffmpeg instead of the one
@@ -1793,6 +1912,18 @@ pub fn apply_nvidia_prime_env(_cmd: &mut std::process::Command) {}
 pub fn apply_render_lib_env(cmd: &mut std::process::Command) {
 	#[cfg(target_os = "linux")]
 	{
+		// The Rockchip renderer variant brings its OWN libav* (ffmpeg-rockchip, other sonames
+		// than the bundle's) + MPP: its private dir goes first, and neither the host's system
+		// ffmpeg nor the AppImage's generic libav must shadow it. Its RUNPATH says the same,
+		// but linuxdeploy rewrites RUNPATHs inside the AppImage, so this is what counts.
+		if let Some(dir) = rkmpp_lib_dir(cmd.get_program()) {
+			let mut dirs = vec![dir.into_os_string()];
+			if let Some(cur) = std::env::var_os("LD_LIBRARY_PATH").filter(|v| !v.is_empty()) {
+				dirs.push(cur);
+			}
+			cmd.env("LD_LIBRARY_PATH", dirs.join(std::ffi::OsStr::new(":")));
+			return;
+		}
 		let appdir = std::env::var_os("APPDIR").filter(|d| !d.is_empty());
 		let mut dirs: Vec<std::ffi::OsString> = Vec::new();
 		let prefer_system = match std::env::var("PULSAR_PREFER_SYSTEM_FFMPEG").as_deref() {
@@ -1927,5 +2058,51 @@ mod display_pick_tests {
 		assert_eq!(display_label(" DELL U2720Q ", false, 0, "Dahili ekran", "Ekran {n}"), "DELL U2720Q");
 		assert_eq!(display_label("", true, 0, "Dahili ekran", "Ekran {n}"), "Dahili ekran");
 		assert_eq!(display_label("", false, 1, "Dahili ekran", "Ekran {n}"), "Ekran 2");
+	}
+}
+
+#[cfg(test)]
+mod rkmpp_render_tests {
+	use super::{rkmpp_lib_dir, rkmpp_mode, rkmpp_probe_ok, RkmppMode};
+
+	#[test]
+	fn mode_parses_the_override() {
+		assert_eq!(rkmpp_mode(None), RkmppMode::Auto);
+		assert_eq!(rkmpp_mode(Some("")), RkmppMode::Auto);
+		assert_eq!(rkmpp_mode(Some("auto")), RkmppMode::Auto);
+		for off in ["0", "off", "false", " 0 "] {
+			assert_eq!(rkmpp_mode(Some(off)), RkmppMode::Off, "{off:?}");
+		}
+		for on in ["1", "on", "true"] {
+			assert_eq!(rkmpp_mode(Some(on)), RkmppMode::Force, "{on:?}");
+		}
+	}
+
+	#[test]
+	fn probe_needs_a_working_rkmpp_zero_copy_decoder() {
+		// RK3588 with MPP access: HEVC/H.264/AV1 on rkmpp.
+		let board = r#"[{"codec":"h264","ok":true,"decoder":"h264_rkmpp","tier":"hw-zerocopy","hw":true,"zero_copy":true,"incompatible_with":[]},{"codec":"h265","ok":true,"decoder":"hevc_rkmpp","tier":"hw-zerocopy","hw":true,"zero_copy":true,"incompatible_with":["nvenc"]},{"codec":"av1","ok":true,"decoder":"av1_rkmpp","tier":"hw-zerocopy","hw":true,"zero_copy":true,"incompatible_with":[]}]"#;
+		assert!(rkmpp_probe_ok(board));
+		// One codec is enough (RK356x: no AV1 block).
+		let rk3566 = r#"[{"codec":"h264","ok":true,"decoder":"h264_rkmpp","tier":"hw-zerocopy","hw":true,"zero_copy":true,"incompatible_with":[]},{"codec":"av1","ok":false}]"#;
+		assert!(rkmpp_probe_ok(rk3566));
+		// MPP device present but unusable (no permission, mainline kernel): software only.
+		let sw = r#"[{"codec":"h264","ok":true,"decoder":"h264","tier":"software","hw":false,"zero_copy":false,"incompatible_with":[]},{"codec":"h265","ok":true,"decoder":"hevc","tier":"software","hw":false,"zero_copy":false,"incompatible_with":[]},{"codec":"av1","ok":false}]"#;
+		assert!(!rkmpp_probe_ok(sw));
+		// Another zero-copy SoC decoder is not a reason to swap renderers.
+		let v4l2 = r#"[{"codec":"h264","ok":true,"decoder":"h264_v4l2m2m","tier":"hw-zerocopy","hw":true,"zero_copy":true}]"#;
+		assert!(!rkmpp_probe_ok(v4l2));
+		// Broken bundle / crash: empty or garbage stdout.
+		assert!(!rkmpp_probe_ok(""));
+		assert!(!rkmpp_probe_ok("pulsar-render-rkmpp: error while loading shared libraries"));
+		assert!(!rkmpp_probe_ok(r#"{"codec":"h264"}"#));
+	}
+
+	#[test]
+	fn lib_dir_only_for_the_rkmpp_binary() {
+		let dir = rkmpp_lib_dir(std::ffi::OsStr::new("/usr/lib/Pulsar/resources/pulsar-render-rkmpp"));
+		assert_eq!(dir, Some(std::path::PathBuf::from("/usr/lib/Pulsar/resources/pulsar-rkmpp")));
+		assert_eq!(rkmpp_lib_dir(std::ffi::OsStr::new("/usr/lib/Pulsar/resources/pulsar-render")), None);
+		assert_eq!(rkmpp_lib_dir(std::ffi::OsStr::new("pulsar-render")), None);
 	}
 }

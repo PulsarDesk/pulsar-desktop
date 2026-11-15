@@ -372,7 +372,7 @@ pub(crate) fn refresh_nvenc(app: &AppHandle) {
 }
 
 /// `Command::output` with a deadline (the child is killed past it → Err TimedOut).
-fn output_within(mut cmd: std::process::Command, limit: std::time::Duration) -> std::io::Result<std::process::Output> {
+pub(crate) fn output_within(mut cmd: std::process::Command, limit: std::time::Duration) -> std::io::Result<std::process::Output> {
 	use std::io::Read as _;
 	cmd.stdout(std::process::Stdio::piped());
 	let mut child = cmd.spawn()?;
