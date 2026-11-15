@@ -1172,7 +1172,7 @@ pub fn no_window(_cmd: &mut std::process::Command) {}
 /// capturing and streaming the host's screen/audio to the last client. Windows gets
 /// the equivalent through job.rs; macOS has no prctl (accepted gap).
 #[cfg(target_os = "linux")]
-fn die_with_parent(cmd: &mut std::process::Command) {
+pub(crate) fn die_with_parent(cmd: &mut std::process::Command) {
 	use std::os::unix::process::CommandExt;
 	unsafe {
 		cmd.pre_exec(|| {
@@ -1214,6 +1214,39 @@ pub fn spawn_tracked(
 			pulsar_prio::boost_child(&child);
 			procs.lock().unwrap().push(child);
 			Ok(())
+		}
+		Err(e) => Err(format!("{program} {}: {e}", crate::i18n::t("err.spawn"))),
+	}
+}
+
+/// [`spawn_tracked`] for a child started later from another thread (a capture's own fallback):
+/// spawned and registered under the `procs` lock, and only while `epoch` still is
+/// `epoch_at_spawn`. A teardown / re-stream drains `procs` and bumps the epoch under that same
+/// lock, so it can never be followed by an orphan streaming into the dead session.
+/// `Ok(false)`: the stream generation moved on, nothing was spawned.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn spawn_tracked_current(
+	procs: &Arc<Mutex<Vec<Child>>>,
+	epoch: &ProcEpoch,
+	epoch_at_spawn: u64,
+	program: &str,
+	args: &[String],
+) -> Result<bool, String> {
+	let mut g = procs.lock().unwrap();
+	if epoch.load(std::sync::atomic::Ordering::SeqCst) != epoch_at_spawn {
+		return Ok(false);
+	}
+	let mut cmd = std::process::Command::new(program);
+	cmd.args(args);
+	no_window(&mut cmd);
+	#[cfg(target_os = "linux")]
+	die_with_parent(&mut cmd);
+	match cmd.spawn() {
+		Ok(child) => {
+			#[cfg(windows)]
+			crate::job::assign(&child);
+			g.push(child);
+			Ok(true)
 		}
 		Err(e) => Err(format!("{program} {}: {e}", crate::i18n::t("err.spawn"))),
 	}

@@ -18,9 +18,18 @@ fn main() {
 	// is impossible on a native Wayland surface (no XID → the video opened a separate
 	// toplevel). Host-side capture is unaffected (the Wayland portal path keys off
 	// XDG_SESSION_TYPE/WAYLAND_DISPLAY, not the GDK backend). An explicit env wins.
+	//
+	// Known cost (hidden-gaps 1.16): on a Wayland session the whole client then runs under
+	// XWayland. With GNOME's fractional scaling and without mutter's `xwayland-native-scaling`
+	// the compositor upscales the X11 surface — the stream looks soft. `PULSAR_FORCED_X11`
+	// tells `link_hint` to log it and, when that blur is likely, show a one-time hint. A
+	// native `wl_surface` renderer is the real fix (not done).
 	#[cfg(target_os = "linux")]
 	if std::env::var_os("GDK_BACKEND").is_none() {
 		std::env::set_var("GDK_BACKEND", "x11");
+		if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+			std::env::set_var("PULSAR_FORCED_X11", "1");
+		}
 	}
 	// Linux AppImage: give the bundled GStreamer its own plugin registry.
 	#[cfg(target_os = "linux")]
