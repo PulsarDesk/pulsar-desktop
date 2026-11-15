@@ -178,13 +178,38 @@ Part of the pulsar-desktop agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
 - **Windows (non-NVENC) / macOS fallback** (and the Linux fallback) — ffmpeg CLI (`ddagrab`/
   `gdigrab`/`avfoundation`/`x11grab` → HW encode or libx264 → RTP). Arg builders are pure
   functions in pulsar-core `pipeline/` (unit-tested); spawning is here (`process.rs`, `host/`).
+  - `encode_command` evens an odd requested size (`& !1`, at least 2×2) before it builds any
+    `scale=` / `scale_cuda=` / `scale_qsv=` / `-video_size`, as the native paths do — an odd
+    4:2:0 frame kills the encoder. Raw NV12 window frames (macOS) keep their exact size.
+  - **Hybrid NVENC on ffmpeg** (`ddagrab`, no zero-copy CUDA map — display on the iGPU):
+    ddagrab's frame lives on the iGPU's D3D11 device, and NVENC cannot open a session on it —
+    the old "direct D3D11 feed" fails with `OpenEncodeSessionEx failed: no encode device`
+    (measured 2026-11-15 with a real ddagrab of the RTX 3080 Laptop + Vega box's 1920x1200@120
+    panel, h264_nvenc and hevc_nvenc). So the frame is always read back once as BGRA and scaled +
+    made NV12 on the NVIDIA GPU (`hwdownload,format=bgra,hwupload_cuda,scale_cuda`) — no CPU
+    swscale. The request is clamped per axis to the captured output's size
+    (`StreamPlan::capture_size`, from `pulsar_capture::list_displays`), as the native DXGI path's
+    `target_size` does: it never upscales; a request at or above the capture streams the
+    capture's size. Measured on that panel (real ddagrab, `-t 8`, 120 fps, h264_nvenc p1/ull):
+    960/960 frames at 1920x1200, 1600x1000 and 1280x800, ~0.3-0.4 CPU core. Synthetic per-step
+    cost at 1920x1200 (a lavfi frame on the Vega's D3D11 device, no capture limit): readback
+    ~3 ms, CUDA upload + scale_cuda + NVENC ~4 ms per frame — the chain keeps 120 fps but costs a
+    few ms of latency the zero-copy branch and the native capture paths (DXGI/WGC + NVENC SDK,
+    first on Windows) do not pay. `scale_d3d11` would keep the frame on the capture GPU, but on
+    the bundled BtbN build it cannot create its output texture (E_INVALIDARG, measured
+    2026-11-15 on the RTX 3080 Laptop and on the Vega iGPU).
 - **Wayland (KDE/GNOME)** — pulsar-core `capture` (Linux-only module): XDG
   ScreenCast portal (`ashpd`) → PipeWire → **in-process** GStreamer
-  (`pipewiresrc ! queue leaky=downstream ! x264enc(zerolatency) name=venc ! rtph264pay`;
+  (`pipewiresrc ! queue leaky=downstream ! <encoder> name=venc ! rtph26xpay`;
   bitrate/keyframe/short-GOP applied live, no restart).
   `x11grab` of rootless Xwayland is **always black**, so this is required. Restore
-  token skips the share dialog after first connect. Software x264 (no gst HW
-  plugins); leaky queue bounds latency. **Input injection is uinput**
+  token skips the share dialog after first connect. The encoder is the gst family
+  `process::pick_gst` takes from what this box validated (`validated_gst_encoders`, one-frame
+  probes in `GstEncoder::PRIORITY` order: `mpph26xenc` → `vaapih26xenc` → `vah26xenc` →
+  `nvh26xenc` → `x264enc`; H.264/HEVC, no AV1), so VA-API / MPP / NVIDIA hosts encode in
+  hardware; x264 is only the last resort. An NVIDIA pick (or x264 while NVENC was asked for)
+  goes through the NVENC SDK frame path instead ("Wayland" under "Linux NVENC SDK" below).
+  Leaky queue bounds latency. **Input injection is uinput**
   (`DesktopInput`), NOT the RemoteDesktop portal (its `Start` hangs on this KDE);
   needs the user in the `input` group.
   **AppImage:** the binary links libgstreamer, so linuxdeploy bundles Ubuntu 22.04's
@@ -300,6 +325,34 @@ Encode per OS:
 Known, not changed here: the 4:2:0 native NVENC stream is full-range BT.709 data **without** a
 VUI (decoders read it as limited range); the Linux presenter assumes limited BT.709 for every
 stream.
+
+## Support matrix: host encode × client decode per OS / GPU (current code, 2026-11-15)
+
+"Measured" = run on real hardware; everything else is code, type checks and unit tests only.
+Host column = what `auto` resolves to, in fallback order (each step falls back to the next).
+
+| OS | GPU | Host encode (auto order) | Client decode (`pulsar-render`) |
+| --- | --- | --- | --- |
+| Windows x64 | NVIDIA | native NVENC SDK (DXGI or WGC, `path.rs`; a hybrid panel may pick the iGPU's MF encoder) → ffmpeg `ddagrab` + `*_nvenc` → libx264. H.264 / HEVC / AV1 (AV1 on RTX 40+); HDR10 (HEVC / AV1, monitor in HDR mode) and 4:4:4 (H.264 / HEVC) only on the native path. **Measured** (RTX 3080 Laptop) | Media Foundation, synchronous MFT on the default adapter. `hw` per codec = the MFT is D3D11-aware AND the adapter has the DXVA profile (`win/decode.rs::probe_json`). HEVC needs the HEVC Video Extensions, AV1 the AV1 Video Extension. **Measured**: the RTX 3080 Laptop + Vega box opens the Vega as default adapter → H.264/HEVC hw, AV1 software |
+| Windows x64 | AMD | ffmpeg `ddagrab` + `*_amf` (CPU bounce to NV12; 10-bit / 4:4:4 honoured) → libx264. A native MF path for AMD/Intel is not on main. Only the hybrid box's Vega iGPU ran it (failover from a hung NVENC); a discrete-AMD-only host never ran | same MF probe; hw where the GPU has the DXVA profile |
+| Windows x64 | Intel | ffmpeg `ddagrab` + `*_qsv` (fully on GPU, SDR 4:2:0) → libx264. Never run on hardware | same MF probe |
+| Windows ARM64 | Qualcomm Adreno | ffmpeg `ddagrab` + `h264_mf` / `hevc_mf` (Qualcomm MFT; NV12 CPU bounce, SDR 4:2:0) → libx264. **Measured**: the Snapdragon laptop has been a daily host + client since 2026-11-07 | MF: **measured** H.264/HEVC hw (DXVA); AV1 not available (no AV1 MFT installed) |
+| macOS | Apple silicon / Intel | native ScreenCaptureKit (a display or one window) → VideoToolbox (H.264/HEVC) → ffmpeg `avfoundation` + `*_videotoolbox` → libx264; AV1 = software SVT-AV1 via ffmpeg only. Never run on hardware | VideoToolbox; `--probe` asks `VTIsHardwareDecodeSupported` (`mac/decode.rs`): H.264/HEVC always ok (hw or not), AV1 only in hardware (M3+). Never run on hardware |
+| Linux X11 | NVIDIA | libav in-process (x11grab) + NVENC SDK on CUDA → libavcodec `*_nvenc` → ffmpeg CLI. Never run on hardware | tiered probe (`decode.rs`): hwaccel CUDA (NVIDIA display) / VA-API (nvidia-vaapi-driver) / Vulkan → software |
+| Linux X11 | Intel / AMD | libav in-process (x11grab) + `*_vaapi` / `*_qsv` on the screen GPU's render node (`drm_node.rs`) → ffmpeg CLI `*_vaapi` / `*_vulkan` → libx264. Never run on hardware | hwaccel VA-API / Vulkan / DRM → software |
+| Linux X11 | Rockchip RK3588 | gst `mpph26xenc` in-process (`x11_gst.rs`: live bitrate / IDR), else a `gst-launch` child (KMS zero-copy when probed), or ffmpeg `*_rkmpp` → x264. **Measured** (Orange Pi 5B, the `gst-launch` child; the in-process runner is untested) | tier 0 zero-copy `rkmpp` (DRM PRIME) → hwaccel → software. **Measured** (Orange Pi 5B client) |
+| Linux Wayland | any | portal → PipeWire → the gst family `pick_gst` validated (MPP → VA-API → NVIDIA → x264; NVIDIA through the NVENC SDK frame path). No AV1. Not run on hardware since the hardware families were added | same tiered probe as X11 |
+
+Codec negotiation (`play.rs::resolve_codec`): `allowed` = host-encodable ∩ client `ok`; `auto`
+picks av1 > h265 > h264 among the allowed codecs the client probe reports `hw` first, then among
+all allowed ones — e.g. a client with software-only AV1 and hardware HEVC streams HEVC. An
+explicit codec in the set still wins. With 4:4:4 wanted, `pick_codec` first narrows `auto` to
+the codecs the client shows in 4:4:4 (see "4:4:4 chroma").
+
+Not possible / not done: HDR and 4:4:4 are clamped to SDR 4:2:0 on every GPU-filter ffmpeg path
+(NVENC / QSV `ddagrab`, MF) — `StreamPlan::effective_hdr_yuv444` — so HDR10 and 4:4:4 encode
+only on the Windows native NVENC path; the gst families model no AV1
+elements; VideoToolbox has no AV1 encoder.
 
 ## Host monitor picker + live display-change watch (per OS, 2026-11-14, untested on macOS / Wayland hardware)
 

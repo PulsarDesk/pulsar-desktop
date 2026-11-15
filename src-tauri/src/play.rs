@@ -122,14 +122,20 @@ fn yuv444_fits(max_px_s: u64, (w, h, fps): (u32, u32, u32)) -> bool {
 /// The session codec: `resolve_codec`, except that with 4:4:4 wanted an "auto" pick is made
 /// among the codecs the renderer shows in 4:4:4 first — "auto" goes best-first (AV1 > HEVC >
 /// H.264), and an AV1 pick would stream 4:2:0 although HEVC 4:4:4 was there.
-fn pick_codec(requested: &str, allowed: &[String], decode_yuv444: &[String], yuv444_wanted: bool) -> String {
+fn pick_codec(
+	requested: &str,
+	allowed: &[String],
+	hw: &[String],
+	decode_yuv444: &[String],
+	yuv444_wanted: bool,
+) -> String {
 	if yuv444_wanted && (requested.is_empty() || requested == "auto") {
 		let both: Vec<String> = allowed.iter().filter(|c| decode_yuv444.contains(c)).cloned().collect();
 		if !both.is_empty() {
-			return resolve_codec("auto", &both);
+			return resolve_codec("auto", &both, hw);
 		}
 	}
-	resolve_codec(requested, allowed)
+	resolve_codec(requested, allowed, hw)
 }
 
 /// Format the host's monitors for the renderer's `caps` line `displays=` field, as
@@ -414,8 +420,12 @@ pub(crate) async fn start_remote_play(
 		.map(|d| d.codec.clone())
 		.collect();
 	let yuv444_wanted = std::env::var_os("PULSAR_YUV444").is_some();
-	let codec = pick_codec(&codec, &allowed, &decode_yuv444, yuv444_wanted);
-	tracing::info!(%codec, ?allowed, "stream codec resolved");
+	// Codecs this client decodes in HARDWARE (probe `hw`): "auto" prefers them, so a box
+	// with a software-only AV1 decoder (the MF AV1 extension on a GPU without the DXVA
+	// profile) streams hardware HEVC instead of AV1 on the CPU — lower decode latency.
+	let hw_codecs = hw_decoded_codecs(&probed_decoders);
+	let codec = pick_codec(&codec, &allowed, &hw_codecs, &decode_yuv444, yuv444_wanted);
+	tracing::info!(%codec, ?allowed, ?hw_codecs, "stream codec resolved");
 
 	// Same machine? (loopback P2P) â†’ control would feed back, so flag it.
 	let local = matches!(sess.transport(), Transport::Direct)
@@ -2579,18 +2589,33 @@ pub(crate) async fn stop_stream(
 	Ok(())
 }
 
+/// The codecs a decoder probe reports as usable (`ok`) AND decoded in hardware (`hw`).
+pub(crate) fn hw_decoded_codecs(decoders: &[crate::caps::DecoderCap]) -> Vec<String> {
+	decoders
+		.iter()
+		.filter(|d| d.ok && d.hw)
+		.map(|d| d.codec.clone())
+		.collect()
+}
+
 /// The codec to actually stream for a requested one against the negotiated set. "auto" (or
-/// empty) picks by quality (av1 > h265 > h264). An explicit codec outside the set (the host
+/// empty) picks by quality (av1 > h265 > h264) among the codecs this client decodes in
+/// hardware (`hw`) first, then among the whole set: a software decode of a "better" codec
+/// costs more decode latency (and drops frames at high fps) than a hardware decode of an
+/// older one. An empty `hw` (software-only box, no probe) leaves the plain order. An explicit codec outside the set (the host
 /// can't encode it, or this client can't decode the host's bitstream for it) degrades to that
 /// pick: honoring it verbatim puts one codec in the renderer's SDP and another on the wire â†’
 /// the decoder consumes AUs forever without a frame (permanent black). `PULSAR_FORCE_CODEC`
 /// bypasses the clamp for testing. An EMPTY set means we learned nothing (caps timed out / old
 /// host), not "nothing is supported" â€” the request is honored and the host degrades it.
-pub(crate) fn resolve_codec(requested: &str, allowed: &[String]) -> String {
+pub(crate) fn resolve_codec(requested: &str, allowed: &[String], hw: &[String]) -> String {
 	let auto_pick = || {
-		["av1", "h265", "h264"]
+		const ORDER: [&str; 3] = ["av1", "h265", "h264"];
+		let in_set = |c: &&str| allowed.iter().any(|a| a == *c);
+		ORDER
 			.iter()
-			.find(|c| allowed.iter().any(|a| a == **c))
+			.find(|c| in_set(c) && hw.iter().any(|h| h == **c))
+			.or_else(|| ORDER.iter().find(|c| in_set(c)))
 			.map(|c| c.to_string())
 			.unwrap_or_else(|| "h264".to_string())
 	};
@@ -2708,14 +2733,14 @@ mod tests {
 		use super::pick_codec;
 		let all = set(&["h264", "h265", "av1"]);
 		// Not wanted: the normal best-first pick.
-		assert_eq!(pick_codec("auto", &all, &set(&["h265"]), false), "av1");
+		assert_eq!(pick_codec("auto", &all, &[], &set(&["h265"]), false), "av1");
 		// Wanted: HEVC 4:4:4 beats AV1 4:2:0.
-		assert_eq!(pick_codec("auto", &all, &set(&["h265"]), true), "h265");
-		assert_eq!(pick_codec("", &all, &set(&["h264", "h265"]), true), "h265");
+		assert_eq!(pick_codec("auto", &all, &[], &set(&["h265"]), true), "h265");
+		assert_eq!(pick_codec("", &all, &[], &set(&["h264", "h265"]), true), "h265");
 		// Nothing decodes 4:4:4: the normal order.
-		assert_eq!(pick_codec("auto", &all, &[], true), "av1");
+		assert_eq!(pick_codec("auto", &all, &[], &[], true), "av1");
 		// A codec picked by name stays.
-		assert_eq!(pick_codec("h264", &all, &set(&["h265"]), true), "h264");
+		assert_eq!(pick_codec("h264", &all, &[], &set(&["h265"]), true), "h264");
 	}
 
 	#[test]
@@ -2747,18 +2772,37 @@ mod tests {
 
 	#[test]
 	fn auto_picks_the_best_negotiated_codec() {
-		assert_eq!(resolve_codec("auto", &set(&["h264", "h265"])), "h265");
-		assert_eq!(resolve_codec("", &set(&["h264"])), "h264");
-		assert_eq!(resolve_codec("auto", &set(&[])), "h264");
+		let none = set(&[]);
+		assert_eq!(resolve_codec("auto", &set(&["h264", "h265"]), &none), "h265");
+		assert_eq!(resolve_codec("", &set(&["h264"]), &none), "h264");
+		assert_eq!(resolve_codec("auto", &set(&[]), &none), "h264");
+	}
+
+	#[test]
+	fn auto_prefers_a_hardware_decoded_codec() {
+		// The gaming PC as client: AV1 decodes in software, H.264/HEVC in hardware.
+		let all = set(&["av1", "h265", "h264"]);
+		assert_eq!(resolve_codec("auto", &all, &set(&["h264", "h265"])), "h265");
+		assert_eq!(resolve_codec("auto", &all, &set(&["h264"])), "h264");
+		assert_eq!(resolve_codec("auto", &all, &set(&["av1", "h265", "h264"])), "av1");
+		// A hw codec the host cannot send does not count: the plain order applies.
+		assert_eq!(resolve_codec("auto", &set(&["h265", "h264"]), &set(&["av1"])), "h265");
+		// No hardware decoder at all: the plain quality order.
+		assert_eq!(resolve_codec("auto", &all, &set(&[])), "av1");
+		// An explicit pick in the set still wins over the hardware preference.
+		assert_eq!(resolve_codec("av1", &all, &set(&["h264", "h265"])), "av1");
+		// An explicit pick outside the set degrades to the hw-aware pick.
+		assert_eq!(resolve_codec("av1", &set(&["h265", "h264"]), &set(&["h264"])), "h264");
 	}
 
 	#[test]
 	fn a_codec_the_host_cannot_send_degrades_instead_of_going_black() {
+		let none = set(&[]);
 		// The 2026-10-29 session: an h264-only software host, h265 picked in the menu.
-		assert_eq!(resolve_codec("h265", &set(&["h264"])), "h264");
-		assert_eq!(resolve_codec("h264", &set(&["h264", "h265"])), "h264");
+		assert_eq!(resolve_codec("h265", &set(&["h264"]), &none), "h264");
+		assert_eq!(resolve_codec("h264", &set(&["h264", "h265"]), &none), "h264");
 		// Nothing learned (old host / caps timeout): honored, the host degrades it.
-		assert_eq!(resolve_codec("av1", &set(&[])), "av1");
+		assert_eq!(resolve_codec("av1", &set(&[]), &none), "av1");
 	}
 }
 

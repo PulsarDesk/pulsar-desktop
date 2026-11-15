@@ -97,6 +97,17 @@ fn main() {
 	// analogue of the Linux probe above.
 	if std::env::args().any(|a| a == "--probe") {
 		println!("{}", win::decode::probe_json());
+		if win::decode::probe_abandoned_worker() {
+			use std::io::Write as _;
+			let _ = std::io::stdout().flush();
+			// SAFETY: ends this process only; the JSON is already flushed.
+			unsafe {
+				let _ = windows::Win32::System::Threading::TerminateProcess(
+					windows::Win32::System::Threading::GetCurrentProcess(),
+					0,
+				);
+			}
+		}
 		return;
 	}
 	// `--probe-444`: the codecs a 4:4:4 stream decodes AND presents in here (real decodes on a

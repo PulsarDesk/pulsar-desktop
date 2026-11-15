@@ -88,6 +88,7 @@ features = [
     "Win32_UI_Input_Pointer", # pen + touch on the video (WM_POINTER → GetPointerPenInfo / FrameTouchInfo)
     "Win32_UI_HiDpi", # overlay scale follows the display's DPI (GetDpiForWindow)
     "Win32_System_LibraryLoader",
+    "Win32_System_Threading", # `--probe`: TerminateProcess past a wedged DXVA query thread
     "Win32_System_Com",
     "Win32_Media_MediaFoundation",
 ]

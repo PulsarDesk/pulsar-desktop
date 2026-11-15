@@ -418,6 +418,14 @@ unsafe fn create_decoder_mft(subtype: GUID, allow_async: bool) -> Result<IMFTran
 /// exists: `ok` requires a SYNCHRONOUS MFT (the drive model is ProcessInput→ProcessOutput;
 /// an async-only MFT accepts input forever and never emits a frame — the black-screen
 /// trap). JSON schema matches the Linux probe so the app's caps parser needs no changes.
+///
+/// `hw` / `tier` are the REAL state, not a blanket claim: the synchronous MFTs this probe
+/// picks are the inbox / Store decoders (msmpeg2vdec, the HEVC / AV1 Video Extensions),
+/// which decode on the GPU through DXVA only when they are D3D11-aware (`MF_SA_D3D11_AWARE`)
+/// AND the GPU the renderer opens (the default hardware adapter, as in `win::mod`) exposes a
+/// DXVA decoder profile for the codec that outputs NV12. Otherwise the same MFT decodes on
+/// the CPU, which is `hw:false, tier:"software"` (still `ok`: it plays, just slower).
+///
 /// `ten_bit` (HEVC / AV1): a canned 10-bit HDR10 keyframe (`testdata/test-hdr10.*`) REALLY
 /// decodes to P010 on a hardware D3D11 device — the precondition for asking a host for HDR
 /// (the present path then shows it on an HDR monitor or tone-maps it, `win/hdr.rs`).
@@ -433,18 +441,20 @@ pub fn probe_json() -> String {
 		("h265", MFVideoFormat_HEVC, Codec::H265, Some(TEST_HDR10_H265)),
 		("av1", MFVideoFormat_AV1, Codec::Av1, Some(TEST_HDR10_AV1)),
 	];
-	let sync: Vec<bool> = codecs.iter().map(|c| unsafe { create_decoder_mft(c.1, false).is_ok() }).collect();
+	let mfts: Vec<Result<IMFTransform>> = codecs.iter().map(|c| unsafe { create_decoder_mft(c.1, false) }).collect();
 	// 2. The 10-bit checks need a hardware D3D11 device and real decodes. A wedged GPU driver
 	// can block D3D11CreateDevice for good (seen on an NVIDIA host, 2026-11-13); the app gives
 	// the whole probe 15 s and then drops to `probe_unavailable`, which would cost every
 	// session its real codec caps. So they run on their own thread under a short deadline: a
 	// hang or a slow driver only clears `ten_bit` (the process exits after printing, taking a
-	// stuck thread with it). Same adapter as the renderer (the default one, `Renderer::new`).
+	// stuck thread with it — `probe_abandoned_worker`). Same adapter as the renderer (the
+	// default one, `Renderer::new`). Started first so it overlaps the DXVA query below.
 	let want: Vec<(usize, Codec, &'static [u8])> = codecs
 		.iter()
 		.enumerate()
-		.filter_map(|(i, c)| c.3.filter(|_| sync[i]).map(|s| (i, c.2, s)))
+		.filter_map(|(i, c)| c.3.filter(|_| mfts[i].is_ok()).map(|s| (i, c.2, s)))
 		.collect();
+	let pending = want.len();
 	let (tx, rx) = std::sync::mpsc::channel();
 	std::thread::spawn(move || {
 		// Media Foundation / D3D on this thread: join the process MTA.
@@ -456,22 +466,201 @@ pub fn probe_json() -> String {
 		}
 	});
 	let deadline = std::time::Instant::now() + TEN_BIT_PROBE_BUDGET;
+	// 3. The real hw / sw tier per codec: a D3D11-aware MFT and a DXVA profile on the GPU
+	// (bounded query on its own thread, see `dxva_nv12_profiles_bounded`).
+	let dxva = dxva_nv12_profiles_bounded(DXVA_QUERY_TIMEOUT);
 	let mut ten = [false; 3];
+	let mut answered = 0;
 	while let Ok((i, ok)) = rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
 		ten[i] = ok;
+		answered += 1;
+	}
+	if answered < pending {
+		// The 10-bit worker is still inside the driver: end the process hard after printing.
+		DXVA_QUERY_ABANDONED.store(true, std::sync::atomic::Ordering::SeqCst);
 	}
 	let mut entries = Vec::new();
-	for (i, (name, ..)) in codecs.iter().enumerate() {
-		let (sync_ok, ten_bit) = (sync[i], ten[i]);
-		entries.push(format!(
-			concat!(
-				"{{\"codec\":\"{}\",\"ok\":{},\"decoder\":\"mediafoundation\",",
-				"\"hw\":true,\"tier\":\"hwaccel\",\"incompatible_with\":[],\"ten_bit\":{}}}"
-			),
-			name, sync_ok, ten_bit
-		));
+	for (i, (name, subtype, ..)) in codecs.iter().enumerate() {
+		let ok = mfts[i].is_ok();
+		let hw = match &mfts[i] {
+			Ok(t) => unsafe { is_d3d11_aware(t) && gpu_decodes(*subtype, &dxva) },
+			Err(_) => false,
+		};
+		entries.push(probe_entry(name, ok, hw, ten[i]));
 	}
 	format!("[{}]", entries.join(","))
+}
+
+/// One probe JSON entry (same keys as the Linux / macOS probes).
+/// `ten_bit`: the 10-bit HDR10 decode check passed (never without `ok`).
+fn probe_entry(codec: &str, ok: bool, hw: bool, ten_bit: bool) -> String {
+	format!(
+		concat!(
+			"{{\"codec\":\"{}\",\"ok\":{},\"decoder\":\"mediafoundation\",",
+			"\"hw\":{},\"tier\":\"{}\",\"incompatible_with\":[],\"ten_bit\":{}}}"
+		),
+		codec,
+		ok,
+		hw && ok,
+		if hw && ok { "hwaccel" } else { "software" },
+		ten_bit && ok
+	)
+}
+
+/// How long the probe waits for the DXVA profile query before it treats the GPU as having
+/// none (`hw:false`).
+const DXVA_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(2500);
+
+/// `dxva_nv12_profiles` on a worker thread, bounded by `timeout`. The query is informational
+/// (it only sets `hw`/`tier`); `ok` comes from the MFT enumeration alone. `D3D11CreateDevice`
+/// can block for good on a GPU whose driver is wedged by another process (seen on NVIDIA:
+/// every device creation blocks while one hung encoder holds the driver). Without the bound
+/// the whole `--probe` would hang until caps.rs kills it after 15 s and falls back to H.264
+/// only, so one informational flag would cost HEVC/AV1 and a 15 s delay. On a timeout the
+/// worker is left behind (the process exits right after printing) and the list is empty.
+fn dxva_nv12_profiles_bounded(timeout: std::time::Duration) -> Vec<GUID> {
+	let (tx, rx) = std::sync::mpsc::channel();
+	let spawned = std::thread::Builder::new()
+		.name("dxva-probe".into())
+		.spawn(move || {
+			let _ = tx.send(unsafe { dxva_nv12_profiles() });
+		});
+	if spawned.is_err() {
+		return Vec::new();
+	}
+	rx.recv_timeout(timeout).unwrap_or_else(|_| {
+		DXVA_QUERY_ABANDONED.store(true, std::sync::atomic::Ordering::SeqCst);
+		Vec::new()
+	})
+}
+
+static DXVA_QUERY_ABANDONED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Did the probe leave a DXVA query thread blocked in the driver? Then a normal exit could
+/// hang in DLL detach (the thread may hold the loader lock), so `main` ends the process
+/// with `TerminateProcess` once the JSON is flushed.
+pub fn probe_abandoned_worker() -> bool {
+	DXVA_QUERY_ABANDONED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// The DXVA (D3D11 video) decoder profiles of one codec subtype, 8-bit 4:2:0 — what the
+/// stream is unless HDR is on (HEVC Main10 is not needed for the SDR stream).
+fn dxva_profiles_for(subtype: GUID) -> &'static [GUID] {
+	use windows::Win32::Graphics::Direct3D11::{
+		D3D11_DECODER_PROFILE_AV1_VLD_PROFILE0, D3D11_DECODER_PROFILE_H264_VLD_NOFGT,
+		D3D11_DECODER_PROFILE_HEVC_VLD_MAIN,
+	};
+	const H264: [GUID; 1] = [D3D11_DECODER_PROFILE_H264_VLD_NOFGT];
+	const HEVC: [GUID; 1] = [D3D11_DECODER_PROFILE_HEVC_VLD_MAIN];
+	const AV1: [GUID; 1] = [D3D11_DECODER_PROFILE_AV1_VLD_PROFILE0];
+	if subtype == MFVideoFormat_H264 {
+		&H264
+	} else if subtype == MFVideoFormat_HEVC {
+		&HEVC
+	} else if subtype == MFVideoFormat_AV1 {
+		&AV1
+	} else {
+		&[]
+	}
+}
+
+/// Does the GPU (its NV12-output DXVA profiles in `dxva`) decode this codec subtype?
+fn gpu_decodes(subtype: GUID, dxva: &[GUID]) -> bool {
+	dxva_profiles_for(subtype).iter().any(|p| dxva.contains(p))
+}
+
+/// The DXVA decoder profiles of the default hardware adapter (the one the renderer's
+/// `D3D11CreateDevice(None, HARDWARE, …, VIDEO_SUPPORT)` opens) that can output NV12.
+/// Empty when there is no D3D11 video device (WARP / basic display driver / no GPU).
+unsafe fn dxva_nv12_profiles() -> Vec<GUID> {
+	use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0};
+	use windows::Win32::Graphics::Direct3D11::{
+		D3D11CreateDevice, ID3D11VideoDevice, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION,
+	};
+	let mut device: Option<ID3D11Device> = None;
+	if D3D11CreateDevice(
+		None,
+		D3D_DRIVER_TYPE_HARDWARE,
+		Default::default(),
+		D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+		Some(&[D3D_FEATURE_LEVEL_11_0]),
+		D3D11_SDK_VERSION,
+		Some(&mut device),
+		None,
+		None,
+	)
+	.is_err()
+	{
+		return Vec::new();
+	}
+	let Some(video) = device.and_then(|d| d.cast::<ID3D11VideoDevice>().ok()) else {
+		return Vec::new();
+	};
+	let mut out = Vec::new();
+	for i in 0..video.GetVideoDecoderProfileCount() {
+		let Ok(p) = video.GetVideoDecoderProfile(i) else {
+			continue;
+		};
+		if video.CheckVideoDecoderFormat(&p, DXGI_FORMAT_NV12).is_ok_and(|b| b.as_bool()) {
+			out.push(p);
+		}
+	}
+	out
+}
+
+/// Is this MFT D3D11-aware (`MF_SA_D3D11_AWARE`)? Only such an MFT decodes through DXVA on
+/// the device manager `Decoder::new_ex` hands it; any other decodes on the CPU.
+unsafe fn is_d3d11_aware(t: &IMFTransform) -> bool {
+	t.GetAttributes()
+		.and_then(|a| a.GetUINT32(&windows::Win32::Media::MediaFoundation::MF_SA_D3D11_AWARE))
+		.map(|v| v != 0)
+		.unwrap_or(false)
+}
+
+#[cfg(test)]
+mod probe_tests {
+	use super::*;
+
+	#[test]
+	fn entry_reports_the_real_tier() {
+		let hw = probe_entry("h264", true, true, false);
+		assert!(hw.contains("\"hw\":true") && hw.contains("\"tier\":\"hwaccel\""), "{hw}");
+		let sw = probe_entry("h265", true, false, true);
+		assert!(sw.contains("\"hw\":false") && sw.contains("\"tier\":\"software\""), "{sw}");
+		// No decoder at all is never "hardware".
+		let none = probe_entry("av1", false, true, true);
+		assert!(none.contains("\"ok\":false") && none.contains("\"hw\":false"), "{none}");
+		// No decoder: no 10-bit either; a 10-bit pass is reported as such.
+		assert!(none.contains("\"ten_bit\":false") && sw.contains("\"ten_bit\":true"), "{none} {sw}");
+		for e in [hw, sw, none] {
+			let v: serde_json::Value = serde_json::from_str(&e).expect("valid JSON");
+			assert!(v["incompatible_with"].is_array());
+		}
+	}
+
+	#[test]
+	fn gpu_profile_match_is_per_codec() {
+		use windows::Win32::Graphics::Direct3D11::D3D11_DECODER_PROFILE_H264_VLD_NOFGT;
+		let only_h264 = [D3D11_DECODER_PROFILE_H264_VLD_NOFGT];
+		assert!(gpu_decodes(MFVideoFormat_H264, &only_h264));
+		assert!(!gpu_decodes(MFVideoFormat_HEVC, &only_h264));
+		assert!(!gpu_decodes(MFVideoFormat_AV1, &only_h264));
+		assert!(!gpu_decodes(MFVideoFormat_H264, &[]));
+	}
+
+	/// The real probe on this machine: valid JSON, three codecs, `hw` only where `ok`.
+	#[test]
+	fn probe_json_is_well_formed() {
+		let v: serde_json::Value = serde_json::from_str(&probe_json()).expect("valid JSON");
+		let arr = v.as_array().expect("array");
+		assert_eq!(arr.len(), 3);
+		for e in arr {
+			if e["hw"].as_bool() == Some(true) {
+				assert_eq!(e["ok"].as_bool(), Some(true));
+				assert_eq!(e["tier"].as_str(), Some("hwaccel"));
+			}
+		}
+	}
 }
 
 /// `--probe-444`: the codecs this machine REALLY decodes and presents in 4:4:4, as

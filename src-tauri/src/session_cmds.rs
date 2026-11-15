@@ -99,7 +99,14 @@ pub(crate) async fn set_play_codec(
 	// Resolve against the negotiated set BEFORE the respawn writes the SDP: "auto" or a codec
 	// the host can't send would otherwise give the renderer a depacketizer for a stream that
 	// never comes (the host degrades it on its side) → black until the session ends.
-	let codec = crate::play::resolve_codec(&codec, &codecs);
+	let hw_codecs = state
+		.local_caps
+		.lock()
+		.unwrap()
+		.as_ref()
+		.map(|lc| crate::play::hw_decoded_codecs(&lc.decoders))
+		.unwrap_or_default();
+	let codec = crate::play::resolve_codec(&codec, &codecs, &hw_codecs);
 	if let Some(tx) = tx {
 		tx.send(Restream::Codec(codec.clone()))
 			.await

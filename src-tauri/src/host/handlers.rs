@@ -3624,6 +3624,18 @@ pub(super) fn make_on_stream(
 		if yuv444 && !(cfg!(windows) && encoder == HwEncoder::Nvenc) {
 			tracing::info!(?encoder, "4:4:4 asked for, but only native NVENC (Windows) encodes it: 4:2:0");
 		}
+		// That output's own size (DXGI desktop coordinates, the order `ddagrab=output_idx`
+		// counts in): the hybrid NVENC ffmpeg branch clamps the request to it per axis (never
+		// upscales; a request at or above it streams that size) and scales a smaller request on
+		// the NVIDIA GPU (`StreamPlan::capture_size`). Off Windows there is no ddagrab: unused.
+		#[cfg(windows)]
+		let ffmpeg_capture_size = pulsar_capture::list_displays()
+			.into_iter()
+			.find(|d| d.0 == ffmpeg_display_idx)
+			.map(|d| (d.2, d.3))
+			.filter(|&(w, h)| w > 0 && h > 0);
+		#[cfg(not(windows))]
+		let ffmpeg_capture_size: Option<(u32, u32)> = None;
 		let plan = StreamPlan {
 			encoder,
 			codec,
@@ -3644,6 +3656,7 @@ pub(super) fn make_on_stream(
 			},
 			gpu_zerocopy,
 			output_idx: ffmpeg_display_idx,
+			capture_size: ffmpeg_capture_size,
 			hdr: req.hdr,
 			// Never 4:4:4 on the ffmpeg chain (see above).
 			yuv444: false,
@@ -4285,6 +4298,7 @@ pub(super) fn make_on_stream(
 							&& enc == pipeline::HwEncoder::Nvenc
 							&& cap == base.capture,
 						output_idx: base.output_idx,
+						capture_size: base.capture_size,
 						hdr: base.hdr,
 						yuv444: base.yuv444,
 						loss_recovery: base.loss_recovery,
