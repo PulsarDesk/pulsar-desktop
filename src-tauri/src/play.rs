@@ -1205,16 +1205,17 @@ pub(crate) async fn start_remote_play(
 		acfg.startup_windows = 0;
 	}
 	// Only the Linux libav renderer resumes on a partially intra-refreshed picture (libav
-	// conceals the lost reference). Windows heals a loss by reference-frame invalidation instead
-	// (`host_rfi`; the 2026-11-08 IR attempt there overflowed the AU queue â€” see stream/rtp.rs
-	// IR_MODE), macOS waits for an IDR and gets a short GOP. A Linux client streaming with RFI
-	// keeps it too: the loss flip then asks for the short GOP, which an RFI host absorbs (the
-	// Windows native path and the Linux NVENC SDK paths keep healing by invalidation) — a flip
-	// to intra refresh would turn RFI off (`rfi 0`) while the host, which cannot start a
-	// rolling intra wave mid-session, keeps its long GOP: every loss then smeared until the
-	// next safety IDR.
+	// conceals the lost reference). Windows and macOS heal a loss by reference-frame
+	// invalidation instead (`host_rfi`, with pulsar-render; the 2026-11-08 IR attempt on Windows
+	// overflowed the AU queue — see stream/rtp.rs IR_MODE); their flip is the short GOP, which an
+	// RFI host absorbs, and only the mpv / ffplay fallback (no RFI) really gets one. On Linux the
+	// controller's intra-refresh flip becomes the short GOP while RFI reaches the current codec
+	// (`hold.rs` `flip_recovery`, re-derived on a codec switch): a flip to intra refresh turns
+	// RFI off (`rfi 0`) while a host that cannot start a rolling intra wave mid-session keeps its
+	// long GOP — every loss then smeared until the next safety IDR. On AV1 (no recovery tag) the
+	// flip stays intra refresh.
 	let rfi_req = host_rfi && codec != "av1";
-	acfg.ir_capable = cfg!(target_os = "linux") && !rfi_req;
+	acfg.ir_capable = cfg!(target_os = "linux");
 	// A game session over a WAN / phone link: loss there is a given, and on Windows each one the
 	// host's RFI can't reach (a handover stall is seconds long) became a keyframe — 5-10× a frame,
 	// re-flooding the weak link (2026-11-15 tether). An intra-refresh stream heals within its

@@ -134,8 +134,13 @@ fn report_hold_end(e: crate::stream::recovery::HoldEnd) {
 
 /// App → renderer: an unrepaired loss happened — hold the last good frame for up to `ms`
 /// (or until the next keyframe), if this starts a loss episode. See `LOSS_HOLD`.
+/// Not on an intra-refresh stream (nothing ends the hold early, the wave heals the concealed
+/// picture) nor on an RFI one: the depacketizer already withholds every access unit until the
+/// recovery frame or a keyframe (`rtp::RFI_MODE`), so nothing smeared reaches the decoder — and
+/// the recovery frame is no keyframe, so a hold would freeze the clean picture after it until
+/// the deadline. (The app sends no `hold` then either, `hold.rs`; this covers a late one.)
 pub fn hold_for_ms(ms: u64) {
-	let ir = crate::stream::rtp::IR_MODE.load(Ordering::Relaxed);
+	let ir = crate::stream::rtp::IR_MODE.load(Ordering::Relaxed) || crate::stream::rtp::RFI_MODE.load(Ordering::Relaxed);
 	// Take the result out first: the report writes to stdout, not under the decode thread's lock.
 	let ended = LOSS_HOLD.lock().unwrap().request(mono_ms(), ms, ir);
 	if let Some(e) = ended {
