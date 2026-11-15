@@ -37,7 +37,91 @@ pub fn set_upscale_mode(mode: &str) {
 		"auto" | "fsr" | "ai" | "sgsr" => mode,
 		_ => "off",
 	};
-	*UPSCALE.lock().unwrap() = m.to_string();
+	*UPSCALE.lock().unwrap() = supported_or_nearest(m, &upscale_modes()).to_string();
+}
+
+/// The picture upscalers this machine can run, in menu order — Settings → Görüntü iyileştirme
+/// and the in-session menu offer only these (an option that silently ran something else was
+/// confusing: "Snapdragon GSR" on a Mac ran FSR).
+/// - Windows: off · auto · FSR · AI (the driver's super resolution: NVIDIA / Intel GPUs only) · SGSR
+/// - macOS: off · auto · FSR · AI (MetalFX, macOS 13+) — SGSR is not ported to Metal
+/// - Linux: off · auto · FSR · SGSR — no vendor AI upscaler
+pub fn upscale_modes() -> Vec<&'static str> {
+	static MODES: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+	MODES.get_or_init(|| modes_for(std::env::consts::OS, ai_upscaler())).clone()
+}
+
+fn modes_for(os: &str, ai: bool) -> Vec<&'static str> {
+	let mut m = vec!["off", "auto", "fsr"];
+	if ai && os != "linux" {
+		m.push("ai");
+	}
+	if os != "macos" {
+		m.push("sgsr");
+	}
+	m
+}
+
+/// A saved mode this machine cannot run → the closest one it can (a setting synced from
+/// another computer, or a GPU change): AI → auto, SGSR → FSR.
+fn supported_or_nearest<'a>(mode: &'a str, modes: &[&'static str]) -> &'a str {
+	if modes.contains(&mode) {
+		mode
+	} else if mode == "sgsr" {
+		"fsr"
+	} else {
+		"auto"
+	}
+}
+
+/// The vendor super resolution the renderer can use: NVIDIA / Intel VSR on Windows (the same
+/// test as pulsar-render's present::pick), MetalFX on macOS 13+.
+fn ai_upscaler() -> bool {
+	#[cfg(windows)]
+	{
+		pulsar_capture::gpu_vendors().iter().any(|v| *v == 0x10DE || *v == 0x8086)
+	}
+	#[cfg(target_os = "macos")]
+	{
+		std::process::Command::new("sw_vers")
+			.arg("-productVersion")
+			.output()
+			.ok()
+			.and_then(|o| String::from_utf8(o.stdout).ok())
+			.and_then(|v| v.trim().split('.').next()?.parse::<u32>().ok())
+			.is_some_and(|major| major >= 13)
+	}
+	#[cfg(not(any(windows, target_os = "macos")))]
+	{
+		false
+	}
+}
+
+/// The renderer's upscalers <m1,m2,…> line: what its menu row offers.
+pub fn upscalers_line() -> String {
+	format!("upscalers {}", upscale_modes().join(","))
+}
+
+#[cfg(test)]
+mod upscale_tests {
+	use super::{modes_for, supported_or_nearest};
+
+	#[test]
+	fn only_what_the_platform_runs() {
+		assert_eq!(modes_for("windows", true), ["off", "auto", "fsr", "ai", "sgsr"]);
+		assert_eq!(modes_for("windows", false), ["off", "auto", "fsr", "sgsr"]);
+		assert_eq!(modes_for("macos", true), ["off", "auto", "fsr", "ai"]);
+		assert_eq!(modes_for("macos", false), ["off", "auto", "fsr"]);
+		assert_eq!(modes_for("linux", true), ["off", "auto", "fsr", "sgsr"]);
+	}
+
+	#[test]
+	fn an_unsupported_pick_falls_to_the_nearest() {
+		let mac = modes_for("macos", false);
+		assert_eq!(supported_or_nearest("sgsr", &mac), "fsr");
+		assert_eq!(supported_or_nearest("ai", &mac), "auto");
+		assert_eq!(supported_or_nearest("fsr", &mac), "fsr");
+	}
 }
 
 pub fn upscale_mode() -> String {

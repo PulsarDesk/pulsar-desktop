@@ -248,6 +248,8 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 		case 'respond_request':
 		case 'submit_password':
 		case 'disconnect_peer':
+		case 'upscale_modes':
+			return Promise.resolve(['off', 'auto', 'fsr', 'ai', 'sgsr'] as unknown as T);
 		case 'take_pending_chat':
 			return Promise.resolve(null as unknown as T);
 		case 'show_connections':

@@ -92,6 +92,22 @@
 	const audioMissing = $derived(
 		!!config?.audio_input && !audioSources.includes(config.audio_input)
 	);
+	// Only the upscalers this machine can run (the app decides per OS / GPU); a saved pick it
+	// can't run shows as the nearest one (SGSR → FSR, AI → auto), like the app applies it.
+	let upModes = $state<string[]>(['off', 'auto', 'fsr', 'ai', 'sgsr']);
+	onMount(() => {
+		api
+			.upscaleModes()
+			.then((m) => {
+				if (!m.length) return;
+				upModes = m;
+				if (!m.includes(ui.upscale)) {
+					ui.upscale = (ui.upscale === 'sgsr' && m.includes('fsr') ? 'fsr' : 'auto') as typeof ui.upscale;
+					saveUi();
+				}
+			})
+			.catch(() => {});
+	});
 </script>
 
 <!-- STREAMING (client): what this device receives when connecting to a host —
@@ -240,11 +256,19 @@
 			saveUi();
 		}}
 	>
-		<option value="off">{t('settings.upscaleOff')}</option>
-		<option value="auto">{t('settings.upscaleAuto')}</option>
-		<option value="fsr">FSR</option>
-		<option value="ai">{t('settings.upscaleAi')}</option>
-		<option value="sgsr">Snapdragon GSR</option>
+		{#each upModes as m (m)}
+			<option value={m}
+				>{m === 'off'
+					? t('settings.upscaleOff')
+					: m === 'auto'
+						? t('settings.upscaleAuto')
+						: m === 'ai'
+							? t('settings.upscaleAi')
+							: m === 'sgsr'
+								? 'Snapdragon GSR'
+								: 'FSR'}</option
+			>
+		{/each}
 	</select>
 </div>
 <div class="srow">

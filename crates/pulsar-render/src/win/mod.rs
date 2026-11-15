@@ -604,6 +604,9 @@ fn stdin_control() {
 			// The app's verdict that the stream really stopped (`stopped 1`) or is back
 			// (`stopped 0`): the "stream stopped" card + input-capture release (see STALLED).
 			STALLED.store(rest.trim() == "1", Ordering::SeqCst);
+		} else if let Some(rest) = l.strip_prefix("upscalers ") {
+			// What this machine runs (the app decides per OS / GPU): the menu row offers only these.
+			crate::overlay::set_upscale_modes(rest);
 		} else if let Some(rest) = l.strip_prefix("upscale ") {
 			// Picture upscaling mode (off|auto|fsr|ai) — see present::set_upscale.
 			present::set_upscale(rest);

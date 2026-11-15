@@ -474,6 +474,20 @@ static UPSCALE_MODE: std::sync::Mutex<String> = std::sync::Mutex::new(String::ne
 /// upscaling is off), e.g. "FSR", "NVIDIA VSR" — shown on the menu's stream line.
 static UPSCALER_ACTIVE: std::sync::Mutex<&'static str> = std::sync::Mutex::new("");
 
+/// The upscalers this machine runs (the app's upscalers off,auto,… line; empty = not told yet
+/// → every mode, as before). The menu row offers only these.
+static UPSCALE_MODES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+pub fn set_upscale_modes(list: &str) {
+	*UPSCALE_MODES.lock().unwrap() =
+		list.split(',').map(|m| m.trim().to_string()).filter(|m| !m.is_empty()).collect();
+}
+
+fn upscale_offered(mode: &str) -> bool {
+	let g = UPSCALE_MODES.lock().unwrap();
+	g.is_empty() || g.iter().any(|m| m == mode)
+}
+
 pub fn set_upscale_mode(mode: &str) {
 	*UPSCALE_MODE.lock().unwrap() = mode.trim().to_string();
 }
@@ -1980,6 +1994,7 @@ fn draw_display(
 		("ai", t("upscale.ai")),
 		("sgsr", "Snapdragon GSR"),
 	];
+	let up: Vec<(&str, &str)> = up.into_iter().filter(|(m, _)| upscale_offered(m)).collect();
 	let up_live = upscale_mode();
 	let up_cur = staged(deferred, "upscale", &up_live);
 	if let Some(v) = rows.choice(ui, row, t("upscale.title"), up_cur, &up, None) {

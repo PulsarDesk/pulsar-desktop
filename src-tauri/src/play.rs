@@ -1,4 +1,4 @@
-﻿//! Client remote-play lifecycle: `start_remote_play` opens a session, brings up the
+//! Client remote-play lifecycle: `start_remote_play` opens a session, brings up the
 //! local video viewer (embedded WebCodecs or a native renderer), holds the control
 //! session open full-duplex, and registers the `PlaySession`. `stop_stream` tears it
 //! all down.
@@ -544,6 +544,7 @@ pub(crate) async fn start_remote_play(
 									let _ = writeln!(si, "msens {}", crate::kbdhook::mouse_sensitivity());
 									let _ = writeln!(si, "ptrfree {}", if crate::kbdhook::pointer_free() { 1 } else { 0 });
 									let _ = writeln!(si, "{}", crate::kbdhook::pen_touch_line(host_pen, host_touch));
+									let _ = writeln!(si, "{}", crate::native_view::upscalers_line());
 									let _ = writeln!(si, "upscale {}", crate::native_view::upscale_mode());
 									let _ = writeln!(si, "hostptrshow {}", if crate::kbdhook::host_cursor() { 1 } else { 0 });
 									for l in crate::audio_devices::seed_lines() {
@@ -854,6 +855,7 @@ pub(crate) async fn start_remote_play(
 										let _ = writeln!(si, "msens {}", crate::kbdhook::mouse_sensitivity());
 										let _ = writeln!(si, "ptrfree {}", if crate::kbdhook::pointer_free() { 1 } else { 0 });
 										let _ = writeln!(si, "{}", crate::kbdhook::pen_touch_line(host_pen, host_touch));
+										let _ = writeln!(si, "{}", crate::native_view::upscalers_line());
 										let _ = writeln!(si, "upscale {}", crate::native_view::upscale_mode());
 										let _ = writeln!(si, "hostptrshow {}", if crate::kbdhook::host_cursor() { 1 } else { 0 });
 										for l in crate::audio_devices::seed_lines() {

@@ -627,6 +627,8 @@ pub fn run() {
 				Some("hostptr") => crate::overlay::host_ptr_line(&it.collect::<Vec<_>>().join(" ")),
 				Some("hostptrshow") => crate::overlay::set_host_ptr_show(it.next() == Some("1")),
 				// Picture upscaling (Settings → Görüntü): FSR in the GL presenter (gl_fsr.rs).
+				// What this machine runs (the app decides per OS / GPU): the menu row offers only these.
+				Some("upscalers") => crate::overlay::set_upscale_modes(it.next().unwrap_or("")),
 				Some("upscale") => {
 					let m = it.next().unwrap_or("off");
 					crate::gl_fsr::set_upscale(m);

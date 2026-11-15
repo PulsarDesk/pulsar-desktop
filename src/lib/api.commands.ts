@@ -150,6 +150,8 @@ export const api = {
 	tabWindowLabel: () => invoke<string>('tab_window_label'),
 	/** Picture upscaling for the session renderer (off | auto | fsr | ai). */
 	setUpscale: (mode: string) => invoke<void>('set_upscale', { mode }),
+	/** The picture upscalers this machine can run (per OS / GPU), in menu order. */
+	upscaleModes: () => invoke<string[]>('upscale_modes'),
 	/** Start with the computer (optionally in the background, to the tray). */
 	setAutostart: (enabled: boolean, background: boolean) =>
 		invoke<void>('set_autostart', { enabled, background }),

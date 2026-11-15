@@ -404,6 +404,7 @@ async fn respawn_render_for_codec(
 					let _ = writeln!(si, "msens {}", crate::kbdhook::mouse_sensitivity());
 					let _ = writeln!(si, "ptrfree {}", if crate::kbdhook::pointer_free() { 1 } else { 0 });
 					let _ = writeln!(si, "{}", crate::kbdhook::pen_touch_line(host_pen, host_touch));
+					let _ = writeln!(si, "{}", crate::native_view::upscalers_line());
 					let _ = writeln!(si, "upscale {}", crate::native_view::upscale_mode());
 					let _ = writeln!(si, "hostptrshow {}", if crate::kbdhook::host_cursor() { 1 } else { 0 });
 					for l in crate::audio_devices::seed_lines() {
@@ -1510,6 +1511,12 @@ pub(crate) async fn set_host_cursor(state: State<'_, AppState>, on: bool) -> Res
 pub(crate) async fn set_pointer_free(on: bool) -> Result<(), String> {
 	crate::kbdhook::set_pointer_free(on);
 	Ok(())
+}
+
+/// The picture upscalers this machine can run (Settings → Görüntü iyileştirme lists only these).
+#[tauri::command]
+pub(crate) fn upscale_modes() -> Vec<&'static str> {
+	crate::native_view::upscale_modes()
 }
 
 /// Picture upscaling mode (Settings → Görüntü): stored for new renderers and pushed live to
