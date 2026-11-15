@@ -219,7 +219,11 @@ impl Encoder {
 		let low = super::policy::low_budget_live(self.low_budget, bps, self.width, self.height, self.fps);
 		let thin = super::policy::thin_budget_live(self.thin_budget, bps, self.width, self.height, self.fps);
 		let env = std::env::var("PULSAR_NVENC_MULTIPASS").ok();
-		let two_pass = super::policy::two_pass_for(thin, self.width, self.height, self.fps, env.as_deref());
+		let two_pass = super::policy::two_pass_444(
+			super::policy::two_pass_for(thin, self.width, self.height, self.fps, env.as_deref()),
+			self.yuv444(),
+			env.as_deref(),
+		);
 		let mut class_change = low != self.low_budget || two_pass != self.two_pass;
 		let mut refused = false;
 		if class_change {

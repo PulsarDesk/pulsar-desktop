@@ -147,6 +147,48 @@ pub(crate) const QUALITY_PRESET_MAX_PIXEL_RATE: f64 = 1920.0 * 1200.0 * 60.0;
 /// The preset of a remote-desktop stream above that rate.
 pub(crate) const REMOTE_FAST_PRESET: u8 = 1;
 
+/// Highest pixel rate (pixels/s) a 4:4:4 stream is encoded at: 1920×1080 at 120 fps (1440p60
+/// and 4K30 are within it). 4:4:4 doubles the chroma samples and NVENC converts the RGB input
+/// itself, so a frame costs ~2× the 4:2:0 one. Measured on an RTX 3080 Laptop (2026-11-15,
+/// `nvenc_444_encodes_on_the_native_path`, submit p50, HEVC / H.264, game P1, RFI, intra
+/// refresh and remote+RFI all alike): 1080p 3.0 / 3.5 ms (4:2:0 1.6 / 1.7), 1440p 4.2 / 4.9 ms
+/// (2.2 / 2.4), 4K 8.8 / 10.3 ms (4.7 / 5.1). Up to this rate that is at most ~40 % of the
+/// frame budget (1080p120: 3.5 of 8.3 ms); 1440p120 would take 50-59 % and 4K60 53-62 %: 4:2:0
+/// there.
+pub(crate) const YUV444_MAX_PIXEL_RATE: f64 = 1920.0 * 1080.0 * 120.0;
+
+/// Can a `w`×`h`@`fps` stream be encoded in 4:4:4 without its encode time crowding the frame
+/// budget (see [`YUV444_MAX_PIXEL_RATE`])? `PULSAR_YUV444_ANY_RATE=1` lifts the ceiling (tests).
+pub(crate) fn yuv444_fits(w: u32, h: u32, fps: u32) -> bool {
+	w as f64 * h as f64 * fps.max(1) as f64 <= YUV444_MAX_PIXEL_RATE
+		|| std::env::var("PULSAR_YUV444_ANY_RATE").map(|v| v == "1").unwrap_or(false)
+}
+
+/// The fastest-quality preset a 4:4:4 stream may use: P2. Its encode costs ~2× the 4:2:0 one,
+/// so the remote profile's P3/P4 would spend the frame budget the 4:2:0 stream keeps. A
+/// forced `PULSAR_NVENC_PRESET` (`forced`) wins.
+pub(crate) const YUV444_PRESET_MAX: u8 = 2;
+
+/// [`preset_level`]'s pick for a 4:4:4 stream (see [`YUV444_PRESET_MAX`]).
+pub(crate) fn preset_444(level: u8, forced: bool) -> u8 {
+	if forced {
+		level
+	} else {
+		level.min(YUV444_PRESET_MAX)
+	}
+}
+
+/// The two-pass choice `two_pass` for a stream that is 4:4:4 (`yuv444`): single pass — the
+/// quarter-resolution first pass would add to an encode that already costs ~2× the 4:2:0 one.
+/// `PULSAR_NVENC_MULTIPASS=1` (`env`) still forces it.
+pub(crate) fn two_pass_444(two_pass: bool, yuv444: bool, env: Option<&str>) -> bool {
+	if yuv444 {
+		env.map(str::trim) == Some("1")
+	} else {
+		two_pass
+	}
+}
+
 /// Reference-buffer depth for an RFI stream at `w`×`h`: as deep as level 5.1 allows at this
 /// size (so the encoder does not have to raise the level — a level-6 stream is one a hardware
 /// decoder may refuse), never below `RFI_DPB_MIN`, never above `RFI_DPB_MAX`. 1080p gets 16,
@@ -404,6 +446,26 @@ impl EncWindow {
 
 #[cfg(test)]
 mod tests {
+	/// 4:4:4 up to 1080p120 / 1440p60, 4:2:0 above; its preset at most P2 unless forced.
+	#[test]
+	fn yuv444_rate_ceiling_and_preset() {
+		use super::{preset_444, yuv444_fits};
+		assert!(yuv444_fits(1920, 1080, 120));
+		assert!(yuv444_fits(2560, 1440, 60));
+		assert!(yuv444_fits(1280, 720, 0));
+		assert!(!yuv444_fits(2560, 1440, 120));
+		assert!(!yuv444_fits(3840, 2160, 60));
+		assert!(!yuv444_fits(1920, 1200, 120));
+		assert_eq!(preset_444(4, false), 2);
+		assert_eq!(preset_444(1, false), 1);
+		assert_eq!(preset_444(4, true), 4);
+		use super::two_pass_444;
+		assert!(!two_pass_444(true, true, None));
+		assert!(two_pass_444(true, true, Some("1")));
+		assert!(two_pass_444(true, false, None));
+		assert!(!two_pass_444(false, false, None));
+	}
+
 	use super::*;
 
 	fn tracker_with(dpb: u32, n: u32, idr_at: &[u32]) -> RefTracker {

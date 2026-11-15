@@ -139,20 +139,8 @@ pub(super) unsafe fn configure(
 	//    `policy::preset_level` (game P1; remote P4 while that is cheap, a faster one at
 	//    high pixel rates). The presets above P4 are not offered (too slow for a live
 	//    stream): a forced 5-7 runs as P4. ------
-	let preset_n = policy::preset_level(
-		p.low_latency,
-		w,
-		h,
-		fps,
-		std::env::var("PULSAR_NVENC_PRESET").ok().as_deref(),
-	)
-	.min(4);
-	let preset_guid = match preset_n {
-		1 => nvenc::NV_ENC_PRESET_P1_GUID,
-		2 => nvenc::NV_ENC_PRESET_P2_GUID,
-		3 => nvenc::NV_ENC_PRESET_P3_GUID,
-		_ => nvenc::NV_ENC_PRESET_P4_GUID,
-	};
+	let preset_env = std::env::var("PULSAR_NVENC_PRESET").ok();
+	let mut preset_n = policy::preset_level(p.low_latency, w, h, fps, preset_env.as_deref()).min(4);
 	let tuning = if p.low_latency {
 		nvenc::NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY
 	} else {
@@ -201,7 +189,15 @@ pub(super) unsafe fn configure(
 			Codec::H264 => nvenc::NV_ENC_H264_PROFILE_HIGH_444_GUID,
 			_ => nvenc::NV_ENC_HEVC_PROFILE_FREXT_GUID,
 		};
+		// ~2× the 4:2:0 encode time: a faster preset keeps it inside the frame budget.
+		preset_n = policy::preset_444(preset_n, preset_env.is_some());
 	}
+	let preset_guid = match preset_n {
+		1 => nvenc::NV_ENC_PRESET_P1_GUID,
+		2 => nvenc::NV_ENC_PRESET_P2_GUID,
+		3 => nvenc::NV_ENC_PRESET_P3_GUID,
+		_ => nvenc::NV_ENC_PRESET_P4_GUID,
+	};
 
 	let mut preset: nvenc::NV_ENC_PRESET_CONFIG = std::mem::zeroed();
 	preset.version = nvenc::NV_ENC_PRESET_CONFIG_VER;
@@ -294,12 +290,13 @@ pub(super) unsafe fn configure(
 	// overrides the pass choice.
 	let low_budget = policy::low_budget(br, w, h, fps);
 	let thin_budget = policy::thin_budget(br, w, h, fps);
-	let two_pass = policy::use_two_pass(
-		br,
-		w,
-		h,
-		fps,
-		std::env::var("PULSAR_NVENC_MULTIPASS").ok().as_deref(),
+	let multipass_env = std::env::var("PULSAR_NVENC_MULTIPASS").ok();
+	// A 4:4:4 stream never runs the quarter-resolution first pass (unless forced): its encode
+	// already costs ~2× the 4:2:0 one (`policy::two_pass_444`).
+	let two_pass = policy::two_pass_444(
+		policy::use_two_pass(br, w, h, fps, multipass_env.as_deref()),
+		yuv444,
+		multipass_env.as_deref(),
 	);
 	// The preset's own keyframe scale: what a stream that leaves the low-budget class live
 	// goes back to.

@@ -600,6 +600,32 @@ impl AnyEncoder {
 	}
 }
 
+/// Codecs (bit per [`Codec`]) this host's NVENC was found not to encode in 4:4:4 (its caps said
+/// no, or the 4:4:4 encoder failed to build): later captures plan them as 4:2:0 streams from the
+/// start instead of skipping the Media Foundation candidate and the measurement for nothing.
+/// Per process; a GPU change needs an app restart to re-learn it.
+#[cfg(windows)]
+static NO_444: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+#[cfg(windows)]
+fn codec_bit(codec: Codec) -> u8 {
+	match codec {
+		Codec::H264 => 1,
+		Codec::H265 => 2,
+		Codec::Av1 => 4,
+	}
+}
+
+#[cfg(windows)]
+fn no_444(codec: Codec) -> bool {
+	NO_444.load(std::sync::atomic::Ordering::Relaxed) & codec_bit(codec) != 0
+}
+
+#[cfg(windows)]
+fn set_no_444(codec: Codec) {
+	NO_444.fetch_or(codec_bit(codec), std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Spawn the dedicated capture+encode thread.
 ///
 /// All fallible init (DXGI device + duplication + NVENC open + RTP header) happens *inside*
@@ -699,7 +725,11 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 			// Full-monitor capture source (DXGI or WGC) and, on a hybrid host, the measurement
 			// that picks it (path.rs). A window capture always uses WGC on its window.
 			let forced_source = path::forced_source();
-			let plan_for = |idx: u32| {
+			// 4:4:4 still wanted for this capture: off once this GPU's NVENC turned out not to
+			// encode it (its caps, or a 4:4:4 encoder that failed to build — see below), and from
+			// the start when an earlier capture learned that (`no_444`).
+			let mut want444 = cfg.yuv444 && !no_444(cfg.codec);
+			let plan_for = |idx: u32, yuv444: bool| {
 				let plan = if cfg.window_hwnd.is_some() {
 					path::Plan::none()
 				} else {
@@ -707,13 +737,15 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 				};
 				// 4:4:4 only NVENC encodes: no Media Foundation candidate, and no measurement
 				// (a 4:4:4 encode would skew the cached verdict the 4:2:0 streams use).
-				if cfg.yuv444 {
+				if yuv444 {
 					plan.nvenc_only()
 				} else {
 					plan
 				}
 			};
-			let mut plan = plan_for(output_idx);
+			let mut plan = plan_for(output_idx, want444);
+			// `plan` was made for a 4:4:4 stream (`Plan::nvenc_only`).
+			let mut plan_444 = want444;
 			let mut plan_output = output_idx;
 			let mut source = plan.first;
 			let mut probe_results: Vec<(path::MonSource, path::Score)> = Vec::new();
@@ -729,7 +761,8 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 			loop {
 				// Another monitor → plan again; a probe step / fallback may have picked the source.
 				if output_idx != plan_output {
-					plan = plan_for(output_idx);
+					plan = plan_for(output_idx, want444);
+					plan_444 = want444;
 					plan_output = output_idx;
 					source = plan.first;
 					probe_results.clear();
@@ -834,7 +867,15 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 				//    driver does any cross-adapter copy internally on hybrid GPUs). Seed the
 				//    bitrate from the LIVE target so a switch preserves any adaptive-bitrate step.
 				let mut last_kbps = req_kbps_t.load(Ordering::Relaxed).max(1);
-				let params = encode::EncParams {
+				// 4:4:4 only up to the pixel rate whose encode leaves the frame budget room
+				// (`encode::yuv444_fits`: 1080p120 / 1440p60); above it this build is 4:2:0.
+				let size444 = encode::yuv444_fits(w, h, cfg.fps.max(1));
+				if want444 && !size444 {
+					encode_log(&format!("4:4:4 asked for, but {w}x{h}@{} is past its encode budget — 4:2:0", cfg.fps));
+				}
+				let mf_path = cfg.window_hwnd.is_none() && source.is_mf();
+				let asked444 = want444 && size444 && !mf_path;
+				let mut params = encode::EncParams {
 					width: w,
 					height: h,
 					capture_width: cap_w,
@@ -847,13 +888,24 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 					intra_refresh: cfg.intra_refresh,
 					rotation,
 					rfi: cfg.rfi,
-					yuv444: cfg.yuv444,
+					yuv444: asked444,
 				};
-				let mf_path = cfg.window_hwnd.is_none() && source.is_mf();
 				let built = if mf_path {
 					encode::mf::MfEncoder::new(cap.device(), cap.context(), &params).map(AnyEncoder::Mf)
 				} else {
-					encode::Encoder::new(cap.device(), cap.context(), &params).map(AnyEncoder::Nv)
+					match encode::Encoder::new(cap.device(), cap.context(), &params) {
+						// 4:4:4 adds combinations no measurement covered (RExt / High 4:4:4 with the
+						// RFI reference buffer, intra refresh, the remote preset, odd ARGB sizes):
+						// if one fails to build, 4:2:0 on this native path — never the ffmpeg
+						// fallback (first build) or a dying thread (a rebuild) for asking for it.
+						Err(e) if params.yuv444 => {
+							encode_log(&format!("nvenc: 4:4:4 encoder failed ({e}) — 4:2:0 for this capture"));
+							params.yuv444 = false;
+							encode::Encoder::new(cap.device(), cap.context(), &params)
+						}
+						r => r,
+					}
+					.map(AnyEncoder::Nv)
 				};
 				let mut enc = match built {
 					Ok(e) => e,
@@ -891,6 +943,36 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 					drop(enc);
 					drop(cap);
 					break;
+				}
+				// Asked for 4:4:4 and did not get it (no 4:4:4 in this GPU's NVENC, or the 4:4:4
+				// encoder failed above): 4:2:0 for the rest of this capture, and remembered so the
+				// next capture plans 4:2:0 at once. A 4:2:0 build for its size alone keeps asking
+				// (a later, smaller rebuild may fit). Either way the plan skipped the Media
+				// Foundation candidate and the measurement for nothing — on a first build, plan
+				// again as a 4:2:0 stream (rebuild) when that picks another path (e.g. a hybrid
+				// host's cached DxgiMf).
+				if asked444 && !enc.yuv444() {
+					want444 = false;
+					set_no_444(cfg.codec);
+				}
+				if plan_444 && !enc.yuv444() && !announced {
+					plan_444 = false;
+					let normal = plan_for(output_idx, false);
+					if cfg.window_hwnd.is_none() && (normal.first != source || normal.probe) {
+						encode_log(&format!(
+							"4:4:4 not encoded here — planning the 4:2:0 path again ({} -> {})",
+							source.name(),
+							normal.first.name()
+						));
+						enc.flush_and_close();
+						drop(enc);
+						drop(cap);
+						plan = normal;
+						source = plan.first;
+						probe_results.clear();
+						next_source = None;
+						continue;
+					}
 				}
 				prev_good_output = output_idx;
 				stats_t.yuv444.store(enc.yuv444(), Ordering::Relaxed);

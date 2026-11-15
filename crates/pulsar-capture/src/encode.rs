@@ -107,6 +107,9 @@ pub(crate) mod nvenc;
 mod nvsession;
 // GPU-free encoder decisions (reference-buffer depth, RFI vs keyframe, keyframe schedule).
 mod policy;
+// The capture loop decides by the encode size whether to ask for 4:4:4 at all.
+#[cfg(windows)]
+pub(crate) use policy::yuv444_fits;
 #[cfg(windows)]
 mod submit;
 

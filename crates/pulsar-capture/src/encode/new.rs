@@ -354,10 +354,22 @@ mod tests {
 	/// ```
 	/// With `PULSAR_DUMP_DIR` set, each stream's Annex-B goes to `<dir>\nvenc-<codec>-<chroma>`
 	/// (`ffprobe` it: `High 4:4:4 Predictive` / `Rext`, `yuv444p`).
+	///
+	/// Besides the game profile (P1) it builds the combinations a session can ask for: RFI
+	/// (deep reference buffer), intra refresh, and the remote profile (LOW_LATENCY, preset
+	/// capped at P2 for 4:4:4). `PULSAR_TEST_SIZE=WxH` / `PULSAR_TEST_FPS` change the size
+	/// (default 1280x720@60) — the numbers behind `policy::YUV444_MAX_PIXEL_RATE`.
 	#[test]
 	#[ignore]
 	fn nvenc_444_encodes_on_the_native_path() {
-		let (w, h) = (1280u32, 720u32);
+		let (w, h) = std::env::var("PULSAR_TEST_SIZE")
+			.ok()
+			.and_then(|s| {
+				let (a, b) = s.split_once('x')?;
+				Some((a.parse::<u32>().ok()?, b.parse::<u32>().ok()?))
+			})
+			.unwrap_or((1280, 720));
+		let fps: u32 = std::env::var("PULSAR_TEST_FPS").ok().and_then(|s| s.parse().ok()).unwrap_or(60);
 		// Top half: flat colour bars (red, green, blue, white, black, yellow, cyan, grey) to read
 		// the colour matrix back from a dump; bottom half: 1-px red/blue columns over a grey
 		// ramp, the worst case for 4:2:0 chroma.
@@ -397,10 +409,15 @@ mod tests {
 			let tex = tex.unwrap();
 			let sink = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
 			sink.set_read_timeout(Some(std::time::Duration::from_millis(200))).unwrap();
+			// (name, low_latency, rfi, intra_refresh)
+			const VARIANTS: [(&str, bool, bool, bool); 4] =
+				[("game", true, false, false), ("rfi", true, true, false), ("intra-refresh", true, false, true), ("remote+rfi", false, true, false)];
+			for (variant, low_latency, rfi, intra_refresh) in VARIANTS {
 			for codec in [Codec::H264, Codec::H265] {
 				for yuv444 in [false, true] {
 					if let Some(d) = &dump {
-						let name = std::path::Path::new(d).join(format!("nvenc-{codec:?}-{}", if yuv444 { "444" } else { "420" }));
+						let name = std::path::Path::new(d)
+							.join(format!("nvenc-{codec:?}-{variant}-{}", if yuv444 { "444" } else { "420" }));
 						let _ = std::fs::remove_file(&name);
 						std::env::set_var("PULSAR_DUMP_BITSTREAM", &name);
 					}
@@ -409,18 +426,19 @@ mod tests {
 						height: h,
 						capture_width: w,
 						capture_height: h,
-						fps: 60,
+						fps,
 						bitrate_kbps: 20_000,
 						dest: format!("rtp://{}", sink.local_addr().unwrap()),
 						codec,
-						low_latency: true,
-						intra_refresh: false,
+						low_latency,
+						intra_refresh,
 						rotation: 0,
-						rfi: false,
+						rfi,
 						yuv444,
 					};
-					let mut enc = Encoder::new(&dev, &ctx, &p).unwrap_or_else(|e| panic!("{codec:?} 444={yuv444}: {e}"));
-					assert_eq!(enc.yuv444(), yuv444, "{codec:?}: the GPU should encode what was asked");
+					let mut enc =
+						Encoder::new(&dev, &ctx, &p).unwrap_or_else(|e| panic!("{variant} {codec:?} 444={yuv444}: {e}"));
+					assert_eq!(enc.yuv444(), yuv444, "{variant} {codec:?}: the GPU should encode what was asked");
 					let mut us = Vec::new();
 					for i in 0..120i64 {
 						let f = Frame {
@@ -433,7 +451,8 @@ mod tests {
 							present_ns: 0,
 						};
 						let t0 = std::time::Instant::now();
-						enc.submit(&f, i, (i as u32) * 1500).unwrap_or_else(|e| panic!("{codec:?} 444={yuv444} submit: {e}"));
+						enc.submit(&f, i, (i as u32) * (90_000 / fps))
+							.unwrap_or_else(|e| panic!("{variant} {codec:?} 444={yuv444} submit: {e}"));
 						us.push(t0.elapsed().as_micros() as u64);
 					}
 					let input = enc.input;
@@ -445,13 +464,14 @@ mod tests {
 					}
 					us.sort_unstable();
 					println!(
-						"{codec:?} 444={yuv444} input={:?}: submit p50 {} us p90 {} us, {bytes} RTP bytes",
+						"{w}x{h}@{fps} {variant} {codec:?} 444={yuv444} input={:?}: submit p50 {} us p90 {} us, {bytes} RTP bytes",
 						input,
 						us[us.len() / 2],
 						us[us.len() * 9 / 10]
 					);
-					assert!(bytes > 0, "{codec:?} 444={yuv444}: nothing was sent");
+					assert!(bytes > 0, "{variant} {codec:?} 444={yuv444}: nothing was sent");
 				}
+			}
 			}
 			std::env::remove_var("PULSAR_DUMP_BITSTREAM");
 		}
