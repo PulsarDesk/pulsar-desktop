@@ -660,6 +660,16 @@ pub(super) async fn hold_session(
 	}
 	let mut pen_tick = tokio::time::interval(std::time::Duration::from_millis(50));
 	pen_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+	// Pointer motion / scroll batching (≤ one packet per ~1 ms per kind; the first event of
+	// a burst goes out at once, a button or key flushes what is held first) — a 4-8 kHz
+	// mouse otherwise sends one encrypted datagram per report. See pulsar-core
+	// `input::coalesce`. The held-back tail leaves from the deadline arm in the loop below.
+	let mut motion = pulsar_core::input::coalesce::MotionCoalescer::default();
+	let mut motion_out: Vec<InputEvent> = Vec::new();
+	// That tail waits on a tokio timer: at Windows' default 15.6 ms timer resolution it would
+	// leave up to ~16 ms late, so the client keeps the 1 ms resolution while the session runs
+	// (refcounted with the host side; Linux / macOS timers are already fine — timer_res.rs).
+	let _timer = crate::timer_res::acquire();
 	// ---- Media-over-session demux state (single-socket transport) ----
 	// Media frames arrive INSIDE this session ([tag][rtp…]); forward each datagram to
 	// the local consumer: the renderer's RTP port (video) / the viewer's audio port.
@@ -955,12 +965,16 @@ pub(super) async fn hold_session(
 					let mut dead = false;
 					let now = std::time::Instant::now();
 					let evs = if host_pen { tablet_aug.on_event(now, ev, tablet::latest()) } else { vec![ev] };
-					'send: for ev in evs {
+					motion_out.clear();
+					for ev in evs {
 						for ev in pen_touch.on_event(now, ev) {
-							if send_input(&mut sess, &ev).await.is_err() {
-								dead = true;
-								break 'send;
-							}
+							motion.push(now, ev, &mut motion_out);
+						}
+					}
+					for ev in motion_out.drain(..) {
+						if send_input(&mut sess, &ev).await.is_err() {
+							dead = true;
+							break;
 						}
 					}
 					if dead {
@@ -978,7 +992,19 @@ pub(super) async fn hold_session(
 					}
 				}
 				evs.extend(pen_touch.tick(now));
+				motion_out.clear();
 				for ev in evs {
+					motion.push(now, ev, &mut motion_out);
+				}
+				for ev in motion_out.drain(..) {
+					let _ = send_input(&mut sess, &ev).await;
+				}
+			}
+			// The held-back motion / scroll tail of a burst, when its window closes.
+			_ = tokio::time::sleep_until(
+				motion.deadline().map(tokio::time::Instant::from_std).unwrap_or_else(tokio::time::Instant::now),
+			), if motion.deadline().is_some() => {
+				if let Some(ev) = motion.poll(std::time::Instant::now()) {
 					let _ = send_input(&mut sess, &ev).await;
 				}
 			}

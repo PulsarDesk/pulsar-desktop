@@ -81,7 +81,10 @@ pub fn button_flag(button: u8, down: bool) -> u32 {
 	}
 }
 
-/// Fractional wheel accumulator (browser pixels → notches, remainder carried).
+/// Hi-res wheel accumulator: browser pixels (100 per notch) → `mouseData` units of 1/120
+/// notch, sub-unit remainder carried. Windows takes sub-`WHEEL_DELTA` wheel data (precision
+/// touchpads send it), so smooth client scrolling stays smooth on the secure desktop too —
+/// the same conversion as pulsar-core's `input::wheel::HiResScroll` for the user desktop.
 #[derive(Default, Debug)]
 pub struct ScrollAcc {
 	v: f64,
@@ -89,20 +92,23 @@ pub struct ScrollAcc {
 }
 
 impl ScrollAcc {
-	/// Returns whole `(vertical, horizontal)` notches to emit now. Browser down(+) → wheel
-	/// down (negative), so dy is negated.
+	/// Returns the `(vertical, horizontal)` `mouseData` to emit now (0 = nothing). Browser
+	/// down(+) → wheel down (negative), so dy is negated.
 	pub fn push(&mut self, dx: f64, dy: f64) -> (i32, i32) {
+		let per_px = WHEEL_DELTA as f64 / 100.0;
 		if dx.is_finite() {
-			self.h += dx / 100.0;
+			self.h += dx * per_px;
 		}
 		if dy.is_finite() {
-			self.v += -dy / 100.0;
+			self.v += -dy * per_px;
 		}
-		let v = self.v.trunc() as i32;
-		let h = self.h.trunc() as i32;
-		self.v -= v as f64;
-		self.h -= h as f64;
-		(v, h)
+		// The 1e-9 nudge keeps float drift (0.6 × 10 = 5.999…) from holding a unit back.
+		let whole = |x: f64| (x + 1e-9_f64.copysign(x)).trunc();
+		let v = whole(self.v);
+		let h = whole(self.h);
+		self.v -= v;
+		self.h -= h;
+		(v.clamp(i32::MIN as f64, i32::MAX as f64) as i32, h.clamp(i32::MIN as f64, i32::MAX as f64) as i32)
 	}
 }
 
@@ -156,11 +162,11 @@ mod tests {
 	#[test]
 	fn scroll_accumulates_fractions() {
 		let mut s = ScrollAcc::default();
-		assert_eq!(s.push(0.0, 40.0), (0, 0));
-		assert_eq!(s.push(0.0, 40.0), (0, 0));
-		assert_eq!(s.push(0.0, 40.0), (-1, 0)); // 120 px down → one notch down
-		assert_eq!(s.push(250.0, 0.0), (0, 2));
-		assert_eq!(s.push(60.0, 0.0), (0, 1)); // 0.5 + 0.6 carried
+		assert_eq!(s.push(0.0, 100.0), (-120, 0)); // one notch down
+		assert_eq!(s.push(0.0, 12.5), (-15, 0)); // a hi-res 1/8 notch is sent, not rounded away
+		assert_eq!(s.push(250.0, 0.0), (0, 300));
+		assert_eq!(s.push(0.0, -0.5), (0, 0)); // 0.6 unit carried…
+		assert_eq!(s.push(0.0, -0.5), (1, 0)); // …1.2 → 1, 0.2 carried
 	}
 
 	#[test]

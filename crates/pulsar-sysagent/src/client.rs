@@ -23,7 +23,7 @@ use windows_sys::Win32::System::Pipes::{
 	GetNamedPipeServerProcessId, GetNamedPipeServerSessionId, WaitNamedPipeW,
 };
 
-use crate::geom::{absolute_move, button_flag, MonitorRect, ScrollAcc, WHEEL_DELTA};
+use crate::geom::{absolute_move, button_flag, MonitorRect, ScrollAcc};
 use crate::proto::{
 	self, DesktopKind, PointerContact, Reply, Request, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
 	MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE,
@@ -385,10 +385,10 @@ impl SysInput {
 	pub fn scroll(&mut self, dx: f64, dy: f64) -> Result<()> {
 		let (v, h) = self.scroll.push(dx, dy);
 		if v != 0 {
-			self.mouse(0, 0, v.saturating_mul(WHEEL_DELTA), MOUSEEVENTF_WHEEL)?;
+			self.mouse(0, 0, v, MOUSEEVENTF_WHEEL)?;
 		}
 		if h != 0 {
-			self.mouse(0, 0, h.saturating_mul(WHEEL_DELTA), MOUSEEVENTF_HWHEEL)?;
+			self.mouse(0, 0, h, MOUSEEVENTF_HWHEEL)?;
 		}
 		Ok(())
 	}

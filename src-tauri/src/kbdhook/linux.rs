@@ -173,6 +173,46 @@ fn fwd(tx: &Sender<InputEvent>, ev: InputEvent) {
 	let _ = tx.try_send(ev);
 }
 
+/// Which wheel axes a captured device reads from (see [`WheelAcc`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct WheelAxes {
+	v_hi_res: bool,
+	h_hi_res: bool,
+}
+
+impl WheelAxes {
+	fn of(d: &evdev::Device) -> Self {
+		let rel = d.supported_relative_axes();
+		let has = |c| rel.is_some_and(|r| r.contains(c));
+		Self { v_hi_res: has(RelativeAxisCode::REL_WHEEL_HI_RES), h_hi_res: has(RelativeAxisCode::REL_HWHEEL_HI_RES) }
+	}
+}
+
+/// One evdev batch's wheel, as browser wheel px (the wire unit: 100 per notch, +y down, +x
+/// right). evdev: +1 notch / +120 hi-res = up (vertical) or right (horizontal).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct WheelAcc {
+	dx: f64,
+	dy: f64,
+}
+
+impl WheelAcc {
+	fn add(&mut self, axes: WheelAxes, code: RelativeAxisCode, value: i32) {
+		let v = value as f64;
+		match code {
+			RelativeAxisCode::REL_WHEEL_HI_RES if axes.v_hi_res => self.dy -= v * 100.0 / 120.0,
+			RelativeAxisCode::REL_WHEEL if !axes.v_hi_res => self.dy -= v * 100.0,
+			RelativeAxisCode::REL_HWHEEL_HI_RES if axes.h_hi_res => self.dx += v * 100.0 / 120.0,
+			RelativeAxisCode::REL_HWHEEL if !axes.h_hi_res => self.dx += v * 100.0,
+			_ => {}
+		}
+	}
+
+	fn event(&self) -> Option<InputEvent> {
+		(self.dx != 0.0 || self.dy != 0.0).then_some(InputEvent::Scroll { dx: self.dx, dy: self.dy })
+	}
+}
+
 /// Stable-ish key for a captured evdev device — its kernel name (e.g. "Logitech USB Keyboard").
 /// Used as the per-pane LOCK key (set_kbm_lock) and surfaced to the UI. Two IDENTICAL devices share
 /// a name (a known v1 limit); a physical-port key would disambiguate them later.
@@ -692,6 +732,12 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, star
 				pfds[i].revents = 0;
 				// Accumulate relative motion within this batch → one PointerRelative.
 				let (mut adx, mut ady) = (0f64, 0f64);
+				// …and the wheel → one Scroll. A hi-res mouse (kernel 5.0+) reports
+				// REL_WHEEL_HI_RES (120 per notch, 1/8-notch steps or finer) AND a legacy
+				// REL_WHEEL notch in the same frame: take the hi-res axis on such a device and
+				// ignore the legacy one (else every notch counted twice), the notch elsewhere.
+				let wheel = WheelAxes::of(&grabbed[i]);
+				let mut wheel_acc = WheelAcc::default();
 				// Collect into an owned Vec so the &mut borrow on grabbed[i] ends HERE.
 				// The chord check below reads every grabbed device's live key state
 				// (`chord_mods(&grabbed)`), which it can't do while this device is still
@@ -958,21 +1004,7 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, star
 						EventSummary::RelativeAxis(_, rel, _) if !want_suspend => match rel {
 							RelativeAxisCode::REL_X => adx += ev.value() as f64,
 							RelativeAxisCode::REL_Y => ady += ev.value() as f64,
-							// evdev wheel notch (+1 = up/right); the host scales /100 like a
-							// browser wheel delta and inverts dy, so up → dy negative.
-							RelativeAxisCode::REL_WHEEL => {
-								let _ = tx.try_send(InputEvent::Scroll {
-									dx: 0.0,
-									dy: -(ev.value() as f64) * 100.0,
-								});
-							}
-							RelativeAxisCode::REL_HWHEEL => {
-								let _ = tx.try_send(InputEvent::Scroll {
-									dx: ev.value() as f64 * 100.0,
-									dy: 0.0,
-								});
-							}
-							_ => {}
+							code => wheel_acc.add(wheel, code, ev.value()),
 						},
 						_ => {}
 					}
@@ -981,6 +1013,9 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, star
 				if adx != 0.0 || ady != 0.0 {
 					diag_fwd += 1;
 					fwd(&tx, InputEvent::PointerRelative { dx: adx, dy: ady });
+				}
+				if let Some(ev) = wheel_acc.event() {
+					fwd(&tx, ev);
 				}
 			}
 		}
@@ -1131,4 +1166,33 @@ pub fn release(app: &AppHandle) {
 pub fn engage_render(app: &AppHandle) {
 	RENDER_FOCUSED.store(true, Ordering::SeqCst);
 	engage(app);
+}
+
+#[cfg(test)]
+mod wheel_tests {
+	use super::*;
+
+	#[test]
+	fn hi_res_device_uses_the_fine_axis_only() {
+		let axes = WheelAxes { v_hi_res: true, h_hi_res: true };
+		let mut w = WheelAcc::default();
+		// One notch up as the kernel reports it: 120 hi-res + the legacy notch, same frame.
+		w.add(axes, RelativeAxisCode::REL_WHEEL_HI_RES, 120);
+		w.add(axes, RelativeAxisCode::REL_WHEEL, 1);
+		assert_eq!(w.event(), Some(InputEvent::Scroll { dx: 0.0, dy: -100.0 }));
+		// A 1/8-notch step right.
+		let mut w = WheelAcc::default();
+		w.add(axes, RelativeAxisCode::REL_HWHEEL_HI_RES, 15);
+		assert_eq!(w.event(), Some(InputEvent::Scroll { dx: 12.5, dy: 0.0 }));
+	}
+
+	#[test]
+	fn plain_wheel_is_whole_notches() {
+		let axes = WheelAxes::default();
+		let mut w = WheelAcc::default();
+		w.add(axes, RelativeAxisCode::REL_WHEEL, -2);
+		w.add(axes, RelativeAxisCode::REL_HWHEEL, 1);
+		assert_eq!(w.event(), Some(InputEvent::Scroll { dx: 100.0, dy: 200.0 }));
+		assert_eq!(WheelAcc::default().event(), None);
+	}
 }

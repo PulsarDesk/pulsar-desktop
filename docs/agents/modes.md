@@ -221,6 +221,27 @@ pulsar-macinput`). Same surface and rules as the Windows hook (`imp.rs`):
   compiles (`pulsar-tauri` cannot be type-checked for macOS from Windows).
 
 
+## Mouse motion batching + hi-res scroll (all desktop clients / hosts, 2026-11-15, untested on hardware)
+
+- **Wire scroll unit** (`InputEvent::Scroll`): browser wheel px, 100 per notch, +y down, +x
+  right, fractions kept. Clients: Windows LL hook `WM_MOUSE(H)WHEEL` raw×100/120; Interception
+  `rolling`×100/120 on the WHEEL (0x400) **and** HWHEEL (0x800) bit (it used to send raw 120s =
+  1.2× too far, and dropped the horizontal wheel); Linux evdev `REL_(H)WHEEL_HI_RES`×100/120 on a
+  device that has the axis (its legacy notch is then ignored), else `REL_(H)WHEEL`×100, one
+  `Scroll` per evdev batch; macOS tap point deltas / lines×100; webview `WheelEvent` px.
+- **Hosts** never round to notches any more (pulsar-core `input::wheel`): Windows `mouseData` in
+  1/120 notch (desktop, per-window, the system agent), Linux `REL_WHEEL_HI_RES` + legacy notch
+  per 120, macOS LINE for whole notches / continuous PIXEL for finer deltas. Exceptions: X11
+  per-window (core button 4-7 events, whole notches) and same-host co-op raw-input injection
+  (`coop.rs`, games often divide by 120 — whole notches on purpose).
+- **Motion batching** (`play/hold.rs`, pulsar-core `input::coalesce`): pointer-relative /
+  absolute / scroll go out at most once per 0.8 ms per kind; the first event of a burst at once,
+  later ones merged (deltas add) and sent when the window closes; a button / key flushes first.
+  The client holds the 1 ms Windows timer (`timer_res`) while a session runs so the tail is not
+  late. The Windows hook and macOS tap forwarders (`util::input_forwarder_loop`) merge motion on
+  a full session channel instead of dropping it; Interception motion goes through the same
+  ordered forwarder as its buttons now.
+
 ## Ctrl+Shift+M toggles the Pulsar menu — the second press has to arrive too
 
 Opening the menu releases control, so the press that closes it comes in on the *disengaged*
