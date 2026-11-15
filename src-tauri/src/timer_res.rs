@@ -7,6 +7,9 @@
 //! it cut a clean 11.5 Mbit/s stream to 3.5 Mbit/s in windows without any loss (2026-11-15,
 //! Snapdragon host on home Wi-Fi → a friend). Sunshine raises the resolution the same way while
 //! streaming. Per process since Windows 10 2004; refcounted, released with the last session.
+//! Windows 11 may ignore the request while the window is hidden / minimised (a host in the
+//! tray): the session's `pulsar_prio::session()` guard opts the process out of that
+//! (PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION, 22H2+) together with EcoQoS.
 
 /// Keeps the 1 ms timer resolution while alive.
 pub(crate) struct Guard(());

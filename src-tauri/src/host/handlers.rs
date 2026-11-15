@@ -117,6 +117,7 @@ pub(super) fn spawn_loopback_audio(
 			}
 		};
 		crate::job::assign(&child); // tie ffmpeg to Pulsar's lifetime (job.rs), like spawn_tracked
+		pulsar_prio::boost_child(&child); // audio encoder above the game, no EcoQoS (pulsar-prio)
 		Some((child, stdin))
 	};
 	let (child, stdin) = match spawn_encoder(fmt) {
@@ -299,6 +300,7 @@ pub(super) fn spawn_process_loopback_audio(
 			}
 		};
 		crate::job::assign(&child); // tie ffmpeg to Pulsar's lifetime (job.rs), like spawn_tracked
+		pulsar_prio::boost_child(&child); // audio encoder above the game, no EcoQoS (pulsar-prio)
 		if !start_process_capture(stdin, pid, mode) {
 			let _ = child.kill();
 			let _ = child.wait();

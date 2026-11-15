@@ -426,6 +426,26 @@ pub fn rumble_selftest() {
 	tracing::info!("rumble self-test: done");
 }
 
+/// Install the app's async runtime before anything uses `tauri::async_runtime`. Same shape as
+/// tauri's default (multi-thread, all drivers) plus the worker hook of crates/pulsar-prio: the
+/// host's video forwarder + wire pacer, the session read loop and the client's receive loop are
+/// tokio tasks, and while a session runs (`pulsar_prio::session()`) the workers run raised
+/// (hidden-gaps 1.13 / 1.14). The runtime lives for the whole process (tauri requires that).
+pub fn install_runtime() {
+	match tokio::runtime::Builder::new_multi_thread()
+		.enable_all()
+		.on_thread_unpark(pulsar_prio::on_worker_unpark)
+		.build()
+	{
+		Ok(rt) => {
+			tauri::async_runtime::set(rt.handle().clone());
+			std::mem::forget(rt);
+		}
+		// Leave tauri to build its default runtime (no worker boost).
+		Err(e) => eprintln!("pulsar: own tokio runtime failed ({e}); using tauri's default"),
+	}
+}
+
 pub fn run() {
 	logging::init();
 	tracing::info!(version = env!("CARGO_PKG_VERSION"), "Pulsar starting");

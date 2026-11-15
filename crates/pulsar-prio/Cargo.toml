@@ -1,0 +1,35 @@
+# Scheduling boosts for the latency-critical threads of a streaming session (host capture /
+# encode / network, client receive / decode / present, the app's async workers) on every
+# desktop OS, plus the per-process opt-outs (Windows EcoQoS / power throttling, macOS App Nap).
+# Shared by the Tauri app, pulsar-capture and pulsar-render. See src/lib.rs for the per-OS table.
+[package]
+name = "pulsar-prio"
+version = "0.0.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+publish = false
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+	"Win32_Foundation",
+	"Win32_System_Threading",
+	"Win32_Graphics_Dwm",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# macOS: NSProcessInfo activity (no App Nap / timer coalescing while a session runs). The same
+# objc2 0.6 / objc2-foundation 0.3 the app and the renderer already use — no new crates.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString"] }
+
+# Linux: rtkit (org.freedesktop.RealtimeKit1) raises a thread's nice level for an unprivileged
+# user, the way PipeWire / PulseAudio get theirs. The same zbus 5 + features the app already uses
+# (src-tauri/Cargo.toml), so the features unify and nothing new enters the lock file.
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "5", default-features = false, features = ["tokio", "blocking-api"] }
+
+[dev-dependencies]
+tokio = { workspace = true }

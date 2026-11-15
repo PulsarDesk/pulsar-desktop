@@ -1210,6 +1210,8 @@ pub fn spawn_tracked(
 			// encoder running and pegging NVENC (see job.rs).
 			#[cfg(windows)]
 			crate::job::assign(&child);
+			// Session media child: above the NORMAL-class game, no EcoQoS (pulsar-prio).
+			pulsar_prio::boost_child(&child);
 			procs.lock().unwrap().push(child);
 			Ok(())
 		}
@@ -1301,6 +1303,9 @@ pub fn spawn_encode_with_fallback(
 			};
 			#[cfg(windows)]
 			crate::job::assign(&child);
+			// The encoder child: ABOVE_NORMAL class + no EcoQoS on Windows (it ran at NORMAL next
+			// to the game it streams), best-effort nice -5 on Unix (pulsar-prio::boost_child).
+			pulsar_prio::boost_child(&child);
 			// First `-progress` tick with frame >= 1 = the encoder initialized AND is
 			// emitting frames. `frame=0` ticks are NOT proof of life: ffmpeg's progress
 			// blocks are wall-clock-paced off the transcode loop, so an encoder that

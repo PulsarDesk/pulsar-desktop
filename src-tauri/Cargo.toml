@@ -82,6 +82,9 @@ opus = "0.4"
 # Linux/macOS for its cross-platform parts: the screen-adaptation best-fit + xrandr parser and
 # the macOS CoreGraphics display-mode switch (display_mode.rs).
 pulsar-capture = { path = "../crates/pulsar-capture" }
+# Session thread / process priority on every OS: the async runtime's workers, the host's media
+# children and threads, Windows EcoQoS opt-out, macOS App Nap (crates/pulsar-prio).
+pulsar-prio = { path = "../crates/pulsar-prio" }
 
 # Raw Win32 for true taskbar-covering fullscreen (borderless-fullscreen via SetWindowPos).
 [target.'cfg(windows)'.dependencies]

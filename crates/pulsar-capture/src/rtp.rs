@@ -647,17 +647,12 @@ impl RtpEgress {
 		let join = std::thread::Builder::new()
 			.name("pulsar-rtp-send".into())
 			.spawn(move || {
-				// A4: raise THIS sender thread to THREAD_PRIORITY_HIGHEST so the OS schedules its
-				// blocking UDP send promptly under load (the IDR packet burst must drain fast). NOT
-				// TIME_CRITICAL on purpose: that would let a long send loop starve the capture/encode
-				// thread (which already runs TIME_CRITICAL) — we want the sender just below it.
-				#[cfg(windows)]
-				unsafe {
-					use windows::Win32::System::Threading::{
-						GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST,
-					};
-					let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
-				}
+				// A4: raise THIS sender thread so the OS schedules its blocking UDP send promptly
+				// under load (the IDR packet burst must drain fast). Windows: THREAD_PRIORITY_HIGHEST,
+				// NOT TIME_CRITICAL on purpose: that would let a long send loop starve the
+				// capture/encode thread (which already runs TIME_CRITICAL) — we want the sender just
+				// below it. macOS: QoS user-interactive; Linux: nice -10 (setpriority or rtkit).
+				let _prio = pulsar_prio::boost_current_thread(pulsar_prio::Role::Network);
 				let mut sender = sender;
 				loop {
 					// Wait for the next AU (or a stop). Holding the lock only across the

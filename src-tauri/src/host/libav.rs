@@ -191,6 +191,10 @@ impl LibavHost {
 		let thread = std::thread::Builder::new()
 			.name("pulsar-libav-host".into())
 			.spawn(move || {
+				// Capture + encode loop at nice -5 (setpriority or rtkit; libav's encoder threads
+				// started from here inherit it). -5, not lower: software x264 runs on every core.
+				let _prio = pulsar_prio::boost_current_thread(pulsar_prio::Role::Capture);
+				tracing::info!(how = _prio.how(), "libav host thread priority");
 				// SAFETY: every libav call below follows the documented ownership rules; the
 				// thread owns all contexts and frees them on every exit path.
 				let r = unsafe { run(&p, rx, ready_tx) };
