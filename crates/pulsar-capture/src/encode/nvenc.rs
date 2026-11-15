@@ -113,6 +113,12 @@ pub const NV_ENC_DEVICE_TYPE_CUDA: u32 = 1;
 pub const NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR: u32 = 1;
 pub const NV_ENC_INPUT_IMAGE: u32 = 0; // NV_ENC_INPUT_RESOURCE_USAGE
 pub const NV_ENC_BUFFER_FORMAT_NV12: u32 = 0x00000001;
+/// H.273 code points for SDR (VUI / AV1 colour config): BT.709 primaries, transfer and matrix.
+/// Pulsar's SDR rule: every encoder signals BT.709 limited range, every client decodes it so
+/// (docs/agents/host-encode.md, "Colour space").
+pub const VUI_PRIMARIES_BT709: u32 = 1;
+pub const VUI_TRANSFER_BT709: u32 = 1;
+pub const VUI_MATRIX_BT709: u32 = 1;
 pub const NV_ENC_PIC_STRUCT_FRAME: u32 = 0x01;
 pub const NV_ENC_PARAMS_RC_CBR: u32 = 0x2; // NV_ENC_PARAMS_RC_MODE
 										   // NV_ENC_TUNING_INFO: 1=HIGH_QUALITY, 2=LOW_LATENCY, 3=ULTRA_LOW_LATENCY, 4=LOSSLESS
@@ -429,6 +435,25 @@ impl NV_ENC_CONFIG_H264 {
 	pub fn set_numRefL0(&mut self, v: u32) {
 		self.numRefL0 = v;
 	}
+	/// SDR colour description in the SPS VUI: BT.709 limited range.
+	pub fn set_sdr_bt709(&mut self) {
+		set_vui_sdr_bt709(&mut self.h264VUIParameters);
+	}
+}
+
+/// Write the SDR colour description into an `NV_ENC_CONFIG_H264_VUI_PARAMETERS` (the HEVC VUI
+/// is the same struct, SDK 12.2 field order): [2] videoSignalTypePresentFlag, [3] videoFormat
+/// (5 = unspecified), [4] videoFullRangeFlag (0 = limited), [5] colourDescriptionPresentFlag,
+/// [6] colourPrimaries, [7] transferCharacteristics, [8] colourMatrix. Without it the stream
+/// says nothing and each client guesses (Windows' decoder BT.601, Linux/macOS BT.709).
+fn set_vui_sdr_bt709(vui: &mut [u32; 28]) {
+	vui[2] = 1;
+	vui[3] = 5;
+	vui[4] = 0;
+	vui[5] = 1;
+	vui[6] = VUI_PRIMARIES_BT709;
+	vui[7] = VUI_TRANSFER_BT709;
+	vui[8] = VUI_MATRIX_BT709;
 }
 
 // NV_ENC_CONFIG_HEVC — HEVC (H.265) codec config (nvEncodeAPI.h, 12.x). Layout:
@@ -481,6 +506,10 @@ impl NV_ENC_CONFIG_HEVC {
 	/// OR named HEVC bitfield bits in (preserving the preset's reserved bits).
 	pub fn set_flags(&mut self, bits: u32) {
 		self.flags |= bits;
+	}
+	/// SDR colour description in the SPS VUI: BT.709 limited range.
+	pub fn set_sdr_bt709(&mut self) {
+		set_vui_sdr_bt709(&mut self.hevcVUIParameters);
 	}
 }
 /// HEVC `repeatSPSPPS` bit (bit 7 of the HEVC bitfield word) — re-emit VPS/SPS/PPS in-band
@@ -549,6 +578,13 @@ impl NV_ENC_CONFIG_AV1 {
 	/// OR named AV1 bitfield bits in (preserving the preset's reserved bits).
 	pub fn set_flags(&mut self, bits: u32) {
 		self.flags |= bits;
+	}
+	/// SDR colour config in the sequence header: BT.709, studio (limited) range.
+	pub fn set_sdr_bt709(&mut self) {
+		self.colorPrimaries = VUI_PRIMARIES_BT709;
+		self.transferCharacteristics = VUI_TRANSFER_BT709;
+		self.matrixCoefficients = VUI_MATRIX_BT709;
+		self.colorRange = 0;
 	}
 }
 /// AV1 `repeatSeqHdr` bit (bit 5 of the AV1 bitfield word) — re-emit the sequence header
@@ -851,5 +887,23 @@ mod tests {
 		// …and never disableSeqHdr (bit 4) or enableIntraRefresh (bit 6) by accident.
 		assert_eq!(a.flags & ((1 << 4) | (1 << 6)), 0);
 		assert_eq!(NV_ENC_AV1_FLAG_INTRA_REFRESH, 1 << 6);
+	}
+
+	// SDR writes the BT.709 limited-range colour description where SDK 12.2 has it: the VUI
+	// slots of H.264 / HEVC (byte offset 72 / 64 into the codec config) and the AV1 fields.
+	#[test]
+	fn sdr_bt709_colour_description() {
+		let mut c = unsafe { std::mem::zeroed::<NV_ENC_CONFIG_H264>() };
+		c.set_sdr_bt709();
+		assert_eq!(&c.h264VUIParameters[2..9], &[1, 5, 0, 1, 1, 1, 1]);
+		assert_eq!(core::mem::offset_of!(NV_ENC_CONFIG_H264, h264VUIParameters), 72);
+		let mut h = unsafe { std::mem::zeroed::<NV_ENC_CONFIG_HEVC>() };
+		h.set_sdr_bt709();
+		assert_eq!(&h.hevcVUIParameters[2..9], &[1, 5, 0, 1, 1, 1, 1]);
+		assert_eq!(core::mem::offset_of!(NV_ENC_CONFIG_HEVC, hevcVUIParameters), 64);
+		assert_eq!(h.flags, 0);
+		let mut a = unsafe { std::mem::zeroed::<NV_ENC_CONFIG_AV1>() };
+		a.set_sdr_bt709();
+		assert_eq!((a.colorPrimaries, a.transferCharacteristics, a.matrixCoefficients, a.colorRange), (1, 1, 1, 0));
 	}
 }

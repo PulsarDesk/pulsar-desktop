@@ -310,6 +310,8 @@ pub(super) unsafe fn configure(
 			h264.maxNumRefFrames = dpb;
 			h264.set_numRefL0(nvenc::NV_ENC_NUM_REF_FRAMES_1);
 			h264.set_chromaFormatIDC(1); // 4:2:0
+			// SDR = BT.709 limited range, said in the VUI (the input NV12 is converted so).
+			h264.set_sdr_bt709();
 		}
 		Codec::H265 => {
 			// NV_ENC_CONFIG_HEVC: repeatSPSPPS re-emits VPS/SPS/PPS in-band on each IDR
@@ -323,6 +325,7 @@ pub(super) unsafe fn configure(
 			);
 			hevc.idrPeriod = gop;
 			hevc.maxNumRefFramesInDPB = dpb;
+			hevc.set_sdr_bt709(); // SDR = BT.709 limited range in the VUI
 			if rfi {
 				// Predict from ONE reference: the deep buffer is only the fallback an RFI
 				// recovery frame reaches into (autoselect could search several = slower).
@@ -344,6 +347,7 @@ pub(super) unsafe fn configure(
 			// but nvEncInitializeEncoder below returns an Err → host falls back to ffmpeg.
 			let av1 = &mut cfg.encodeCodecConfig.av1Config;
 			av1.set_flags(nvenc::NV_ENC_AV1_FLAG_REPEAT_SEQ_HDR | nvenc::NV_ENC_AV1_CHROMA_420);
+			av1.set_sdr_bt709(); // SDR = BT.709 studio range in the sequence header
 			av1.idrPeriod = gop;
 			av1.maxNumRefFramesInDPB = 1;
 			if intra_refresh {

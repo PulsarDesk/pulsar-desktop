@@ -443,7 +443,13 @@ unsafe fn build_graph(
 	// Pin the sink's pixel format.
 	let fmts: [c_int; 2] = [pix_fmt as c_int, -1];
 	let _ = av_opt_set_int_list_workaround(sink, &fmts);
-	let desc = format!("scale={}:{}:flags=fast_bilinear,format=pix_fmts={}", w, h, pix_fmt as c_int);
+	// SDR = BT.709 limited range (Pulsar's rule; `open_encoder` writes the same into the VUI,
+	// and the NVENC SDK encoder fed from this graph signals it too). swscale's default would
+	// convert the x11grab RGB with the BT.601 matrix.
+	let desc = format!(
+		"scale={}:{}:flags=fast_bilinear:out_color_matrix=bt709:out_range=tv,format=pix_fmts={}",
+		w, h, pix_fmt as c_int
+	);
 	let mut inputs = ff::avfilter_inout_alloc();
 	let mut outputs = ff::avfilter_inout_alloc();
 	(*outputs).name = ff::av_strdup(cstr("in").as_ptr());
@@ -507,6 +513,11 @@ unsafe fn open_encoder(p: &Params, pix_fmt: ff::AVPixelFormat) -> Result<*mut ff
 	(*ec).time_base = ff::AVRational { num: 1, den: p.fps as c_int };
 	(*ec).framerate = ff::AVRational { num: p.fps as c_int, den: 1 };
 	(*ec).pix_fmt = pix_fmt;
+	// The colour description of the BT.709 limited-range frames `build_graph` makes.
+	(*ec).colorspace = ff::AVColorSpace::AVCOL_SPC_BT709;
+	(*ec).color_primaries = ff::AVColorPrimaries::AVCOL_PRI_BT709;
+	(*ec).color_trc = ff::AVColorTransferCharacteristic::AVCOL_TRC_BT709;
+	(*ec).color_range = ff::AVColorRange::AVCOL_RANGE_MPEG;
 	(*ec).bit_rate = p.bitrate_kbps as i64 * 1000;
 	(*ec).rc_max_rate = (*ec).bit_rate;
 	(*ec).rc_buffer_size = ((*ec).bit_rate / 2) as c_int; // ~0.5 s VBV: low latency, no spikes

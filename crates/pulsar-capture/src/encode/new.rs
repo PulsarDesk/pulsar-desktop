@@ -141,6 +141,7 @@ impl Encoder {
 
 		// -- 1. ID3D11VideoProcessor for BGRA→NV12 (one GPU Blt/frame) on the NVENC device.
 		let (vp_enum, vproc) = build_video_processor(&vdevice, cap_w, cap_h, w, h)?;
+		super::d3d::set_sdr_colour_spaces(&vcontext, &vproc); // BT.709 limited (the VUI's)
 
 		// -- 2. Allocate OUR own NV12 texture (Sunshine single-texture model) on the NVENC
 		//    device. NVENC has no hwframe pool — we Blt into THIS every frame, register once.

@@ -117,6 +117,53 @@ Part of the pulsar-desktop agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
 
 All paths emit **RTP/H.264(+HEVC/AV1) over UDP**.
 
+## Colour space — SDR = BT.709 limited range on every host (2026-11-15, branch `fix/colour-bt709`, untested on a real session)
+
+One rule: every host converts the captured RGB with the **BT.709 matrix into limited
+(16–235) range** and says so in the stream (H.264 / HEVC VUI, AV1 sequence header); every
+client decodes what the stream says, and BT.709 limited when it says nothing
+(`crates/pulsar-render/src/colour.rs`). Before, nothing was signalled: the Windows
+VideoProcessor (driver default, BT.601 on most GPUs) and ffmpeg (swscale default BT.601)
+converted with BT.601, Linux / macOS clients decoded BT.709 → shifted reds / greens / skin.
+
+| Host path | Conversion | Signalling |
+| --- | --- | --- |
+| Windows native (DXGI / WGC → VideoProcessor → NVENC / MF) | `encode/d3d.rs::set_sdr_colour_spaces` (`VideoProcessorSetStreamColorSpace1` RGB_FULL_G22_P709, `SetOutputColorSpace1` YCBCR_STUDIO_G22_LEFT_P709; the legacy `ID3D11VideoContext` words as fallback) | NVENC VUI (`nvenc.rs` `set_sdr_bt709`: H.264 / HEVC VUI, AV1 colour fields); MF media type `MF_MT_YUV_MATRIX` / `MF_MT_VIDEO_NOMINAL_RANGE` / primaries / transfer (`mf.rs::set_sdr_colour`) |
+| ffmpeg CLI (all OSes, pulsar-core `pipeline/command.rs` + `types.rs`) | every conversion names `out_color_matrix=bt709:out_range=tv` itself (not only FFmpeg 7.1+ colour negotiation): x11grab / gdigrab get an explicit `scale` ahead of the encoder's format, the ddagrab CPU bounces (AMF / MF / software) carry it on their `scale`, the zero-copy GPU scalers on `scale_cuda` (NVENC) and `vpp_qsv` (QSV; `scale_qsv` has no colour options) | `-colorspace bt709 -color_range tv` + a `setparams` frame tag (primaries / transfer; all four for an already-YUV capture: avfoundation, raw NV12) |
+| Linux X11 libav (`src-tauri/src/host/libav.rs`) | `scale=…:out_color_matrix=bt709:out_range=tv` | encoder context colorspace / primaries / trc / range = BT.709 / MPEG |
+| Linux NVENC SDK (`NvencCuda`) | the libav graph / gst `videoconvert` | `nvsession::configure` VUI (shared with Windows) |
+| Linux gst (Wayland, X11 fallback, probes) | `videoconvert ! video/x-raw,format=NV12,colorimetry=bt709` (gst's default is BT.601 below 720 lines) | the encoder element reads the caps colorimetry |
+| macOS native (SCK → VideoToolbox) | pulsar-core `macos_capture::sck::set_sdr_colour`: SCK `colorMatrix` = ITU_R_709_2, `colorSpaceName` = sRGB (a P3 display is mapped into BT.709 primaries) | VT `ColorPrimaries` / `TransferFunction` / `YCbCrMatrix` = ITU_R_709_2 (`mac/vt.rs`); range from '420v' |
+| Android host (pulsar-mobile `HostEncoder.kt`) | `KEY_COLOR_STANDARD` BT709, `KEY_COLOR_RANGE` LIMITED, `KEY_COLOR_TRANSFER` SDR_VIDEO (API 24+) | the same keys |
+
+Not covered / unmeasured (measure with colour bars before trusting them):
+- the Orange Pi X11 direct-BGRx `mpph26xenc` path (`gst.rs` `direct_bgrx`): RGA / VEPU converts
+  with MPP's own matrix and gst gives no VUI control. Clients now read an untagged stream as
+  BT.709 (the old Windows client read BT.601): if RGA converts BT.601, a Pi host is off on every
+  client. Measure on the Pi (bars on the X screen → stream → decoded Y of red: 63 = BT.709,
+  81 = BT.601); if BT.601, drop that path to `videoconvert` or set the encoder's colour
+  property if gst-rockchip exposes one;
+- the hybrid ffmpeg `ddagrab → h264_nvenc` path that hands NVENC BGRA (NVENC converts
+  internally; ffmpeg's NVENC wrapper tags what it does);
+- `scale_cuda` / `vpp_qsv` options are from the bundled FFmpeg 8 `-h filter=` listing; no
+  NVIDIA / Intel GPU here, so neither chain has run with them (check one session on each).
+
+HDR keeps its own BT.2020 / PQ signalling.
+
+Version skew: there is no wire field for the rule, so mixed old / new Windows pairs shift until
+both ends update (same desktop release, auto-update). An old Windows client (VideoProcessor
+default, BT.601 on NVIDIA / AMD) shows a new host's BT.709 stream off; a new client reads an old
+host's untagged BT.601 stream (old Windows NVENC / MF, old ffmpeg / libav) as BT.709. Old Linux /
+macOS clients already assumed BT.709, so they improve. Tests:
+`encode::d3d::tests::bgra_to_nv12_is_bt709_limited` (the real VideoProcessor, read back),
+`nvenc::tests::sdr_bt709_colour_description`, pulsar-core `pipeline::tests::sdr_*` and
+`sdr_colour_bars_through_ffmpeg` (`PULSAR_TEST_FFMPEG=<bundled ffmpeg>`: real gdigrab and x11grab
+chains encode → decode, red must be Y 63, not BT.601's 81), and
+`encode::mf::tests::mf_encoder_bars_are_bt709_limited` (the real MF encoder MFT, H.264 + HEVC,
+decoded with `PULSAR_TEST_FFMPEG`; measured on the Snapdragon's QCOM MFT: attributes taken, VUI
+`tv, bt709`). An MFT that rejects a media type over the colour attributes gets it again
+without them (`mf.rs::set_type_with_colour`, logged): the conversion stays BT.709 limited.
+
 ## Host monitor picker + live display-change watch (per OS, 2026-11-14, untested on macOS / Wayland hardware)
 
 `process::host_displays()` fills `StreamCaps::displays`; the index travels back in

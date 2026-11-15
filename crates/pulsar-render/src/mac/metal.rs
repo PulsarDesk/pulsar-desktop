@@ -384,6 +384,22 @@ impl Gpu {
 		layer.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
 		layer.setFramebufferOnly(true);
 		layer.setOpaque(true);
+		// The YUV→RGB shader yields the R'G'B' the host captured: sRGB-encoded (SCK captures in
+		// sRGB, a Windows desktop is sRGB; the stream's BT.709 tag is only the YUV matrix, no
+		// transfer conversion happens anywhere). Tag the layer sRGB so macOS colour-matches it
+		// to the display: same primaries as BT.709, so a P3 / wide-gamut Mac is gamut-mapped
+		// instead of over-saturated, and the sRGB curve keeps midtones as on the host and the
+		// Windows / Linux clients. NOT `kCGColorSpaceITUR_709`: its ~1.96 camera curve lifts
+		// shadows and midtones (QuickTime's washed-out shift). The egui overlay is sRGB too.
+		// SAFETY: a +1 CGColorSpace handed to the layer (which retains it), then released; the
+		// typed pointer encodes as `^{CGColorSpace=}` for objc2's debug check.
+		unsafe {
+			let cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+			if !cs.is_null() {
+				let _: () = objc2::msg_send![&layer, setColorspace: cs];
+				CGColorSpaceRelease(cs);
+			}
+		}
 		// Never let presentation pace the DECODE (see win/mod.rs show_frame): the pacer meters
 		// pictures by the display link, the layer presents at once.
 		layer.setDisplaySyncEnabled(false);

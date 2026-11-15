@@ -11,6 +11,48 @@ VideoToolbox+Metal zero-copy (mpv only as a fallback — see "macOS renderer" be
 too (`src-tauri/src/native_audio.rs`, libopus + SDL3; see audio.md), so no media
 reaches the webview. Don't resurrect a webview video path.
 
+## Colour: the stream's matrix + range, BT.709 limited by default (2026-11-15, branch `fix/colour-bt709`)
+
+`crates/pulsar-render/src/colour.rs` (pure, tested everywhere): `Colour { matrix, full_range }`,
+default = BT.709 limited (what every host sends, see host-encode.md "Colour space"), the shader
+constants (`yuv_consts`, shared with macOS) and the EGL / KMS hint values.
+
+- **Windows:** `win/decode.rs` reads the MF output type's `MF_MT_YUV_MATRIX` /
+  `MF_MT_VIDEO_NOMINAL_RANGE` (filled from the VUI; missing = BT.709 limited), and
+  `Present::set_colour` sets `VideoProcessorSetStreamColorSpace1` + RGB_FULL_G22_P709 out
+  (re-applied after a processor rebuild). The processor's default ignores the tag (measured on
+  Adreno: a BT.601 stream came out with red `(255, 24, 0)`). Harness: `win/colour_bars.rs`
+  decodes `testdata/colour-{bt709,untagged,bt601}.h264` through MF + the VideoProcessor and
+  reads the bars back.
+- **Linux:** the GL YUV shaders take `yr` / `ym` uniforms per draw from the AVFrame's
+  `colorspace` / `color_range` (`video.rs::set_colour`; P010 dmabuf layers as 10-bit MSB). They
+  were fixed BT.709 with full-range chroma gains (limited-range chroma ~12 % desaturated). A
+  composed YUV dmabuf (rkmpp NV12 / NV15) gets `EGL_YUV_COLOR_SPACE_HINT_EXT` /
+  `EGL_SAMPLE_RANGE_HINT_EXT` (drivers default to BT.601), and the DRM-lease video plane gets
+  `COLOR_ENCODING` / `COLOR_RANGE` (`kms_lease.rs`). Not compiled on the Windows dev box: check
+  on the Pi / CI.
+- **macOS:** VideoToolbox attaches the stream's matrix (`Frame::matrix`, BT.709 when absent) and
+  the range follows the pixel format ('420v' / '420f'); the `CAMetalLayer` is now tagged
+  `kCGColorSpaceSRGB` (`mac/metal.rs`), so macOS colour-matches it to the display instead
+  of showing the values raw (over-saturated on P3 panels). sRGB, NOT `kCGColorSpaceITUR_709`:
+  the pixels are sRGB-encoded (hosts capture sRGB and never convert the transfer; the stream's
+  BT.709 tag is the YUV matrix), and the 709 camera curve (~1.96) would lift midtones
+  (QuickTime's gamma shift) against the host and the Windows / Linux clients. CF / CG pointers
+  given to `msg_send!` must be typed (`ffi::CGColorSpaceObj`, pulsar-core `ffi::CFStringObj`):
+  objc2 checks argument encodings in debug builds and panics on `*const c_void`. Untested on a
+  Mac.
+- **Android:** the decoder `MediaFormat` gets BT.709 / limited / SDR-video keys when the stream
+  is not HDR (`PulsarVideoPlugin.kt`); the bitstream's VUI still wins. iOS has no video path yet.
+- **Linux frame props:** `av_hwframe_map` (VA-API → DRM_PRIME) and `av_hwframe_transfer_data`
+  (readback) copy pixels only, so `video.rs` calls `av_frame_copy_props` after either: the VUI
+  (a BT.601 tag, full range) reaches `frame_colour`. The `yr` / `ym` uniforms are cached per
+  program (`ColourUniforms`) and uploaded only when the colour changes. The DRM-lease plane
+  writes `COLOR_ENCODING` / `COLOR_RANGE` only when the plane's enum lists the value
+  (`Req::opt_enum`; an unlisted value fails the whole atomic commit with EINVAL).
+- **Version skew:** an untagged stream is read as BT.709, so an old host's untagged BT.601
+  stream (old Windows NVENC / MF, old ffmpeg / libav) shifts on a new client until the host
+  updates; see host-encode.md "Version skew".
+
 ## Linux / RK3588 (Orange Pi 5) renderer — the reality (IMPORTANT)
 
 - **VSync (Linux renderer, `linux.rs`):** the swap interval follows the compositor.

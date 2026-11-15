@@ -164,41 +164,8 @@ pub fn scales_up(src: (f32, f32, f32, f32), dst: (f32, f32, f32, f32)) -> bool {
 	dst.2 > src.2.round() || dst.3 > src.3.round()
 }
 
-/// The colour matrix of a decoded picture.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Matrix {
-	Bt601,
-	Bt709,
-	Bt2020,
-}
-
-/// Shader constants for YCbCr → RGB: `[ym, ya, cm, ca]` turn a sampled (normalized) luma /
-/// chroma value into Y' 0..1 / C −0.5..0.5 (`Y = v·ym + ya`), `[a, b, c, d]` is the matrix
-/// (`R = Y + a·Cr`, `G = Y − b·Cb − c·Cr`, `B = Y + d·Cb`). `msb16` = the samples sit in the
-/// top bits of 16-bit texels (P010), so a sample reads as `code << (16 − bits)` / 65535.
-pub fn yuv_consts(m: Matrix, bits: u32, full_range: bool, msb16: bool) -> ([f32; 4], [f32; 4]) {
-	let bits = bits.clamp(8, 16);
-	// A normalized texel value → the integer code value.
-	let to_code = if msb16 { 65535.0 / (1u32 << (16 - bits)) as f32 } else { ((1u32 << bits) - 1) as f32 };
-	let k = (1u32 << (bits - 8)) as f32;
-	let max = ((1u32 << bits) - 1) as f32;
-	let (ym, ya, cm, ca) = if full_range {
-		(to_code / max, 0.0, to_code / max, -(128.0 * k) / max)
-	} else {
-		(to_code / (219.0 * k), -(16.0 * k) / (219.0 * k), to_code / (224.0 * k), -(128.0 * k) / (224.0 * k))
-	};
-	let (kr, kb): (f32, f32) = match m {
-		Matrix::Bt601 => (0.299, 0.114),
-		Matrix::Bt709 => (0.2126, 0.0722),
-		Matrix::Bt2020 => (0.2627, 0.0593),
-	};
-	let kg = 1.0 - kr - kb;
-	let a = 2.0 * (1.0 - kr);
-	let d = 2.0 * (1.0 - kb);
-	let b = d * kb / kg;
-	let c = a * kr / kg;
-	([ym, ya, cm, ca], [a, b, c, d])
-}
+// The YCbCr → RGB maths are shared with the Linux renderer (`colour.rs`).
+pub use crate::colour::{yuv_consts, Matrix};
 
 #[cfg(test)]
 mod tests {

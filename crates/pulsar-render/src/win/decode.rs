@@ -65,6 +65,9 @@ pub struct Decoder {
 	/// The picture's VISIBLE size (the stream's display aperture: 1920×1080 of a 1920×1088
 	/// surface — decoders pad to the macroblock grid). `None` until the MFT reports it.
 	visible: Option<(u32, u32)>,
+	/// The output's colour description (the stream's VUI as the MFT reports it; BT.709
+	/// limited when it reports nothing — Pulsar's SDR rule, see `colour.rs`).
+	colour: crate::colour::Colour,
 	width: u32,
 	height: u32,
 	fps: u32,
@@ -154,6 +157,7 @@ impl Decoder {
 				_manager: manager,
 				subtype,
 				visible: None,
+				colour: crate::colour::Colour::default(),
 				width: w,
 				height: h,
 				fps,
@@ -217,6 +221,7 @@ impl Decoder {
 					// The decoder discovered the real stream geometry; renegotiate NV12 and retry.
 					set_nv12_output(&self.transform)?;
 					self.visible = visible_size(&self.transform);
+					self.colour = output_colour(&self.transform);
 					continue;
 				}
 				Err(e) => return Err(e),
@@ -266,6 +271,21 @@ impl Decoder {
 	pub fn visible(&self) -> Option<(u32, u32)> {
 		self.visible
 	}
+
+	/// The decoded pictures' colour description (see `colour`).
+	pub fn colour(&self) -> crate::colour::Colour {
+		self.colour
+	}
+}
+
+/// The output type's `MF_MT_YUV_MATRIX` + `MF_MT_VIDEO_NOMINAL_RANGE` (the decoder fills them
+/// from the stream's VUI / colour config). Missing = BT.709 limited.
+unsafe fn output_colour(transform: &IMFTransform) -> crate::colour::Colour {
+	use windows::Win32::Media::MediaFoundation::{MF_MT_VIDEO_NOMINAL_RANGE, MF_MT_YUV_MATRIX};
+	let Ok(t) = transform.GetOutputCurrentType(0) else {
+		return crate::colour::Colour::default();
+	};
+	crate::colour::Colour::from_mf(t.GetUINT32(&MF_MT_YUV_MATRIX).ok(), t.GetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE).ok())
 }
 
 /// The output type's visible area: `MF_MT_MINIMUM_DISPLAY_APERTURE` (an `MFVideoArea`; the
