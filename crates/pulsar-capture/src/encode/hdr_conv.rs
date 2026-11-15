@@ -500,6 +500,7 @@ mod tests {
 			rotation: 0,
 			rfi: false,
 			hdr: Some(crate::hdr::HdrMeta::default()),
+			yuv444: false,
 		};
 		let mut enc = unsafe { crate::encode::Encoder::new(&d, &c, &p) }.expect("HDR encoder");
 		for i in 0..30u32 {

@@ -238,19 +238,35 @@ impl Decoder {
 	}
 
 	fn make_session(&mut self) -> Result<(), String> {
-		let Some(format) = self.format.as_ref() else { return Err("no format".into()) };
+		// A 4:4:4 stream (its SPS says so) asks for a 4:4:4 picture; a VideoToolbox that cannot
+		// make one gets the 4:2:0 formats (it subsamples: blurrier chroma, still a picture).
+		let yuv444 = matches!(self.codec, Codec::H264 | Codec::H265)
+			&& self.sps.as_ref().and_then(|s| crate::stream::chroma::sps_chroma_format(self.codec, s)) == Some(3);
+		if yuv444 {
+			match self.make_session_for(&[PIX_444F, PIX_444V]) {
+				Ok(()) => return Ok(()),
+				Err(e) => eprintln!("pulsar-render(mac): no 4:4:4 decoder output ({e}) — 4:2:0"),
+			}
+		}
 		// Any of the 4:2:0 bi-planar formats, Metal-compatible, IOSurface-backed (zero-copy into
 		// the CVMetalTextureCache). 8-bit first for an SDR stream (half the memory traffic of
 		// P010). An HDR10 stream (the parameter sets' colour description says PQ) lists the
 		// 10-bit formats first, so VideoToolbox does not hand 10-bit PQ out as 8-bit (banding);
 		// the Metal pass tone-maps PQ at either depth (metal.rs keys it on `Frame::is_pq`).
+		let Some(format) = self.format.as_ref() else { return Err("no format".into()) };
 		// SAFETY: live format description; the extension is +0 (or null) and only compared.
 		let pq = unsafe {
 			let t = CMFormatDescriptionGetExtension(format.ptr(), kCVImageBufferTransferFunctionKey);
 			!t.is_null() && CFEqual(t, kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ) != 0
 		};
 		let order = if pq { [PIX_X420, PIX_XF20, PIX_420V, PIX_420F] } else { [PIX_420V, PIX_420F, PIX_X420, PIX_XF20] };
-		let fmts: Vec<Cf> = order.iter().map(|f| cf_i32(*f as i32)).collect();
+		self.make_session_for(&order)
+	}
+
+	/// Create the session with `pixel_formats` as the decoder's output choices.
+	fn make_session_for(&mut self, pixel_formats: &[u32]) -> Result<(), String> {
+		let Some(format) = self.format.as_ref() else { return Err("no format".into()) };
+		let fmts: Vec<Cf> = pixel_formats.iter().map(|f| cf_i32(*f as i32)).collect();
 		let fmt_arr = cf_array(&fmts.iter().collect::<Vec<_>>());
 		let iosurf = cf_dict(&[]);
 		// SAFETY: the statics are framework CFStrings; values are live CF objects.
@@ -445,7 +461,7 @@ fn obu_payload(obu: &[u8]) -> Option<(usize, usize)> {
 
 /// Headless capability probe (main.rs `--probe`), the same JSON as the Windows / Linux
 /// probes: H.264 / HEVC decode everywhere (hardware or Apple's software decoder), AV1 only
-/// where VideoToolbox decodes it in hardware.
+/// where VideoToolbox decodes it in hardware. 4:4:4 is a separate probe (`probe_444_json`).
 pub fn probe_json() -> String {
 	register_av1();
 	let mut entries = Vec::new();
@@ -481,4 +497,32 @@ fn decodes_hdr10(c: Codec) -> bool {
 	let au = AccessUnit { data: sample.to_vec(), pts_90k: 0, key: true, conceal: false };
 	let out = d.decode(&au).unwrap_or_default();
 	out.first().is_some_and(|f| f.is_pq() && matches!(f.pixel_format(), PIX_X420 | PIX_XF20))
+}
+
+/// `--probe-444` (main.rs): the codecs whose canned 4:4:4 keyframe VideoToolbox really decodes
+/// into a 4:4:4 picture, as `[{"codec":"h265"}]`. Separate from `--probe` so the app runs these
+/// decodes only when 4:4:4 is wanted (`PULSAR_YUV444`), under their own timeout.
+pub fn probe_444_json() -> String {
+	let entries: Vec<String> = [(Codec::H264, "h264"), (Codec::H265, "h265")]
+		.into_iter()
+		.filter(|(c, _)| decodes_444(*c))
+		.map(|(_, name)| format!("{{\"codec\":\"{name}\"}}"))
+		.collect();
+	format!("[{}]", entries.join(","))
+}
+
+/// Decode the canned 4:4:4 keyframe (`testdata/test-444.*`) and check a 4:4:4 picture came out
+/// (not one VideoToolbox subsampled to 4:2:0). AV1: no fixture, never.
+fn decodes_444(c: Codec) -> bool {
+	let fixture: &[u8] = match c {
+		Codec::H264 => include_bytes!("../../testdata/test-444.h264"),
+		Codec::H265 => include_bytes!("../../testdata/test-444.h265"),
+		Codec::Av1 => return false,
+	};
+	let mut dec = Decoder::new(c);
+	let au = AccessUnit { data: fixture.to_vec(), pts_90k: 0, key: true, conceal: false };
+	match dec.decode(&au) {
+		Ok(frames) => frames.iter().any(|f| matches!(f.pixel_format(), PIX_444V | PIX_444F)),
+		Err(_) => false,
+	}
 }

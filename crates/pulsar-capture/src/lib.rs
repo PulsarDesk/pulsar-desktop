@@ -54,6 +54,12 @@ pub struct CaptureConfig {
 	/// Reference-frame invalidation (`StreamReq::rfi`): a deeper reference buffer, and a loss
 	/// the client reports (`CaptureHandle::request_rfi`) is healed without a keyframe.
 	pub rfi: bool,
+	/// 4:4:4 chroma (`StreamReq::wants_yuv444`: asked for AND the client decodes it). Windows
+	/// NVENC: H.264 High 4:4:4 / HEVC RExt where the GPU encodes it (`CaptureStats::yuv444`
+	/// says what it got), else 4:2:0 — on the same native path either way. The hybrid
+	/// "display GPU's Media Foundation encoder" candidate is skipped (NV12 only). macOS
+	/// (VideoToolbox) streams 4:2:0.
+	pub yuv444: bool,
 	/// Composite the cursor (v1: parsed but no-op unless `cursor.rs` landed).
 	pub draw_mouse: bool,
 	/// PER-WINDOW capture (Phase 2b): when `Some(hwnd)`, the native path captures that single
@@ -108,6 +114,8 @@ pub struct CaptureStats {
 	/// Access units encoded for the capture's life (wraps). 0 a few seconds into a stream =
 	/// the source never delivered a frame (see the no-frame watchdog in `start`).
 	pub encoded: u32,
+	/// The current encoder streams 4:4:4 (see `CaptureConfig::yuv444`).
+	pub yuv444: bool,
 }
 
 /// The atomics behind [`CaptureStats`], written by the capture thread.
@@ -133,6 +141,8 @@ pub struct LiveStats {
 	pub(crate) hdr_mon: std::sync::atomic::AtomicIsize,
 	#[cfg_attr(not(windows), allow(dead_code))]
 	pub(crate) hdr_peak_nits: std::sync::atomic::AtomicU32,
+	/// The current build streams 4:4:4.
+	pub(crate) yuv444: std::sync::atomic::AtomicBool,
 }
 
 /// Tells how long a monotonic counter has been flat. The host feeds it the capture thread's
@@ -184,6 +194,7 @@ impl LiveStats {
 			rfi_declined: self.rfi_no.load(Relaxed),
 			encoded: self.encoded.load(Relaxed),
 			hdr: self.hdr.load(Relaxed),
+			yuv444: self.yuv444.load(Relaxed),
 		}
 	}
 
@@ -642,6 +653,39 @@ impl AnyEncoder {
 			AnyEncoder::Mf(e) => e.flush_and_close(),
 		}
 	}
+	/// The stream is 4:4:4 (Media Foundation encodes 4:2:0 only).
+	fn yuv444(&self) -> bool {
+		match self {
+			AnyEncoder::Nv(e) => e.yuv444(),
+			AnyEncoder::Mf(_) => false,
+		}
+	}
+}
+
+/// Codecs (bit per [`Codec`]) this host's NVENC was found not to encode in 4:4:4 (its caps said
+/// no, or the 4:4:4 encoder failed to build): later captures plan them as 4:2:0 streams from the
+/// start instead of skipping the Media Foundation candidate and the measurement for nothing.
+/// Per process; a GPU change needs an app restart to re-learn it.
+#[cfg(windows)]
+static NO_444: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+#[cfg(windows)]
+fn codec_bit(codec: Codec) -> u8 {
+	match codec {
+		Codec::H264 => 1,
+		Codec::H265 => 2,
+		Codec::Av1 => 4,
+	}
+}
+
+#[cfg(windows)]
+fn no_444(codec: Codec) -> bool {
+	NO_444.load(std::sync::atomic::Ordering::Relaxed) & codec_bit(codec) != 0
+}
+
+#[cfg(windows)]
+fn set_no_444(codec: Codec) {
+	NO_444.fetch_or(codec_bit(codec), std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Spawn the dedicated capture+encode thread.
@@ -743,14 +787,27 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 			// Full-monitor capture source (DXGI or WGC) and, on a hybrid host, the measurement
 			// that picks it (path.rs). A window capture always uses WGC on its window.
 			let forced_source = path::forced_source();
-			let plan_for = |idx: u32| {
-				if cfg.window_hwnd.is_some() {
+			// 4:4:4 still wanted for this capture: off once this GPU's NVENC turned out not to
+			// encode it (its caps, or a 4:4:4 encoder that failed to build — see below), and from
+			// the start when an earlier capture learned that (`no_444`).
+			let mut want444 = cfg.yuv444 && !no_444(cfg.codec);
+			let plan_for = |idx: u32, yuv444: bool| {
+				let plan = if cfg.window_hwnd.is_some() {
 					path::Plan::none()
 				} else {
 					path::plan(idx, cfg.fps, forced_source)
+				};
+				// 4:4:4 only NVENC encodes: no Media Foundation candidate, and no measurement
+				// (a 4:4:4 encode would skew the cached verdict the 4:2:0 streams use).
+				if yuv444 {
+					plan.nvenc_only()
+				} else {
+					plan
 				}
 			};
-			let mut plan = plan_for(output_idx);
+			let mut plan = plan_for(output_idx, want444);
+			// `plan` was made for a 4:4:4 stream (`Plan::nvenc_only`).
+			let mut plan_444 = want444;
 			let mut plan_output = output_idx;
 			let mut source = plan.first;
 			let mut probe_results: Vec<(path::MonSource, path::Score)> = Vec::new();
@@ -770,7 +827,8 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 			loop {
 				// Another monitor → plan again; a probe step / fallback may have picked the source.
 				if output_idx != plan_output {
-					plan = plan_for(output_idx);
+					plan = plan_for(output_idx, want444);
+					plan_444 = want444;
 					plan_output = output_idx;
 					source = plan.first;
 					probe_results.clear();
@@ -880,7 +938,21 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 				//    driver does any cross-adapter copy internally on hybrid GPUs). Seed the
 				//    bitrate from the LIVE target so a switch preserves any adaptive-bitrate step.
 				let mut last_kbps = req_kbps_t.load(Ordering::Relaxed).max(1);
-				let params = encode::EncParams {
+				// 4:4:4 only up to the pixel rate whose encode leaves the frame budget room
+				// (`encode::yuv444_fits`: 1080p120 / 1440p60); above it this build is 4:2:0.
+				let size444 = encode::yuv444_fits(w, h, cfg.fps.max(1));
+				if want444 && !size444 {
+					encode_log(&format!("4:4:4 asked for, but {w}x{h}@{} is past its encode budget — 4:2:0", cfg.fps));
+				}
+				let mf_path = cfg.window_hwnd.is_none() && source.is_mf();
+				// HDR10 only on the NVENC path (Media Foundation is 8-bit here). An HDR10 stream is
+				// P010 4:2:0: it wins over a 4:4:4 request (neither is remembered as refused).
+				let hdr = if mf_path { None } else { cap.hdr() };
+				if want444 && hdr.is_some() {
+					encode_log("4:4:4 asked for, but this stream is HDR10 (P010 4:2:0) — 4:2:0");
+				}
+				let asked444 = want444 && size444 && !mf_path && hdr.is_none();
+				let mut params = encode::EncParams {
 					width: w,
 					height: h,
 					capture_width: cap_w,
@@ -893,14 +965,25 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 					intra_refresh: cfg.intra_refresh,
 					rotation,
 					rfi: cfg.rfi,
-					hdr: None,
+					hdr,
+					yuv444: asked444,
 				};
-				let mf_path = cfg.window_hwnd.is_none() && source.is_mf();
-				let params = encode::EncParams { hdr: if mf_path { None } else { cap.hdr() }, ..params };
 				let built = if mf_path {
 					encode::mf::MfEncoder::new(cap.device(), cap.context(), &params).map(AnyEncoder::Mf)
 				} else {
-					encode::Encoder::new(cap.device(), cap.context(), &params).map(AnyEncoder::Nv)
+					match encode::Encoder::new(cap.device(), cap.context(), &params) {
+						// 4:4:4 adds combinations no measurement covered (RExt / High 4:4:4 with the
+						// RFI reference buffer, intra refresh, the remote preset, odd ARGB sizes):
+						// if one fails to build, 4:2:0 on this native path — never the ffmpeg
+						// fallback (first build) or a dying thread (a rebuild) for asking for it.
+						Err(e) if params.yuv444 => {
+							encode_log(&format!("nvenc: 4:4:4 encoder failed ({e}) — 4:2:0 for this capture"));
+							params.yuv444 = false;
+							encode::Encoder::new(cap.device(), cap.context(), &params)
+						}
+						r => r,
+					}
+					.map(AnyEncoder::Nv)
 				};
 				let mut enc = match built {
 					Ok(e) => e,
@@ -947,6 +1030,37 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 					drop(cap);
 					break;
 				}
+				// Asked for 4:4:4 and did not get it (no 4:4:4 in this GPU's NVENC, or the 4:4:4
+				// encoder failed above): 4:2:0 for the rest of this capture, and remembered so the
+				// next capture plans 4:2:0 at once. A 4:2:0 build for its size alone keeps asking
+				// (a later, smaller rebuild may fit). Either way the plan skipped the Media
+				// Foundation candidate and the measurement for nothing — on a first build, plan
+				// again as a 4:2:0 stream (rebuild) when that picks another path (e.g. a hybrid
+				// host's cached DxgiMf).
+				if asked444 && !enc.yuv444() {
+					want444 = false;
+					set_no_444(cfg.codec);
+				}
+				// (An HDR10 stream keeps its NVENC-only plan: HDR runs on no other path.)
+				if plan_444 && !enc.yuv444() && !announced && params.hdr.is_none() {
+					plan_444 = false;
+					let normal = plan_for(output_idx, false);
+					if cfg.window_hwnd.is_none() && (normal.first != source || normal.probe) {
+						encode_log(&format!(
+							"4:4:4 not encoded here — planning the 4:2:0 path again ({} -> {})",
+							source.name(),
+							normal.first.name()
+						));
+						enc.flush_and_close();
+						drop(enc);
+						drop(cap);
+						plan = normal;
+						source = plan.first;
+						probe_results.clear();
+						next_source = None;
+						continue;
+					}
+				}
 				prev_good_output = output_idx;
 				stats_t.hdr.store(params.hdr.is_some(), Ordering::Relaxed);
 				if let Some(m) = params.hdr {
@@ -956,6 +1070,7 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 				if params.hdr.is_some() {
 					encode_log(&format!("HDR10 stream: {:?} {w}x{h} (FP16 scRGB → P010 PQ)", cfg.codec));
 				}
+				stats_t.yuv444.store(enc.yuv444(), Ordering::Relaxed);
 				stats_t.source.store(
 					if cfg.window_hwnd.is_some() { 3 } else { source.code() },
 					Ordering::Relaxed,

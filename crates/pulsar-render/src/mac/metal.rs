@@ -717,7 +717,7 @@ impl Gpu {
 		let pic = video.and_then(|v| {
 			let fmt = v.frame.pixel_format();
 			let p010 = fmt == PIX_X420 || fmt == PIX_XF20;
-			let full = fmt == PIX_420F || fmt == PIX_XF20;
+			let full = fmt == PIX_420F || fmt == PIX_XF20 || fmt == PIX_444F;
 			let (fy, fc) = if p010 {
 				(MTLPixelFormat::R16Unorm, MTLPixelFormat::RG16Unorm)
 			} else {

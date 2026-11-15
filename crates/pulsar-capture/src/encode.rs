@@ -33,7 +33,8 @@
 //!   nvidia_bgra BGRA (plain, MiscFlags:0)                [NVIDIA device]
 //!        │  ID3D11VideoProcessorBlt  (BGRA → NV12, one GPU call; scales if needed)
 //!        ▼
-//!   nv12_tex NV12 (DEFAULT, BIND_RENDER_TARGET)          [NVIDIA device]
+//!   input_tex NV12 (DEFAULT, BIND_RENDER_TARGET)         [NVIDIA device]
+//!            (a 4:4:4 stream: BGRA that NVENC converts — d3d::InputFormat)
 //!        │  nvEncMapInputResource → nvEncEncodePicture (SYNC, no B-frames)
 //!        ▼
 //!   NVENC H.264 (preset P1 / tune ULL / CBR, repeatSPSPPS) → bitstream buffer
@@ -109,6 +110,9 @@ pub(crate) mod nvenc;
 mod nvsession;
 // GPU-free encoder decisions (reference-buffer depth, RFI vs keyframe, keyframe schedule).
 mod policy;
+// The capture loop decides by the encode size whether to ask for 4:4:4 at all.
+#[cfg(windows)]
+pub(crate) use policy::yuv444_fits;
 #[cfg(windows)]
 mod submit;
 
@@ -285,6 +289,10 @@ pub struct EncParams {
 	/// and the metadata on every keyframe. `None` = the SDR NV12 path, unchanged. Only the
 	/// same-device NVENC path takes it (no hybrid bridge, not Media Foundation).
 	pub hdr: Option<crate::hdr::HdrMeta>,
+	/// 4:4:4 chroma (the client decodes it): NVENC H.264 High 4:4:4 / HEVC RExt where the GPU
+	/// encodes it, else 4:2:0 on the same path. The Media Foundation encoder is 4:2:0 only.
+	/// An HDR10 stream (`hdr` set) is 4:2:0 (P010): HDR wins.
+	pub yuv444: bool,
 }
 
 /// The SEI NAL that tags an RFI recovery frame (user_data_unregistered with

@@ -152,6 +152,14 @@ impl Plan {
 		Plan { key, first, probe: false, queue: Vec::new() }
 	}
 
+	/// This plan for a stream only NVENC can encode (4:4:4): never the display GPU's Media
+	/// Foundation encoder, and nothing measured or cached. A cached or first-to-measure
+	/// `DxgiMf` becomes WGC (the expected NVENC winner on a hybrid host, see `plan`).
+	pub(crate) fn nvenc_only(self) -> Self {
+		let first = if self.first.is_mf() { MonSource::Wgc } else { self.first };
+		Plan { key: self.key, first, probe: false, queue: Vec::new() }
+	}
+
 	/// A path of the probe could not be built: measure the next one instead (Some), or — none
 	/// left — finish with what was measured.
 	pub(crate) fn skip(&mut self, results: &mut Vec<(MonSource, Score)>, next: &mut Option<MonSource>) -> Option<MonSource> {
@@ -472,6 +480,17 @@ mod tests {
 		let clear = Score { p50_us: 1500, p90_us: 1700 };
 		assert_eq!(decide(&[(MonSource::Dxgi, nv), (MonSource::DxgiMf, close)]), MonSource::Dxgi);
 		assert_eq!(decide(&[(MonSource::Dxgi, nv), (MonSource::DxgiMf, clear)]), MonSource::DxgiMf);
+	}
+
+	/// A 4:4:4 stream never lands on the Media Foundation encoder, and measures nothing.
+	#[test]
+	fn a_444_stream_stays_on_nvenc() {
+		let probe = Plan { key: "k".into(), first: MonSource::Wgc, probe: true, queue: vec![MonSource::Dxgi, MonSource::DxgiMf] };
+		let p = probe.nvenc_only();
+		assert_eq!((p.first, p.probe, p.queue.len()), (MonSource::Wgc, false, 0));
+		assert_eq!(Plan::fixed("k".into(), MonSource::DxgiMf).nvenc_only().first, MonSource::Wgc);
+		assert_eq!(Plan::fixed("k".into(), MonSource::Dxgi).nvenc_only().first, MonSource::Dxgi);
+		assert_eq!(Plan::none().nvenc_only().first, MonSource::Dxgi);
 	}
 
 	/// A path that can't be built is skipped; the last one finishes the probe.

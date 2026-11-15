@@ -74,6 +74,12 @@ fn main() {
 		println!("{}", decode::probe_json());
 		return;
 	}
+	// `--probe-444`: the codecs a 4:4:4 stream decodes AND presents in here, with the measured
+	// software decode speed (only asked for when 4:4:4 is wanted — see `decode::probe_444_json`).
+	if std::env::args().any(|a| a == "--probe-444") {
+		println!("{}", decode::probe_444_json());
+		return;
+	}
 	apply_lang();
 	linux::run();
 }
@@ -87,6 +93,12 @@ fn main() {
 		println!("{}", win::decode::probe_json());
 		return;
 	}
+	// `--probe-444`: the codecs a 4:4:4 stream decodes AND presents in here (real decodes on a
+	// hardware D3D11 device; only asked for when 4:4:4 is wanted — see `probe_444_json`).
+	if std::env::args().any(|a| a == "--probe-444") {
+		println!("{}", win::decode::probe_444_json());
+		return;
+	}
 	apply_lang();
 	win::run();
 }
@@ -97,6 +109,12 @@ fn main() {
 	// Windows / Linux probes.
 	if std::env::args().any(|a| a == "--probe") {
 		println!("{}", mac::decode::probe_json());
+		return;
+	}
+	// `--probe-444`: the codecs VideoToolbox decodes into a 4:4:4 picture here (only asked for
+	// when 4:4:4 is wanted — see `probe_444_json`).
+	if std::env::args().any(|a| a == "--probe-444") {
+		println!("{}", mac::decode::probe_444_json());
 		return;
 	}
 	apply_lang();

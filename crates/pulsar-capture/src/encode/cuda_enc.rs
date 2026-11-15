@@ -211,6 +211,7 @@ impl NvencCuda {
 			init_params,
 			enc_config,
 			rfi,
+			yuv444: _,
 			intra_refresh,
 			dpb,
 			gop,
@@ -233,6 +234,9 @@ impl NvencCuda {
 				// No Linux capture delivers HDR pixels (x11grab / PipeWire hand over 8-bit), so
 				// the Linux SDK encoder stays 8-bit SDR (docs/agents/host-encode.md, HDR).
 				hdr: false,
+				// The Linux CUDA encoder takes NV12 frames from libavfilter: 4:2:0 only (a 4:4:4
+				// request takes the host's ffmpeg path, which feeds yuv444p).
+				yuv444: false,
 			},
 		)?;
 

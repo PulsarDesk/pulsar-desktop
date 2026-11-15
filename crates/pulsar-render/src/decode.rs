@@ -43,6 +43,11 @@ const TEST_NVENC_H264: &[u8] = include_bytes!("../testdata/test-nvenc.h264");
 const TEST_NVENC_H265: &[u8] = include_bytes!("../testdata/test-nvenc.h265");
 const TEST_NVENC_AV1: &[u8] = include_bytes!("../testdata/test-nvenc.av1.ivf");
 
+// Canned 4:4:4 keyframes (H.264 High 4:4:4 / HEVC RExt, same 320×180 testsrc2; see
+// testdata/README.md): `select_yuv444` decodes them before the app may ask a host for 4:4:4.
+const TEST_444_H264: &[u8] = include_bytes!("../testdata/test-444.h264");
+const TEST_444_H265: &[u8] = include_bytes!("../testdata/test-444.h265");
+
 /// One probe sample: the encoder family it represents and the raw bitstream. `family`
 /// is empty for the baseline/conformant fixture (a generic correctness check) and an
 /// encoder wire-id (`nvenc`) for a family-specific real-world sample.
@@ -610,6 +615,184 @@ pub fn select_skipping(codec_id: ff::AVCodecID, skip: &[String]) -> Option<Probe
 		}
 	}
 	None
+}
+
+/// The decoder for a **4:4:4** stream of `codec_id`: libavcodec in software, validated on the
+/// canned 4:4:4 keyframe. Its yuv444p goes through the planar GL upload (`video.rs`) like any
+/// software frame. The hardware tiers are left out on purpose: VAAPI hands 4:4:4 over as
+/// packed VUYX/XV30 surfaces the dmabuf import and the NV12 readback cannot show, and the
+/// CUDA↔GL interop copies NV12 only — a 4:4:4 stream there was a black screen until the
+/// zero-output fallback walked down to software. `None`: no 4:4:4 fixture for this codec (AV1)
+/// or no software decoder in this libavcodec. Only H.264 / HEVC.
+///
+/// This validates (writes the fixture, decodes it); the decode thread uses the per-process
+/// cache [`yuv444_decoder`] instead.
+pub fn select_yuv444(codec_id: ff::AVCodecID) -> Option<Probed> {
+	let path = fixture_444(codec_id)?;
+	unsafe {
+		for cand in candidates(codec_id).into_iter().filter(|c| c.tier == Tier::Software) {
+			if !validate(&cand, &path) {
+				eprintln!("pulsar-render: decoder {} failed the 4:4:4 validation", cand.name);
+				continue;
+			}
+			return Some(Probed {
+				sel: Selected {
+					name: cand.name,
+					tier: cand.tier,
+					hwdev: cand.hwdev,
+					hw_fmt: cand.hw_fmt,
+					node: cand.node,
+					zero_copy: cand.zero_copy,
+				},
+				incompatible_with: Vec::new(),
+			});
+		}
+	}
+	None
+}
+
+/// The canned 4:4:4 keyframe of `codec_id` written to its temp file (H.264 / HEVC only).
+fn fixture_444(codec_id: ff::AVCodecID) -> Option<std::path::PathBuf> {
+	let (bytes, ext) = match codec_id {
+		ff::AVCodecID::AV_CODEC_ID_H264 => (TEST_444_H264, "h264"),
+		ff::AVCodecID::AV_CODEC_ID_HEVC => (TEST_444_H265, "h265"),
+		_ => return None,
+	};
+	write_fixture(&Fixture { family: "444", bytes, ext })
+}
+
+/// The software 4:4:4 decoder for `codec_id` ([`select_yuv444`]), validated ONCE per process
+/// and cached. The decode thread asks at a 4:4:4 keyframe: re-validating there (temp file +
+/// avformat open + a full decode) delayed the session's first picture, and again after every
+/// GL-context-loss reopen. `video.rs` warms it before the stream's first keyframe when 4:4:4
+/// is wanted (`PULSAR_YUV444`) — on the decode thread itself, never concurrently with a
+/// decoder open (the validation sets the process-wide wanted hw format).
+pub fn yuv444_decoder(codec_id: ff::AVCodecID) -> Option<Selected> {
+	static H264: std::sync::OnceLock<Option<Selected>> = std::sync::OnceLock::new();
+	static HEVC: std::sync::OnceLock<Option<Selected>> = std::sync::OnceLock::new();
+	let cell = match codec_id {
+		ff::AVCodecID::AV_CODEC_ID_H264 => &H264,
+		ff::AVCodecID::AV_CODEC_ID_HEVC => &HEVC,
+		_ => return None,
+	};
+	cell.get_or_init(|| select_yuv444(codec_id).map(|p| p.sel)).clone()
+}
+
+/// Headroom between the measured single-thread 4:4:4 decode speed and the pixel rate the app
+/// may ask a host for: the frame budget must also hold the three-plane GL upload and stream
+/// frames that cost more than the fixture's.
+const YUV444_DECODE_MARGIN: f64 = 2.0;
+
+/// Below this usable pixel rate (720p30) 4:4:4 is not offered at all: such a CPU keeps no
+/// session we stream in real time (e.g. an ARM board whose 4:2:0 runs on its rkmpp block).
+const YUV444_MIN_PX_S: u64 = 1280 * 720 * 30;
+
+/// Software decode speed of `sel` on the canned 4:4:4 keyframe at `fixture`, in pixels/s, on
+/// ONE thread — what a real stream gets: `open_decoder` threads by slice only, and NVENC writes
+/// one slice per picture. An intra picture at ~0.6 bit/pixel is a pessimistic stand-in for a
+/// stream's average frame. Decodes for ~150 ms after a short warm-up. `None`: nothing decoded.
+unsafe fn sw_decode_px_per_s(sel: &Selected, codec_id: ff::AVCodecID, fixture: &std::path::Path) -> Option<f64> {
+	let cpath = CString::new(fixture.to_string_lossy().as_bytes()).ok()?;
+	let mut fmt: *mut ff::AVFormatContext = ptr::null_mut();
+	if ff::avformat_open_input(&mut fmt, cpath.as_ptr(), ptr::null_mut(), ptr::null_mut()) < 0 {
+		return None;
+	}
+	let mut rate = None;
+	'done: {
+		if ff::avformat_find_stream_info(fmt, ptr::null_mut()) < 0 {
+			break 'done;
+		}
+		let vs = ff::av_find_best_stream(fmt, ff::AVMediaType::AVMEDIA_TYPE_VIDEO, -1, -1, ptr::null_mut(), 0);
+		if vs < 0 {
+			break 'done;
+		}
+		let st = *(*fmt).streams.add(vs as usize);
+		let dec = find_decoder(sel, codec_id);
+		if dec.is_null() {
+			break 'done;
+		}
+		let mut dc = ff::avcodec_alloc_context3(dec);
+		if dc.is_null() {
+			break 'done;
+		}
+		ff::avcodec_parameters_to_context(dc, (*st).codecpar);
+		(*dc).flags |= ff::AV_CODEC_FLAG_LOW_DELAY as c_int;
+		(*dc).thread_count = 1;
+		let mut pkt = ff::av_packet_alloc();
+		let mut key = ff::av_packet_alloc();
+		let mut frame = ff::av_frame_alloc();
+		if !pkt.is_null() && !key.is_null() && !frame.is_null() && ff::avcodec_open2(dc, dec, ptr::null_mut()) >= 0 {
+			// The fixture's first video packet: its keyframe (parameter sets in-band).
+			let mut have = false;
+			while ff::av_read_frame(fmt, pkt) >= 0 {
+				if (*pkt).stream_index == vs && !have {
+					have = ff::av_packet_ref(key, pkt) >= 0;
+				}
+				ff::av_packet_unref(pkt);
+			}
+			if have {
+				const WARMUP: u32 = 3;
+				let mut t0: Option<std::time::Instant> = None;
+				let mut px = 0f64;
+				for i in 0..2000u32 {
+					if i == WARMUP {
+						t0 = Some(std::time::Instant::now());
+						px = 0.0;
+					}
+					if ff::avcodec_send_packet(dc, key) < 0 {
+						break;
+					}
+					while ff::avcodec_receive_frame(dc, frame) == 0 {
+						px += f64::from((*frame).width.max(0)) * f64::from((*frame).height.max(0));
+						ff::av_frame_unref(frame);
+					}
+					if t0.is_some_and(|t| t.elapsed() >= std::time::Duration::from_millis(150)) {
+						break;
+					}
+				}
+				if let Some(t) = t0 {
+					let s = t.elapsed().as_secs_f64();
+					if px > 0.0 && s > 0.0 {
+						rate = Some(px / s);
+					}
+				}
+			}
+		}
+		ff::av_packet_free(&mut pkt);
+		ff::av_packet_free(&mut key);
+		ff::av_frame_free(&mut frame);
+		ff::avcodec_free_context(&mut dc);
+	}
+	ff::avformat_close_input(&mut fmt);
+	rate
+}
+
+/// `--probe-444` (main.rs): the codecs a 4:4:4 stream decodes AND presents in here, as
+/// `[{"codec":"h265","max_px_s":N}]`. Only libavcodec in software shows 4:4:4 on Linux
+/// ([`select_yuv444`]), on one thread, so each entry carries the pixel rate (w×h×fps) it keeps
+/// up with — measured, divided by [`YUV444_DECODE_MARGIN`] — and the app asks for 4:4:4 only
+/// for a session within it; a CPU under [`YUV444_MIN_PX_S`] gets no entry (in practice the
+/// RK3588 boards, whose 4:2:0 runs on rkmpp). Separate from `--probe`: the app runs it only
+/// when 4:4:4 is wanted (`PULSAR_YUV444`), under its own timeout.
+pub fn probe_444_json() -> String {
+	let mut entries = Vec::new();
+	for (label, id) in [("h264", ff::AVCodecID::AV_CODEC_ID_H264), ("h265", ff::AVCodecID::AV_CODEC_ID_HEVC)] {
+		let Some(p) = select_yuv444(id) else { continue };
+		let Some(path) = fixture_444(id) else { continue };
+		let measured = unsafe { sw_decode_px_per_s(&p.sel, id, &path) }.unwrap_or(0.0);
+		let max_px_s = (measured / YUV444_DECODE_MARGIN) as u64;
+		eprintln!(
+			"pulsar-render: 4:4:4 {label} in software ({}): {:.0} Mpx/s on one thread, offered up to {:.0} Mpx/s",
+			p.sel.name,
+			measured / 1e6,
+			max_px_s as f64 / 1e6
+		);
+		if max_px_s < YUV444_MIN_PX_S {
+			continue;
+		}
+		entries.push(format!(r#"{{"codec":"{label}","max_px_s":{max_px_s}}}"#));
+	}
+	format!("[{}]", entries.join(","))
 }
 
 /// Resolve a Selected back to its AVCodec for opening the real stream context.
