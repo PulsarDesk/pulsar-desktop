@@ -1219,10 +1219,14 @@ pub(crate) async fn start_remote_play(
 		None => 0.0,
 	};
 	let wan_like = link.is_mobile() || path_class != crate::adapt_memory::PathClass::Lan || start_rtt_ms >= 30.0;
-	// OFF by default (opt-in PULSAR_IR=1) since its first real tether session (2026-11-15):
-	// with holes dropped fast on IR the Windows renderer froze every few seconds ("AU burst of
-	// 8 — presenting the newest only"), the same decoder stall IR showed on 2026-11-08. RFI
-	// heals the dropped holes instead until IR is fixed and re-measured.
+	// OFF by default (opt-in PULSAR_IR=1) since its first real tether session (2026-11-15): the
+	// picture froze for good after the first unrepaired hole. Cause (reproduced headless the
+	// same day): the Media Foundation HEVC decoder outputs nothing once a reference is missing,
+	// and an intra-refreshed stream never sends the IDR that would restart it. The renderer now
+	// feeds it stand-ins for the skipped pictures (pulsar-render stream/hevc.rs) and asks for a
+	// keyframe if it stalls anyway; measured headless on the tether pattern IR then beats RFI
+	// (4 % vs 12 % of the time in >100 ms gaps). Back on by default once a PULSAR_IR=1 session
+	// over the real link (NVENC HEVC) confirms it.
 	let ir_bad_link = match std::env::var("PULSAR_IR").as_deref() {
 		Ok("1") => cfg!(windows) && game_mode && mos && host_ir && wan_like && codec_h != "av1",
 		_ => false,

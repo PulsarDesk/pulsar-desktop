@@ -316,9 +316,35 @@ side (stall vs congestion, mobile start, adaptive off): pulsar-core `docs/adapti
 - **Intra refresh on a bad link** (`play.rs` `ir_bad_link`): a Windows game session over WAN /
   mobile / start RTT ≥ 30 ms to a host advertising `FEAT_IR` (NVENC SDK) starts in
   `LossRecovery::IntraRefresh` — the wave heals a loss, no keyframe; the renderer gets `ir 1`
-  and `rfi 0` (NVENC turns RFI off under IR anyway). LAN keeps RFI. `PULSAR_IR=0|1` overrides.
-  The 2026-11-08 IR overflow (`stream/rtp.rs` `IR_MODE`) came from the reorder burst — the fast
-  drop below keeps that burst away; re-measure on the field link.
+  and `rfi 0` (NVENC turns RFI off under IR anyway). LAN keeps RFI. **Opt-in (`PULSAR_IR=1`)
+  since 8336dd2**: its first tether session froze for good after the first unrepaired hole —
+  see "IR / RFI freezes" below; back on by default once a real-link session confirms the fix.
+- **IR / RFI freezes on the tether (fix/ir-freeze, reproduced headless 2026-11-15)**:
+  - *HEVC + intra refresh*: the Media Foundation HEVC decoder MFT outputs NOTHING once a
+    reference is missing — every later AU in, no picture out, until an IDR an IR stream never
+    sends (x265 IR variants with/without TMVP, ref 1–3, recovery-point SEI: all the same; H.264
+    conceals). Fix: `stream/hevc.rs` `Conceal` — on an IR resume the depacketizer queues, per
+    skipped picture order count, a stand-in (the last picture's slices with the missing
+    `slice_pic_order_cnt_lsb` patched in; `take_stand_ins`, `AccessUnit.conceal` = decode, never
+    show). Windows only (`rtp::HEVC_CONCEAL`). Safety net: `recovery::DecodeStall` — 6 AUs over
+    250 ms without a picture → `vidsink-needidr` (re-asked ≤ 1/s); the 45-AU zero-output decoder
+    rebuild asks for an IDR too (it waited for one forever on an IR stream).
+  - *RFI on a reordering path*: a hole was reported after a fixed 3 ms, so every packet the
+    tether delivered 5–60 ms late became an invalidation + recovery frame, and release-at-tag
+    then skipped past packets still in flight (reordering turned into loss): 11–13 fps, 0.5–1 s
+    freezes with ZERO loss. Now `Reorder::report_after` = 1.25 × the observed reorder lateness
+    (peak, halves every 2 s; 3–100 ms; a hole given up on is reported at once, only the head
+    hole), release-at-tag skips reported holes only, the recovery wait is
+    max(150 ms, 1.5 RTT + 50 ms).
+  - Harness (scratch, not in the repo): pre-encoded x264/x265 IR clips → Python RTP sender with
+    the host's packetizing + RFI tag / IDR answers → impairment (20 % of packets 5–60 ms late,
+    0.75 loss bursts/s of 10–40 packets, optional 600 ms stalls) → pulsar-render off-screen with
+    `PULSAR_FRAMELOG=1` (`fl a|d|s|h` lines) → longest gap between presented pictures. Before →
+    after, 30 s each: HEVC IR permanent freeze → 50 fps, max gap 190 ms, 4 % of the time in
+    >100 ms gaps; H.264 RFI 13 → 51 fps, max 660 → 316 ms, 61 → 12 %; reorder-only RFI 12.5 →
+    57.5 fps, max 513 → 73 ms; LAN unchanged (60 fps, 20 ms). RFI keeps a freeze of report +
+    RTT per lost hole (it drops the frames up to the recovery frame); IR shows a concealed,
+    healing picture instead.
 - **Fast drop** (`hold.rs` `fast_drop_on` / `fast_drop_wait_ms`): game mode, median RTT ≥ 35 ms
   (off < 25), RFI or IR → the renderer's `maxdelay` is the reorder / FEC wait + one frame + 10 ms
   (30–80 ms) instead of the RTT-based repair window, the sweep writes holes off at the same
