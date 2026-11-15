@@ -1578,6 +1578,11 @@ pub(super) async fn hold_session(
 					// A menu re-request (esp. a monitor switch) → the host rebuilds its encoder
 					// (a brief gap). Mark it so the adaptive controller ignores that gap's loss.
 					last_switch_at = std::time::Instant::now();
+					// What makes the host rebuild its encoder (a fresh RTP sequence base).
+					let encoder_key = |w: u32, h: u32, fps: u32, codec: &str, enc: &str, disp: u32, win: Option<i64>, adapt: Option<(u32, u32)>| {
+						(w, h, fps, codec.to_owned(), enc.to_owned(), disp, win, adapt)
+					};
+					let before = encoder_key(cur_w, cur_h, cur_fps, &cur_codec, &cur_encoder, cur_display, cur_window, cur_adapt);
 					match cmd {
 						// An explicit size pins the ladder's resolution; (0, 0) = "Otomatik"
 						// hands it back to the controller (which re-picks for its target).
@@ -1746,6 +1751,14 @@ pub(super) async fn hold_session(
 					tracing::info!(display_idx = cur_display, ok = rs.is_ok(), "restream request_stream sent");
 					if rs.is_err() {
 						break;
+					}
+					// The host rebuilds its encoder on a fresh RTP base: forget the old stream's
+					// gaps / FEC state and frame clock now (the mobile client does the same). The
+					// seq-jump detection alone misses a new base that lands close to the old one —
+					// bogus gaps, NACKs and counted loss.
+					if encoder_key(cur_w, cur_h, cur_fps, &cur_codec, &cur_encoder, cur_display, cur_window, cur_adapt) != before {
+						repair_st.reset_stream();
+						frame_clock.reset();
 					}
 				}
 				None => {}
