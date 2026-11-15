@@ -376,6 +376,11 @@ pub fn start_decode(sdp_path: &str) {
 	}
 	let sdp = CString::new(sdp_path).unwrap();
 	std::thread::spawn(move || {
+		// The decode thread at nice -5 (usually inherited from the render main thread already):
+		// libavcodec opens one slice thread per core for software HEVC / AV1 and they inherit
+		// it, so -10 here would let a decode burst crowd out the compositor (see main.rs
+		// boost_process). The RTP thread it starts raises itself to -10.
+		let _prio = pulsar_prio::boost_current_thread(pulsar_prio::Role::Decode);
 		let mut sdp = sdp;
 		loop {
 			unsafe { decode_once(&sdp) };
@@ -622,6 +627,9 @@ unsafe fn open_rtp(path: &str, name: &str) -> Option<Source> {
 	let thread = std::thread::Builder::new()
 		.name("pulsar-rtp".into())
 		.spawn(move || {
+			// RTP intake at nice -10 (usually inherited already; explicit so it never depends on
+			// which thread opened the source).
+			let _prio = pulsar_prio::boost_current_thread(pulsar_prio::Role::Network);
 			// Rate limit for `vidsink-needidr` (at most 2/s, the Windows renderer's cadence).
 			let mut last_needidr = std::time::Instant::now() - std::time::Duration::from_secs(1);
 			// Overflow lines at most once per 2 s, with counts (one per AU flooded the log).

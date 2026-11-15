@@ -25,6 +25,13 @@ pulsar-desktop/
   crates/pulsar-machine/  # Linux/macOS shared (machine-wide) mode plumbing: root-owned
                           #   machine dir checks, admin group, flock host lease, session
                           #   active, pkexec/osascript setup (libc only; mac-checkable).
+  crates/pulsar-prio/     # session scheduling on every OS: per-thread boosts (Windows
+                          #   priority + MMCSS, macOS QoS, Linux nice via setpriority/rtkit),
+                          #   process opt-outs (EcoQoS, App Nap), tokio worker hook, media
+                          #   children. Never realtime classes. `PULSAR_PRIO=0` = off.
+                          #   Linux: rtkit only for media threads/children (6/20 s budget,
+                          #   fire-and-forget), workers setpriority only; nice does not cross
+                          #   cgroups (a game in its own systemd scope is not outranked).
   src-tauri/              # `pulsar-tauri` crate (bin name `pulsar`)
     src/lib.rs            #   command registration / glue
     src/host.rs,host/     #   host side; handlers.rs = capture/encode/audio spawn

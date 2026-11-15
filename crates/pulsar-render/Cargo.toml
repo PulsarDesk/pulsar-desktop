@@ -44,6 +44,9 @@ socket2 = "0.6"
 # cursorless KMS video. `png` only (no full `image`): the payload is always our own
 # tiny RGBA8 PNG (cursors ≤ 64 px).
 png = "0.18"
+# Decode / present / RTP-receive thread priority + process opt-outs (EcoQoS, App Nap, DWM MMCSS)
+# on every OS (main.rs, the per-backend receive threads).
+pulsar-prio = { path = "../pulsar-prio" }
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 egui_glow = { version = "0.37", default-features = false }

@@ -26,6 +26,34 @@ fn apply_lang() {
 	}
 }
 
+/// Scheduling boosts for the whole life of this process — it only runs while a session shows
+/// video (hidden-gaps 1.14: decode / present / receive ran at the default priority on every OS).
+/// The process opts out of EcoQoS / power throttling (Windows) and App Nap (macOS); the main
+/// thread, which decodes and presents on Windows and macOS, takes the `Present` level (Windows
+/// HIGHEST + MMCSS "Games", macOS QoS user-interactive). On Linux it runs the GL present loop
+/// and creates the GL / EGL context (Mesa / driver worker threads, on every core, inherit its
+/// nice value) and then starts the decode thread (inheriting it too): `Decode`, nice -5, so
+/// those threads never crowd out the compositor. Windows also lets DWM schedule its
+/// composition with MMCSS (Moonlight's d3d11va does the same). The receive / decode threads
+/// boost themselves where they start. `PULSAR_PRIO=0` turns it off.
+#[cfg(any(windows, unix))]
+fn boost_process() -> (pulsar_prio::Session, pulsar_prio::ThreadBoost) {
+	let session = pulsar_prio::session();
+	let dwm = pulsar_prio::enable_dwm_mmcss();
+	#[cfg(all(unix, not(target_os = "macos")))]
+	let role = pulsar_prio::Role::Decode;
+	#[cfg(not(all(unix, not(target_os = "macos"))))]
+	let role = pulsar_prio::Role::Present;
+	let main = pulsar_prio::boost_current_thread(role);
+	eprintln!(
+		"pulsar-render: priority: present thread {}, process [{}]{}",
+		main.how(),
+		pulsar_prio::session_report(),
+		if dwm { ", dwm mmcss" } else { "" }
+	);
+	(session, main)
+}
+
 #[cfg(all(unix, not(target_os = "macos")))]
 mod decode;
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -73,6 +101,7 @@ fn main() {
 		return;
 	}
 	apply_lang();
+	let _prio = boost_process();
 	linux::run();
 }
 
@@ -86,6 +115,7 @@ fn main() {
 		return;
 	}
 	apply_lang();
+	let _prio = boost_process();
 	win::run();
 }
 
@@ -98,6 +128,7 @@ fn main() {
 		return;
 	}
 	apply_lang();
+	let _prio = boost_process();
 	mac::run();
 }
 

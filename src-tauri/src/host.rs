@@ -127,7 +127,13 @@ use handlers::{make_on_audio, make_on_file, make_on_stream};
 /// for hundreds of ms — measured entering/leaving a game: a 370 ms hole in the video, then
 /// 17–19 frames at once, RTT 584–934 ms, the bitrate cut to a third. Sunshine runs at HIGH for
 /// the same reason. Back to NORMAL when the last session ends. (Child encoders don't inherit
-/// it; the WebView2 UI is separate processes.)
+/// it — `pulsar_prio::boost_child` raises them to ABOVE_NORMAL; the WebView2 UI is separate
+/// processes.) macOS / Linux have no process-wide class an unprivileged app may raise: there the
+/// session's threads are raised one by one (crates/pulsar-prio: QoS / nice via setpriority or
+/// rtkit), and the per-session `pulsar_prio::session()` guard covers the async workers on every
+/// OS. Linux caveat: nice only weighs threads inside one CPU cgroup / autogroup, so where the
+/// desktop puts the game in its own systemd scope it does not put the host above the game
+/// (see the crate docs).
 fn hosting_priority(on: bool) {
 	#[cfg(windows)]
 	{
@@ -2890,6 +2896,11 @@ pub(crate) async fn bring_online(
 						on_stream(req, addr)
 					}
 				};
+				// Session scheduling on every OS (crates/pulsar-prio, hidden-gaps 1.13): Windows
+				// EcoQoS / ignored-timer opt-out, macOS App Nap opt-out, and the async workers that
+				// run the forwarder, the wire pacer and the session loop raised while it streams.
+				let _prio = pulsar_prio::session();
+				tracing::info!(process = %pulsar_prio::session_report(), "host session priority on");
 				let _cleanup_guard = SessionCleanupGuard {
 					procs: procs.clone(),
 					proc_epoch: proc_epoch.clone(),

@@ -2435,6 +2435,9 @@ unsafe fn event_loop(
 		let q = queue.clone();
 		let stop2 = stop.clone();
 		std::thread::spawn(move || {
+			// RTP intake at THREAD_PRIORITY_HIGHEST: a late wake here is added straight to the
+			// glass-to-glass delay and lets the socket buffer fill on an IDR burst.
+			let _prio = pulsar_prio::boost_current_thread(pulsar_prio::Role::Network);
 			stream::rtp::recv_loop(
 				port,
 				codec,

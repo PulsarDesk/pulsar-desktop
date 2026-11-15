@@ -650,6 +650,12 @@ pub(super) async fn hold_session(
 	// The host injects the mouse side buttons (`FEAT_MOUSE_X`, see `host_takes`).
 	host_mouse_x: bool,
 ) {
+	// Client scheduling while this session runs (crates/pulsar-prio, hidden-gaps 1.14): the
+	// session read loop and this receive / forward loop are tokio tasks, and the runtime's
+	// workers run raised while a session is on (Windows ABOVE_NORMAL, macOS QoS
+	// user-initiated, Linux nice -5); EcoQoS (Windows) and App Nap (macOS) are off for the app.
+	let _prio = pulsar_prio::session();
+	tracing::info!(process = %pulsar_prio::session_report(), "client session priority on");
 	// A relayed session keeps punching in the background (core `punch_in_background`) and may
 	// upgrade to a direct path mid-stream; the adaptive rate then starts over on it.
 	let mut on_relay = matches!(sess.transport(), pulsar_core::Transport::Relay);

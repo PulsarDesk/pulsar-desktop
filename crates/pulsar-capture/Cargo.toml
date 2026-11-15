@@ -31,6 +31,8 @@ rand.workspace = true
 # buffer absorbs the keyframe/IDR packet burst so a blocking send() never stalls the
 # capture thread (the ~110 ms periodic delivery gap — "fix B"). Already in the lock.
 socket2 = "0.6"
+# Thread priority of the RTP sender on every OS (rtp.rs).
+pulsar-prio = { path = "../pulsar-prio" }
 
 # Windows GPU stack (DXGI duplication + D3D11 + high-res pacing). `windows` 0.62, same as
 # pulsar-render (pulsar-core still pins 0.59 — a separate copy; no windows types cross crates).
