@@ -72,17 +72,23 @@ Part of the pulsar-desktop agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
   - `encode_command` evens an odd requested size (`& !1`, at least 2×2) before it builds any
     `scale=` / `scale_cuda=` / `scale_qsv=` / `-video_size`, as the native paths do — an odd
     4:2:0 frame kills the encoder. Raw NV12 window frames (macOS) keep their exact size.
-  - **Hybrid NVENC on ffmpeg** (`ddagrab`, no zero-copy CUDA map — display on the iGPU): when the
-    request equals the captured output's size (`StreamPlan::capture_size`, from
-    `pulsar_capture::list_displays`) or that size is unknown, ddagrab's D3D11 frame goes straight
-    to NVENC (no scaler). When it differs, the frame is read back once as BGRA and scaled + made
-    NV12 on the NVIDIA GPU (`hwupload_cuda,scale_cuda`) — no CPU swscale. `scale_d3d11` would
-    keep it on the capture GPU, but on the bundled BtbN build it cannot create its output
-    texture (E_INVALIDARG, measured 2026-11-15 on the RTX 3080 Laptop and on the Vega iGPU). The
-    same headless measurement (frames uploaded to the Vega's D3D11 device) showed NVENC refusing
-    a D3D11 frame from another vendor's device (`OpenEncodeSessionEx failed: no encode device`).
-    A real ddagrab session on a hybrid panel was not re-run, so whether the direct feed works
-    there today is unverified; the fallback chain moves on when it does not.
+  - **Hybrid NVENC on ffmpeg** (`ddagrab`, no zero-copy CUDA map — display on the iGPU):
+    ddagrab's frame lives on the iGPU's D3D11 device, and NVENC cannot open a session on it —
+    the old "direct D3D11 feed" fails with `OpenEncodeSessionEx failed: no encode device`
+    (measured 2026-11-15 with a real ddagrab of the RTX 3080 Laptop + Vega box's 1920x1200@120
+    panel, h264_nvenc and hevc_nvenc). So the frame is always read back once as BGRA and scaled +
+    made NV12 on the NVIDIA GPU (`hwdownload,format=bgra,hwupload_cuda,scale_cuda`) — no CPU
+    swscale. The request is clamped per axis to the captured output's size
+    (`StreamPlan::capture_size`, from `pulsar_capture::list_displays`), as the native DXGI path's
+    `target_size` does: it never upscales; a request at or above the capture streams the
+    capture's size. Measured on that panel (real ddagrab, `-t 8`, 120 fps, h264_nvenc p1/ull):
+    960/960 frames at 1920x1200, 1600x1000 and 1280x800, ~0.3-0.4 CPU core. Synthetic per-step
+    cost at 1920x1200 (a lavfi frame on the Vega's D3D11 device, no capture limit): readback
+    ~3 ms, CUDA upload + scale_cuda + NVENC ~4 ms per frame — the chain keeps 120 fps but costs a
+    few ms of latency the zero-copy branch and the native capture paths (DXGI/WGC + NVENC SDK,
+    first on Windows) do not pay. `scale_d3d11` would keep the frame on the capture GPU, but on
+    the bundled BtbN build it cannot create its output texture (E_INVALIDARG, measured
+    2026-11-15 on the RTX 3080 Laptop and on the Vega iGPU).
 - **Wayland (KDE/GNOME)** — pulsar-core `capture` (Linux-only module): XDG
   ScreenCast portal (`ashpd`) → PipeWire → **in-process** GStreamer
   (`pipewiresrc ! queue leaky=downstream ! <encoder> name=venc ! rtph26xpay`;
@@ -140,6 +146,11 @@ Host column = what `auto` resolves to, in fallback order (each step falls back t
 | Linux X11 | Intel / AMD | ffmpeg CLI `*_vaapi` / `*_vulkan` (the in-process libav engine does x264/x265/SVT-AV1/NVENC only) → libx264 | hwaccel VA-API / Vulkan / DRM → software |
 | Linux X11 | Rockchip RK3588 | gst `mpph26xenc` (KMS zero-copy when probed) or ffmpeg `*_rkmpp` → x264. **Measured** (Orange Pi 5B) | tier 0 zero-copy `rkmpp` (DRM PRIME) → hwaccel → software. **Measured** (Orange Pi 5B client) |
 | Linux Wayland | any | portal → PipeWire → the gst family `pick_gst` validated (MPP → VA-API → NVIDIA → x264; NVIDIA through the NVENC SDK frame path). No AV1. Not run on hardware since the hardware families were added | same tiered probe as X11 |
+
+Codec negotiation (`play.rs::resolve_codec`): `allowed` = host-encodable ∩ client `ok`; `auto`
+picks av1 > h265 > h264 among the allowed codecs the client probe reports `hw` first, then among
+all allowed ones — e.g. a client with software-only AV1 and hardware HEVC streams HEVC. An
+explicit codec in the set still wins.
 
 Not possible / not done: HDR and 4:4:4 are clamped to SDR 4:2:0 on every GPU-filter ffmpeg path
 (NVENC / QSV `ddagrab`, MF) — `StreamPlan::effective_hdr_yuv444`; the gst families model no AV1

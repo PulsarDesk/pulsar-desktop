@@ -3499,9 +3499,9 @@ pub(super) fn make_on_stream(
 		#[cfg(not(windows))]
 		let ffmpeg_display_idx: u32 = 0;
 		// That output's own size (DXGI desktop coordinates, the order `ddagrab=output_idx`
-		// counts in): the hybrid NVENC ffmpeg branch streams it as-is when the request equals it
-		// and scales on the NVIDIA GPU when it doesn't (`StreamPlan::capture_size`). Off Windows
-		// there is no ddagrab: unused.
+		// counts in): the hybrid NVENC ffmpeg branch clamps the request to it per axis (never
+		// upscales; a request at or above it streams that size) and scales a smaller request on
+		// the NVIDIA GPU (`StreamPlan::capture_size`). Off Windows there is no ddagrab: unused.
 		#[cfg(windows)]
 		let ffmpeg_capture_size = pulsar_capture::list_displays()
 			.into_iter()
