@@ -360,14 +360,31 @@ streams plain BT.709 — before, AMF / software / VA-API re-quantised 8-bit BGRA
 BT.2020 + PQ into the VUI: wrong colours on every client).
 
 Negotiation: the host advertises `FEAT_HDR` (Windows with an NVENC that has HEVC or AV1) and
-`DisplayInfo::hdr` per monitor; the client sets `StreamReq::hdr` only when the Settings switch
-is on, the host has `FEAT_HDR`, the codec is HEVC / AV1 and its renderer probe says `ten_bit`
-(`play.rs::hdr_possible`; `PULSAR_HDR=1` forces). The host still decides per build: an SDR
+`DisplayInfo::hdr` per monitor; the client sets **`StreamReq::hdr10`** only when the Settings
+switch is on, the host has `FEAT_HDR`, the codec is HEVC / AV1 and its renderer probe says
+`ten_bit` for THAT codec (`play.rs::HdrNeg::want`, re-decided in `hold.rs` on every codec
+change; `PULSAR_HDR=1` forces). The host reads only `hdr10` for real HDR: the legacy
+`StreamReq::hdr` bit is what old desktop clients and the mobile app send from a setting alone,
+with no capability check, and an old client given Main10 PQ shows black (Linux) or washed-out
+(Windows) video. New clients send `hdr = false`. The host still decides per build: an SDR
 monitor, H.264, the hybrid cross-adapter bridge or the Media Foundation encoder stream SDR.
+`DisplayInfo::hdr` is informational (logged by the client), not a gate: it is a caps-time
+snapshot, and the host falls back to SDR on its own, so asking costs nothing.
+
+While the native capture streams HDR10 the host sends `DataMsg::HdrMeta { sdr_white_nits,
+peak_nits }` every 2 s (`LiveStats::hdr_reference`: Windows "SDR content brightness" re-read by
+GDI device name, and the monitor's peak). Clients tone-map around that SDR white instead of a
+fixed 203 nits (see client-video.md "HDR10").
+
+Release order (the desktop branch builds only against the pulsar-core branch): push core
+(`StreamReq::hdr10`, `DataMsg::HdrMeta`, `FEAT_HDR`, `DisplayInfo::hdr`) first, then
+`cargo update -p pulsar-core` here and commit that `Cargo.lock` bump with the desktop push.
+pulsar-mobile builds `StreamReq` as a struct literal: its core bump must add `hdr10: false`
+(mobile has no 10-bit decode check yet, so it must not ask for HDR10).
 
 | Host | HDR capture + encode | Why / status |
 | --- | --- | --- |
-| Windows, NVENC, monitor on the NVIDIA GPU (DXGI) or WGC on the NVIDIA device | `DuplicateOutput1(R16G16B16A16_FLOAT)` / WGC `R16G16B16A16Float` (scRGB) → `encode/hdr_conv.rs` (2 pixel-shader passes: BT.709→BT.2020, ×80/10000, PQ, BT.2020 NCL Y'CbCr, limited range → P010 planes; scale + rotation) → NVENC HEVC Main10 / AV1 10-bit (`set_hdr10`: bit depth 10, VUI 9/16/9) → mastering display + content light level on every keyframe (`hdr.rs`: HEVC SEI 137/144, AV1 metadata OBUs, from `DXGI_OUTPUT_DESC1`). Cursor composited linear × SDR white level / 80. HDR on/off mid-stream rebuilds the encoder (`pacing.rs` format check). Failed HDR build → SDR on the same path. Stats label says `HDR10`. | Verified headless on the RTX 3080 laptop host (ignored test `hdr_nvenc_encodes_main10_with_metadata`): ffmpeg reads `hevc (Main 10), yuv420p10le(tv, bt2020nc/bt2020/smpte2084)` + MDCV/CLL side data. GPU conversion checked against the CPU reference on Adreno. **No real HDR monitor captured yet** (the host's monitor state could not be read from the SSH session). |
+| Windows, NVENC, monitor on the NVIDIA GPU (DXGI) or WGC on the NVIDIA device | `DuplicateOutput1(R16G16B16A16_FLOAT)` / WGC `R16G16B16A16Float` (scRGB) → `encode/hdr_conv.rs` (2 pixel-shader passes: BT.709→BT.2020, ×80/10000, PQ, BT.2020 NCL Y'CbCr, limited range → P010 planes; scale + rotation) → NVENC HEVC Main10 / AV1 10-bit (`set_hdr10`: bit depth 10, VUI 9/16/9) → mastering display + content light level on every keyframe (`hdr.rs`: HEVC SEI 137/144, AV1 metadata OBUs, from `DXGI_OUTPUT_DESC1`). Cursor composited linear × SDR white level / 80. Native → encode downscale box-filters each output pixel's footprint in linear light (bilinear taps on ~2×2-texel cells, ≤ 4×4; thin lines do not alias at a 4K → 1080p encode). HDR on/off mid-stream rebuilds capture + encoder: DXGI on the ACCESS_LOST reinit (Reinit and Error arms compare the duplication format), WGC by a ~1 s re-check of the item's monitor (`dxgi/hdr.rs::HdrWatch`: cached factory, re-walked only when `IsCurrent()` is false or the window changed monitor), and the capture thread rebuilds on any frame whose format does not match the encoder (FP16 ⇄ BGRA). Failed HDR build → SDR on the same path. Stats label says `HDR10`. | Verified headless on the RTX 3080 laptop host (ignored test `hdr_nvenc_encodes_main10_with_metadata`): ffmpeg reads `hevc (Main 10), yuv420p10le(tv, bt2020nc/bt2020/smpte2084)` + MDCV/CLL side data. GPU conversion checked against the CPU reference on Adreno. **No real HDR monitor captured yet** (the host's monitor state could not be read from the SSH session). |
 | Windows, hybrid (monitor on the iGPU, DXGI picked) | SDR | the cross-adapter bridge stages 8-bit BGRA through system memory; `path.rs` may pick WGC (then HDR works). Not forced, to stay out of the path measurement. |
 | Windows, AMD / Intel / Snapdragon only (Media Foundation / AMF / QSV via ffmpeg) | SDR | `ddagrab` runs with `output_fmt=bgra`; a 10-bit ddagrab (`x2bgr10`) + a matching swscale BT.2020 conversion + AMF/QSV Main10 would be the way — not built, no hardware to verify. |
 | macOS (ScreenCaptureKit → VideoToolbox) | SDR | SCK is configured for 8-bit NV12; HDR needs macOS 15 `SCStreamConfiguration.captureDynamicRange` + a 10-bit pixel format + VT HEVC Main10 with PQ attachments. Not built (no Mac). |

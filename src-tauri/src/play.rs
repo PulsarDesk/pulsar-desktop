@@ -960,16 +960,17 @@ pub(crate) async fn start_remote_play(
 	// has a 10-bit profile (HEVC / AV1) and this client's renderer decodes it (`ten_bit`) and
 	// can show it (HDR10 output on an HDR monitor, tone-mapped to SDR otherwise). The PULSAR_HDR
 	// env var is a debug override that asks regardless.
-	let hdr_pref = state.stream_cfg.lock().unwrap().hdr;
-	let hdr_ok = hdr_possible(
-		host_caps.features.iter().any(|f| f == pulsar_core::service::media::FEAT_HDR),
-		&codec,
-		probed_decoders.iter().any(|d| d.ok && d.ten_bit && d.codec == codec),
-	);
-	if hdr_pref && !hdr_ok {
-		tracing::info!(%codec, features = ?host_caps.features, "HDR asked in Settings but not possible end to end — SDR stream");
+	// The same decision is re-made in hold.rs whenever the codec changes (HdrNeg::want).
+	let hdr_neg = HdrNeg {
+		pref: state.stream_cfg.lock().unwrap().hdr,
+		host: host_caps.features.iter().any(|f| f == pulsar_core::service::media::FEAT_HDR),
+		ten_bit: probed_decoders.iter().filter(|d| d.ok && d.ten_bit).map(|d| d.codec.clone()).collect(),
+		force: std::env::var_os("PULSAR_HDR").is_some(),
+	};
+	if hdr_neg.pref && !hdr_neg.want(&codec) {
+		tracing::info!(%codec, features = ?host_caps.features, ten_bit = ?hdr_neg.ten_bit, "HDR asked in Settings but not possible end to end — SDR stream");
 	}
-	let req_hdr = (hdr_pref && hdr_ok) || std::env::var_os("PULSAR_HDR").is_some();
+	let req_hdr = hdr_neg.want(&codec);
 	// Quality bias from the Settings â†’ Display 'VarsayÄ±lan kalite' control (ui.quality).
 	// "hq" â†’ Quality, "fast" â†’ Latency; "auto" (or absent) defers to the mode-natural default
 	// (game=Latency, remote=Quality). Also seeded into hold_session so re-requests (adaptive
@@ -1348,6 +1349,13 @@ pub(crate) async fn start_remote_play(
 		req_w, req_h, req_fps, req_kbps,
 		"adaptive controller seeded"
 	);
+	// The host's per-monitor HDR state (`DisplayInfo::hdr`) is logged, not used as a gate: it
+	// is a caps-time snapshot (the user can turn HDR on after connecting), and a host asked for
+	// HDR10 from an SDR monitor streams SDR on its own, so asking costs nothing.
+	if req_hdr {
+		let mon_hdr = host_caps.displays.iter().find(|d| d.idx == display_idx.unwrap_or(0)).map(|d| d.hdr);
+		tracing::info!(%codec, ?mon_hdr, "asking the host for HDR10");
+	}
 	let rfi_req = host_rfi && codec != "av1";
 	let req = StreamReq {
 		port: video_port,
@@ -1370,7 +1378,10 @@ pub(crate) async fn start_remote_play(
 		// 0 = host default; quality: "hq"â†’Quality, "fast"â†’Latency, "auto"/missingâ†’mode-derived default.
 		bitrate_kbps: req_kbps,
 		quality: req_quality,
-		hdr: req_hdr,
+		// Never the legacy bit (an old host could tag an 8-bit capture as PQ on it); real HDR10
+		// only through hdr10, which only hosts with FEAT_HDR read.
+		hdr: false,
+		hdr10: req_hdr,
 		yuv444: std::env::var_os("PULSAR_YUV444").is_some(),
 		// PRUNED set (host-encoder-aware), not raw `client_codecs`: the host clamps its
 		// auto-degraded codec to this, so it can never land on a codec the client dropped
@@ -2181,7 +2192,7 @@ pub(crate) async fn start_remote_play(
 		peer_key,
 		path_class,
 		req.cursor_external,
-		req_hdr,
+		hdr_neg,
 		req_quality,
 		req.audio_quality,
 		auto_audio,
@@ -2534,6 +2545,24 @@ pub(crate) fn resolve_codec(requested: &str, allowed: &[String]) -> String {
 pub(crate) fn hdr_possible(host_hdr: bool, codec: &str, client_ten_bit: bool) -> bool {
 	host_hdr && matches!(codec, "h265" | "av1") && client_ten_bit
 }
+/// What decides StreamReq::hdr10 for a session: the Settings preference, the host's
+/// FEAT_HDR, the codecs this client's renderer really decodes + shows at 10 bits, and the
+/// PULSAR_HDR debug override. Kept for the whole session so a codec change (session menu,
+/// fallback) re-decides HDR for the NEW codec instead of keeping the first codec's answer.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct HdrNeg {
+	pub pref: bool,
+	pub host: bool,
+	pub ten_bit: Vec<String>,
+	pub force: bool,
+}
+
+impl HdrNeg {
+	/// Ask the host for HDR10 on codec?
+	pub(crate) fn want(&self, codec: &str) -> bool {
+		self.force || (self.pref && hdr_possible(self.host, codec, self.ten_bit.iter().any(|c| c == codec)))
+	}
+}
 
 #[cfg(test)]
 mod hdr_tests {
@@ -2546,6 +2575,22 @@ mod hdr_tests {
 		assert!(!hdr_possible(false, "h265", true), "host without FEAT_HDR");
 		assert!(!hdr_possible(true, "h264", true), "no 10-bit H.264 on the host");
 		assert!(!hdr_possible(true, "h265", false), "client cannot decode 10-bit");
+	}
+	#[test]
+	fn a_codec_switch_re_decides_hdr() {
+		use super::HdrNeg;
+		// The client's AV1 decoder failed the 10-bit probe; HEVC passed.
+		let n = HdrNeg { pref: true, host: true, ten_bit: vec!["h265".into()], force: false };
+		assert!(n.want("h265"));
+		assert!(!n.want("av1"), "h265 -> av1 must drop HDR (8-bit-only AV1 decoder)");
+		assert!(!n.want("h264"));
+		// A session that started on h264 asks for HDR after a switch to h265.
+		assert!(!n.want("h264") && n.want("h265"));
+		// Settings off / host without FEAT_HDR: never, whatever the codec.
+		assert!(!HdrNeg { pref: false, ..n.clone() }.want("h265"));
+		assert!(!HdrNeg { host: false, ..n.clone() }.want("h265"));
+		// The debug override asks regardless.
+		assert!(HdrNeg { force: true, pref: false, ..n }.want("h264"));
 	}
 }
 

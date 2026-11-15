@@ -3619,9 +3619,12 @@ pub(super) fn make_on_stream(
 				// `output_idx` is then ignored by the capture crate (WGC tracks a window, not a
 				// monitor). `None` (no window target) => the full-monitor DXGI source, unchanged.
 				window_hwnd: target_hwnd.map(|h| h as isize),
-				// HDR10 when the client asked (it only does when this host advertised FEAT_HDR)
-				// and the monitor is in HDR mode; SDR otherwise (pulsar-capture decides per build).
-				hdr: req.hdr,
+				// HDR10 only on the new `hdr10` opt-in (a new client sets it when this host
+				// advertised FEAT_HDR and its renderer decodes + shows the codec's 10-bit stream)
+				// and only while the monitor is in HDR mode; SDR otherwise (pulsar-capture decides
+				// per build). Never on the legacy `hdr` bit: old desktop clients and the mobile app
+				// set that from a setting alone and cannot all show 10-bit PQ.
+				hdr: req.hdr10,
 			}) {
 				Ok(h) => {
 					// Publish the confirmed capture monitor for the input path. Use
@@ -3958,6 +3961,17 @@ pub(super) fn make_on_stream(
 							hdr = c.hdr,
 							"native capture"
 						);
+					}
+					// HDR10 stream: tell the client where this host's SDR content sits (Windows "SDR
+					// content brightness") and the monitor's peak, so its SDR tone-map keeps the
+					// desktop as bright as on an SDR stream (DataMsg::HdrMeta). Every 2 s: the session
+					// transport is lossy and the slider can move mid-stream. Only Windows has an HDR
+					// capture (macOS / Linux hosts stream SDR — docs/agents/host-encode.md).
+					#[cfg(windows)]
+					if let Some((sdr_white_nits, peak_nits)) =
+						cap_stats.as_ref().filter(|_| ticks % 4 == 1).and_then(|c| c.hdr_reference())
+					{
+						let _ = stats_enc.try_send(DataMsg::HdrMeta { sdr_white_nits, peak_nits });
 					}
 					let us = enc_us.load(std::sync::atomic::Ordering::Relaxed);
 					if us == 0 {
