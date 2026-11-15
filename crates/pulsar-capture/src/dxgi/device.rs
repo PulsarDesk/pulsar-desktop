@@ -13,7 +13,9 @@ use windows::Win32::Graphics::Direct3D11::{
 	D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
 	D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
 };
-use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+use windows::Win32::Graphics::Dxgi::Common::{
+	DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_SAMPLE_DESC,
+};
 use windows::Win32::Graphics::Dxgi::{
 	CreateDXGIFactory1, IDXGIAdapter1, IDXGIDevice1, IDXGIFactory1, IDXGIOutput, IDXGIOutput1,
 	IDXGIOutputDuplication, DXGI_ERROR_NOT_CURRENTLY_AVAILABLE, DXGI_ERROR_NOT_FOUND,
@@ -108,6 +110,17 @@ pub struct CaptureDevice {
 	/// `NOT_CURRENTLY_AVAILABLE` retry loop bails immediately when the session is torn down,
 	/// instead of stalling the joining caller for the whole ~5 s budget.
 	pub(super) stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+
+	// --- HDR (see dxgi/hdr.rs) ---
+	/// The stream may be HDR (the client asked, the codec / encoder can do 10-bit): a monitor in
+	/// HDR mode is then duplicated as FP16 scRGB (`DuplicateOutput1`) instead of BGRA.
+	pub(super) want_hdr: bool,
+	/// `Some` while the duplication delivers FP16 scRGB from a monitor in HDR mode (its
+	/// mastering data); `None` = the plain BGRA SDR duplication.
+	pub(super) hdr: Option<crate::hdr::HdrMeta>,
+	/// The monitor's SDR white level (nits): what the composited cursor's 1.0 maps to on an
+	/// FP16 surface (scRGB 1.0 = 80 nits).
+	pub(super) sdr_white_nits: f32,
 }
 
 impl CaptureDevice {
@@ -119,6 +132,10 @@ impl CaptureDevice {
 	/// what lets NVENC do the cross-adapter copy itself (Strategy A).
 	pub unsafe fn create(
 		output_idx: u32,
+		// HDR stream wanted: capture FP16 scRGB if this monitor is in HDR mode AND sits on the
+		// NVIDIA adapter (the HDR conversion + NVENC run on the capture device; the hybrid
+		// cross-adapter bridge is 8-bit only). Otherwise the BGRA SDR duplication as before.
+		want_hdr: bool,
 		stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 		// `true` for an in-session SWITCH build (short transient-retry budget — see
 		// `build_duplication`); `false` for the initial build (long budget, the monitor must
@@ -134,6 +151,8 @@ impl CaptureDevice {
 		// Create the device on the adapter that OWNS this output. DRIVER_TYPE_UNKNOWN is
 		// mandatory when you pass a specific adapter (HARDWARE would assert).
 		let (device, context) = Self::create_device(&adapter)?;
+		let want_hdr = want_hdr
+			&& adapter.GetDesc1().map(|d| d.VendorId == 0x10DE).unwrap_or(false);
 
 		// SetMaximumFrameLatency(1): never let the GPU queue more than one frame — keeps
 		// capture→encode latency minimal. It lives on IDXGIDevice1 (NOT the base
@@ -171,6 +190,9 @@ impl CaptureDevice {
 			present_rtv: None,
 			output_rect_cache: None,
 			stop,
+			want_hdr,
+			hdr: None,
+			sdr_white_nits: 80.0,
 		};
 		me.build_duplication(fast_transient)?;
 		Ok(me)
@@ -427,14 +449,33 @@ impl CaptureDevice {
 		let mut last_err: Option<windows::core::Error> = None;
 		let mut attempt: u32 = 0;
 		loop {
-			// Prefer the plain DuplicateOutput — DuplicateOutput1 needs an IDXGIOutput5
-			// and a format list; the SDR BGRA path here doesn't benefit from it, and
-			// DuplicateOutput is the most broadly available entry point.
-			match self.output.DuplicateOutput(&self.device) {
+			// SDR: the plain DuplicateOutput — DuplicateOutput1 needs an IDXGIOutput5 and a
+			// format list; the BGRA path doesn't benefit from it, and DuplicateOutput is the
+			// most broadly available entry point. HDR (wanted + the monitor is in HDR mode):
+			// DuplicateOutput1 with FP16 — DWM hands over the composed desktop as scRGB (linear
+			// BT.709 primaries, 1.0 = 80 nits, HDR highlights above 1.0). BGRA there would be
+			// the desktop already mapped down to SDR. A refused FP16 duplication streams SDR.
+			let hdr_meta = if self.want_hdr { super::hdr::output_hdr(&self.output) } else { None };
+			let dup_r = match hdr_meta {
+				Some(_) => self.duplicate_fp16().or_else(|e| {
+					crate::encode_log(&format!("HDR: DuplicateOutput1(FP16) refused ({e:?}) — SDR capture"));
+					self.output.DuplicateOutput(&self.device)
+				}),
+				None => self.output.DuplicateOutput(&self.device),
+			};
+			match dup_r {
 				Ok(dup) => {
 					// IDXGIOutputDuplication::GetDesc returns the desc BY VALUE (infallible,
 					// no out-param) in windows-rs.
 					self.dup_desc = dup.GetDesc();
+					self.hdr = if self.dup_desc.ModeDesc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT {
+						hdr_meta
+					} else {
+						None
+					};
+					if self.hdr.is_some() {
+						self.sdr_white_nits = super::hdr::sdr_white_nits(&self.output);
+					}
 					self.dup = Some(dup);
 					self.build_pool()?;
 					return Ok(());
@@ -484,9 +525,9 @@ impl CaptureDevice {
 			Height: h,
 			MipLevels: 1,
 			ArraySize: 1,
-			// Duplication surfaces are B8G8R8A8_UNORM; match it so CopyResource is a
-			// straight blit (no format mismatch).
-			Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+			// Match the duplication surface (B8G8R8A8_UNORM, or R16G16B16A16_FLOAT for an
+			// HDR monitor) so CopyResource is a straight blit (no format mismatch).
+			Format: self.pool_format(),
 			SampleDesc: DXGI_SAMPLE_DESC {
 				Count: 1,
 				Quality: 0,
@@ -568,6 +609,26 @@ impl CaptureDevice {
 		}
 	}
 
+	/// The pool / present texture format: FP16 scRGB while capturing an HDR monitor, else BGRA.
+	pub(crate) fn pool_format(&self) -> DXGI_FORMAT {
+		if self.hdr.is_some() {
+			DXGI_FORMAT_R16G16B16A16_FLOAT
+		} else {
+			DXGI_FORMAT_B8G8R8A8_UNORM
+		}
+	}
+
+	/// `Some(mastering data)` while the duplication delivers FP16 scRGB from an HDR monitor.
+	pub fn hdr(&self) -> Option<crate::hdr::HdrMeta> {
+		self.hdr
+	}
+
+	/// `DuplicateOutput1` asking for FP16 scRGB (`IDXGIOutput5`, Windows 10 1703+).
+	unsafe fn duplicate_fp16(&self) -> windows::core::Result<IDXGIOutputDuplication> {
+		let o5: windows::Win32::Graphics::Dxgi::IDXGIOutput5 = self.output.cast()?;
+		o5.DuplicateOutput1(&self.device, 0, &[DXGI_FORMAT_R16G16B16A16_FLOAT])
+	}
+
 	/// Drop the live duplication + pool (so a rebuild starts clean).
 	pub(super) unsafe fn teardown_duplication(&mut self) {
 		// Releasing the IDXGIOutputDuplication is just dropping the COM ref. Drop the pool
@@ -586,6 +647,13 @@ impl CaptureDevice {
 	/// duplication. Backs off `REINIT_BACKOFF_MS` first to let the transition settle.
 	pub(super) unsafe fn reinit(&mut self) -> windows::core::Result<()> {
 		std::thread::sleep(std::time::Duration::from_millis(REINIT_BACKOFF_MS));
+		// A stale factory keeps reporting the outputs as they were (an HDR switch toggled since
+		// would go unseen): take a fresh one when DXGI says the old one is out of date.
+		if !self.factory.IsCurrent().as_bool() {
+			if let Ok(f) = CreateDXGIFactory1::<IDXGIFactory1>() {
+				self.factory = f;
+			}
+		}
 		// Re-pick the output that currently owns the desktop (hybrid-GPU reparenting).
 		// Also update self.output_idx to the ACTUAL chosen index: if the originally-requested
 		// monitor was hot-unplugged, find_output falls back to the first attached output (index

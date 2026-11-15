@@ -72,7 +72,9 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
     D3D11_USAGE_DEFAULT,
 };
-use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_SAMPLE_DESC,
+};
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter1, IDXGIDevice, IDXGIDevice1, IDXGIFactory1,
     DXGI_ERROR_NOT_FOUND,
@@ -138,6 +140,9 @@ pub struct WgcCaptureDevice {
     arrived_token: i64,
     /// `SystemRelativeTime` (QPC ns) of the frame last copied into `tex` → `Frame::present_ns`.
     last_present_ns: i64,
+    /// `Some` = an HDR stream from a monitor in HDR mode: the pool delivers FP16 scRGB (linear
+    /// BT.709, 1.0 = 80 nits) and `tex` is FP16 (see `encode/hdr_conv.rs`). `None` = BGRA SDR.
+    hdr: Option<crate::hdr::HdrMeta>,
 }
 
 /// Outcome of one `pump_latest` drain: a fresh frame was copied into `tex`, no new frame arrived
@@ -163,6 +168,9 @@ impl WgcCaptureDevice {
     pub unsafe fn create(
         hwnd: isize,
         output_idx: u32,
+        // HDR stream wanted (see `CaptureDevice::create`): FP16 capture when the window's
+        // monitor is in HDR mode and this device is the NVIDIA one.
+        want_hdr: bool,
         stop: Arc<AtomicBool>,
         _fast_transient: bool,
     ) -> windows::core::Result<Self> {
@@ -185,14 +193,27 @@ impl WgcCaptureDevice {
         let interop: IGraphicsCaptureItemInterop =
             windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
         let item: GraphicsCaptureItem = interop.CreateForWindow(hwnd)?;
-        Self::start(device, context, Some(hwnd), item, output_idx, stop)
+        let hdr = if want_hdr {
+            let hmon = windows::Win32::Graphics::Gdi::MonitorFromWindow(
+                hwnd,
+                windows::Win32::Graphics::Gdi::MONITOR_DEFAULTTONEAREST,
+            );
+            crate::dxgi::hdr::hdr_for_monitor(hmon)
+        } else {
+            None
+        };
+        Self::start(device, context, Some(hwnd), item, output_idx, stop, hdr)
     }
 
     /// Build a WGC capture of the whole MONITOR at `output_idx` (DXGI attached-output order,
     /// the same index `CaptureDevice::create` takes). The device lives on the NVIDIA adapter
     /// when there is one: WGC delivers the composed desktop onto it GPU-side, so the encoder
     /// takes its same-device path even when the monitor belongs to the iGPU.
-    pub unsafe fn create_monitor(output_idx: u32, stop: Arc<AtomicBool>) -> windows::core::Result<Self> {
+    pub unsafe fn create_monitor(
+        output_idx: u32,
+        want_hdr: bool,
+        stop: Arc<AtomicBool>,
+    ) -> windows::core::Result<Self> {
         let factory: IDXGIFactory1 = CreateDXGIFactory1()?;
         let (out_adapter, output, actual_idx) =
             crate::dxgi::CaptureDevice::find_output(&factory, output_idx)?;
@@ -202,7 +223,8 @@ impl WgcCaptureDevice {
         let interop: IGraphicsCaptureItemInterop =
             windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
         let item: GraphicsCaptureItem = interop.CreateForMonitor(hmon)?;
-        Self::start(device, context, None, item, actual_idx, stop)
+        let hdr = if want_hdr { crate::dxgi::hdr::output_hdr(&output) } else { None };
+        Self::start(device, context, None, item, actual_idx, stop, hdr)
     }
 
     /// The common tail of `create`/`create_monitor`: WinRT device, frame pool, frame-arrival
@@ -214,7 +236,11 @@ impl WgcCaptureDevice {
         item: GraphicsCaptureItem,
         output_idx: u32,
         stop: Arc<AtomicBool>,
+        hdr: Option<crate::hdr::HdrMeta>,
     ) -> windows::core::Result<Self> {
+        // HDR needs the capture on the NVIDIA device (the P010 conversion + NVENC run where the
+        // frames land; the hybrid bridge to another GPU's NVENC is 8-bit only).
+        let hdr = hdr.filter(|_| crate::encode::device_is_nvidia(&device));
         // SetMaximumFrameLatency(1): keep capture→encode queueing minimal (same as DXGI), and
         // the same max GPU scheduling priority as the DXGI device (PULSAR_GPU_PRIO=0 disables).
         if let Ok(dxgi_dev) = device.cast::<IDXGIDevice1>() {
@@ -240,7 +266,12 @@ impl WgcCaptureDevice {
         // 4. Free-threaded frame pool (poll-able from the capture thread w/o a dispatcher).
         let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
             &rt_device,
-            DirectXPixelFormat::B8G8R8A8UIntNormalized,
+            if hdr.is_some() {
+                // scRGB: DWM hands the HDR desktop over unclipped (BGRA would be its SDR mapping).
+                DirectXPixelFormat::R16G16B16A16Float
+            } else {
+                DirectXPixelFormat::B8G8R8A8UIntNormalized
+            },
             POOL_BUFFERS,
             size,
         )?;
@@ -294,6 +325,7 @@ impl WgcCaptureDevice {
             arrived,
             arrived_token,
             last_present_ns: 0,
+            hdr,
         };
         me.build_pool_texture()?;
         Ok(me)
@@ -391,7 +423,7 @@ impl WgcCaptureDevice {
             Height: self.height.max(2),
             MipLevels: 1,
             ArraySize: 1,
-            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            Format: self.format(),
             SampleDesc: DXGI_SAMPLE_DESC {
                 Count: 1,
                 Quality: 0,
@@ -439,6 +471,20 @@ impl WgcCaptureDevice {
     /// back the unrotated scan-out surface + a rotation. Always 0 (the encoder skips rotation).
     pub fn rotation_deg(&self) -> u32 {
         0
+    }
+
+    /// `Some(mastering data)` while the frames are FP16 scRGB from an HDR monitor.
+    pub fn hdr(&self) -> Option<crate::hdr::HdrMeta> {
+        self.hdr
+    }
+
+    /// The pool / `tex` format: FP16 for an HDR capture, else BGRA.
+    fn format(&self) -> DXGI_FORMAT {
+        if self.hdr.is_some() {
+            DXGI_FORMAT_R16G16B16A16_FLOAT
+        } else {
+            DXGI_FORMAT_B8G8R8A8_UNORM
+        }
     }
 
     /// The Sunshine-style pacing loop, mirroring `CaptureDevice::run`: emit `on_frame` once per
@@ -584,7 +630,7 @@ impl WgcCaptureDevice {
                 if let Some(tex) = self.tex.as_ref() {
                     let frame = Frame {
                         texture: tex,
-                        format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                        format: self.format(),
                         width: self.width.max(2) & !1,
                         height: self.height.max(2) & !1,
                         is_new: last_was_new,

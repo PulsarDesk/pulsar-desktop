@@ -181,6 +181,17 @@ fn media_features() -> Vec<String> {
 	if linux_nvenc_sdk() {
 		v.push(pulsar_core::service::media::FEAT_IR.to_string());
 	}
+	// HDR10: the Windows native NVENC path captures a monitor in HDR mode as FP16 and streams
+	// 10-bit PQ (HEVC Main10 / AV1); needs an NVENC with HEVC or AV1. No other host path has an
+	// HDR capture (ffmpeg grabs, macOS ScreenCaptureKit / VideoToolbox here, Linux x11grab /
+	// PipeWire all hand over 8-bit SDR — see docs/agents/host-encode.md), so they never claim it.
+	#[cfg(windows)]
+	if pulsar_capture::nvenc_codecs()
+		.iter()
+		.any(|c| matches!(c, pulsar_capture::Codec::H265 | pulsar_capture::Codec::Av1))
+	{
+		v.push(pulsar_core::service::media::FEAT_HDR.to_string());
+	}
 	// Pen + multi-touch: real injection on Windows (synthetic pointer devices) and Linux
 	// (uinput tablet + multitouch screen); on macOS the pen is a CGEvent tablet and touch is
 	// mapped to mouse + scroll (no public touch injection). Clients send the mouse fallback

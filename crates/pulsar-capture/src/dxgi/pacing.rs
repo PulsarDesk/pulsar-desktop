@@ -6,7 +6,6 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
-use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Dxgi::{
 	IDXGIResource, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_NOT_CURRENTLY_AVAILABLE,
 	DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
@@ -82,6 +81,8 @@ impl CaptureDevice {
 		// scan-out surface; orientation lives in dup_desc.Rotation), so a rotation change is
 		// INVISIBLE to the Width/Height comparison below without this extra baseline.
 		let built_rotation = self.rotation_deg();
+		// The duplication format the encoder was built for (FP16 HDR / BGRA SDR).
+		let built_format = self.pool_format();
 		// Set after a same-resolution reinit; the next emitted Frame carries it so the encoder
 		// forces an IDR (the client dropped the GOP it was mid-decode of during the blip).
 		let mut force_next_idr = false;
@@ -192,7 +193,10 @@ impl CaptureDevice {
 					// the outer lib.rs loop must rebuild to republish current_output()/build_gen —
 					// otherwise the host input path stays mapped to the vanished monitor's rect and
 					// absolute clicks land at the wrong virtual-desktop coordinates for the session.
+					// An HDR on/off switch on the monitor changes the duplication format (FP16 ⇄
+					// BGRA): the encoder (P010 + Main10 vs NV12) must be rebuilt for it too.
 					if self.output_idx != prev_output_idx
+						|| self.pool_format() != built_format
 						|| self.dup_desc.ModeDesc.Width != built_w
 						|| self.dup_desc.ModeDesc.Height != built_h
 						|| self.rotation_deg() != built_rotation
@@ -246,10 +250,11 @@ impl CaptureDevice {
 				// static desktop still moves). Returns `present` when the cursor was drawn,
 				// else the clean `pool` — either way a valid BGRA texture the encoder reads.
 				let present_ns = if is_new { self.last_present_ns } else { 0 };
+				let format = self.pool_format();
 				if let Some(texture) = self.composite_cursor(draw_cursor) {
 					let frame = Frame {
 						texture,
-						format: DXGI_FORMAT_B8G8R8A8_UNORM,
+						format,
 						width: w,
 						height: h,
 						is_new,

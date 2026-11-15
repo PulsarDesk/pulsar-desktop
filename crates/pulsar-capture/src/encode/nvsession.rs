@@ -87,6 +87,9 @@ pub(super) struct SessionParams {
 	pub(super) low_latency: bool,
 	pub(super) intra_refresh: bool,
 	pub(super) rfi: bool,
+	/// HDR10: P010 input, HEVC Main10 / AV1 10-bit, BT.2020 / PQ colour description. H.264 is
+	/// refused (NVENC has no High 10 encode).
+	pub(super) hdr: bool,
 }
 
 /// An initialised encoder's retained config and the choices `configure` made.
@@ -150,7 +153,7 @@ pub(super) unsafe fn configure(
 		),
 		Codec::H265 => (
 			nvenc::NV_ENC_CODEC_HEVC_GUID,
-			nvenc::NV_ENC_HEVC_PROFILE_MAIN_GUID,
+			if p.hdr { nvenc::NV_ENC_HEVC_PROFILE_MAIN10_GUID } else { nvenc::NV_ENC_HEVC_PROFILE_MAIN_GUID },
 		),
 		Codec::Av1 => (
 			nvenc::NV_ENC_CODEC_AV1_GUID,
@@ -170,6 +173,15 @@ pub(super) unsafe fn configure(
 	};
 	let rfi_caps = query_cap(nvenc::NV_ENC_CAPS_SUPPORT_REF_PIC_INVALIDATION) != Some(0)
 		&& query_cap(nvenc::NV_ENC_CAPS_SUPPORT_MULTIPLE_REF_FRAMES) != Some(0);
+	if p.hdr {
+		if p.codec == Codec::H264 {
+			return Err("HDR needs HEVC or AV1 (NVENC has no H.264 High 10)".into());
+		}
+		// An explicit "no" only (an unanswered query keeps going; init then decides).
+		if query_cap(nvenc::NV_ENC_CAPS_SUPPORT_10BIT_ENCODE) == Some(0) {
+			return Err(format!("this NVENC has no 10-bit {:?} encode", p.codec));
+		}
+	}
 
 	let mut preset: nvenc::NV_ENC_PRESET_CONFIG = std::mem::zeroed();
 	preset.version = nvenc::NV_ENC_PRESET_CONFIG_VER;
@@ -328,6 +340,9 @@ pub(super) unsafe fn configure(
 				// recovery frame reaches into (autoselect could search several = slower).
 				hevc.numRefL0 = nvenc::NV_ENC_NUM_REF_FRAMES_1;
 			}
+			if p.hdr {
+				hevc.set_hdr10();
+			}
 			if intra_refresh {
 				hevc.set_flags(nvenc::NV_ENC_HEVC_FLAG_INTRA_REFRESH);
 				hevc.idrPeriod = nvenc::NVENC_INFINITE_GOPLENGTH;
@@ -346,6 +361,9 @@ pub(super) unsafe fn configure(
 			av1.set_flags(nvenc::NV_ENC_AV1_FLAG_REPEAT_SEQ_HDR | nvenc::NV_ENC_AV1_CHROMA_420);
 			av1.idrPeriod = gop;
 			av1.maxNumRefFramesInDPB = 1;
+			if p.hdr {
+				av1.set_hdr10();
+			}
 			if intra_refresh {
 				av1.set_flags(nvenc::NV_ENC_AV1_FLAG_INTRA_REFRESH);
 				av1.idrPeriod = nvenc::NVENC_INFINITE_GOPLENGTH;
@@ -382,9 +400,10 @@ pub(super) unsafe fn configure(
 	let init_params = ip; // retained on the Encoder for live bitrate reconfigure
 	cap_dbg(&format!(
 		"nvenc rc {w}x{h}@{fps} {} kbps: bpp={:.3} preset=P{preset_n} low_budget={low_budget} \
-		 two_pass={two_pass} rfi={rfi} (caps {rfi_caps}) dpb={dpb}",
+		 two_pass={two_pass} rfi={rfi} (caps {rfi_caps}) dpb={dpb} hdr={}",
 		br / 1000,
 		policy::bits_per_pixel(br, w, h, fps),
+		p.hdr,
 	));
 
 	Ok(Configured {

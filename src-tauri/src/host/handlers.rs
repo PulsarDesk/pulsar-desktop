@@ -3565,12 +3565,12 @@ pub(super) fn make_on_stream(
 		#[cfg(windows)]
 		// The native (NVENC) path runs for the normal display capture (ddagrab) OR whenever a
 		// per-window WGC target is set — WGC is a separate capture SOURCE that does not need the
-		// ddagrab display-capture method, just NVENC. HDR / 4:4:4 still force the ffmpeg path (the
-		// native pipeline doesn't do them yet); a window target with HDR/444 falls back to ffmpeg
-		// (whole-monitor) for now — documented limit. PULSAR_FFMPEG_CAPTURE still forces ffmpeg.
+		// ddagrab display-capture method, just NVENC. HDR stays native (the capture streams HDR10
+		// from a monitor in HDR mode, SDR otherwise — `CaptureConfig::hdr`); 4:4:4 still forces
+		// the ffmpeg path, and a window target with 4:4:4 falls back to ffmpeg (whole-monitor) —
+		// documented limit. PULSAR_FFMPEG_CAPTURE still forces ffmpeg.
 		let native_started = if encoder == HwEncoder::Nvenc
 			&& (capture == CaptureMethod::Ddagrab || target_hwnd.is_some())
-			&& !req.hdr
 			&& !req.yuv444
 			&& std::env::var_os("PULSAR_FFMPEG_CAPTURE").is_none()
 		{
@@ -3619,6 +3619,9 @@ pub(super) fn make_on_stream(
 				// `output_idx` is then ignored by the capture crate (WGC tracks a window, not a
 				// monitor). `None` (no window target) => the full-monitor DXGI source, unchanged.
 				window_hwnd: target_hwnd.map(|h| h as isize),
+				// HDR10 when the client asked (it only does when this host advertised FEAT_HDR)
+				// and the monitor is in HDR mode; SDR otherwise (pulsar-capture decides per build).
+				hdr: req.hdr,
 			}) {
 				Ok(h) => {
 					// Publish the confirmed capture monitor for the input path. Use
@@ -3667,14 +3670,15 @@ pub(super) fn make_on_stream(
 		// live bitrate, keyframe on request, live display switch — what the ffmpeg CLI cannot do.
 		// Taken when the resolved encoder is VideoToolbox; the ffmpeg avfoundation chain below
 		// stays the fallback (macOS < 12.3, no Screen Recording permission, a codec VideoToolbox
-		// refuses, HDR / 4:4:4). PULSAR_FFMPEG_CAPTURE=1 forces ffmpeg. Untested on macOS hardware.
+		// refuses, 4:4:4). An HDR request is streamed SDR here like on the ffmpeg path (neither
+		// captures HDR on macOS yet), so it no longer forces ffmpeg. PULSAR_FFMPEG_CAPTURE=1
+		// forces ffmpeg. Untested on macOS hardware.
 		#[cfg(target_os = "macos")]
 		let native_started = if encoder == HwEncoder::VideoToolbox
 			&& capture == CaptureMethod::AvFoundation
 			// A window pick streams through the ScreenCaptureKit window source + ffmpeg below.
 			&& plan.window.is_none()
 			&& codec != pipeline::VCodec::Av1
-			&& !req.hdr
 			&& !req.yuv444
 			&& std::env::var_os("PULSAR_FFMPEG_CAPTURE").is_none()
 		{
@@ -3703,6 +3707,9 @@ pub(super) fn make_on_stream(
 				rfi: req.rfi,
 				draw_mouse: true,
 				window_hwnd: None,
+				// macOS host: ScreenCaptureKit here is set up for 8-bit NV12, so the stream is SDR
+				// (no HDR capture on macOS yet — docs/agents/host-encode.md).
+				hdr: false,
 			}) {
 				Ok(h) => {
 					native_enc_us = Some(h.encode_us_arc());

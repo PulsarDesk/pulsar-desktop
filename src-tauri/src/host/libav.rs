@@ -155,7 +155,9 @@ pub fn supported(plan: &StreamPlan) -> bool {
 	}
 	plan.capture == CaptureMethod::X11grab
 		&& matches!(plan.window, None | Some(WindowInput::X11 { .. }))
-		&& !plan.hdr
+		// An HDR request is SDR on every x11grab plan (8-bit capture — pulsar-core
+		// `effective_hdr_yuv444`), so it no longer pushes the stream onto the ffmpeg CLI.
+		&& !plan.effective_hdr_yuv444().0
 		&& !plan.yuv444
 		&& matches!(plan.encoder, HwEncoder::Software | HwEncoder::Nvenc)
 		&& plan.encoder.ffmpeg_name(plan.codec).is_some()

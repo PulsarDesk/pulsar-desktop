@@ -68,7 +68,14 @@ impl Encoder {
 		} else {
 			frame.texture.clone()
 		};
-		self.blt_bgra_to_nv12(&bgra_src)?;
+		match self.hdr_conv.as_mut() {
+			// HDR: FP16 scRGB → P010 BT.2020 PQ (shader passes on the capture/NVENC device).
+			Some(conv) => {
+				let ctx = self._kept_context.clone().ok_or("no context")?;
+				conv.run(&ctx, &bgra_src)?;
+			}
+			None => self.blt_bgra_to_nv12(&bgra_src)?,
+		}
 
 		// (b) Map our registered NV12 texture for this encode call.
 		let map_fn = self
@@ -180,9 +187,16 @@ impl Encoder {
 				// dump can be inspected NAL-by-NAL (layer_id / nal_unit_type) off the wire. Appends
 				// every AU; a non-zero layer_id or a bogus NAL type in the dump implicates the
 				// encoder config, a clean dump implicates the packetizer (rtp.rs).
-				dump_bitstream(annexb);
 				// The capture-time RTP timestamp (see lib.rs): the client's delay estimator needs
 				// real send spacing, which a frame-index clock only gives at exactly the nominal fps.
+				// HDR10: the mastering display + content light level go with every keyframe
+				// (after its parameter sets), so a client that joins or recovers has them.
+				let hdr_au = match self.hdr.as_ref() {
+					Some(m) if idr => Some(crate::hdr::with_hdr_metadata(self.codec, annexb, m)),
+					_ => None,
+				};
+				let annexb: &[u8] = hdr_au.as_deref().unwrap_or(annexb);
+				dump_bitstream(annexb);
 				if self.mark_recovery {
 					// RFI recovery frame: the client resumes decoding at this tag.
 					let mut au = super::recovery_sei(self.codec);
