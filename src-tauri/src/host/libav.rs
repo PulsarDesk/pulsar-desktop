@@ -125,8 +125,20 @@ impl Params {
 	}
 }
 
-/// `PULSAR_NVENC_SDK` = `0` / `false` / `off` keeps NVENC on libavcodec.
-fn sdk_enabled(env: Option<&str>) -> bool {
+/// Frames between the forced keyframes of the loss-recovery mode (`u32::MAX` = none): a short
+/// GOP of ~0.5 s once the client asked for one, unless the encoder heals losses itself
+/// (`sdk_heals`: the NVENC SDK encoder with RFI or intra refresh).
+fn recovery_cadence(recovery: LossRecovery, fps: u32, sdk_heals: bool) -> u32 {
+	if recovery.is_active() && !sdk_heals {
+		(fps / 2).max(1)
+	} else {
+		u32::MAX
+	}
+}
+
+/// `PULSAR_NVENC_SDK` = `0` / `false` / `off` keeps NVENC on libavcodec (also read by the
+/// host's FEAT_RFI probe, `host.rs` `linux_nvenc_sdk`).
+pub(super) fn sdk_enabled(env: Option<&str>) -> bool {
 	!matches!(env.map(str::trim), Some("0") | Some("false") | Some("off"))
 }
 
@@ -730,8 +742,10 @@ unsafe fn run(p: &Params, rx: Receiver<Cmd>, ready: Sender<Result<(), String>>) 
 			while ff::av_buffersink_get_frame(cx.sink, filt) == 0 {
 				(*filt).pts = pts;
 				pts += 1;
-				// Keyframe on request, or on the recovery cadence (~0.5 s).
-				let cadence = if recovery.is_active() { (p.fps / 2).max(1) } else { u32::MAX };
+				// Keyframe on request, or on the recovery cadence (~0.5 s) — not on an NVENC SDK
+				// encoder that heals a loss itself (RFI / intra refresh, `heals_losses`): the
+				// client's recovery flip is absorbed there, as on the Windows native path.
+				let cadence = recovery_cadence(recovery, p.fps, sdk.as_ref().is_some_and(|e| e.heals_losses()));
 				// `pict_type = I` is what libx264 / NVENC read (with `forced-idr` it becomes a
 				// real IDR); no frame flag needed — and `AV_FRAME_FLAG_KEY` only exists from
 				// FFmpeg 6.1 (the Linux release builds use Ubuntu 22.04's 4.4).
@@ -848,6 +862,18 @@ mod tests {
 	/// Headless end-to-end: testsrc → libx264 → RTP into a local socket. Verifies packets
 	/// flow, a keyframe request produces an IDR within a few frames, and a live bitrate
 	/// change is accepted without breaking the stream.
+	/// The short GOP of the recovery mode runs on encoders that can't heal a loss themselves; an
+	/// NVENC SDK encoder with RFI or intra refresh absorbs the client's flip (no IDR every 0.5 s).
+	#[test]
+	fn recovery_cadence_skips_an_encoder_that_heals_itself() {
+		assert_eq!(recovery_cadence(LossRecovery::Normal, 60, false), u32::MAX);
+		assert_eq!(recovery_cadence(LossRecovery::ShortGop, 60, false), 30);
+		assert_eq!(recovery_cadence(LossRecovery::IntraRefresh, 120, false), 60);
+		assert_eq!(recovery_cadence(LossRecovery::ShortGop, 1, false), 1);
+		assert_eq!(recovery_cadence(LossRecovery::ShortGop, 60, true), u32::MAX);
+		assert_eq!(recovery_cadence(LossRecovery::IntraRefresh, 60, true), u32::MAX);
+	}
+
 	#[test]
 	fn nvenc_sdk_switch_and_helpers() {
 		assert!(sdk_enabled(None));

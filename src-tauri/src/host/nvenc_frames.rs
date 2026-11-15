@@ -30,6 +30,17 @@ pub(super) fn wanted(sdk_ready: bool, codecs: &[Codec], genc: GstEncoder, enc_pr
 	enabled && sdk_ready && family && codecs.contains(&codec)
 }
 
+/// The capture's short-GOP timer (a keyframe every 0.5 s, `WaylandCapture::set_short_gop`) for
+/// the client's loss-recovery mode. Not when this SDK encoder runs the stream (`raw_frames`)
+/// and heals a loss itself: with RFI (`rfi`, asked for by the client; NVENC turns it off under
+/// intra refresh, then the wave heals) — the flip is absorbed as on the Windows native path and
+/// the X11 SDK path (`libav::recovery_cadence`). A keyframe every 0.5 s on a lossy link is the
+/// flood RFI exists to avoid. An intra-refresh flip without RFI keeps the timer: the session
+/// was built without the wave and cannot start one live.
+pub(super) fn short_gop(raw_frames: bool, rfi: bool, recovery: pulsar_core::service::LossRecovery) -> bool {
+	recovery.is_active() && !(raw_frames && rfi)
+}
+
 /// The factory pulsar-core calls on the first frame (and on a size change) with the cast's size.
 /// `base` carries everything but the size; the live bitrate survives a rebuild; the RTP clock
 /// runs from the factory's creation so it stays monotonic across rebuilds.
@@ -94,6 +105,20 @@ impl FrameEncoder for SdkFrames {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn short_gop_only_where_the_encoder_cannot_heal() {
+		use pulsar_core::service::LossRecovery::*;
+		assert!(!short_gop(false, false, Normal));
+		// A gst encoder (no raw frames): the forced key units are its recovery.
+		assert!(short_gop(false, true, ShortGop));
+		assert!(short_gop(false, false, IntraRefresh));
+		// The SDK encoder with RFI absorbs the flip.
+		assert!(!short_gop(true, true, ShortGop));
+		assert!(!short_gop(true, true, IntraRefresh));
+		// The SDK encoder without RFI (e.g. AV1) keeps the short GOP.
+		assert!(short_gop(true, false, ShortGop));
+	}
 
 	#[test]
 	fn sdk_only_for_nvidia_or_an_open_software_pick() {

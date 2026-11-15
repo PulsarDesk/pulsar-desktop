@@ -2193,7 +2193,8 @@ pub(super) fn make_on_stream(
 					// The pipeline is in-process now: apply the bitrate and the recovery mode
 					// LIVE on the running encoder (no restart, no portal churn).
 					let applied = if req.bitrate_kbps > 0 { cap.set_bitrate(req.bitrate_kbps) } else { false };
-					cap.set_short_gop(req.loss_recovery.is_active());
+					// Not on the NVENC SDK encoder with RFI (it absorbs the flip, see `short_gop`).
+					cap.set_short_gop(super::nvenc_frames::short_gop(cap.is_raw_frames(), req.rfi, req.loss_recovery));
 					last_wl_req = Some(req.clone());
 					tracing::info!(
 						bitrate_kbps = req.bitrate_kbps,

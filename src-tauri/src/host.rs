@@ -216,7 +216,9 @@ fn linux_nvenc_sdk() -> bool {
 	static STATE: AtomicU8 = AtomicU8::new(0);
 	if STATE.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
 		let spawned = std::thread::Builder::new().name("nvenc-sdk-probe".into()).spawn(|| {
-			let ok = pulsar_capture::nvenc_supported() && std::env::var("PULSAR_NVENC_SDK").map(|v| v != "0").unwrap_or(true);
+			// The encoders' own switch (`0` / `false` / `off`): a host whose SDK encoder is off must
+			// not advertise RFI — its clients would wait out every recovery tag that never comes.
+			let ok = pulsar_capture::nvenc_supported() && libav::sdk_enabled(std::env::var("PULSAR_NVENC_SDK").ok().as_deref());
 			tracing::info!(codecs = ?pulsar_capture::nvenc_codecs(), ok, "Linux NVENC SDK (CUDA) probe");
 			STATE.store(if ok { 3 } else { 2 }, Ordering::SeqCst);
 		});
