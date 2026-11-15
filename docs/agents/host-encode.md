@@ -17,8 +17,8 @@ Part of the pulsar-desktop agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
     e.g. AMD VCN). It has no CPU hop, but needs a 1 ms lead to beat NVENC's cleaner picture.
     Measured on Vega it lost: WGC 4.57, DXGI 6.48, DXGI-MF 8.40.
     The host label then names "Media Foundation".
-  - The native path is still entered only when NVENC exists. An AMD/Intel-only host keeps the
-    ffmpeg chain; `MfEncoder` could serve it, but that is untested.
+  - A host WITHOUT NVENC now takes the native path too, with `MfEncoder` as the encoder — see
+    "Windows without NVENC: native Media Foundation path" below.
   - A monitor this process already duplicates (a second session on the same screen: DXGI
     `E_INVALIDARG`) falls back to WGC, so every session keeps its own NVENC encoder + ABR.
   - Both sources encode a fresh frame as soon as it arrives (one frame per fps slot).
@@ -66,7 +66,7 @@ Part of the pulsar-desktop agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
   - **NVENC there goes through the NVENC SDK** (2026-11-14, untested on Linux hardware):
     `pulsar_capture::NvencCuda` (`crates/pulsar-capture/src/encode/cuda_enc.rs`) instead of
     libavcodec's `h264_nvenc`. See "Linux NVENC SDK" below.
-- **Windows (non-NVENC) / macOS fallback** (and the Linux fallback) — ffmpeg CLI (`ddagrab`/
+- **Windows non-NVENC fallback / macOS fallback** (and the Linux fallback) — ffmpeg CLI (`ddagrab`/
   `gdigrab`/`avfoundation`/`x11grab` → HW encode or libx264 → RTP). Arg builders are pure
   functions in pulsar-core `pipeline/` (unit-tested); spawning is here (`process.rs`, `host/`).
 - **Wayland (KDE/GNOME)** — pulsar-core `capture` (Linux-only module): XDG
@@ -104,6 +104,100 @@ Part of the pulsar-desktop agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
   clean distro containers (`scripts/appimage/smoke.sh`) before publishing.
 
 All paths emit **RTP/H.264(+HEVC/AV1) over UDP**.
+
+## Windows without NVENC: native Media Foundation path (2026-11-15, branch `feat/native-encode`, untested in a real session)
+
+A host whose stream resolves to an ffmpeg Media Foundation / AMF / QSV encoder (Snapdragon X,
+AMD-only, Intel-only) used to run the ffmpeg CLI (`ddagrab → hwdownload → h264_mf → RTP`): AUs
+reached the forwarder in clumps, the bitrate could not change live ("bitrate-only step
+absorbed"; bigger steps restarted ffmpeg = a gap + keyframe), a keyframe every 0.25-0.5 s (the
+CLI cannot be asked for one) and no RFI. Now `make_on_stream` starts the native path with
+`CaptureConfig::encoder = NativeEncoder::MediaFoundation` (`native_mf_wanted` + the codec in
+`pulsar_capture::mf_codecs()`):
+
+- **Pipeline** (`crates/pulsar-capture/src/encode/mf.rs`): DXGI duplication (WGC when DXGI
+  refuses — a 2nd session; a window pick = WGC window) → VideoProcessor BGRA→NV12 on the capture
+  GPU (ring of 3 surfaces) → the adapter's async hardware MFT through the DXGI device manager
+  (system-memory copy if the MFT is not D3D11-aware) → the same `RtpEgress` / forwarder / pacer /
+  FEC. An **output thread** blocks on the MFT's event queue and sends each AU the moment it is
+  encoded (emit-on-arrival); the capture thread only waits for an input grant + a free surface,
+  so an encode longer than a frame interval costs latency, not frame rate.
+- **Encoder settings**: CBR (mean = max), `AVLowLatencyMode`, 0 B-frames (Qualcomm defaults to
+  1!), 10 s safety GOP, keyframe at frame 0 and fps/2 only (an MF keyframe is ~13 frames'
+  budget at 1080p; CBR then skips frames to repay it — measured), QualityVsSpeed 0 in game mode.
+  The Qualcomm MFT ignores `AVEncCommonBufferSize` (identical output for a 1-15 frame VBV) and
+  `AVScenarioInfo = DisplayRemoting` halves the frame rate — not used.
+- **Live**: bitrate (`AVEncCommonMeanBitRate` + Max + BufferSize, next frame), keyframe on
+  request (`AVEncVideoForceKeyFrame`: the very next frame), monitor switch (the thread rebuilds).
+- **Loss recovery = long-term references** where the MFT has `AVEncVideoLTRBufferControl` /
+  `MarkLTRFrame` / `UseLTRFrame` (Qualcomm: 4 slots, H.264 + HEVC + AV1; `encode/ltr.rs`): 2
+  slots, a mark every fps/4 frames (each keyframe = slot 0); a client-reported loss → the next
+  frame predicts only from the newest intact LTR older than the loss (`UseLTRFrame` mode 1) and
+  carries the NVENC recovery SEI, so the client resumes at the tag. Nothing intact → declined
+  (the client's keyframe request heals, as with NVENC). A rate-control-skipped frame is no
+  reference; a skipped recovery frame is planned again. **Verified headless**: a stream with
+  the lost frame and everything up to the tag cut out decodes bit-identical to the full one
+  from the tag on (ffmpeg framemd5, H.264 and HEVC; HEVC logs "Could not find ref with POC"
+  for an unused RPS entry). No intra refresh (`GradualIntraRefresh` exists, not wired; FEAT_IR
+  stays NVENC-only).
+- **Failover**: init failure / timeout → ffmpeg chain for that session (`native_mf_off`); a
+  stall (the reporter's 5/8 s watchdogs, a thread that does not stop) → restart onto ffmpeg for
+  that session. Never reported as an NVENC stall. The MF path refuses an NVIDIA capture GPU.
+- **Caps**: the MF family's codecs come from the ffmpeg probe, which now feeds the MFT NV12 +
+  `-hw_encoding 1` like the stream (pulsar-core `probe_command`) — before, the Qualcomm HEVC /
+  AV1 MFTs failed the probe and a Snapdragon host only offered H.264. MF **AV1 is not offered**
+  (AUs came in pairs: 12 % of intervals < 4 ms, 18 % > 29 ms at 1080p60) unless
+  `PULSAR_MF_AV1=1`. The stats label names "Media Foundation" (also on an AMF/QSV host).
+- **Knobs**: `PULSAR_NATIVE_MF=0` (ffmpeg CLI as before), `PULSAR_FFMPEG_CAPTURE=1` (all native
+  paths off), `PULSAR_MF_AV1=1`, `PULSAR_MF_LTR=0`, `PULSAR_MF_QVS`, `PULSAR_MF_SYSMEM=1`,
+  `PULSAR_MF_SURFACES`, `PULSAR_MF_RC`, `PULSAR_MF_TRACE=1`; log
+  `C:\Users\Public\pulsar-capture-dbg.txt` ("mf: encoder …", "mf: encode latency p50 …" each
+  second).
+- **Tools**: `examples/mfprobe.rs` (every hardware MFT + its ICodecAPI knobs),
+  `examples/mfbench.rs` (headless: `synth` = synthetic moving frames through `MfEncoder`,
+  `capture` = monitor 0 through `start_capture_encode`, `listen` = receiver for an ffmpeg run;
+  prints the inter-frame arrival spread, arrival-vs-RTP-clock queueing, bitrate per 500 ms,
+  keyframe / recovery delays; `--out` writes the stream + a `.lossy` cut for decode checks).
+
+Measured on the Snapdragon X Elite laptop (Adreno; other agents were compiling meanwhile, so
+the tails are noisy — interleaved runs, 2560x1440@60 desktop, 8 Mbit/s H.264):
+
+| | ffmpeg CLI (`ddagrab … h264_mf -g 30`) | native MF (`capture`) |
+| --- | --- | --- |
+| frame intervals < 25 % of nominal ("clumped") | 10-27 % | 4-16 % |
+| arrival vs RTP clock p50 / p90 (read as queue by the delay estimator) | 64-79 / 87-110 ms | 4-9 / 15-25 ms |
+| keyframes | every 0.5 s, 150-310 KB each | start + fps/2 + on request |
+| keyframe on request | impossible (restart) | next frame (22-37 ms) |
+| bitrate 8 → 4 → 8 Mbit/s | restart / absorbed | applied within the next 500 ms window |
+| frames encoded / 600 | — | 592-595 (the first, synchronous design: 515-570) |
+| encode latency (input → output) | — | p50 8-20 ms, p90 ~21 ms at 1440p |
+
+Synthetic 1080p60 (`synth`, the encoder alone): encode p50 ~5 ms; intervals p90 19-28 ms, sd
+2.6-7 ms; arrival-vs-RTP p90 4-12 ms (ffmpeg `testsrc2 → h264_mf`: 7 % clumped, p90 70 ms).
+The off-screen `pulsar-render` harness (PrintWindow) shows the native H.264 and HEVC streams
+correctly.
+
+**Untested**: a real session (client ↔ this host), AMD / Intel MFTs (the vendor match, LTR,
+live bitrate there), the WGC fallback with MF, HEVC LTR recovery on the Windows MF decoder (the
+client's decoder after an unused-reference gap), display rotation.
+
+## Streaming quality per OS (2026-11-15)
+
+| | Windows NVENC | Windows MF (Qualcomm/AMD/Intel) | Linux X11 (libav) | Linux Wayland (gst) | macOS (SCK + VT) |
+| --- | --- | --- | --- | --- | --- |
+| Emission | on arrival | on arrival (output thread) | as encoded (`av_interleaved_write_frame`) | as encoded (pipewiresrc, damage-driven) | on arrival (VT callback) |
+| RTP clock | capture time | capture time | **capture time now** (`host/capture_clock.rs`; was a frame counter — the 2026-11-08 drift) | buffer pts (capture) | capture time |
+| Live bitrate | yes | yes | x264 / NVENC yes; **libx265 / SVT-AV1 no** (no libavcodec reconfig — the step waits for the next restart) | x264enc / va* / nvh26x property | yes |
+| Keyframe on request | yes | yes | yes | yes (force-key-unit) | yes |
+| Loss recovery | RFI | **LTR** | RFI on the NVENC SDK; else keyframe (x264 has `x264_encoder_invalidate_reference`, libavcodec does not expose it) | RFI on NVENC SDK frames; else keyframe | keyframe (VT has LTR from macOS 14 — `EnableLTR` + acknowledged tokens; not built, no Mac to test) |
+| Intra refresh | yes | no | x264 / NVENC | no | no |
+| Timers | 1 ms while streaming (`timer_res.rs`) | same | fine already | fine already | App Nap held off while streaming (`timer_res.rs`, NSProcessInfo activity) |
+| Wi-Fi | media-streaming mode + no background scan (`wlan_lowlat.rs`) | same | hint logged: power save on → `sudo iw dev … set power_save off` (no root-free switch; bgscan has none) | same | hint logged: AWDL active → `sudo ifconfig awdl0 down` |
+| Pacer learned boost cap | all OSes (`handlers/pacer.rs`, no cfg) | same | same | same | same |
+
+Linux / macOS cells are code-read + compile-checked where possible (`pulsar-capture` /
+`pulsar-render` for `aarch64-apple-darwin`; the App Nap code in a scratch crate — `pulsar-tauri`
+does not cross-check here; Linux not compiled), untested on hardware.
 
 ## Host monitor picker + live display-change watch (per OS, 2026-11-14, untested on macOS / Wayland hardware)
 
@@ -251,7 +345,8 @@ GPU runs the **same NVENC SDK session as Windows**:
   forwarder throughput" (per-class pkts/bytes, nack_*, pace_kbps, max_qdelay_ms, drops).
 - `pulsar-capture/src/rtp.rs` `RtpSender`: packet-granular bucket (same model, AU out within
   1.5 frame intervals); **off by default toward loopback** (the forwarder paces), on toward
-  remote; `PULSAR_RTP_PACE=0/1` forces. Windows timers are ~15.6 ms (no `timeBeginPeriod`).
+  remote; `PULSAR_RTP_PACE=0/1` forces. Windows timers: 1 ms while a session streams
+  (`timer_res.rs`; macOS: App Nap held off; Linux: already fine — see the per-OS table).
 - **FEC v2** (`host.rs` + core `FecPolicy`): pre-repair loss sizing, 10–50 %, WAN starts at
   15 % for 30 s; counters from `MediaSendStats` on the "client stats" line.
 - **NVENC** (`encode/policy.rs`, `encoder.rs`, `nvenc.rs`): RFI DPB per level 5.1 (16/12/8),
@@ -267,7 +362,7 @@ GPU runs the **same NVENC SDK session as Windows**:
   1920×1200×60 px/s and P1 above (encoder utilisation at 1200p120: P4 55 %, P3 47 %, P2 39 %,
   P1 20 %; P4 is 0.03 dB PSNR ahead of P1 there).
   Fixed binding layout bugs vs SDK 12.2 (VUI pad, AV1 flag bits,
-  `NV_ENC_CONFIG` = 3584 B, offset asserts). `mf.rs` answers RFI with Err. Rate/IDR log:
+  `NV_ENC_CONFIG` = 3584 B, offset asserts). `mf.rs` heals RFI with long-term references where the MFT has them (see below). Rate/IDR log:
   `C:\Users\Public\pulsar-capture-dbg.txt`.
 
 ## Windows: an NVIDIA driver that stops answering (2026-11-13, LOCAL, unpushed)

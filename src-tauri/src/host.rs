@@ -107,6 +107,8 @@ pub(crate) mod takeover;
 pub(crate) mod window_src;
 #[cfg(target_os = "linux")]
 mod libav;
+// Capture-time RTP timestamps for the libav host (pure; tested on every OS).
+mod capture_clock;
 // The NVENC SDK encoder as the Wayland capture's raw-frame encoder (RFI on Wayland hosts).
 #[cfg(target_os = "linux")]
 mod nvenc_frames;

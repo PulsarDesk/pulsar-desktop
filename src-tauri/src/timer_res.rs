@@ -1,4 +1,5 @@
-//! 1 ms system timer resolution while a session streams from this host (Windows).
+//! Fine-grained timers while a session streams from this host (Windows: 1 ms resolution;
+//! macOS: no App Nap; Linux: nothing to do).
 //!
 //! WHY: the video forwarder's wire pacer sleeps to the next send slot (tokio timers). At the
 //! default 15.6 ms Windows timer resolution those wakes land late in coarse steps, so datagrams
@@ -7,8 +8,18 @@
 //! it cut a clean 11.5 Mbit/s stream to 3.5 Mbit/s in windows without any loss (2026-11-15,
 //! Snapdragon host on home Wi-Fi → a friend). Sunshine raises the resolution the same way while
 //! streaming. Per process since Windows 10 2004; refcounted, released with the last session.
+//!
+//! macOS: the timers are fine-grained, but App Nap coalesces and delays the timers of an app
+//! whose windows are hidden or occluded (a host that streams with Pulsar minimized — the usual
+//! case) by up to seconds, which would stall the pacer exactly like the coarse Windows timer.
+//! While a session streams the process holds an `NSProcessInfo` activity
+//! (`NSActivityUserInitiatedAllowingIdleSystemSleep | NSActivityLatencyCritical`), as
+//! latency-sensitive media apps do. Untested on macOS hardware.
+//!
+//! Linux: hrtimers, a 50 µs default timer slack and tokio's 1 ms wheel — the pacer's sleeps
+//! land on time; there is no per-process switch to make (and no App Nap equivalent).
 
-/// Keeps the 1 ms timer resolution while alive.
+/// Keeps the fine-grained timers while alive.
 pub(crate) struct Guard(());
 
 impl Drop for Guard {
@@ -58,9 +69,68 @@ mod imp {
 	}
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
 mod imp {
-	// Linux / macOS timers are already fine-grained.
+	use std::sync::Mutex;
+
+	use objc2::rc::Retained;
+	use objc2::runtime::AnyObject;
+	use objc2::{class, msg_send};
+
+	/// `NSActivityUserInitiatedAllowingIdleSystemSleep` (0x00FFFFFF & ~(1 << 20)) |
+	/// `NSActivityLatencyCritical` (0xFF00000000).
+	const OPTIONS: u64 = (0x00FF_FFFF & !(1u64 << 20)) | 0xFF_0000_0000;
+
+	/// The activity token (an opaque NSObject only `endActivity:` uses).
+	struct Token(Retained<AnyObject>);
+	// SAFETY: the token is immutable and only handed back to NSProcessInfo, whose activity
+	// calls are thread-safe.
+	unsafe impl Send for Token {}
+
+	static HELD: Mutex<(usize, Option<Token>)> = Mutex::new((0, None));
+
+	fn process_info() -> Option<Retained<AnyObject>> {
+		// SAFETY: `+[NSProcessInfo processInfo]` returns the shared instance (any thread).
+		unsafe { msg_send![class!(NSProcessInfo), processInfo] }
+	}
+
+	pub(super) fn acquire() {
+		let mut st = HELD.lock().unwrap();
+		st.0 += 1;
+		if st.1.is_some() {
+			return;
+		}
+		let reason = objc2_foundation::NSString::from_str("Pulsar is streaming");
+		let token: Option<Retained<AnyObject>> = process_info().and_then(|pi| {
+			// SAFETY: `-beginActivityWithOptions:reason:` (NSActivityOptions = uint64_t,
+			// NSString *) returns a retained-by-us activity token.
+			unsafe { msg_send![&*pi, beginActivityWithOptions: OPTIONS, reason: &*reason] }
+		});
+		tracing::info!(ok = token.is_some(), "timer: App Nap off for the streaming session");
+		st.1 = token.map(Token);
+	}
+
+	pub(super) fn release() {
+		let mut st = HELD.lock().unwrap();
+		if st.0 == 0 {
+			return;
+		}
+		st.0 -= 1;
+		if st.0 == 0 {
+			if let (Some(Token(t)), Some(pi)) = (st.1.take(), process_info()) {
+				// SAFETY: ends the activity begun in `acquire`, with its own token.
+				unsafe {
+					let _: () = msg_send![&*pi, endActivity: &*t];
+				}
+				tracing::info!("timer: App Nap allowed again (no session streams)");
+			}
+		}
+	}
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+mod imp {
+	// Linux timers are already fine-grained (see the module doc).
 	pub(super) fn acquire() {}
 	pub(super) fn release() {}
 }

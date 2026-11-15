@@ -760,6 +760,16 @@ pub fn validated_codecs(ffmpeg: &str, encoder: HwEncoder, vaapi_device: &str) ->
 	let listed = encoder.available_codecs(&encoders_text(ffmpeg));
 	listed
 		.into_iter()
+		// Windows Media Foundation AV1 (the Qualcomm X Elite MFT validates since the probe feeds
+		// it NV12) is not offered: its access units came out in pairs (12 % of the frame
+		// intervals < 4 ms, 18 % > 29 ms at 1080p60, measured 2026-11-15) and no AV1 session
+		// ran on it yet. H.264 / HEVC are. `PULSAR_MF_AV1=1` offers it.
+		.filter(|&c| {
+			!(cfg!(windows)
+				&& encoder == HwEncoder::MediaFoundation
+				&& c == VCodec::Av1
+				&& std::env::var("PULSAR_MF_AV1").map(|v| v != "1").unwrap_or(true))
+		})
 		.filter(|&c| probe_encoder_codec(ffmpeg, encoder, c, vaapi_device))
 		.collect()
 }

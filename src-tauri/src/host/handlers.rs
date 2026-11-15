@@ -2107,6 +2107,14 @@ pub(super) fn make_on_stream(
 	// stalled whenever the driver itself turned out to be fine.
 	#[cfg(windows)]
 	let mut native_stalled_at: Option<u64> = None;
+	// The running native capture encodes with the GPU's Media Foundation encoder (a host without
+	// NVENC), and whether that path failed for THIS session (stalled, stuck, or its build timed
+	// out): the session then keeps the ffmpeg CLI chain. Nothing global — an MF stall says
+	// nothing about NVENC or other sessions.
+	#[cfg(windows)]
+	let mut native_is_mf = false;
+	#[cfg(windows)]
+	let mut native_mf_off = false;
 	// The request the running ffmpeg CLI encode (Windows/macOS software/fallback path) was
 	// started with, and when: ffmpeg can't change its bitrate live, so every ABR step used to
 	// restart capture (a visible gap + keyframe each time → stutter, and the gap itself read as
@@ -2245,7 +2253,10 @@ pub(super) fn make_on_stream(
 					// below must not walk into the same capture again — NVENC is off until a
 					// probe child gets an answer from the driver (`process::nv`). A thread that
 					// simply died is no such sign; it gets its plain restart.
-					if alive && (forced || !joined || flat >= NATIVE_STUCK_AFTER) {
+					if alive && (forced || !joined || flat >= NATIVE_STUCK_AFTER) && native_is_mf {
+						tracing::warn!("native Media Foundation capture stalled → this session keeps the ffmpeg chain");
+						native_mf_off = true;
+					} else if alive && (forced || !joined || flat >= NATIVE_STUCK_AFTER) {
 						// (The reporter made the report itself before it forced this restart;
 						// a second one would only send another probe.)
 						if !forced {
@@ -2879,9 +2890,14 @@ pub(super) fn make_on_stream(
 				);
 				// It sits inside a GPU call. The capture this restream is about to start must
 				// not walk into the same driver (its build would only time out): NVENC is off
-				// until a probe child gets an answer (`process::nv`).
-				crate::process::nvenc_report_stall("the native capture thread is stuck in a GPU call");
-				native_stalled_at = Some(crate::process::nvenc_back_epoch());
+				// until a probe child gets an answer (`process::nv`) — or, for the Media
+				// Foundation path, this session keeps ffmpeg.
+				if native_is_mf {
+					native_mf_off = true;
+				} else {
+					crate::process::nvenc_report_stall("the native capture thread is stuck in a GPU call");
+					native_stalled_at = Some(crate::process::nvenc_back_epoch());
+				}
 			}
 			native_watch.reset();
 		}
@@ -3562,23 +3578,44 @@ pub(super) fn make_on_stream(
 		let target_hwnd: Option<i64> = req
 			.window_hwnd
 			.or_else(|| *launched_hwnd.lock().unwrap());
+		// Which encoder the Windows native path drives: NVENC, or — on a host without it (the
+		// stream resolved to an ffmpeg Media Foundation / AMF / QSV encoder) — the capture GPU's
+		// own hardware encoder through Media Foundation, in-process (live bitrate, keyframe on
+		// request, long-term-reference loss recovery, emit-on-arrival; `pulsar-capture`
+		// `encode/mf.rs`). Only for a codec that encoder has (`mf_codecs`), and not again in a
+		// session whose MF path stalled. `PULSAR_NATIVE_MF=0` keeps those hosts on the ffmpeg CLI.
 		#[cfg(windows)]
-		// The native (NVENC) path runs for the normal display capture (ddagrab) OR whenever a
+		let native_encoder = if encoder == HwEncoder::Nvenc {
+			Some(pulsar_capture::NativeEncoder::Nvenc)
+		} else if native_mf_wanted(encoder)
+			&& !native_mf_off
+			// AV1 through MF only on request (bursty on the Qualcomm MFT; see process.rs).
+			&& (codec != pipeline::VCodec::Av1 || std::env::var("PULSAR_MF_AV1").as_deref() == Ok("1"))
+			&& pulsar_capture::mf_codecs().contains(&native_codec(codec))
+		{
+			Some(pulsar_capture::NativeEncoder::MediaFoundation)
+		} else {
+			None
+		};
+		#[cfg(windows)]
+		let native_mf = native_encoder == Some(pulsar_capture::NativeEncoder::MediaFoundation);
+		#[cfg(windows)]
+		{
+			native_is_mf = false;
+		}
+		#[cfg(windows)]
+		// The native path runs for the normal display capture (ddagrab) OR whenever a
 		// per-window WGC target is set — WGC is a separate capture SOURCE that does not need the
-		// ddagrab display-capture method, just NVENC. HDR / 4:4:4 still force the ffmpeg path (the
+		// ddagrab display-capture method. HDR / 4:4:4 still force the ffmpeg path (the
 		// native pipeline doesn't do them yet); a window target with HDR/444 falls back to ffmpeg
 		// (whole-monitor) for now — documented limit. PULSAR_FFMPEG_CAPTURE still forces ffmpeg.
-		let native_started = if encoder == HwEncoder::Nvenc
+		let native_started = if native_encoder.is_some()
 			&& (capture == CaptureMethod::Ddagrab || target_hwnd.is_some())
 			&& !req.hdr
 			&& !req.yuv444
 			&& std::env::var_os("PULSAR_FFMPEG_CAPTURE").is_none()
 		{
-			let ncodec = match codec {
-				pipeline::VCodec::H264 => pulsar_capture::Codec::H264,
-				pipeline::VCodec::H265 => pulsar_capture::Codec::H265,
-				pipeline::VCodec::Av1 => pulsar_capture::Codec::Av1,
-			};
+			let ncodec = native_codec(codec);
 			// Clamp the client-requested monitor index to the current attached-output count.
 			// A stale client picker (built from an earlier QueryStreamCaps) may send an index
 			// that no longer exists after a hot-unplug, and find_output's silent fallback to
@@ -3619,8 +3656,13 @@ pub(super) fn make_on_stream(
 				// `output_idx` is then ignored by the capture crate (WGC tracks a window, not a
 				// monitor). `None` (no window target) => the full-monitor DXGI source, unchanged.
 				window_hwnd: target_hwnd.map(|h| h as isize),
+				encoder: native_encoder.unwrap_or_default(),
 			}) {
 				Ok(h) => {
+					native_is_mf = native_mf;
+					if native_mf {
+						tracing::info!(?codec, ffmpeg_encoder = ?encoder, "native capture: Media Foundation hardware encoder (in-process)");
+					}
 					// Publish the confirmed capture monitor for the input path. Use
 					// h.current_output() rather than clamped_display_idx: the thread writes
 					// current_output() from the actual_idx returned by find_output (which may
@@ -3646,18 +3688,27 @@ pub(super) fn make_on_stream(
 					// silicon) host produced a dead stream with zero trace anywhere. Log it,
 					// and remember an nvenc-shaped failure so the ffmpeg chain skips nvenc.
 					let msg = e.to_string();
-					tracing::warn!(error = %msg, "native DXGI+NVENC capture failed — falling back to ffmpeg");
-					// The build never finished: its thread sits inside a GPU call (device
-					// creation on an NVIDIA driver that stopped answering). ffmpeg's nvenc
-					// would walk into the same call, so the chain below skips it, and NVENC
-					// stays off until a probe child gets an answer (`process::nv`).
-					let init_stuck = e.kind() == std::io::ErrorKind::TimedOut;
-					if init_stuck {
-						crate::process::nvenc_report_stall("the native capture never finished building");
-						native_stalled_at = Some(crate::process::nvenc_back_epoch());
+					if native_mf {
+						// The GPU's MF encoder could not start here (no hardware MFT for the codec,
+						// a refused media type, a build that timed out): this session streams with
+						// the ffmpeg CLI chain from now on. Nothing about NVENC is implied.
+						tracing::warn!(error = %msg, "native Media Foundation capture failed — falling back to ffmpeg");
+						native_mf_off = true;
+						false
+					} else {
+						tracing::warn!(error = %msg, "native DXGI+NVENC capture failed — falling back to ffmpeg");
+						// The build never finished: its thread sits inside a GPU call (device
+						// creation on an NVIDIA driver that stopped answering). ffmpeg's nvenc
+						// would walk into the same call, so the chain below skips it, and NVENC
+						// stays off until a probe child gets an answer (`process::nv`).
+						let init_stuck = e.kind() == std::io::ErrorKind::TimedOut;
+						if init_stuck {
+							crate::process::nvenc_report_stall("the native capture never finished building");
+							native_stalled_at = Some(crate::process::nvenc_back_epoch());
+						}
+						native_nvenc_failed = init_stuck || msg.contains("nvenc") || msg.contains("nvEnc");
+						false
 					}
-					native_nvenc_failed = init_stuck || msg.contains("nvenc") || msg.contains("nvEnc");
-					false
 				}
 			}
 		} else {
@@ -3703,6 +3754,7 @@ pub(super) fn make_on_stream(
 				rfi: req.rfi,
 				draw_mouse: true,
 				window_hwnd: None,
+				encoder: pulsar_capture::NativeEncoder::default(),
 			}) {
 				Ok(h) => {
 					native_enc_us = Some(h.encode_us_arc());
@@ -3820,10 +3872,16 @@ pub(super) fn make_on_stream(
 		} else {
 			format!("{}p", eff_h)
 		};
+		// The native Media Foundation path names its encoder (the ffmpeg pick may have been AMF /
+		// QSV on an AMD / Intel host).
+		#[cfg(windows)]
+		let label_encoder = if native_started && native_mf { HwEncoder::MediaFoundation } else { encoder };
+		#[cfg(not(windows))]
+		let label_encoder = encoder;
 		let base_label = format!(
 			"{} · {} · {} · {} · {} {}",
 			vcodec_label(codec),
-			encoder.label(),
+			label_encoder.label(),
 			res_part,
 			fps_part,
 			(eff_bitrate as f32 / 1000.0).round() as u32,
@@ -3873,6 +3931,10 @@ pub(super) fn make_on_stream(
 				// encoded-frame count has been standing.
 				#[cfg(windows)]
 				let (req_fo, mut last_encoded, mut flat_ticks) = (req.clone(), 0u32, 0u32);
+				// A Media Foundation stall is this session's business (it keeps ffmpeg after
+				// the restart), not a sign that the NVIDIA driver stopped answering.
+				#[cfg(windows)]
+				let stall_is_mf = native_is_mf;
 				// Bind this reporter to the stream generation: a slow-path restream/teardown flips
 				// this flag (above) so THIS thread exits instead of lingering and re-pushing the old
 				// stream's now-frozen encode-ms label. Store it so the next restream can cancel us.
@@ -3915,7 +3977,9 @@ pub(super) fn make_on_stream(
 							} else {
 								"the native capture stopped encoding"
 							};
-							crate::process::nvenc_report_stall(why);
+							if !stall_is_mf {
+								crate::process::nvenc_report_stall(why);
+							}
 							let queued = super::failover::restart(sid, req_fo.clone());
 							tracing::error!(encoded = n, queued, "{why} → restarting the stream on the next encoder");
 						}
@@ -4685,5 +4749,24 @@ pub(super) fn make_on_audio() -> impl FnMut(DataMsg) + Send + 'static {
 			player = None; // PlayerGuard::drop kills + reaps
 		}
 		_ => {}
+	}
+}
+
+/// The native Media Foundation path takes the streams an ffmpeg CLI encoder would carry on a
+/// host without NVENC: Media Foundation itself (Qualcomm and other ARM hosts), AMF (AMD) and
+/// QSV (Intel) — their MFTs are the same GPUs' encoders. `PULSAR_NATIVE_MF=0` keeps the ffmpeg
+/// CLI on all of them. Untested on AMD / Intel hardware (measured on a Snapdragon X host).
+#[cfg(windows)]
+fn native_mf_wanted(encoder: HwEncoder) -> bool {
+	matches!(encoder, HwEncoder::MediaFoundation | HwEncoder::Amf | HwEncoder::Qsv)
+		&& std::env::var("PULSAR_NATIVE_MF").map(|v| v != "0").unwrap_or(true)
+}
+
+#[cfg(windows)]
+fn native_codec(codec: pipeline::VCodec) -> pulsar_capture::Codec {
+	match codec {
+		pipeline::VCodec::H264 => pulsar_capture::Codec::H264,
+		pipeline::VCodec::H265 => pulsar_capture::Codec::H265,
+		pipeline::VCodec::Av1 => pulsar_capture::Codec::Av1,
 	}
 }

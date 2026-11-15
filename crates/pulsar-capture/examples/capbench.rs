@@ -61,6 +61,11 @@ fn main() {
 		rfi: false,
 		draw_mouse: true,
 		window_hwnd: None,
+		encoder: if std::env::var("PULSAR_NATIVE_ENCODER").as_deref() == Ok("mf") {
+			pulsar_capture::NativeEncoder::MediaFoundation
+		} else {
+			pulsar_capture::NativeEncoder::Nvenc
+		},
 	};
 	let h = pulsar_capture::start_capture_encode(cfg.clone()).expect("start_capture_encode");
 	let h2 = twice.then(|| {

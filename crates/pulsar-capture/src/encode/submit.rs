@@ -330,7 +330,7 @@ impl Encoder {
 /// a failed open/write is silently ignored (a diagnostic must never break the encode path). The
 /// resulting file is a concatenated Annex-B elementary stream playable/inspectable as `.h265`/`.h264`
 /// (e.g. `ffmpeg -i dump.h265`, or a NAL walker that prints each `nal_unit_type` + `nuh_layer_id`).
-fn dump_bitstream(annexb: &[u8]) {
+pub(super) fn dump_bitstream(annexb: &[u8]) {
 	use std::io::Write;
 	let Ok(path) = std::env::var("PULSAR_DUMP_BITSTREAM") else {
 		return;
