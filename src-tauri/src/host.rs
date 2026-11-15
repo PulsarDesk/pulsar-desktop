@@ -1462,7 +1462,7 @@ pub(crate) async fn bring_online(
 				let launched_hwnd: Arc<Mutex<Option<i64>>> = Arc::new(Mutex::new(None));
 				// The HWND the CURRENT stream is ACTUALLY per-window (WGC) capturing, published by
 				// `make_on_stream` (Bug 0). `launched_hwnd` only records the resolver's discovered
-				// window; the stream may still fall back to WHOLE-MONITOR capture (no NVENC / HDR /
+				// window; the stream may still fall back to WHOLE-MONITOR capture (no NVENC /
 				// 4:4:4 / PULSAR_FFMPEG_CAPTURE / a capture-start error), in which case the video
 				// shows the monitor, not the window. `on_input` must gate its per-window PostMessage
 				// routing on THIS (the confirmed capture target) — NOT on `launched_hwnd` — so kb/
@@ -1640,7 +1640,7 @@ pub(crate) async fn bring_online(
 					// Gate per-window routing on the CONFIRMED capture target (Bug 0): the HWND the
 					// current stream is actually WGC-capturing, published by make_on_stream. Reading
 					// `launched_hwnd` directly here routed kb/mouse into the window even when the stream
-					// fell back to whole-monitor capture (non-NVENC host / HDR / 4:4:4 / capture error) —
+					// fell back to whole-monitor capture (non-NVENC host / 4:4:4 / capture error) —
 					// clicks remapped onto an invisible window while the video showed the monitor.
 					// Linux (X11 SendEvent/XTest) and macOS (CGEventPostToPid) have the same
 					// `WindowInput` API; each backend documents its own ceiling.

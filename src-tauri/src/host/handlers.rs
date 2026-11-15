@@ -2018,7 +2018,7 @@ pub(super) fn make_on_stream(
 	#[cfg(windows)] native_gen_arc: Arc<Mutex<Option<Arc<std::sync::atomic::AtomicU32>>>>,
 	// Publishes the HWND the CURRENT stream actually per-window (WGC) captures, for the input path
 	// (Bug 0). Set to the window target ONLY when the native NVENC per-window path started; cleared
-	// to `None` on every other outcome (whole-monitor ddagrab, ffmpeg fallback, HDR/4:4:4, or a
+	// to `None` on every other outcome (whole-monitor ddagrab, ffmpeg fallback, 4:4:4, or a
 	// capture-start error). `on_input` gates its per-window PostMessage routing on THIS — never on
 	// the raw `launched_hwnd`, which can point at a window the stream isn't actually showing.
 	// The id is per OS (HWND / X11 XID / CGWindowID), matching `pulsar_core::input::WindowInput`.
@@ -3737,7 +3737,7 @@ pub(super) fn make_on_stream(
 		// Publish the per-window capture state for the input path (Bug 0): the current stream routes
 		// kb/mouse to WindowInput ONLY when it ACTUALLY WGC-captured a specific window — i.e. the
 		// native path started AND a window target was set. Every other outcome (whole-monitor
-		// ddagrab, ffmpeg fallback, HDR/4:4:4, or a start_capture_encode error) streams the whole
+		// ddagrab, ffmpeg fallback, 4:4:4, or a start_capture_encode error) streams the whole
 		// monitor, so the window must NOT be the input target even if `launched_hwnd` holds an HWND.
 		#[cfg(windows)]
 		{

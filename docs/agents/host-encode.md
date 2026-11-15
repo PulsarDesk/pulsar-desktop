@@ -39,7 +39,7 @@ Part of the pulsar-desktop agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
   row), a still screen re-encodes the last frame once per fps slot, `LiveStats.source = "sck"`,
   display kept awake (`IOPMAssertion`). Not possible with VideoToolbox: reference-frame
   invalidation (declined, counted as `rfi_declined`) and periodic intra refresh (keyframes
-  instead). Entered when the resolved encoder is VideoToolbox, codec ≠ AV1, no HDR/4:4:4;
+  instead). Entered when the resolved encoder is VideoToolbox, codec ≠ AV1, no 4:4:4 (an HDR request streams SDR — see "HDR10" below);
   `PULSAR_FFMPEG_CAPTURE=1` forces ffmpeg. Falls back to the ffmpeg avfoundation CLI on macOS <
   12.3 (ScreenCaptureKit is dlopen'ed, never linked — the app still starts on older macOS), a
   missing **Screen Recording permission** (the host's home screen shows a notice with "İzin
@@ -62,7 +62,7 @@ Part of the pulsar-desktop agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
 - **Linux X11** — the ffmpeg **libraries in-process** (`src-tauri/src/host/libav.rs`:
   x11grab → libavfilter → libavcodec x264/x265/SVT-AV1/NVENC → libavformat RTP; live
   bitrate, forced IDR on request, short-GOP recovery; `PULSAR_LIBAV_HOST=0` disables).
-  Falls back to the ffmpeg CLI below when it cannot start or for VA-API/Vulkan/HDR/4:4:4.
+  Falls back to the ffmpeg CLI below when it cannot start or for VA-API/Vulkan/4:4:4.
   - **NVENC there goes through the NVENC SDK** (2026-11-14, untested on Linux hardware):
     `pulsar_capture::NvencCuda` (`crates/pulsar-capture/src/encode/cuda_enc.rs`) instead of
     libavcodec's `h264_nvenc`. See "Linux NVENC SDK" below.
@@ -140,7 +140,7 @@ The id on the wire is an opaque `i64` whose meaning is the HOST's (table in puls
 
 | Host | Picker | Capture | Status |
 | --- | --- | --- | --- |
-| Windows | `pulsar_capture::list_capture_windows` (HWND) | WGC → NVENC (native path); a non-NVENC/HDR/4:4:4 stream falls back to the monitor | shipped |
+| Windows | `pulsar_capture::list_capture_windows` (HWND) | WGC → NVENC (native path; HDR10 when the window's monitor is in HDR mode); a non-NVENC/4:4:4 stream falls back to the monitor | shipped |
 | Linux X11 | `_NET_CLIENT_LIST` via pure-Rust `x11rb` (X window id) | libav `x11grab window_id` (`host/libav.rs` `Source::X11Window`), ffmpeg CLI `-window_id` + `scale`, or gst `ximagesrc xid=` (`gst::x11_window_pipeline`, MPP hosts; never KMS) | untested on hardware |
 | Linux Wayland | one entry `WindowInfo::PORTAL_PICK` ("Pencereyi bu bilgisayarda seç") | ScreenCast portal with source type WINDOW only (`capture::start_with(.., Source::Window)`): the person AT THE HOST picks the window in the compositor's dialog; frames scaled into the requested box (`wayland_pipeline_sized`) | untested on hardware |
 | macOS | ScreenCaptureKit `SCShareableContent` (`CGWindowID`) | `SCContentFilter(desktopIndependentWindow:)` → NV12 → loopback TCP → ffmpeg `-f rawvideo` → VideoToolbox (`pulsar_core::window_capture::serve_for`) | untested on hardware |
@@ -350,6 +350,30 @@ capture"); not on Wayland.
   eframe renderer follow by themselves.
 
 Untested on Linux and macOS hardware.
+
+## HDR10 end to end (2026-11-15, LOCAL branch `feat/hdr`, untested in a real session)
+
+The only HDR source is a host monitor in HDR mode (Windows "Use HDR": output colour space
+BT.2020 / PQ). No 8-bit picture is ever labelled PQ any more (pulsar-core
+`StreamPlan::effective_hdr_yuv444`: every ffmpeg capture is 8-bit SDR, so an HDR request there
+streams plain BT.709 — before, AMF / software / VA-API re-quantised 8-bit BGRA to P010 and wrote
+BT.2020 + PQ into the VUI: wrong colours on every client).
+
+Negotiation: the host advertises `FEAT_HDR` (Windows with an NVENC that has HEVC or AV1) and
+`DisplayInfo::hdr` per monitor; the client sets `StreamReq::hdr` only when the Settings switch
+is on, the host has `FEAT_HDR`, the codec is HEVC / AV1 and its renderer probe says `ten_bit`
+(`play.rs::hdr_possible`; `PULSAR_HDR=1` forces). The host still decides per build: an SDR
+monitor, H.264, the hybrid cross-adapter bridge or the Media Foundation encoder stream SDR.
+
+| Host | HDR capture + encode | Why / status |
+| --- | --- | --- |
+| Windows, NVENC, monitor on the NVIDIA GPU (DXGI) or WGC on the NVIDIA device | `DuplicateOutput1(R16G16B16A16_FLOAT)` / WGC `R16G16B16A16Float` (scRGB) → `encode/hdr_conv.rs` (2 pixel-shader passes: BT.709→BT.2020, ×80/10000, PQ, BT.2020 NCL Y'CbCr, limited range → P010 planes; scale + rotation) → NVENC HEVC Main10 / AV1 10-bit (`set_hdr10`: bit depth 10, VUI 9/16/9) → mastering display + content light level on every keyframe (`hdr.rs`: HEVC SEI 137/144, AV1 metadata OBUs, from `DXGI_OUTPUT_DESC1`). Cursor composited linear × SDR white level / 80. HDR on/off mid-stream rebuilds the encoder (`pacing.rs` format check). Failed HDR build → SDR on the same path. Stats label says `HDR10`. | Verified headless on the RTX 3080 laptop host (ignored test `hdr_nvenc_encodes_main10_with_metadata`): ffmpeg reads `hevc (Main 10), yuv420p10le(tv, bt2020nc/bt2020/smpte2084)` + MDCV/CLL side data. GPU conversion checked against the CPU reference on Adreno. **No real HDR monitor captured yet** (the host's monitor state could not be read from the SSH session). |
+| Windows, hybrid (monitor on the iGPU, DXGI picked) | SDR | the cross-adapter bridge stages 8-bit BGRA through system memory; `path.rs` may pick WGC (then HDR works). Not forced, to stay out of the path measurement. |
+| Windows, AMD / Intel / Snapdragon only (Media Foundation / AMF / QSV via ffmpeg) | SDR | `ddagrab` runs with `output_fmt=bgra`; a 10-bit ddagrab (`x2bgr10`) + a matching swscale BT.2020 conversion + AMF/QSV Main10 would be the way — not built, no hardware to verify. |
+| macOS (ScreenCaptureKit → VideoToolbox) | SDR | SCK is configured for 8-bit NV12; HDR needs macOS 15 `SCStreamConfiguration.captureDynamicRange` + a 10-bit pixel format + VT HEVC Main10 with PQ attachments. Not built (no Mac). |
+| Linux (x11grab / PipeWire) | SDR | X11 has no HDR; the ScreenCast portal / PipeWire has no HDR format negotiation yet (KDE's HDR screencast is experimental). Not possible today. |
+
+Knobs: `PULSAR_HOST_HDR=0` treats every monitor as SDR.
 
 ## Capability probe (`src-tauri/src/caps.rs`) — read before touching codecs
 

@@ -15,7 +15,7 @@
 //! every ~0.5 s from here — no GOP change needed in the encoder).
 //!
 //! Scope (`supported`): X11 capture, H.264/HEVC/AV1 with libx264/libx265/SVT-AV1 or NVENC
-//! via ffmpeg, SDR 4:2:0. Everything else (VA-API/Vulkan hw frames, HDR, 4:4:4, Windows
+//! via ffmpeg, SDR 4:2:0. Everything else (VA-API/Vulkan hw frames, 4:4:4, Windows
 //! and macOS) stays on the ffmpeg CLI path — the same library build is not bundled there yet.
 //! A `lavfi testsrc` input (`Source::Test`) lets the engine run headless in tests.
 //!
