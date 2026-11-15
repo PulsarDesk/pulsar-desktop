@@ -323,14 +323,6 @@ impl NvencCuda {
 		self.intra_refresh
 	}
 
-	/// The encoder heals a loss by itself — reference-frame invalidation or its intra-refresh
-	/// wave — so the host's loss-recovery keyframe cadence (the short GOP for encoders that
-	/// can't) must not run on top: a keyframe every 0.5 s on a lossy link is the flood both
-	/// avoid. The Windows native path absorbs the client's recovery flip the same way.
-	pub fn heals_losses(&self) -> bool {
-		self.rfi || self.intra_refresh
-	}
-
 	/// (losses healed by invalidation, losses declined) since the encoder was built.
 	pub fn rfi_counts(&self) -> (u32, u32) {
 		(self.rfi_ok, self.rfi_no)

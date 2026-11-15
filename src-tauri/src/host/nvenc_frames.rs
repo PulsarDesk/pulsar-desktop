@@ -7,13 +7,15 @@
 
 #![cfg(target_os = "linux")]
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
 use pulsar_capture::{Codec, Nv12Frame, NvencCuda, NvencCudaParams};
 use pulsar_core::capture::{FrameEncoder, FrameEncoderFactory, RawFrame};
 use pulsar_core::pipeline::gst::GstEncoder;
+
+use super::libav::EncoderHeals;
 
 /// Use the SDK encoder for this Wayland stream? The gst pick is NVIDIA's own plugin, or software
 /// x264 while the client left the encoder to us / asked for NVENC (an NVIDIA host whose gst
@@ -31,20 +33,45 @@ pub(super) fn wanted(sdk_ready: bool, codecs: &[Codec], genc: GstEncoder, enc_pr
 }
 
 /// The capture's short-GOP timer (a keyframe every 0.5 s, `WaylandCapture::set_short_gop`) for
-/// the client's loss-recovery mode. Not when this SDK encoder runs the stream (`raw_frames`)
-/// and heals a loss itself: with RFI (`rfi`, asked for by the client; NVENC turns it off under
-/// intra refresh, then the wave heals) — the flip is absorbed as on the Windows native path and
-/// the X11 SDK path (`libav::recovery_cadence`). A keyframe every 0.5 s on a lossy link is the
-/// flood RFI exists to avoid. An intra-refresh flip without RFI keeps the timer: the session
-/// was built without the wave and cannot start one live.
-pub(super) fn short_gop(raw_frames: bool, rfi: bool, recovery: pulsar_core::service::LossRecovery) -> bool {
-	recovery.is_active() && !(raw_frames && rfi)
+/// the client's loss-recovery mode. Off when this SDK encoder runs the stream (`sdk`: what the
+/// encoder the factory built really does, `None` = a gst encoder or none built) and absorbs
+/// that mode itself (`EncoderHeals::absorbs`) — as on the Windows native path and the X11 SDK
+/// path (`libav::recovery_cadence`). Decided from the built encoder, not from the client's
+/// request: NVENC turns RFI off on a GPU without the caps, for AV1 and under intra refresh. A
+/// keyframe every 0.5 s on a lossy link is the flood RFI exists to avoid; an intra-refresh flip
+/// on an encoder built without the wave keeps the timer (it cannot start one live, and the
+/// client stops reporting holes under intra refresh).
+pub(super) fn short_gop(recovery: pulsar_core::service::LossRecovery, sdk: Option<EncoderHeals>) -> bool {
+	recovery.is_active() && !sdk.is_some_and(|h| h.absorbs(recovery))
+}
+
+/// What the raw-frame encoder the factory built last really does (`EncoderHeals`), shared with
+/// the host's restream fast path (`short_gop`). Empty until an encoder was built, and again
+/// after a rebuild failed (pulsar-core then runs the gst encoder).
+#[derive(Default)]
+pub(super) struct BuiltHeals(AtomicU8);
+
+const BUILT: u8 = 1;
+const RFI: u8 = 2;
+const WAVE: u8 = 4;
+
+impl BuiltHeals {
+	fn set(&self, h: Option<EncoderHeals>) {
+		let v = h.map_or(0, |h| BUILT | (RFI * u8::from(h.rfi)) | (WAVE * u8::from(h.intra_refresh)));
+		self.0.store(v, Ordering::Relaxed);
+	}
+
+	pub(super) fn get(&self) -> Option<EncoderHeals> {
+		let v = self.0.load(Ordering::Relaxed);
+		(v & BUILT != 0).then_some(EncoderHeals { rfi: v & RFI != 0, intra_refresh: v & WAVE != 0 })
+	}
 }
 
 /// The factory pulsar-core calls on the first frame (and on a size change) with the cast's size.
 /// `base` carries everything but the size; the live bitrate survives a rebuild; the RTP clock
 /// runs from the factory's creation so it stays monotonic across rebuilds.
-pub(super) fn factory(base: NvencCudaParams) -> FrameEncoderFactory {
+/// `heals` receives what each built encoder really does.
+pub(super) fn factory(base: NvencCudaParams, heals: Arc<BuiltHeals>) -> FrameEncoderFactory {
 	let kbps = Arc::new(AtomicU32::new(base.bitrate_kbps));
 	let t0 = Instant::now();
 	Box::new(move |w, h| {
@@ -54,7 +81,8 @@ pub(super) fn factory(base: NvencCudaParams) -> FrameEncoderFactory {
 			bitrate_kbps: kbps.load(Ordering::Relaxed),
 			..base.clone()
 		};
-		let enc = NvencCuda::new(&p)?;
+		let enc = NvencCuda::new(&p).inspect_err(|_| heals.set(None))?;
+		heals.set(Some(EncoderHeals::of(&enc)));
 		Ok(Box::new(SdkFrames { enc, t0, kbps: kbps.clone() }) as Box<dyn FrameEncoder>)
 	})
 }
@@ -107,17 +135,40 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn short_gop_only_where_the_encoder_cannot_heal() {
+	fn short_gop_only_where_the_built_encoder_cannot_heal() {
 		use pulsar_core::service::LossRecovery::*;
-		assert!(!short_gop(false, false, Normal));
-		// A gst encoder (no raw frames): the forced key units are its recovery.
-		assert!(short_gop(false, true, ShortGop));
-		assert!(short_gop(false, false, IntraRefresh));
-		// The SDK encoder with RFI absorbs the flip.
-		assert!(!short_gop(true, true, ShortGop));
-		assert!(!short_gop(true, true, IntraRefresh));
-		// The SDK encoder without RFI (e.g. AV1) keeps the short GOP.
-		assert!(short_gop(true, false, ShortGop));
+		let rfi = Some(EncoderHeals { rfi: true, intra_refresh: false });
+		let wave = Some(EncoderHeals { rfi: false, intra_refresh: true });
+		assert!(!short_gop(Normal, None));
+		assert!(!short_gop(Normal, rfi));
+		// A gst encoder (no SDK encoder built): the forced key units are its recovery.
+		assert!(short_gop(ShortGop, None));
+		assert!(short_gop(IntraRefresh, None));
+		// The SDK encoder with RFI absorbs the short GOP…
+		assert!(!short_gop(ShortGop, rfi));
+		// …not an intra-refresh flip (the client stops reporting holes; no wave to heal).
+		assert!(short_gop(IntraRefresh, rfi));
+		// Built with the wave: both absorbed.
+		assert!(!short_gop(IntraRefresh, wave));
+		assert!(!short_gop(ShortGop, wave));
+		// Built without either (the driver refused RFI, AV1): the timer runs.
+		assert!(short_gop(ShortGop, Some(EncoderHeals::default())));
+	}
+
+	#[test]
+	fn built_heals_round_trip() {
+		let b = BuiltHeals::default();
+		assert_eq!(b.get(), None, "nothing built yet");
+		for h in [
+			EncoderHeals::default(),
+			EncoderHeals { rfi: true, intra_refresh: false },
+			EncoderHeals { rfi: false, intra_refresh: true },
+		] {
+			b.set(Some(h));
+			assert_eq!(b.get(), Some(h));
+		}
+		b.set(None);
+		assert_eq!(b.get(), None, "a failed rebuild clears it");
 	}
 
 	#[test]

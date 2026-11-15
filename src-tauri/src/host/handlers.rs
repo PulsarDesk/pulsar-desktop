@@ -2079,6 +2079,11 @@ pub(super) fn make_on_stream(
 	// bitrate-only re-stream (ABR) can be absorbed instead of tearing the live pipeline down.
 	#[cfg(target_os = "linux")]
 	let mut last_wl_req: Option<StreamReq> = None;
+	// What the Wayland raw-frame NVENC SDK encoder of that capture really does (RFI / intra
+	// refresh, filled in by its factory once built): whether the restream fast path absorbs a
+	// recovery flip (`nvenc_frames::short_gop`). None = the capture has no SDK encoder.
+	#[cfg(target_os = "linux")]
+	let mut wl_heals: Option<Arc<super::nvenc_frames::BuiltHeals>> = None;
 	// The request the running in-process libav encode was started with (X11 hosts): a
 	// bitrate / recovery-only re-request is applied live on it instead of restarting.
 	#[cfg(target_os = "linux")]
@@ -2193,8 +2198,9 @@ pub(super) fn make_on_stream(
 					// The pipeline is in-process now: apply the bitrate and the recovery mode
 					// LIVE on the running encoder (no restart, no portal churn).
 					let applied = if req.bitrate_kbps > 0 { cap.set_bitrate(req.bitrate_kbps) } else { false };
-					// Not on the NVENC SDK encoder with RFI (it absorbs the flip, see `short_gop`).
-					cap.set_short_gop(super::nvenc_frames::short_gop(cap.is_raw_frames(), req.rfi, req.loss_recovery));
+					// Not where the built NVENC SDK encoder absorbs the flip (see `short_gop`).
+					let sdk = if cap.is_raw_frames() { wl_heals.as_ref().and_then(|h| h.get()) } else { None };
+					cap.set_short_gop(super::nvenc_frames::short_gop(req.loss_recovery, sdk));
 					last_wl_req = Some(req.clone());
 					tracing::info!(
 						bitrate_kbps = req.bitrate_kbps,
@@ -2638,6 +2644,7 @@ pub(super) fn make_on_stream(
 			// The codec list is only read once the background probe answered (it is cached
 			// then) — never a driver call on this task.
 			let sdk_ready = super::linux_nvenc_sdk();
+			wl_heals = None;
 			let frames = (!wl_window
 				&& super::nvenc_frames::wanted(
 					sdk_ready,
@@ -2663,7 +2670,7 @@ pub(super) fn make_on_stream(
 					intra_refresh: req.loss_recovery == pulsar_core::service::LossRecovery::IntraRefresh,
 					rfi: req.rfi,
 					device: std::env::var("PULSAR_CUDA_DEVICE").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
-				})
+				}, wl_heals.insert(Arc::default()).clone())
 			});
 			// The stats line once the SDK encoder took the stream (the one above names the gst pick).
 			let sdk_label = format!(
