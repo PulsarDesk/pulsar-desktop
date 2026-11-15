@@ -1218,6 +1218,9 @@ pub(crate) async fn bring_online(
 				// retransmits): logged per client stats window, and the packet count the
 				// pre-repair loss is rebuilt from.
 				let media_sent: Arc<pulsar_core::service::media::MediaSendStats> = Arc::new(Default::default());
+				// The client's pre-repair loss per stats window for the video forwarder's pacer (see
+				// pacer::Pacer::on_loss_window): high 32 bits = window counter, low 32 = loss in ‰.
+				let pace_loss: Arc<std::sync::atomic::AtomicU64> = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
 				// Per-session: hold the screen capture so it can be stopped when this
 				// client disconnects. (Input injection is via uinput in `on_input`.)
@@ -1580,6 +1583,7 @@ pub(crate) async fn bring_online(
 					nack_slot.clone(),
 					fwd_slot.clone(),
 					fec_n.clone(),
+					pace_loss.clone(),
 					media_sent.clone(),
 					#[cfg(target_os = "linux")]
 					restore_token.clone(),
@@ -2726,6 +2730,7 @@ pub(crate) async fn bring_online(
 					// ENCODER rate, net of the parity share it deducts — see `budget_cap`).
 					on_stats: {
 						let fec_n = fec_n.clone();
+						let pace_loss = pace_loss.clone();
 						let mut policy = fec_policy;
 						let media_sent = media_sent.clone();
 						let mut sent_prev = media_sent.snapshot();
@@ -2752,6 +2757,12 @@ pub(crate) async fn bring_online(
 								rtx_bytes: sent.rtx_bytes,
 							};
 							let ratio = policy.on_window(&w);
+								// The pacer learns from it whether its boosted drains are being dropped.
+								{
+									let permille = (policy.last_raw_loss() * 1000.0).round().clamp(0.0, 1000.0) as u64;
+									let gen = (pace_loss.load(Ordering::Relaxed) >> 32).wrapping_add(1) & 0xFFFF_FFFF;
+									pace_loss.store(gen << 32 | permille, Ordering::Relaxed);
+								}
 							let n = (ratio * 1000.0).round() as u16;
 							if n != fec_n.load(Ordering::Relaxed) {
 								fec_n.store(n, Ordering::Relaxed);

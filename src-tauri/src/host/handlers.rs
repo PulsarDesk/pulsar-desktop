@@ -1522,6 +1522,9 @@ fn spawn_media_forwarders(
 	// updated by `make_on_stream` on every request, including the live fast paths that keep
 	// these forwarders running.
 	pace_target_kbps: Arc<std::sync::atomic::AtomicU32>,
+	// The client's pre-repair loss per stats window (window counter << 32 | permille), for the
+	// pacer's learned boost cap (Pacer::on_loss_window).
+	pace_loss: Arc<std::sync::atomic::AtomicU64>,
 	// Per-session send counters (first copies / parity / retransmits) the host's FEC policy
 	// rebuilds pre-repair loss from; bumped when a datagram actually leaves the pacer.
 	sent: Arc<pulsar_core::service::media::MediaSendStats>,
@@ -1566,6 +1569,8 @@ fn spawn_media_forwarders(
 		// pacer, so parity and retransmits share the video's budget instead of bursting on top
 		// of it (see pacer.rs for why and how).
 		let mut pacer = Pacer::new(pace_on, std::time::Instant::now());
+		// Last loss window the pacer has seen (pace_loss high bits).
+		let mut loss_gen = pace_loss.load(Ordering::Relaxed) >> 32;
 		// 2 s measurement window (intake + what actually left, per class) — the "video reaches
 		// the client mangled/not at all" debugging needs to know WHERE the chain loses data,
 		// and a field test on a poor link must tell congestion from policing/MTU loss: the
@@ -1641,6 +1646,7 @@ fn spawn_media_forwarders(
 					nack_unsent = m_nack_unsent,
 					target_kbps = pace_target_kbps.load(Ordering::Relaxed),
 					pace_kbps = pacer.pace_kbps(now) as u64,
+					boost_cap_kbps = pacer.boost_cap_kbps() as u64,
 					paced = pace_on,
 					max_qdelay_ms = st.max_qdelay_ms as u32,
 					drops = st.drops,
@@ -1691,6 +1697,11 @@ fn spawn_media_forwarders(
 					m_bytes += n as u64;
 					let milli = fec.as_ref().map_or(0, |(_, r)| r.load(Ordering::Relaxed));
 					pacer.set_target(pace_target_kbps.load(Ordering::Relaxed), milli as f32 / 1000.0, now);
+					let pl = pace_loss.load(Ordering::Relaxed);
+					if pl >> 32 != loss_gen {
+						loss_gen = pl >> 32;
+						pacer.on_loss_window((pl & 0xFFFF_FFFF) as f64 / 1000.0);
+					}
 					pacer.push(Class::Video, media::frame(media::TAG_VIDEO, rtp), seq, now);
 					// FEC parity behind every frame / group (zero-RTT repair on lossy paths).
 					// Queued right behind the packet that completed its frame/group, so it
@@ -2026,6 +2037,7 @@ pub(super) fn make_on_stream(
 	nack_slot: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Vec<u16>>>>>,
 	fwd_slot: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 	fec_n: Arc<std::sync::atomic::AtomicU16>,
+	pace_loss: Arc<std::sync::atomic::AtomicU64>,
 	media_sent: Arc<pulsar_core::service::media::MediaSendStats>,
 	#[cfg(target_os = "linux")] restore_token: Arc<Mutex<Option<String>>>,
 	// Wayland: the request the portal picker was last answered for + the monitor it streams
@@ -2398,6 +2410,7 @@ pub(super) fn make_on_stream(
 				&fwd_slot,
 				(req.fec || req.fec_rs).then(|| (req.fec_rs, fec_n.clone())),
 				pace_target_kbps.clone(),
+				pace_loss.clone(),
 				media_sent.clone(),
 			) {
 				Some((vp, ap)) => (

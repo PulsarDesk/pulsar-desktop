@@ -68,6 +68,24 @@ pub(super) const HARD_DELAY: Duration = Duration::from_millis(250);
 pub(super) const WIRE_OVERHEAD: usize = 48;
 /// Pace at least this x the measured intake rate.
 const INPUT_HEADROOM: f64 = 1.25;
+/// Learned boost cap (Pacer::on_loss_window). The queue-delay bound drains a burst of big
+/// frames as fast as it takes to meet SOFT_DELAY_MS — 120-160 Mbit/s for the clumps of big
+/// frames MediaFoundation via ffmpeg delivers on motion. A 50 Mbit/s home uplink dropped the
+/// excess in the modem / ISP shaper without any queueing delay: 5-25 % loss at an 8-17 Mbit/s
+/// target, worst whenever the picture moved, read as random loss so nothing cut it (2026-11-15,
+/// Snapdragon host → a friend's PC). The client's pre-repair loss per stats window now tells
+/// the pacer: lossy windows in which it boosted cap the boost under that window's peak; clean
+/// windows relax the cap again. The base rate is never capped, and a datagram still leaves
+/// within HARD_SAFE_MS whatever the cap (the deadline stays soft, nothing is dropped for it).
+const CAP_LOSS: f64 = 0.04;
+/// A lossy window caps the boost at this share of the peak drain rate it used.
+const CAP_SHARE: f64 = 0.6;
+/// Clean windows (pre-repair loss under CAP_CLEAN) before the cap rises by CAP_RELAX.
+const CAP_CLEAN: f64 = 0.01;
+const CAP_CLEAN_WINDOWS: u32 = 8;
+const CAP_RELAX: f64 = 1.25;
+/// The capped drain still empties the queue within this (well under HARD_DELAY).
+const HARD_SAFE_MS: f64 = 150.0;
 /// Retransmits may use at most this share of the expected wire rate (sustained). Random loss
 /// repaired by NACK costs about its loss rate (a few % to ~10 % in the field logs), so only a
 /// loss storm reaches it.
@@ -127,6 +145,11 @@ pub(super) struct Pacer {
 	in_at: Instant,
 	/// Measured intake rate (video only), bytes per ms (EWMA).
 	in_rate: f64,
+	/// Learned ceiling on the boosted drain rate, bytes per ms (None = not learned).
+	boost_cap: Option<f64>,
+	/// Highest drain rate used since the last loss window, and the clean-window streak.
+	win_peak: f64,
+	clean_windows: u32,
 	/// Retransmit budget bucket (bytes) and when it was last refilled.
 	rtx_tokens: f64,
 	rtx_at: Instant,
@@ -151,6 +174,9 @@ impl Pacer {
 			in_bytes: 0.0,
 			in_at: now,
 			in_rate: 0.0,
+			boost_cap: None,
+			win_peak: 0.0,
+			clean_windows: 0,
 			// Starts full (clamped to the bucket depth on first use).
 			rtx_tokens: f64::MAX,
 			rtx_at: now,
@@ -199,6 +225,7 @@ impl Pacer {
 	/// O(queue) — the queue is a few hundred datagrams at most.
 	fn eff_rate(&self, now: Instant) -> f64 {
 		let mut need = self.base;
+		let mut hard = self.base;
 		let mut cum = -self.tokens.max(0.0);
 		for it in self.rtx.iter().chain(self.media.iter()) {
 			cum += cost(it.data.len());
@@ -206,10 +233,38 @@ impl Pacer {
 				continue;
 			}
 			let age = now.saturating_duration_since(it.at).as_secs_f64() * 1000.0;
-			let left = (SOFT_DELAY_MS - age).max(BORROW_MS);
-			need = need.max(cum / left);
+			need = need.max(cum / (SOFT_DELAY_MS - age).max(BORROW_MS));
+			hard = hard.max(cum / (HARD_SAFE_MS - age).max(BORROW_MS));
 		}
-		need
+		match self.boost_cap {
+			Some(cap) => need.min(cap.max(self.base)).max(hard),
+			None => need,
+		}
+	}
+
+	/// The client's pre-repair loss for the window that just ended (0..1). Loss in a window in
+	/// which the pacer boosted past its base rate caps later boosts under that window's peak;
+	/// a run of clean windows relaxes the cap again (and drops it once it no longer binds).
+	pub(super) fn on_loss_window(&mut self, raw_loss: f64) {
+		let peak = std::mem::take(&mut self.win_peak);
+		if raw_loss >= CAP_LOSS && peak > self.base * 1.2 {
+			let c = (peak * CAP_SHARE).max(self.base);
+			self.boost_cap = Some(self.boost_cap.map_or(c, |old| old.min(c)));
+			self.clean_windows = 0;
+		} else if raw_loss < CAP_CLEAN {
+			self.clean_windows += 1;
+			if self.clean_windows >= CAP_CLEAN_WINDOWS {
+				self.clean_windows = 0;
+				self.boost_cap = self.boost_cap.map(|c| c * CAP_RELAX).filter(|c| *c < self.base * 16.0);
+			}
+		} else {
+			self.clean_windows = 0;
+		}
+	}
+
+	/// The learned boost cap in kbps (0 = none), for the measurement log.
+	pub(super) fn boost_cap_kbps(&self) -> f64 {
+		self.boost_cap.map_or(0.0, |c| c * 8.0)
 	}
 
 	/// Current drain rate in kbps (for the measurement log).
@@ -325,6 +380,12 @@ impl Pacer {
 		let c = cost(self.head()?.data.len());
 		if self.enabled && self.tokens + self.eff_rate(now) * BORROW_MS < c {
 			return None;
+		}
+		if self.enabled {
+			let r = self.eff_rate(now);
+			if r > self.win_peak {
+				self.win_peak = r;
+			}
 		}
 		let it = if self.rtx.is_empty() { self.media.pop_front() } else { self.rtx.pop_front() }?;
 		if self.enabled {
@@ -621,5 +682,38 @@ mod tests {
 			n += 1;
 		}
 		assert_eq!(n, 84);
+	}
+
+	/// 2026-11-15: big frames on motion were drained at 120-160 Mbit/s into a 50 Mbit/s uplink and
+	/// dropped. A lossy window in which the pacer boosted caps the next boost; the queue still
+	/// empties well inside the hard bound; clean windows lift the cap again.
+	#[test]
+	fn a_lossy_boost_is_capped_and_the_cap_relaxes() {
+		let t0 = Instant::now();
+		let mut now = t0;
+		let mut p = Pacer::new(true, t0);
+		p.set_target(8000, 0.4, t0);
+		let base_kbps = p.base * 8.0;
+		let mut seq = 0u16;
+		push_frame(&mut p, 300_000, &mut seq, now);
+		drain(&mut p, t0, &mut now, t0 + Duration::from_secs(1));
+		let peak = p.win_peak * 8.0;
+		assert!(peak > base_kbps * 2.0, "the burst boosted: {peak:.0} vs base {base_kbps:.0} kbps");
+		p.on_loss_window(0.15);
+		let cap = p.boost_cap_kbps();
+		assert!(cap > 0.0 && cap <= peak * CAP_SHARE + 1.0, "cap {cap:.0} kbps under the lossy peak {peak:.0}");
+		// The same burst again: drained no faster than the cap (or what the hard bound needs).
+		let t1 = now;
+		push_frame(&mut p, 300_000, &mut seq, now);
+		let sent = drain(&mut p, t0, &mut now, t1 + Duration::from_secs(1));
+		let span = sent.last().unwrap().0 - ms(t0, t1);
+		assert!(span <= HARD_SAFE_MS + 5.0, "drained within the hard bound: {span:.1} ms");
+		assert!(p.win_peak * 8.0 <= cap.max(300_000.0 * 8.0 / HARD_SAFE_MS) + 1.0, "boost held under the cap");
+		assert_eq!(p.take_stats().drops, 0, "capping drops nothing");
+		// Clean windows relax it until it no longer binds.
+		for _ in 0..(CAP_CLEAN_WINDOWS * 20) {
+			p.on_loss_window(0.0);
+		}
+		assert_eq!(p.boost_cap_kbps(), 0.0, "the cap is gone after a long clean run");
 	}
 }
