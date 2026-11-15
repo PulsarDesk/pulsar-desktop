@@ -2815,6 +2815,8 @@ pub(crate) async fn bring_online(
 				// are sid-guarded so they silently no-op when already cleared).
 				// Wi-Fi low-latency mode while this session streams (see wlan_lowlat.rs).
 				let _wlan = crate::wlan_lowlat::acquire();
+				// 1 ms timer while streaming: the video pacer's wakes stay on time (see timer_res.rs).
+				let _timer = crate::timer_res::acquire();
 				let _cleanup_guard = SessionCleanupGuard {
 					procs: procs.clone(),
 					proc_epoch: proc_epoch.clone(),
