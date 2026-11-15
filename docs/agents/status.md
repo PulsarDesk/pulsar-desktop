@@ -71,6 +71,16 @@ loss with reference-frame invalidation like the Windows host — see
 [host-encode.md](host-encode.md) "Linux NVENC SDK". Open: the Linux client does not ask for
 RFI yet (`play.rs` `cfg!(windows)`); VA-API / QSV / AMF hosts have no equivalent (keyframe).
 
+**Linux AMD / Intel host, in-process VA-API / QSV (2026-11-15, LOCAL, untested on Linux
+hardware, not compiled for Linux here):** X11 hosts on `*_vaapi` / `*_qsv` run inside the app
+(`host/libav.rs`) on the screen GPU's render node (`drm_node.rs`); a bitrate step re-opens the
+encoder alone at the next IDR instead of restarting ffmpeg, and the CLI fallback absorbs small
+steps on Linux too. See [host-encode.md](host-encode.md) "Linux X11". Windows (AMD/Intel: the
+Media Foundation native path, separate work) and macOS (VideoToolbox native, live bitrate)
+have their own engines; the CLI absorb already covered them. To check on hardware: the re-open
+time (log `encoder re-opened`), CBR rate accuracy on radeonsi / iHD, `PULSAR_VAAPI_VPP=1`
+colours, QSV `low_power` on pre-Ice-Lake iGPUs.
+
 **macOS host virtual gamepad (2026-11-14, untested on macOS hardware):** pulsar-core
 `input/mac_hid.rs` creates an `IOHIDUserDevice` virtual HID pad (Xbox target = Xbox Wireless
 over Bluetooth 045E:0B13, DS4 target = DualShock 4 USB 054C:09CC) with rumble back to the

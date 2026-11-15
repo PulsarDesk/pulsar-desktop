@@ -60,9 +60,27 @@ Part of the pulsar-desktop agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
   region (`ghost_region`) is still None on macOS. The streamed display is process-wide: two
   sessions streaming different displays map the pointer onto the one published last.
 - **Linux X11** — the ffmpeg **libraries in-process** (`src-tauri/src/host/libav.rs`:
-  x11grab → libavfilter → libavcodec x264/x265/SVT-AV1/NVENC → libavformat RTP; live
-  bitrate, forced IDR on request, short-GOP recovery; `PULSAR_LIBAV_HOST=0` disables).
-  Falls back to the ffmpeg CLI below when it cannot start or for VA-API/Vulkan/HDR/4:4:4.
+  x11grab → libavfilter → libavcodec x264/x265/SVT-AV1/NVENC/VA-API/QSV → libavformat RTP;
+  live bitrate, forced IDR on request, short-GOP recovery; `PULSAR_LIBAV_HOST=0` disables).
+  Falls back to the ffmpeg CLI below when it cannot start or for Vulkan/HDR/4:4:4.
+  - **AMD / Intel (VA-API, QSV) in-process** (2026-11-15, untested on Linux hardware):
+    VA-API = `scale,format=nv12,hwupload` (the CLI's chain; `PULSAR_VAAPI_VPP=1` =
+    `hwupload,scale_vaapi` GPU conversion, BT.709-tagged) → `h264/hevc/av1_vaapi` (CBR game /
+    VBR desktop, `async_depth=1`, no B-frames); QSV = system-memory NV12 on a QSV device whose
+    VA-API child is the same node (`veryfast` + `low_power`, retried without, `look_ahead=0`,
+    `async_depth=1`, `forced_idr`). Game mode gets a ~125 ms VBV (others keep ~0.5 s).
+    `*_vaapi` (and QSV before FFmpeg 6.0) read the rate only at open, so a bitrate step
+    re-opens the ENCODER alone on the same capture/graph/surfaces/RTP muxer at the next IDR
+    the stream has anyway (≤ 0.25 s in game mode, ≤ 2 s desktop; a ≥ 25 % cut at once) —
+    one IDR, no ffmpeg restart. QSV on FFmpeg ≥ 6.0 takes it live. Rules + tests:
+    `host/libav_policy.rs`. `PULSAR_LIBAV_HW=0` sends VA-API / QSV back to the CLI.
+  - **Render node** (`src-tauri/src/drm_node.rs`): `StreamCfg::vaapi_device` (CLI
+    `-vaapi_device`, the encoder probes / caps, the in-process engine) is the render node of
+    the first non-NVIDIA GPU with an enabled, connected connector (sysfs), else the first
+    non-NVIDIA GPU, else `renderD128`; `PULSAR_VAAPI_DEVICE` overrides. Picked once at start.
+  - **CLI fallback absorbs ABR steps on Linux too** (as Windows/macOS): a bitrate-only step
+    under 30 % down / 40 % up, or within 6 s of the last restart, keeps the running ffmpeg —
+    only while the stream is actually on the CLI (a libav / Wayland stream clears it).
   - **NVENC there goes through the NVENC SDK** (2026-11-14, untested on Linux hardware):
     `pulsar_capture::NvencCuda` (`crates/pulsar-capture/src/encode/cuda_enc.rs`) instead of
     libavcodec's `h264_nvenc`. See "Linux NVENC SDK" below.

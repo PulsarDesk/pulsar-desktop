@@ -107,6 +107,8 @@ pub(crate) mod takeover;
 pub(crate) mod window_src;
 #[cfg(target_os = "linux")]
 mod libav;
+// libav.rs's VA-API / QSV rate + graph rules: compiled everywhere so they are tested on every OS.
+mod libav_policy;
 // The NVENC SDK encoder as the Wayland capture's raw-frame encoder (RFI on Wayland hosts).
 #[cfg(target_os = "linux")]
 mod nvenc_frames;
