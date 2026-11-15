@@ -2257,11 +2257,7 @@ pub(crate) async fn bring_online(
 						// lines went unnoticed. Clicking the toast opens the chat.
 						// (On screen = the host is looking at it: visible, not minimized and focused.
 						// A window behind other windows gets the toast + taskbar flash too.)
-						let chat_on_screen = tauri::Manager::get_webview_window(&app_h, "connections").is_some_and(|w| {
-							w.is_visible().unwrap_or(false)
-								&& !w.is_minimized().unwrap_or(true)
-								&& w.is_focused().unwrap_or(false)
-						});
+						let chat_on_screen = crate::connections::chat_on_screen(&app_h);
 						if !chat_on_screen {
 							let from = chat_names
 								.lock()

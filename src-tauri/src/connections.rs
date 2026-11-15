@@ -18,6 +18,18 @@ use crate::state::{AppState, ConnMode};
 
 const LABEL: &str = "connections";
 
+/// The connections window has the keyboard focus (kept from its Focused events).
+static FOCUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The host is looking at the chat: the connections window exists, is visible, not minimized
+/// and focused. Safe from any thread.
+pub(crate) fn chat_on_screen(app: &AppHandle) -> bool {
+	FOCUSED.load(std::sync::atomic::Ordering::SeqCst)
+		&& app
+			.get_webview_window(LABEL)
+			.is_some_and(|w| w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(true))
+}
+
 /// How to surface the connections window, decided by the incoming connection's mode.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Surface {
@@ -70,7 +82,18 @@ pub(crate) fn open_or_update(app: &AppHandle, surface: Surface) {
 			.focused(surface == Surface::Forward)
 			.build()
 		{
-			Ok(win) => match surface {
+			Ok(win) => {
+				// Track focus from the window's own events: is_focused() asked from another
+				// thread (the chat handler runs on a tokio worker) reads Windows' per-thread
+				// active window and always said "not focused" — the chat toast showed while
+				// the host was typing in the chat (2026-11-15).
+				win.on_window_event(|ev| match ev {
+					tauri::WindowEvent::Focused(f) => FOCUSED.store(*f, std::sync::atomic::Ordering::SeqCst),
+					tauri::WindowEvent::Destroyed => FOCUSED.store(false, std::sync::atomic::Ordering::SeqCst),
+					_ => {}
+				});
+				FOCUSED.store(surface == Surface::Forward, std::sync::atomic::Ordering::SeqCst);
+				match surface {
 				// Remote: bring it forward, like the approval popup.
 				Surface::Forward => {
 					let _ = win.set_focus();
@@ -93,7 +116,8 @@ pub(crate) fn open_or_update(app: &AppHandle, surface: Surface) {
 					#[cfg(not(windows))]
 					let _ = win.minimize();
 				}
-			},
+				}
+			}
 			Err(e) => tracing::warn!(%e, "connections window failed to open"),
 		}
 	});
@@ -108,7 +132,7 @@ pub(crate) fn notify_chat(app: &AppHandle) {
 	// Queued after the build above (same main-thread queue), so the window exists by now.
 	let _ = app.run_on_main_thread(move || {
 		if let Some(win) = handle.get_webview_window(LABEL) {
-			if !win.is_focused().unwrap_or(false) {
+			if !FOCUSED.load(std::sync::atomic::Ordering::SeqCst) {
 				let _ = win.request_user_attention(Some(tauri::UserAttentionType::Informational));
 			}
 		}
