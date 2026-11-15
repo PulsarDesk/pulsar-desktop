@@ -704,6 +704,12 @@ impl RtpEgress {
 		frames_in_seq_range(&self.sent, first, last)
 	}
 
+	/// The sequence numbers the access unit with RTP timestamp `ts` went out on (benchmarks
+	/// simulate a client-reported loss with it).
+	pub fn seq_range_of(&self, ts: u32) -> Option<(u16, u16)> {
+		self.sent.lock().unwrap().iter().rev().find(|(t, _, _)| *t == ts).map(|(_, a, b)| (*a, *b))
+	}
+
 	/// Hand one access unit to the sender thread. NON-BLOCKING: copies `annexb` (valid only
 	/// until the caller unlocks the NVENC bitstream) into an owned `Vec`, enqueues it, and
 	/// returns. On overflow the stale backlog is dropped (newest-wins) so the encode thread is

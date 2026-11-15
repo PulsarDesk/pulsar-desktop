@@ -100,6 +100,12 @@ mod encoder;
 // The display GPU's own hardware encoder via Media Foundation (measured against NVENC).
 #[cfg(windows)]
 pub(crate) mod mf;
+// Long-term-reference loss recovery bookkeeping (Media Foundation encoders; pure, unit-tested).
+#[cfg_attr(not(windows), allow(dead_code))]
+mod ltr;
+// Which hardware Media Foundation encoders this machine has, and what they take.
+#[cfg(windows)]
+pub(crate) mod mf_probe;
 #[cfg(windows)]
 mod new;
 pub(crate) mod nvenc;

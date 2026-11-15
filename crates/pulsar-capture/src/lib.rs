@@ -63,6 +63,22 @@ pub struct CaptureConfig {
 	/// The HWND is a raw window handle (`HWND.0 as isize`); the entire encode/RTP path is
 	/// identical either way. Has no effect on non-Windows (the native path is Windows-only).
 	pub window_hwnd: Option<isize>,
+	/// Which hardware encoder the Windows native path drives (ignored on macOS — always
+	/// VideoToolbox there).
+	pub encoder: NativeEncoder,
+}
+
+/// The Windows native path's encoder.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NativeEncoder {
+	/// The NVENC SDK (an NVIDIA GPU). On a hybrid laptop the monitor GPU's own Media
+	/// Foundation encoder is measured against it (`path.rs`).
+	#[default]
+	Nvenc,
+	/// The capture GPU's own hardware encoder through Media Foundation (`encode/mf.rs`): hosts
+	/// without NVENC (Qualcomm Adreno, AMD, Intel). Live bitrate, keyframe on request,
+	/// long-term-reference loss recovery where the MFT has it.
+	MediaFoundation,
 }
 
 /// Video codec selector. The native NVENC path implements all three (`H264`, `H265`,
@@ -79,9 +95,9 @@ pub enum Codec {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CaptureStats {
 	/// `"dxgi"` (Desktop Duplication), `"wgc"` (whole monitor via Windows Graphics Capture),
-	/// `"wgc-window"` (one window) — all NVENC — or `"dxgi-mf"` (Desktop Duplication + the
-	/// display GPU's own encoder through Media Foundation); `"sck"` on macOS (ScreenCaptureKit +
-	/// VideoToolbox); `""` before the first build.
+	/// `"wgc-window"` (one window) — all NVENC — or `"dxgi-mf"` / `"wgc-mf"` / `"wgc-window-mf"`
+	/// (the same sources + the capture GPU's own encoder through Media Foundation); `"sck"` on
+	/// macOS (ScreenCaptureKit + VideoToolbox); `""` before the first build.
 	pub source: &'static str,
 	/// A fresh frame composed → its access unit handed to RTP (capture wait + any cross-GPU
 	/// hop + colour convert + encode): median / 90th percentile in µs. 0 on a static screen.
@@ -157,6 +173,8 @@ impl LiveStats {
 				3 => "wgc-window",
 				4 => "dxgi-mf",
 				5 => "sck",
+				6 => "wgc-mf",
+				7 => "wgc-window-mf",
 				_ => "",
 			},
 			latency_p50_us: self.lat_p50.load(Relaxed),
@@ -399,6 +417,9 @@ pub(crate) mod dxgi;
 mod encode;
 #[cfg(windows)]
 pub use encode::gpu_vendors;
+// The display GPU's hardware encoders through Media Foundation (non-NVIDIA hosts' native path).
+#[cfg(windows)]
+pub use encode::mf_probe::{mf_codecs, mf_report};
 #[cfg(any(windows, target_os = "linux"))]
 pub use encode::{nvenc_codecs, nvenc_supported};
 // Linux: the NVENC SDK on a CUDA context, fed system-memory NV12 frames (the host's x11grab /
@@ -418,6 +439,9 @@ mod gpu_sched;
 // Glass-to-encode measurement hooks for the capbench example (inert unless PULSAR_BENCH_PIXEL=1).
 #[cfg(windows)]
 pub mod bench;
+// Headless synthetic-frame encoder bench (examples/mfbench.rs).
+#[cfg(windows)]
+pub mod synth_bench;
 /// macOS stubs — there is no NVENC there.
 #[cfg(not(any(windows, target_os = "linux")))]
 pub fn nvenc_supported() -> bool {
@@ -581,6 +605,14 @@ impl AnyEncoder {
 			AnyEncoder::Mf(e) => e.flush_and_close(),
 		}
 	}
+	/// The encoder's own input → output time (µs) where `submit` does not wait for the output
+	/// (Media Foundation: the access unit leaves from its output thread).
+	fn async_latency_us(&self) -> Option<u32> {
+		match self {
+			AnyEncoder::Nv(_) => None,
+			AnyEncoder::Mf(e) => Some(e.encode_latency_us()),
+		}
+	}
 }
 
 /// Spawn the dedicated capture+encode thread.
@@ -682,8 +714,11 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 			// Full-monitor capture source (DXGI or WGC) and, on a hybrid host, the measurement
 			// that picks it (path.rs). A window capture always uses WGC on its window.
 			let forced_source = path::forced_source();
+			// No NVENC: the capture GPU's Media Foundation encoder behind DXGI (or WGC when DXGI
+			// refuses), nothing to measure.
+			let mf_only = cfg.encoder == NativeEncoder::MediaFoundation;
 			let plan_for = |idx: u32| {
-				if cfg.window_hwnd.is_some() {
+				if cfg.window_hwnd.is_some() || mf_only {
 					path::Plan::none()
 				} else {
 					path::plan(idx, cfg.fps, forced_source)
@@ -824,7 +859,7 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 					rotation,
 					rfi: cfg.rfi,
 				};
-				let mf_path = cfg.window_hwnd.is_none() && source.is_mf();
+				let mf_path = mf_only || (cfg.window_hwnd.is_none() && source.is_mf());
 				let built = if mf_path {
 					encode::mf::MfEncoder::new(cap.device(), cap.context(), &params).map(AnyEncoder::Mf)
 				} else {
@@ -834,7 +869,7 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 					Ok(e) => e,
 					// The display GPU has no usable encoder for this codec: measure / use the next
 					// path (NVENC) instead — never a reason to leave the native path.
-					Err(e) if mf_path => {
+					Err(e) if mf_path && !mf_only => {
 						encode_log(&format!("capture path dxgi-mf: encoder unavailable ({e})"));
 						if plan.skip(&mut probe_results, &mut next_source).is_none() {
 							next_source = Some(source.other());
@@ -845,7 +880,8 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 					Err(e) => {
 						if !announced {
 							cap_log(&format!("BUILD #{build_no} enc FAILED output={output_idx}: {e} — initial, fall to ffmpeg"));
-							let _ = init_tx.send(Err(format!("nvenc init: {e}")));
+							let what = if mf_only { "mf init" } else { "nvenc init" };
+							let _ = init_tx.send(Err(format!("{what}: {e}")));
 							return;
 						}
 						if output_idx != prev_good_output {
@@ -869,7 +905,13 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 				}
 				prev_good_output = output_idx;
 				stats_t.source.store(
-					if cfg.window_hwnd.is_some() { 3 } else { source.code() },
+					match (cfg.window_hwnd.is_some(), mf_only, source) {
+						(true, false, _) => 3,
+						(true, true, _) => 7,
+						(false, true, path::MonSource::Wgc) => 6,
+						(false, true, _) => 4,
+						(false, false, s) => s.code(),
+					},
 					Ordering::Relaxed,
 				);
 				if cfg.window_hwnd.is_none() {
@@ -998,11 +1040,18 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 							frames_sent += 1;
 							stats_t.encoded.fetch_add(1, Ordering::Relaxed);
 							// G2: smooth per-frame encode wall-time (µs) into the EWMA atom.
-							let us = enc_t0.elapsed().as_micros().min(u32::MAX as u128) as u32;
+							let tick = enc_t0.elapsed().as_micros().min(u32::MAX as u128) as u32;
+							// An encoder whose access units leave from its own thread (MF): the
+							// tick is only the hand-over; its measured encode time (+ the
+							// conversion) stands for the frame, and the AU leaves that much later.
+							let (us, ahead_ns) = match enc.async_latency_us() {
+								Some(lat) if lat > 0 => (tick + lat, lat as i64 * 1000),
+								_ => (tick, 0),
+							};
 							let prev = encode_us_t.load(Ordering::Relaxed);
 							encode_us_t.store(if prev == 0 { us } else { prev / 8 * 7 + us / 8 }, Ordering::Relaxed);
 							// present→encoded latency: the live stats and, while probing, this source's score.
-							let done_ns = qpc.now_ns();
+							let done_ns = qpc.now_ns() + ahead_ns;
 							let present_ns = match pixel.as_mut() {
 								Some(p) if frame.is_new => p.paint_ns(frame.texture),
 								Some(_) => 0,
