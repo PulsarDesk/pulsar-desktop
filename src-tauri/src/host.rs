@@ -1719,6 +1719,11 @@ pub(crate) async fn bring_online(
 					// Touchpad gestures (3 / 4 fingers): the host user's own action for each,
 					// read from this host's settings per gesture (pulsar-core `input::gesture`).
 					let mut gestures = pulsar_core::input::gesture::HostGestures::new();
+					// The client's pointer is relative (captured / locked: a native-renderer game
+					// client, or host pointer lock) — the last pointer motion it sent was relative.
+					// With a game session it picks whole-notch wheel output on Windows.
+					#[cfg(windows)]
+					let mut rel_pointer = false;
 					move |ev: InputEvent| {
 						// View-only: drop EVERY input event for this session (gamepad too)
 						// while the host user has control revoked.
@@ -1728,6 +1733,12 @@ pub(crate) async fn bring_online(
 							.get(&sid)
 							.map(|ci| (ci.view_only, ci.mode == crate::state::ConnMode::Remote))
 							.unwrap_or((false, true));
+						#[cfg(windows)]
+						match ev {
+							InputEvent::PointerRelative { .. } => rel_pointer = true,
+							InputEvent::PointerMotion { .. } => rel_pointer = false,
+							_ => {}
+						}
 						let pointer = matches!(
 							ev,
 							InputEvent::PointerMotion { .. }
@@ -2216,7 +2227,17 @@ pub(crate) async fn bring_online(
 										InputEvent::PointerButton { button, down } => {
 											d.button(button, down)
 										}
-										InputEvent::Scroll { dx, dy } => d.scroll(dx, dy),
+										InputEvent::Scroll { dx, dy } => {
+											// Windows: whole WHEEL_DELTA notches in a game session or
+											// while the pointer is relative — games often do
+											// `delta / 120` as an integer, so hi-res 1/8-notch steps
+											// would be a dead wheel there (pulsar-core `input::wheel`).
+											// Hi-res units for the desktop. Linux uinput sends both
+											// axes anyway; macOS posts line events.
+											#[cfg(windows)]
+											d.set_whole_notch_wheel(!remote_mode || rel_pointer);
+											d.scroll(dx, dy)
+										}
 										InputEvent::Key { code, down } => d.key(code, down),
 										InputEvent::Char(c) => d.type_char(c),
 										InputEvent::Pinch { phase, scale } => d.pinch(phase, scale),

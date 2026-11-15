@@ -61,6 +61,8 @@ mod imp {
 		monitor: Option<MonitorRect>,
 		/// Log the helper state once per change, not per event.
 		logged_missing: bool,
+		/// Wheel mode last set (re-applied to a helper that (re)connects).
+		whole_notches: bool,
 	}
 
 	impl HostInput {
@@ -72,6 +74,7 @@ mod imp {
 				next_try: Instant::now(),
 				monitor: None,
 				logged_missing: false,
+				whole_notches: false,
 			};
 			s.ensure_sys();
 			Ok(s)
@@ -85,6 +88,7 @@ mod imp {
 			match SysInput::connect(pulsar_core::input::evdev_to_raw_key) {
 				Ok(mut s) => {
 					s.set_monitor(self.monitor.map(conv));
+					s.set_whole_notch_wheel(self.whole_notches);
 					tracing::info!(session = s.session(), "input: SYSTEM helper connected (UAC / lock screen reachable)");
 					self.logged_missing = false;
 					self.sys = Some(s);
@@ -149,6 +153,15 @@ mod imp {
 		}
 		pub(crate) fn button(&mut self, button: u8, down: bool) {
 			self.with(|s| s.button(button, down), |d| d.button(button, down));
+		}
+		/// Whole `WHEEL_DELTA` notches (game session / relative pointer) or hi-res units, on
+		/// both injectors so a helper drop / reconnect keeps the mode.
+		pub(crate) fn set_whole_notch_wheel(&mut self, on: bool) {
+			self.whole_notches = on;
+			self.desk.set_whole_notch_wheel(on);
+			if let Some(s) = self.sys.as_mut() {
+				s.set_whole_notch_wheel(on);
+			}
 		}
 		pub(crate) fn scroll(&mut self, dx: f64, dy: f64) {
 			self.with(|s| s.scroll(dx, dy), |d| d.scroll(dx, dy));

@@ -256,6 +256,37 @@ pulsar-macinput`). Same surface and rules as the Windows hook (`imp.rs`):
   host now ignores ids it does not know. The Windows secure-desktop helper (pulsar-sysagent) and
   the Android host ignore the side buttons.
 
+## Mouse motion batching + hi-res scroll (all desktop clients / hosts, 2026-11-15, untested on hardware)
+
+- **Wire scroll unit** (`InputEvent::Scroll`): browser wheel px, 100 per notch, +y down, +x
+  right, fractions kept. Clients: Windows LL hook `WM_MOUSE(H)WHEEL` raw×100/120; Interception
+  `rolling`×100/120 on the WHEEL (0x400) **and** HWHEEL (0x800) bit (it used to send raw 120s =
+  1.2× too far, and dropped the horizontal wheel); Linux evdev `REL_(H)WHEEL_HI_RES`×100/120 on a
+  device that has the axis (its legacy notch is then ignored), else `REL_(H)WHEEL`×100, one
+  `Scroll` per evdev batch; macOS tap point deltas / lines×100; webview `WheelEvent` px.
+- **Hosts** (pulsar-core `input::wheel`): Windows `mouseData` in 1/120 notch for a desktop
+  session (desktop injector + the system agent), but **whole notches ×120 in a game session or
+  while the client's last pointer motion was relative** (`host.rs` sets
+  `HostInput::set_whole_notch_wheel` per scroll event): many games read Raw Input /
+  `WM_MOUSEWHEEL` and do `delta / 120` as an integer, so a hi-res 1/8-notch step is a dead
+  wheel there (why mouse drivers keep hi-res off by default on Windows). Linux
+  `REL_WHEEL_HI_RES` + the legacy notch at the halfway point (like the kernel), macOS one scale
+  (LINE events; finer deltas carry fractional lines in the fixed-point fields). Whole notches
+  always: the Windows per-window injector (a launched game), X11 per-window (core button 4-7
+  events) and same-host co-op raw-input injection (`coop.rs`). The **Android host** (mobile
+  repo) turns each scroll call into one swipe, so it accumulates to whole 100 px notches first.
+- **Motion batching** (`play/hold.rs`, pulsar-core `input::coalesce`): pointer-relative /
+  absolute / scroll per kind through a 2-deep token bucket refilled every 0.8 ms — a 1 kHz mouse
+  with jitter is never held, a sustained >1.25 kHz stream is merged (deltas add) and the tail
+  sent when the next token is due; a button / key flushes first. The input arm drains what is
+  already queued (≤ 64) and sends it merged but unheld (`push_backlog`): it is late already.
+  The client holds the 1 ms Windows timer (`timer_res`) while a session runs so the tail is not
+  late. The Windows hook and macOS tap forwarders (`util::input_forwarder_loop`) merge motion on
+  a full session channel instead of dropping it; Interception motion goes through the same
+  ordered forwarder as its buttons now. The Linux evdev reader stays non-blocking (it holds the
+  grab): a batch's motion / scroll refused by a full channel is kept (`MotionCarry`) and added
+  to the next batch for that channel; edges keep the plain `try_send`.
+
 ## Ctrl+Shift+M toggles the Pulsar menu — the second press has to arrive too
 
 Opening the menu releases control, so the press that closes it comes in on the *disengaged*

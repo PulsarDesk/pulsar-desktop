@@ -30,6 +30,9 @@ use crate::state::Restream;
 /// (Phase 0.1) and to size the NACK repair window (Phase 0.5). Each Ping is a ~10-byte
 /// datagram; the host answers every one with a Pong and refreshes its liveness timer.
 const PING_MS: u64 = 500;
+/// At most this many already-queued input events are taken per wake of the input arm (see
+/// the backlog drain there): bounded so one busy moment can't starve the other arms.
+const INPUT_BACKLOG_MAX: usize = 64;
 /// A Ping still unanswered this long is written off as lost. Pings go out every `PING_MS`
 /// whether or not the last one was answered (see `match_pong`): on a 40 %-loss link a lost
 /// Ping or Pong used to stall the RTT samples for a second.
@@ -680,6 +683,16 @@ pub(super) async fn hold_session(
 	// session forwards passes the `input_rx` arm below; focus / lock / expiry are checked on
 	// the 2 s `keep` tick (see keep_awake.rs).
 	let mut awake = crate::keep_awake::ClientAwake::start(std::time::Instant::now());
+	// Pointer motion / scroll batching (≤ one packet per ~1 ms per kind; the first event of
+	// a burst goes out at once, a button or key flushes what is held first) — a 4-8 kHz
+	// mouse otherwise sends one encrypted datagram per report. See pulsar-core
+	// `input::coalesce`. The held-back tail leaves from the deadline arm in the loop below.
+	let mut motion = pulsar_core::input::coalesce::MotionCoalescer::default();
+	let mut motion_out: Vec<InputEvent> = Vec::new();
+	// That tail waits on a tokio timer: at Windows' default 15.6 ms timer resolution it would
+	// leave up to ~16 ms late, so the client keeps the 1 ms resolution while the session runs
+	// (refcounted with the host side; Linux / macOS timers are already fine — timer_res.rs).
+	let _timer = crate::timer_res::acquire();
 	// ---- Media-over-session demux state (single-socket transport) ----
 	// Media frames arrive INSIDE this session ([tag][rtp…]); forward each datagram to
 	// the local consumer: the renderer's RTP port (video) / the viewer's audio port.
@@ -988,14 +1001,32 @@ pub(super) async fn hold_session(
 				Some(ev) => {
 					let mut dead = false;
 					let now = std::time::Instant::now();
-					awake.on_input(&ev, now);
-					let evs = if host_pen { tablet_aug.on_event(now, ev, tablet::latest()) } else { vec![ev] };
-					'send: for ev in evs {
-						for ev in pen_touch.on_event(now, ev) {
-							if send_input(&mut sess, &ev).await.is_err() {
-								dead = true;
-								break 'send;
-							}
+					// Whatever else is already queued came in while this loop was busy in
+					// another arm (media demux, a send_input await, file chunks) or from a hook
+					// that delivers in batches: take it now (bounded) — it merges into fewer
+					// packets, and `push_backlog` sends the merged tail at once instead of
+					// holding already-late input for the coalescer's timer.
+					let mut batch = vec![ev];
+					while batch.len() < INPUT_BACKLOG_MAX {
+						match input_rx.try_recv() {
+							Ok(ev) => batch.push(ev),
+							Err(_) => break,
+						}
+					}
+					let mut evs = Vec::with_capacity(batch.len());
+					for ev in batch {
+						awake.on_input(&ev, now);
+						let aug = if host_pen { tablet_aug.on_event(now, ev, tablet::latest()) } else { vec![ev] };
+						for ev in aug {
+							evs.extend(pen_touch.on_event(now, ev));
+						}
+					}
+					motion_out.clear();
+					motion.push_backlog(now, evs, &mut motion_out);
+					for ev in motion_out.drain(..) {
+						if send_input(&mut sess, &ev).await.is_err() {
+							dead = true;
+							break;
 						}
 					}
 					if dead {
@@ -1013,7 +1044,19 @@ pub(super) async fn hold_session(
 					}
 				}
 				evs.extend(pen_touch.tick(now));
+				motion_out.clear();
 				for ev in evs {
+					motion.push(now, ev, &mut motion_out);
+				}
+				for ev in motion_out.drain(..) {
+					let _ = send_input(&mut sess, &ev).await;
+				}
+			}
+			// The held-back motion / scroll tail of a burst, when its window closes.
+			_ = tokio::time::sleep_until(
+				motion.deadline().map(tokio::time::Instant::from_std).unwrap_or_else(tokio::time::Instant::now),
+			), if motion.deadline().is_some() => {
+				if let Some(ev) = motion.poll(std::time::Instant::now()) {
 					let _ = send_input(&mut sess, &ev).await;
 				}
 			}

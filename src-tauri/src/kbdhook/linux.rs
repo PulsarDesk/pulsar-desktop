@@ -174,6 +174,102 @@ fn fwd(tx: &Sender<InputEvent>, ev: InputEvent) {
 	let _ = tx.try_send(ev);
 }
 
+/// `fwd` for one batch's motion / wheel: on a FULL session channel the event comes back
+/// (`Some`) so the reader keeps it in its [`MotionCarry`] instead of dropping it. Still
+/// non-blocking (the grab must never stall, see `fwd`).
+fn fwd_motion(tx: &Sender<InputEvent>, ev: InputEvent) -> Option<InputEvent> {
+	crate::power_watch::note_input();
+	match tx.try_send(ev) {
+		Err(tokio::sync::mpsc::error::TrySendError::Full(ev)) => Some(ev),
+		_ => None,
+	}
+}
+
+/// Relative motion + wheel a full session channel refused, added to the next batch for the
+/// same channel — so a stall costs packets, not mouse distance or scroll (the Windows hook /
+/// macOS tap forwarders merge the same way, `util::input_forwarder_loop`). Edges keep
+/// `fwd`'s plain try_send.
+#[derive(Default)]
+struct MotionCarry {
+	tx: Option<Sender<InputEvent>>,
+	dx: f64,
+	dy: f64,
+	scroll_dx: f64,
+	scroll_dy: f64,
+}
+
+impl MotionCarry {
+	/// The carry for `tx`, cleared — `(dx, dy, scroll_dx, scroll_dy)`, zeros when it belongs to
+	/// another channel (left in place for that one).
+	fn take(&mut self, tx: &Sender<InputEvent>) -> (f64, f64, f64, f64) {
+		if !self.tx.as_ref().is_some_and(|c| c.same_channel(tx)) {
+			return (0.0, 0.0, 0.0, 0.0);
+		}
+		self.tx = None;
+		let out = (self.dx, self.dy, self.scroll_dx, self.scroll_dy);
+		(self.dx, self.dy, self.scroll_dx, self.scroll_dy) = (0.0, 0.0, 0.0, 0.0);
+		out
+	}
+
+	/// Keep a refused motion / scroll event for `tx`.
+	fn keep(&mut self, tx: &Sender<InputEvent>, ev: InputEvent) {
+		if !self.tx.as_ref().is_some_and(|c| c.same_channel(tx)) {
+			*self = Self { tx: Some(tx.clone()), ..Self::default() };
+		}
+		match ev {
+			InputEvent::PointerRelative { dx, dy } => {
+				self.dx += dx;
+				self.dy += dy;
+			}
+			InputEvent::Scroll { dx, dy } => {
+				self.scroll_dx += dx;
+				self.scroll_dy += dy;
+			}
+			_ => {}
+		}
+	}
+}
+
+/// Which wheel axes a captured device reads from (see [`WheelAcc`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct WheelAxes {
+	v_hi_res: bool,
+	h_hi_res: bool,
+}
+
+impl WheelAxes {
+	fn of(d: &evdev::Device) -> Self {
+		let rel = d.supported_relative_axes();
+		let has = |c| rel.is_some_and(|r| r.contains(c));
+		Self { v_hi_res: has(RelativeAxisCode::REL_WHEEL_HI_RES), h_hi_res: has(RelativeAxisCode::REL_HWHEEL_HI_RES) }
+	}
+}
+
+/// One evdev batch's wheel, as browser wheel px (the wire unit: 100 per notch, +y down, +x
+/// right). evdev: +1 notch / +120 hi-res = up (vertical) or right (horizontal).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct WheelAcc {
+	dx: f64,
+	dy: f64,
+}
+
+impl WheelAcc {
+	fn add(&mut self, axes: WheelAxes, code: RelativeAxisCode, value: i32) {
+		let v = value as f64;
+		match code {
+			RelativeAxisCode::REL_WHEEL_HI_RES if axes.v_hi_res => self.dy -= v * 100.0 / 120.0,
+			RelativeAxisCode::REL_WHEEL if !axes.v_hi_res => self.dy -= v * 100.0,
+			RelativeAxisCode::REL_HWHEEL_HI_RES if axes.h_hi_res => self.dx += v * 100.0 / 120.0,
+			RelativeAxisCode::REL_HWHEEL if !axes.h_hi_res => self.dx += v * 100.0,
+			_ => {}
+		}
+	}
+
+	fn event(&self) -> Option<InputEvent> {
+		(self.dx != 0.0 || self.dy != 0.0).then_some(InputEvent::Scroll { dx: self.dx, dy: self.dy })
+	}
+}
+
 /// Stable-ish key for a captured evdev device — its kernel name (e.g. "Logitech USB Keyboard").
 /// Used as the per-pane LOCK key (set_kbm_lock) and surfaced to the UI. Two IDENTICAL devices share
 /// a name (a known v1 limit); a physical-port key would disambiguate them later.
@@ -410,6 +506,8 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, star
 		let mut diag_logged_at = std::time::Instant::now();
 		let mut diag_last: Option<(bool, bool, bool, usize)> = None;
 		let (mut diag_events, mut diag_fwd) = (0u32, 0u32);
+		// Motion / wheel a full session channel refused (see `MotionCarry`).
+		let mut carry = MotionCarry::default();
 		let mut grabbed: Vec<evdev::Device> = Vec::new();
 		// Event node of grabbed[i] (parallel array) — needed to purge a VANISHED device's
 		// entry so a later device reusing the same event number can be grabbed again.
@@ -693,6 +791,12 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, star
 				pfds[i].revents = 0;
 				// Accumulate relative motion within this batch → one PointerRelative.
 				let (mut adx, mut ady) = (0f64, 0f64);
+				// …and the wheel → one Scroll. A hi-res mouse (kernel 5.0+) reports
+				// REL_WHEEL_HI_RES (120 per notch, 1/8-notch steps or finer) AND a legacy
+				// REL_WHEEL notch in the same frame: take the hi-res axis on such a device and
+				// ignore the legacy one (else every notch counted twice), the notch elsewhere.
+				let wheel = WheelAxes::of(&grabbed[i]);
+				let mut wheel_acc = WheelAcc::default();
 				// Collect into an owned Vec so the &mut borrow on grabbed[i] ends HERE.
 				// The chord check below reads every grabbed device's live key state
 				// (`chord_mods(&grabbed)`), which it can't do while this device is still
@@ -966,29 +1070,26 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, star
 						EventSummary::RelativeAxis(_, rel, _) if !want_suspend => match rel {
 							RelativeAxisCode::REL_X => adx += ev.value() as f64,
 							RelativeAxisCode::REL_Y => ady += ev.value() as f64,
-							// evdev wheel notch (+1 = up/right); the host scales /100 like a
-							// browser wheel delta and inverts dy, so up → dy negative.
-							RelativeAxisCode::REL_WHEEL => {
-								let _ = tx.try_send(InputEvent::Scroll {
-									dx: 0.0,
-									dy: -(ev.value() as f64) * 100.0,
-								});
-							}
-							RelativeAxisCode::REL_HWHEEL => {
-								let _ = tx.try_send(InputEvent::Scroll {
-									dx: ev.value() as f64 * 100.0,
-									dy: 0.0,
-								});
-							}
-							_ => {}
+							code => wheel_acc.add(wheel, code, ev.value()),
 						},
 						_ => {}
 					}
 				}
 				let (adx, ady) = super::scale_relative(adx, ady);
+				let (cdx, cdy, csx, csy) = carry.take(&tx);
+				let (adx, ady) = (adx + cdx, ady + cdy);
 				if adx != 0.0 || ady != 0.0 {
 					diag_fwd += 1;
-					fwd(&tx, InputEvent::PointerRelative { dx: adx, dy: ady });
+					if let Some(ev) = fwd_motion(&tx, InputEvent::PointerRelative { dx: adx, dy: ady }) {
+						carry.keep(&tx, ev);
+					}
+				}
+				wheel_acc.dx += csx;
+				wheel_acc.dy += csy;
+				if let Some(ev) = wheel_acc.event() {
+					if let Some(ev) = fwd_motion(&tx, ev) {
+						carry.keep(&tx, ev);
+					}
 				}
 			}
 		}
@@ -1138,4 +1239,51 @@ pub fn release(app: &AppHandle) {
 pub fn engage_render(app: &AppHandle) {
 	RENDER_FOCUSED.store(true, Ordering::SeqCst);
 	engage(app);
+}
+
+#[cfg(test)]
+mod wheel_tests {
+	use super::*;
+
+	#[test]
+	fn hi_res_device_uses_the_fine_axis_only() {
+		let axes = WheelAxes { v_hi_res: true, h_hi_res: true };
+		let mut w = WheelAcc::default();
+		// One notch up as the kernel reports it: 120 hi-res + the legacy notch, same frame.
+		w.add(axes, RelativeAxisCode::REL_WHEEL_HI_RES, 120);
+		w.add(axes, RelativeAxisCode::REL_WHEEL, 1);
+		assert_eq!(w.event(), Some(InputEvent::Scroll { dx: 0.0, dy: -100.0 }));
+		// A 1/8-notch step right.
+		let mut w = WheelAcc::default();
+		w.add(axes, RelativeAxisCode::REL_HWHEEL_HI_RES, 15);
+		assert_eq!(w.event(), Some(InputEvent::Scroll { dx: 12.5, dy: 0.0 }));
+	}
+
+	#[test]
+	fn a_full_channel_carries_motion_and_scroll() {
+		let (tx, mut rx) = tokio::sync::mpsc::channel::<InputEvent>(1);
+		let mut carry = MotionCarry::default();
+		assert!(fwd_motion(&tx, InputEvent::PointerRelative { dx: 1.0, dy: 1.0 }).is_none());
+		// Full: both come back and are kept.
+		let ev = fwd_motion(&tx, InputEvent::PointerRelative { dx: 2.0, dy: -3.0 }).unwrap();
+		carry.keep(&tx, ev);
+		let ev = fwd_motion(&tx, InputEvent::Scroll { dx: 0.0, dy: 12.5 }).unwrap();
+		carry.keep(&tx, ev);
+		// Another session's channel doesn't get them.
+		let (other, _orx) = tokio::sync::mpsc::channel::<InputEvent>(1);
+		assert_eq!(carry.take(&other), (0.0, 0.0, 0.0, 0.0));
+		assert!(rx.try_recv().is_ok());
+		assert_eq!(carry.take(&tx), (2.0, -3.0, 0.0, 12.5));
+		assert_eq!(carry.take(&tx), (0.0, 0.0, 0.0, 0.0));
+	}
+
+	#[test]
+	fn plain_wheel_is_whole_notches() {
+		let axes = WheelAxes::default();
+		let mut w = WheelAcc::default();
+		w.add(axes, RelativeAxisCode::REL_WHEEL, -2);
+		w.add(axes, RelativeAxisCode::REL_HWHEEL, 1);
+		assert_eq!(w.event(), Some(InputEvent::Scroll { dx: 100.0, dy: 200.0 }));
+		assert_eq!(WheelAcc::default().event(), None);
+	}
 }

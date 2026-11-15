@@ -19,8 +19,8 @@ use tauri::Emitter;
 use tokio::sync::mpsc::Sender;
 
 /// Hand an event to the forwarder thread: never blocks (the tap callback must return fast),
-/// keeps the order, drops only coalescible motion when the session channel is full — the same
-/// discipline as the Windows hook (`imp.rs` `fwd`).
+/// keeps the order, merges (never drops) coalescible motion while the session channel is full
+/// — the same discipline as the Windows hook (`imp.rs` `fwd`, `util::input_forwarder_loop`).
 fn fwd(tx: &Sender<InputEvent>, ev: InputEvent) {
 	use std::sync::mpsc;
 	static Q: OnceLock<Mutex<mpsc::Sender<(Sender<InputEvent>, InputEvent)>>> = OnceLock::new();
@@ -28,15 +28,7 @@ fn fwd(tx: &Sender<InputEvent>, ev: InputEvent) {
 		let (qtx, qrx) = mpsc::channel::<(Sender<InputEvent>, InputEvent)>();
 		std::thread::Builder::new()
 			.name("macinput-fwd".into())
-			.spawn(move || {
-				for (tx, ev) in qrx {
-					if crate::util::is_coalescible_input(&ev) {
-						let _ = tx.try_send(ev);
-					} else if tx.blocking_send(ev).is_err() {
-						tracing::warn!("mac input forwarder: session channel closed");
-					}
-				}
-			})
+			.spawn(move || crate::util::input_forwarder_loop(qrx, "mac input forwarder", |_| {}))
 			.expect("spawn mac input forwarder");
 		Mutex::new(qtx)
 	});

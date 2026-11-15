@@ -83,28 +83,91 @@ pub fn button_flag(button: u8, down: bool) -> Option<u32> {
 	})
 }
 
-/// Fractional wheel accumulator (browser pixels → notches, remainder carried).
+/// Hi-res wheel accumulator: browser pixels (100 per notch) → `mouseData` units of 1/120
+/// notch, sub-unit remainder carried. Windows takes sub-`WHEEL_DELTA` wheel data (precision
+/// touchpads send it), so smooth client scrolling stays smooth on the secure desktop too —
+/// the same conversion as pulsar-core's `input::wheel::HiResScroll` for the user desktop.
+///
+/// Whole-notch mode ([`set_whole_notches`](Self::set_whole_notches)) emits only completed
+/// notches × `WHEEL_DELTA` instead — the helper injects ALL of a session's input while it is
+/// up, games included, and games often do `delta / WHEEL_DELTA` as an integer (a 15-unit step
+/// = a dead wheel). The host turns it on for a game session / a relative pointer, as it does
+/// for its own `DesktopInput`.
 #[derive(Default, Debug)]
 pub struct ScrollAcc {
 	v: f64,
 	h: f64,
+	nv: NotchCounter,
+	nh: NotchCounter,
+	whole_notches: bool,
+}
+
+/// Legacy-notch counter over hi-res units: a notch fires once the remainder passes HALF a
+/// notch in one direction, a reversal voids the remainder (pulsar-core
+/// `input::wheel::HiResScroll`, the kernel's hid scroll counter).
+#[derive(Default, Debug)]
+struct NotchCounter {
+	rem: i32,
+	dir: i8,
+}
+
+impl NotchCounter {
+	fn push(&mut self, units: i32) -> i32 {
+		if units == 0 {
+			return 0;
+		}
+		let dir: i8 = if units > 0 { 1 } else { -1 };
+		if dir != self.dir {
+			self.dir = dir;
+			self.rem = 0;
+		}
+		self.rem = self.rem.saturating_add(units);
+		if self.rem.abs() < WHEEL_DELTA / 2 {
+			return 0;
+		}
+		let mut n = self.rem / WHEEL_DELTA;
+		if n == 0 {
+			n = dir as i32;
+		}
+		self.rem -= n * WHEEL_DELTA;
+		n
+	}
 }
 
 impl ScrollAcc {
-	/// Returns whole `(vertical, horizontal)` notches to emit now. Browser down(+) → wheel
-	/// down (negative), so dy is negated.
+	/// Whole `WHEEL_DELTA` notches (`true`) or hi-res units (`false`, the default).
+	pub fn set_whole_notches(&mut self, on: bool) {
+		self.whole_notches = on;
+	}
+
+	/// Returns the `(vertical, horizontal)` `mouseData` to emit now (0 = nothing). Browser
+	/// down(+) → wheel down (negative), so dy is negated.
 	pub fn push(&mut self, dx: f64, dy: f64) -> (i32, i32) {
+		let (v, h) = self.push_units(dx, dy);
+		// The notch counters always run, so a mode switch mid-scroll keeps its place.
+		let (nv, nh) = (self.nv.push(v), self.nh.push(h));
+		if self.whole_notches {
+			(nv.saturating_mul(WHEEL_DELTA), nh.saturating_mul(WHEEL_DELTA))
+		} else {
+			(v, h)
+		}
+	}
+
+	fn push_units(&mut self, dx: f64, dy: f64) -> (i32, i32) {
+		let per_px = WHEEL_DELTA as f64 / 100.0;
 		if dx.is_finite() {
-			self.h += dx / 100.0;
+			self.h += dx * per_px;
 		}
 		if dy.is_finite() {
-			self.v += -dy / 100.0;
+			self.v += -dy * per_px;
 		}
-		let v = self.v.trunc() as i32;
-		let h = self.h.trunc() as i32;
-		self.v -= v as f64;
-		self.h -= h as f64;
-		(v, h)
+		// The 1e-9 nudge keeps float drift (0.6 × 10 = 5.999…) from holding a unit back.
+		let whole = |x: f64| (x + 1e-9_f64.copysign(x)).trunc();
+		let v = whole(self.v);
+		let h = whole(self.h);
+		self.v -= v;
+		self.h -= h;
+		(v.clamp(i32::MIN as f64, i32::MAX as f64) as i32, h.clamp(i32::MIN as f64, i32::MAX as f64) as i32)
 	}
 }
 
@@ -158,11 +221,30 @@ mod tests {
 	#[test]
 	fn scroll_accumulates_fractions() {
 		let mut s = ScrollAcc::default();
-		assert_eq!(s.push(0.0, 40.0), (0, 0));
-		assert_eq!(s.push(0.0, 40.0), (0, 0));
-		assert_eq!(s.push(0.0, 40.0), (-1, 0)); // 120 px down → one notch down
-		assert_eq!(s.push(250.0, 0.0), (0, 2));
-		assert_eq!(s.push(60.0, 0.0), (0, 1)); // 0.5 + 0.6 carried
+		assert_eq!(s.push(0.0, 100.0), (-120, 0)); // one notch down
+		assert_eq!(s.push(0.0, 12.5), (-15, 0)); // a hi-res 1/8 notch is sent, not rounded away
+		assert_eq!(s.push(250.0, 0.0), (0, 300));
+		assert_eq!(s.push(0.0, -0.5), (0, 0)); // 0.6 unit carried…
+		assert_eq!(s.push(0.0, -0.5), (1, 0)); // …1.2 → 1, 0.2 carried
+	}
+
+	#[test]
+	fn whole_notch_mode_for_games() {
+		let mut s = ScrollAcc::default();
+		s.set_whole_notches(true);
+		assert_eq!(s.push(0.0, 100.0), (-120, 0));
+		// 1/8-notch steps: nothing until half a notch built up, then one whole notch.
+		assert_eq!(s.push(0.0, 12.5), (0, 0));
+		assert_eq!(s.push(0.0, 12.5), (0, 0));
+		assert_eq!(s.push(0.0, 12.5), (0, 0));
+		assert_eq!(s.push(0.0, 12.5), (-120, 0));
+		for _ in 0..4 {
+			assert_eq!(s.push(0.0, 12.5), (0, 0)); // the rest of that detent
+		}
+		assert_eq!(s.push(-300.0, 0.0), (0, -360));
+		// Back to hi-res units.
+		s.set_whole_notches(false);
+		assert_eq!(s.push(0.0, 12.5), (-15, 0));
 	}
 
 	#[test]

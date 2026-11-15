@@ -162,7 +162,8 @@ fn globals() -> &'static Mutex<Globals> {
 /// pointer-motion try_sends keep it full — so the first key after a burst of mouse moves
 /// killed the keyboard hook for good (mouse still working, no keys, no Ctrl+Alt+Z).
 /// One unbounded queue + one thread keeps the events in order; the thread does the
-/// (possibly blocking) send, still dropping coalescible motion when the channel is full.
+/// (possibly blocking) send. Coalescible motion on a full channel is merged with the next
+/// motion instead of dropped, so a congested moment doesn't lose mouse distance.
 fn fwd(tx: &Sender<InputEvent>, ev: InputEvent) {
 	use std::sync::mpsc;
 	use std::sync::OnceLock;
@@ -172,18 +173,13 @@ fn fwd(tx: &Sender<InputEvent>, ev: InputEvent) {
 		std::thread::Builder::new()
 			.name("kbdhook-fwd".into())
 			.spawn(move || {
-				for (tx, ev) in qrx {
-					if crate::util::is_coalescible_input(&ev) {
-						let _ = tx.try_send(ev);
-					} else {
-						if matches!(ev, InputEvent::Key { .. }) {
-							FWD_KEYS.fetch_add(1, Ordering::Relaxed);
-						}
-						if tx.blocking_send(ev).is_err() {
-							tracing::warn!("kbd forwarder: session channel closed");
-						}
+				// Edges wait for a slot; motion is merged (never dropped) while the session
+				// channel is full — see `util::input_forwarder_loop`.
+				crate::util::input_forwarder_loop(qrx, "kbd forwarder", |ev| {
+					if matches!(ev, InputEvent::Key { .. }) {
+						FWD_KEYS.fetch_add(1, Ordering::Relaxed);
 					}
-				}
+				});
 			})
 			.expect("spawn kbdhook forwarder");
 		Mutex::new(qtx)
@@ -1284,6 +1280,18 @@ fn handle_key(evdev: u32, down: bool) -> bool {
 	false
 }
 
+/// An Interception wheel stroke (`state` bits, raw `rolling` delta) as a wire scroll.
+fn interception_wheel(state: u16, rolling: i16) -> Option<InputEvent> {
+	let px = rolling as f64 * 100.0 / 120.0;
+	if state & 0x400 != 0 {
+		Some(InputEvent::Scroll { dx: 0.0, dy: -px })
+	} else if state & 0x800 != 0 {
+		Some(InputEvent::Scroll { dx: px, dy: 0.0 })
+	} else {
+		None
+	}
+}
+
 /// Forward a captured mouse stroke (native-renderer mode) to the host as relative
 /// motion + buttons + wheel, and suppress it locally (cursor lock — the mouse only
 /// drives the remote). Returns true (suppress) whenever a session is active.
@@ -1340,10 +1348,13 @@ fn handle_mouse(state: u16, flags: u16, rolling: i16, x: i32, y: i32) -> bool {
 	// flaps (e.g. the render-child activation), so re-assert it on each mouse event.
 	reassert_confine();
 	// Relative movement (skip absolute-coordinate mice — 0x001 = ABSOLUTE flag).
+	// Through `fwd` like the buttons below (not a direct try_send): the same ordered queue
+	// keeps a click behind the motion that preceded it, and a full channel merges motion
+	// instead of dropping it. Batching to the wire happens in the session loop.
 	if flags & 0x001 == 0 && (x != 0 || y != 0) {
 		let (dx, dy) = super::scale_relative(x as f64, y as f64);
 		if dx != 0.0 || dy != 0.0 {
-			let _ = tx.try_send(InputEvent::PointerRelative { dx, dy });
+			fwd(tx, InputEvent::PointerRelative { dx, dy });
 		}
 	}
 	// Buttons (Interception mouse-state bitflags → 0=left, 1=right, 2=middle, 3=back,
@@ -1369,12 +1380,15 @@ fn handle_mouse(state: u16, flags: u16, rolling: i16, x: i32, y: i32) -> bool {
 			fwd(tx, InputEvent::PointerButton { button, down });
 		}
 	}
-	// Wheel: state carries the WHEEL bit (0x400), rolling is the signed delta.
-	if state & 0x400 != 0 && rolling != 0 {
-		let _ = tx.try_send(InputEvent::Scroll {
-			dx: 0.0,
-			dy: -(rolling as f64),
-		});
+	// Wheel: state carries INTERCEPTION_MOUSE_WHEEL (0x400) or INTERCEPTION_MOUSE_HWHEEL
+	// (0x800); `rolling` is the raw signed delta in WHEEL_DELTA units (120 per notch, finer on
+	// hi-res wheels), +up / +right. The wire is browser px (100 per notch, +y down, +x right)
+	// like the WM_MOUSEWHEEL path — the raw 120s used to go out as px, so this path scrolled
+	// 1.2x too far, and the horizontal wheel was dropped entirely.
+	if rolling != 0 {
+		if let Some(ev) = interception_wheel(state, rolling) {
+			fwd(tx, ev);
+		}
 	}
 	// Track held buttons for the disengage flush (mirror `g.held` for keys). Done after
 	// the `tx` borrow above so the disjoint `g.held_buttons` field can be mutated. A
@@ -2453,6 +2467,17 @@ unsafe extern "system" fn ll_keyboard_proc(ncode: i32, wparam: WPARAM, lparam: L
 #[cfg(test)]
 mod chord_tests {
 	use super::*;
+
+	#[test]
+	fn interception_wheel_is_browser_px_both_axes() {
+		// One notch up = 120 raw → 100 px toward the top (dy negative), not 120.
+		assert_eq!(interception_wheel(0x400, 120), Some(InputEvent::Scroll { dx: 0.0, dy: -100.0 }));
+		// A hi-res 1/8 notch down.
+		assert_eq!(interception_wheel(0x400, -15), Some(InputEvent::Scroll { dx: 0.0, dy: 12.5 }));
+		// The horizontal wheel (tilt right) is forwarded, + = right.
+		assert_eq!(interception_wheel(0x800, 120), Some(InputEvent::Scroll { dx: 100.0, dy: 0.0 }));
+		assert_eq!(interception_wheel(0x001, 120), None);
+	}
 
 	#[test]
 	fn pen_and_touch_synthesized_mouse_is_recognized() {

@@ -443,6 +443,99 @@ pub(crate) fn is_coalescible_input(ev: &InputEvent) -> bool {
 	)
 }
 
+/// Merge two coalescible input events of the same kind into one that means both: relative
+/// motion and scroll deltas ADD (no distance lost), an absolute position or a pad snapshot
+/// is superseded by the newer one. `Err` gives both back when they don't merge.
+pub(crate) fn merge_motion(a: InputEvent, b: InputEvent) -> Result<InputEvent, (InputEvent, InputEvent)> {
+	match (a, b) {
+		(InputEvent::PointerRelative { dx, dy }, InputEvent::PointerRelative { dx: x, dy: y }) => {
+			Ok(InputEvent::PointerRelative { dx: dx + x, dy: dy + y })
+		}
+		(InputEvent::Scroll { dx, dy }, InputEvent::Scroll { dx: x, dy: y }) => Ok(InputEvent::Scroll { dx: dx + x, dy: dy + y }),
+		(InputEvent::PointerMotion { .. }, b @ InputEvent::PointerMotion { .. }) => Ok(b),
+		(InputEvent::Gamepad(_), b @ InputEvent::Gamepad(_)) => Ok(b),
+		(a, b) => Err((a, b)),
+	}
+}
+
+/// One queued hand-off to [`input_forwarder_loop`]: the session channel + the event.
+pub(crate) type FwdItem = (tokio::sync::mpsc::Sender<InputEvent>, InputEvent);
+
+/// `try_send`, keeping the event (to merge with the next) when the channel is full.
+fn try_or_keep(tx: tokio::sync::mpsc::Sender<InputEvent>, ev: InputEvent) -> Option<FwdItem> {
+	match tx.try_send(ev) {
+		Ok(()) => None,
+		Err(tokio::sync::mpsc::error::TrySendError::Full(ev)) => Some((tx, ev)),
+		Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => None,
+	}
+}
+
+/// The forwarder-thread loop behind the Windows hook's and the macOS tap's `fwd`: one
+/// ordered queue drained on a plain thread, so the capture callback never blocks.
+///
+/// Press/release edges wait for a channel slot (`blocking_send`: a dropped UP = a stuck
+/// key on the host). Coalescible motion never waits — but on a FULL session channel it is
+/// no longer dropped either: it is kept and merged with the following motion of its kind
+/// ([`merge_motion`]), retried every millisecond and flushed before the next edge, so a
+/// congested moment costs packets, not mouse distance (aim drift after a stall).
+pub(crate) fn input_forwarder_loop(
+	qrx: std::sync::mpsc::Receiver<FwdItem>,
+	label: &'static str,
+	mut on_edge: impl FnMut(&InputEvent),
+) {
+	use std::sync::mpsc::RecvTimeoutError;
+	let mut backlog: Option<FwdItem> = None;
+	loop {
+		let next = if backlog.is_some() {
+			match qrx.recv_timeout(std::time::Duration::from_millis(1)) {
+				Ok(item) => Some(item),
+				Err(RecvTimeoutError::Timeout) => None,
+				Err(RecvTimeoutError::Disconnected) => break,
+			}
+		} else {
+			match qrx.recv() {
+				Ok(item) => Some(item),
+				Err(_) => break,
+			}
+		};
+		let Some((tx, mut ev)) = next else {
+			if let Some((btx, bev)) = backlog.take() {
+				backlog = try_or_keep(btx, bev);
+			}
+			continue;
+		};
+		if let Some((btx, bev)) = backlog.take() {
+			if !btx.same_channel(&tx) {
+				// Another session took over: best effort for the old one.
+				let _ = btx.try_send(bev);
+			} else if is_coalescible_input(&ev) {
+				match merge_motion(bev, ev) {
+					Ok(merged) => ev = merged,
+					Err((old, new)) => {
+						// Two motion kinds: the older one first, in order.
+						let _ = btx.blocking_send(old);
+						ev = new;
+					}
+				}
+			} else {
+				let _ = btx.blocking_send(bev);
+			}
+		}
+		if is_coalescible_input(&ev) {
+			backlog = try_or_keep(tx, ev);
+		} else {
+			on_edge(&ev);
+			if tx.blocking_send(ev).is_err() {
+				tracing::warn!("{label}: session channel closed");
+			}
+		}
+	}
+	// The capture side is gone: a last try for a motion still held back.
+	if let Some((btx, bev)) = backlog {
+		let _ = btx.try_send(bev);
+	}
+}
+
 /// Forward an input event to a specific play session's host.
 ///
 /// The 256-slot input channel is drained one-await-per-event by the hold loop, so a
@@ -993,5 +1086,50 @@ mod net_tests {
 		if super::machine_hostname().is_some_and(|h| h != real) {
 			assert_ne!(super::beacon_name(""), real);
 		}
+	}
+}
+
+#[cfg(test)]
+mod forwarder_tests {
+	use pulsar_core::service::InputEvent;
+
+	#[test]
+	fn motion_merges_by_kind() {
+		let r = |dx, dy| InputEvent::PointerRelative { dx, dy };
+		assert_eq!(super::merge_motion(r(1.0, 2.0), r(3.0, -1.0)), Ok(r(4.0, 1.0)));
+		let s = |dy| InputEvent::Scroll { dx: 0.0, dy };
+		assert_eq!(super::merge_motion(s(10.0), s(2.5)), Ok(s(12.5)));
+		let m = |x| InputEvent::PointerMotion { x, y: 0.5 };
+		assert_eq!(super::merge_motion(m(0.1), m(0.2)), Ok(m(0.2)));
+		assert!(super::merge_motion(r(1.0, 0.0), s(1.0)).is_err());
+	}
+
+	#[test]
+	fn a_full_channel_keeps_motion_distance_and_edge_order() {
+		let (tx, mut rx) = tokio::sync::mpsc::channel::<InputEvent>(1);
+		let (qtx, qrx) = std::sync::mpsc::channel();
+		let th = std::thread::spawn(move || super::input_forwarder_loop(qrx, "test", |_| {}));
+		// The channel holds one event and nobody drains it yet: everything after the first
+		// motion backs up in the forwarder.
+		for _ in 0..50 {
+			qtx.send((tx.clone(), InputEvent::PointerRelative { dx: 1.0, dy: -2.0 })).unwrap();
+		}
+		let click = InputEvent::PointerButton { button: 0, down: true };
+		qtx.send((tx.clone(), click)).unwrap();
+		drop(qtx);
+		drop(tx);
+		std::thread::sleep(std::time::Duration::from_millis(30));
+		let mut got = vec![];
+		while let Some(ev) = rx.blocking_recv() {
+			got.push(ev);
+		}
+		th.join().unwrap();
+		assert_eq!(got.last(), Some(&click), "{got:?}");
+		assert!(got.len() < 10, "motion was not merged: {got:?}");
+		let (sx, sy) = got.iter().fold((0.0, 0.0), |(x, y), e| match e {
+			InputEvent::PointerRelative { dx, dy } => (x + dx, y + dy),
+			_ => (x, y),
+		});
+		assert_eq!((sx, sy), (50.0, -100.0));
 	}
 }
