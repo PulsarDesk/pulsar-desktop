@@ -5,8 +5,9 @@
 //! embedded via `include_bytes!`). First success wins:
 //!
 //! - **Tier 0 — zero-copy SoC decoders**: any ffmpeg decoder with `AV_CODEC_CAP_HARDWARE`
-//!   whose `pix_fmts` include `DRM_PRIME` (rkmpp, v4l2m2m-drm, future SoCs — found by
-//!   capability, not by name). Output feeds the existing dmabuf→EGLImage zero-copy path.
+//!   whose `pix_fmts` include `DRM_PRIME`, or whose hw configs offer DRM_PRIME with internal
+//!   setup (ffmpeg-rockchip 7.x declares it only there) (rkmpp, v4l2m2m-drm, future SoCs —
+//!   found by capability, not by name). Output feeds the existing dmabuf→EGLImage zero-copy path.
 //! - **Tier 1 — generic hwaccels**: the stock decoder + a hw device context, the DISPLAY
 //!   GPU first (gpu.rs): VAAPI on the display GPU → CUDA → VAAPI elsewhere → Vulkan → DRM.
 //!   A decoder on the display GPU presents without a system-memory copy (VAAPI frames
@@ -174,13 +175,37 @@ unsafe fn pix_fmts_contain(dec: *const ff::AVCodec, want: ff::AVPixelFormat) -> 
 	false
 }
 
-/// Enumerate candidates for `codec_id`, tier order. No names anywhere — Tier 0 is
-/// "hardware decoder that outputs DRM_PRIME", which is what makes a NEW SoC work
-/// without Pulsar changes (Moonlight's format-not-device lesson).
-unsafe fn candidates(codec_id: ff::AVCodecID) -> Vec<Candidate> {
-	let mut out = Vec::new();
+/// Does `dec` say, in its hw configs, that it outputs DRM_PRIME frames it can set up by
+/// ITSELF (`METHOD_INTERNAL`: no device context from us, which tier 0 never creates)?
+///
+/// Why this exists next to [`pix_fmts_contain`]: a wrapper decoder may declare its output
+/// formats ONLY through `hw_configs`. ffmpeg-rockchip 7.x does exactly that —
+/// `DEFINE_RKMPP_DECODER` (libavcodec/rkmppdec.h) dropped `.p.pix_fmts` and lists DRM_PRIME
+/// in `rkmpp_dec_hw_configs` (device type RKMPP, methods HW_DEVICE_CTX | HW_FRAMES_CTX |
+/// INTERNAL) — so on a libavcodec built from it the pix_fmts check alone never offers
+/// h264/hevc/av1_rkmpp and the board decodes in software. Still format-based, no names.
+unsafe fn hw_config_drm_prime_internal(dec: *const ff::AVCodec) -> bool {
+	let mut i = 0;
+	loop {
+		let cfg = ff::avcodec_get_hw_config(dec, i);
+		if cfg.is_null() {
+			return false;
+		}
+		if (*cfg).pix_fmt == ff::AVPixelFormat::AV_PIX_FMT_DRM_PRIME
+			&& (*cfg).methods & (ff::AV_CODEC_HW_CONFIG_METHOD_INTERNAL as c_int) != 0
+			&& (*cfg).device_type != ff::AVHWDeviceType::AV_HWDEVICE_TYPE_NONE
+		{
+			return true;
+		}
+		i += 1;
+	}
+}
 
-	// Tier 0: AV_CODEC_CAP_HARDWARE decoders with DRM_PRIME output.
+/// Tier 0: `AV_CODEC_CAP_HARDWARE` decoders for `codec_id` that output DRM_PRIME, by
+/// their pix_fmts or by a self-contained DRM_PRIME hw config (see
+/// [`hw_config_drm_prime_internal`]). Registry order.
+unsafe fn zero_copy_decoders(codec_id: ff::AVCodecID) -> Vec<*const ff::AVCodec> {
+	let mut out = Vec::new();
 	let mut it: *mut std::ffi::c_void = ptr::null_mut();
 	loop {
 		let dec = ff::av_codec_iterate(&mut it);
@@ -193,17 +218,53 @@ unsafe fn candidates(codec_id: ff::AVCodecID) -> Vec<Candidate> {
 		if (*dec).capabilities & (ff::AV_CODEC_CAP_HARDWARE as c_int) == 0 {
 			continue;
 		}
-		if pix_fmts_contain(dec, ff::AVPixelFormat::AV_PIX_FMT_DRM_PRIME) {
-			out.push(Candidate {
-				dec,
-				name: decoder_name(dec),
-				tier: Tier::ZeroCopyHw,
-				hwdev: None,
-				hw_fmt: ff::AVPixelFormat::AV_PIX_FMT_DRM_PRIME,
-				node: None,
-				zero_copy: true,
-			});
+		if pix_fmts_contain(dec, ff::AVPixelFormat::AV_PIX_FMT_DRM_PRIME)
+			|| hw_config_drm_prime_internal(dec)
+		{
+			out.push(dec);
 		}
+	}
+	out
+}
+
+/// `--list-zerocopy`: the tier-0 decoder NAMES per codec, without opening any of them
+/// (`{"h264":["h264_rkmpp"],"h265":[...],"av1":[...]}`). For build checks off the target
+/// board: proves a libavcodec offers its SoC decoders to the selection at all, which
+/// `--probe` cannot show where the hardware is missing.
+pub fn list_zero_copy_json() -> String {
+	let mut entries = Vec::new();
+	for (label, id) in [
+		("h264", ff::AVCodecID::AV_CODEC_ID_H264),
+		("h265", ff::AVCodecID::AV_CODEC_ID_HEVC),
+		("av1", ff::AVCodecID::AV_CODEC_ID_AV1),
+	] {
+		let names = unsafe { zero_copy_decoders(id) }
+			.into_iter()
+			.map(|d| format!(r#""{}""#, unsafe { decoder_name(d) }))
+			.collect::<Vec<_>>()
+			.join(",");
+		entries.push(format!(r#""{label}":[{names}]"#));
+	}
+	format!("{{{}}}", entries.join(","))
+}
+
+/// Enumerate candidates for `codec_id`, tier order. No names anywhere — Tier 0 is
+/// "hardware decoder that outputs DRM_PRIME", which is what makes a NEW SoC work
+/// without Pulsar changes (Moonlight's format-not-device lesson).
+unsafe fn candidates(codec_id: ff::AVCodecID) -> Vec<Candidate> {
+	let mut out = Vec::new();
+
+	// Tier 0: AV_CODEC_CAP_HARDWARE decoders with DRM_PRIME output.
+	for dec in zero_copy_decoders(codec_id) {
+		out.push(Candidate {
+			dec,
+			name: decoder_name(dec),
+			tier: Tier::ZeroCopyHw,
+			hwdev: None,
+			hw_fmt: ff::AVPixelFormat::AV_PIX_FMT_DRM_PRIME,
+			node: None,
+			zero_copy: true,
+		});
 	}
 
 	// Tier 1: the stock decoder's hwaccel configs, display GPU first.

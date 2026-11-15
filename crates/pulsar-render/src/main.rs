@@ -72,6 +72,12 @@ fn main() {
 		println!("{}", decode::probe_json());
 		return;
 	}
+	// `--list-zerocopy`: the tier-0 (zero-copy SoC) decoder names this libavcodec offers,
+	// nothing opened — the off-board build check of the Rockchip variant.
+	if std::env::args().any(|a| a == "--list-zerocopy") {
+		println!("{}", decode::list_zero_copy_json());
+		return;
+	}
 	apply_lang();
 	linux::run();
 }
