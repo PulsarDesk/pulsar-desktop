@@ -156,10 +156,21 @@ no recovery tag there).
 - The report goes out from the renderer's RTP receive thread (`rtp::report_rfi`, the `pump`
   tick) on all three OSes; Windows and macOS printed it from the render loop before, up to one
   decode + present later.
-- A Linux client streaming with RFI no longer flips to intra refresh on sustained loss
-  (`acfg.ir_capable` is off then): the flip asks for the short GOP, which an RFI host absorbs,
-  so RFI stays on. An intra-refresh flip used to turn RFI off (`rfi 0`) while the host — which
-  cannot start an intra wave mid-session — kept its long GOP.
+- A Linux client streaming with RFI no longer flips to intra refresh on sustained loss:
+  `hold.rs` `flip_recovery` turns the controller's intra-refresh flip into the short GOP while
+  RFI reaches the current codec (re-derived on a codec switch; AV1 keeps intra refresh), which an
+  RFI host absorbs, so RFI stays on. An intra-refresh flip used to turn RFI off (`rfi 0`) while
+  the host — which cannot start an intra wave mid-session — kept its long GOP.
+- No loss `hold` on an RFI stream (Linux renderer; the others ignore `hold`): the depacketizer
+  already withholds every access unit until the recovery frame or a keyframe, and the recovery
+  frame is no keyframe, so a hold froze the healed picture for its full 300 ms. `hold.rs` sends
+  none (`loss_hold_ms`), `video.rs` `hold_for_ms` treats `RFI_MODE` like `IR_MODE`.
+- `FEAT_RFI` is per host, not per stream: a stream whose encoder cannot do RFI (another encoder
+  pick, a fallback encoder, a Wayland window cast) ignores the reports. Until a stream has shown
+  one recovery frame (`Depacketizer::rfi_proven`, reset on an encoder restart) the recovery wait
+  is short (`RFI_UNPROVEN_WAIT` 40 ms, or the RTT) before the keyframe request, instead of
+  `rfi_timeout` (≥ 150 ms) on every unrepaired loss; a late recovery frame still ends the
+  keyframe wait. Cost on a healing stream: at most one early keyframe request per stream.
 - Decoder stall watch (`recovery::DecodeStall`: access units in, no picture out → keyframe
   request) runs in all three renderers now (macOS and Linux added 2026-11-15): VideoToolbox
   drops a picture with a missing reference silently, rkmpp may too.
