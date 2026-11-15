@@ -807,6 +807,7 @@ pub(super) async fn hold_session(
 			None
 		},
 	);
+	let start_path = class_of;
 	// The last pick shortfall told to the user, and when (see `shortfall_due`).
 	let mut shortfall_told: Option<(PointKey, PointKey)> = None;
 	let mut shortfall_told_at: Option<std::time::Instant> = None;
@@ -2030,9 +2031,23 @@ pub(super) async fn hold_session(
 				);
 				let class = if now_path == class_of {
 					cur_class
+				} else if now_path == start_path {
+					// Back on the session-start path: keep its verdict (judged with the round
+					// trip too), so an overlay the interface check misses stays Wan.
+					class_of = now_path;
+					path_class
 				} else {
 					class_of = now_path;
-					crate::adapt_memory::classify(now_path.0, now_path.1, None)
+					// The measured round trip of the live path feeds the same RTT fallback as
+					// the start-of-session class.
+					let rtt = match sess.path_latency().await {
+						Some((d, r)) => match live {
+							pulsar_core::Transport::Direct => d,
+							pulsar_core::Transport::Relay => r,
+						},
+						None => None,
+					};
+					crate::adapt_memory::classify(now_path.0, now_path.1, rtt)
 				};
 				if class != cur_class {
 					tracing::info!(from = cur_class.as_str(), to = class.as_str(), "media path class changed");

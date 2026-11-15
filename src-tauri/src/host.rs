@@ -758,11 +758,9 @@ pub(crate) async fn bring_online(
 			Ok(d) => {
 				tracing::info!(port = node_port, name = %beacon, "LAN discovery beacon started");
 				// Honor the current serve gate: a beacon (re)started while in gaming mode must
-				// stay silent (don't advertise a pure client on the LAN).
-				if state
-					.hosting_disabled
-					.load(std::sync::atomic::Ordering::Relaxed)
-				{
+				// stay silent (don't advertise a pure client on the LAN), and so must an
+				// unattended host (see `beacon_silent`).
+				if beacon_silent(&app) {
 					d.set_paused(true);
 				}
 				*state.discovery.lock().unwrap() = Some(d.clone());
@@ -3006,10 +3004,9 @@ pub(crate) async fn bring_online(
 	// Tell the UI whether this relay advertises E2E as required (v4). Pulsar always
 	// encrypts, so this only drives a "relay forces E2E" lock indicator in Settings.
 	let _ = app.emit("relay-e2e", node.relay_e2e_required().await);
-	// Now that we have a relay id, advertise it on the LAN too — unless unattended access is
-	// on (see `beacon_id`).
+	// Now that we have a relay id, advertise it on the LAN too.
 	if let Some(d) = &discovery {
-		d.set_id(beacon_id(&app, Some(id))).await;
+		d.set_id(Some(id)).await;
 	}
 
 	// Watch for an ID ROTATION: a full relay restart loses its pubkey→id map and
@@ -3033,7 +3030,7 @@ pub(crate) async fn bring_online(
 				let Some(new_id) = new_id else { continue };
 				tracing::warn!(id = %new_id, "relay reissued a new device ID — re-advertising");
 				if let Some(d) = &watch_disc {
-					d.set_id(beacon_id(&watch_app, Some(new_id))).await;
+					d.set_id(Some(new_id)).await;
 				}
 				let _ = watch_app.emit("node-id", new_id.grouped());
 			}
@@ -3105,28 +3102,29 @@ async fn teardown_node(state: &AppState) {
 	let _ = state.node.lock().unwrap().take();
 }
 
-/// The relay id to put in the LAN beacon. NONE while unattended access is on: an unattended
-/// host needs no password and no approval, so on a shared network (café, hotel, office) the
-/// broadcast id would be the only thing a stranger needs to take control. Peers that already
-/// connected once still find it on the LAN by its pinned key (`util::connect_target`).
-pub(crate) fn beacon_id(app: &AppHandle, id: Option<pulsar_core::proto::DeviceId>) -> Option<pulsar_core::proto::DeviceId> {
-	let unattended = app.state::<AppState>().config.lock().unwrap().unattended_access;
-	id.filter(|_| !unattended)
+/// Whether the LAN beacon must stay silent: in gaming mode (a pure client, not connectable) and
+/// while unattended access is on. An unattended host needs no password and no approval, and the
+/// beacon carries the node's address + port, which is all a typed direct connect needs — so on a
+/// shared network (café, hotel, office) announcing it would hand control to anyone there. Clients
+/// that know its id still reach it over the LAN: the relay rendezvous carries both sides' LAN
+/// candidates, so the punch picks the direct LAN path. It only leaves the LAN lists.
+pub(crate) fn beacon_silent(app: &AppHandle) -> bool {
+	let state = app.state::<AppState>();
+	state
+		.hosting_disabled
+		.load(std::sync::atomic::Ordering::Relaxed)
+		|| state.config.lock().unwrap().unattended_access
 }
 
-/// Re-apply the beacon's name + id after a settings change (device name, unattended access).
+/// Re-apply the beacon's name and silence after a settings change (device name, unattended
+/// access) or a serve-gate change.
 pub(crate) async fn refresh_beacon(app: &AppHandle) {
 	let state = app.state::<AppState>();
 	let disc = state.discovery.lock().unwrap().clone();
 	let Some(d) = disc else { return };
-	let node = state.node.lock().unwrap().clone();
-	let id = match node {
-		Some(n) => n.self_id().await,
-		None => None,
-	};
 	let name = crate::util::beacon_name(&state.config.lock().unwrap().device_name);
+	d.set_paused(beacon_silent(app));
 	d.set_name(name).await;
-	d.set_id(beacon_id(app, id)).await;
 }
 
 /// Take this host fully offline (shared mode: the session lost the machine-wide host lease,

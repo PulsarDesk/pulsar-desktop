@@ -218,6 +218,8 @@
 	"devices.lanTitle": "On your network",
 	"devices.lanScanning": "Scanning… Pulsar devices on this network appear here.",
 	"devices.lanSave": "Save",
+	"devices.lanUnnamed": "Pulsar device",
+	"devices.lanUnnamedOn": "Pulsar device ({platform})",
 	"devices.savedBadge": "Saved",
 	"devices.editTitle": "Edit device",
 	"devices.edit": "Edit",

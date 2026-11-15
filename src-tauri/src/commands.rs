@@ -44,8 +44,8 @@ pub(crate) async fn set_config(
 ) -> Result<(), String> {
 	crate::i18n::set_lang(&config.language);
 	*state.config.lock().unwrap() = config.clone();
-	// The LAN beacon follows the device name and the unattended switch at once (it never
-	// advertises the id of an unattended host).
+	// The LAN beacon follows the device name and the unattended switch at once (an unattended
+	// host does not announce itself, see `host::beacon_silent`).
 	crate::host::refresh_beacon(&app).await;
 	config.save(config_path(&app)).map_err(|e| e.to_string())
 }
@@ -555,7 +555,7 @@ pub(crate) async fn connect(
 /// Devices auto-discovered on the local network. Empty until `go_online` starts
 /// the beacon. Polled by the Devices screen.
 #[tauri::command]
-pub(crate) async fn lan_devices(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<LanDevice>, String> {
+pub(crate) async fn lan_devices(state: State<'_, AppState>) -> Result<Vec<LanDevice>, String> {
 	let disc = state.discovery.lock().unwrap().clone();
 	let Some(disc) = disc else {
 		return Ok(Vec::new());
@@ -582,18 +582,8 @@ pub(crate) async fn lan_devices(app: AppHandle, state: State<'_, AppState>) -> R
 			}
 		}
 	}
-	// A beacon without an id (an unattended host withholds it) still names a host we
-	// pinned before: show it under that id so its presence dot works.
-	let relay = state.config.lock().unwrap().relay.clone();
-	let pinned = crate::util::pinned_ids(&app, &relay);
 	let mut list: Vec<LanDevice> = by_key
 		.into_values()
-		.map(|mut p| {
-			if p.id.is_none() {
-				p.id = pinned.get(&p.pubkey).copied();
-			}
-			p
-		})
 		.map(|p| LanDevice {
 			id: p.id.map(|d| d.grouped()).unwrap_or_default(),
 			has_id: p.id.is_some(),
@@ -834,14 +824,15 @@ pub(crate) fn set_pad_background(enabled: bool) {
 /// connects still work. Default (never called) = serving, matching `hosting_disabled`'s
 /// `false` zero-value.
 #[tauri::command]
-pub(crate) fn set_host_serving(state: State<'_, AppState>, serving: bool) {
+pub(crate) fn set_host_serving(app: AppHandle, state: State<'_, AppState>, serving: bool) {
 	state
 		.hosting_disabled
 		.store(!serving, std::sync::atomic::Ordering::Relaxed);
 	// A pure client (gaming mode) must not advertise itself on the LAN — pause/resume the
-	// discovery beacon's announcing alongside the serve gate.
+	// discovery beacon's announcing alongside the serve gate (an unattended host stays
+	// silent either way, see `host::beacon_silent`).
 	if let Some(d) = state.discovery.lock().unwrap().clone() {
-		d.set_paused(!serving);
+		d.set_paused(crate::host::beacon_silent(&app));
 	}
 }
 

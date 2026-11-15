@@ -15,7 +15,7 @@ if command -v udevadm >/dev/null 2>&1; then
 	udevadm trigger --subsystem-match=platform --sysname-match='vhci_hcd.*' --action=add 2>/dev/null || true
 fi
 
-# UDP socket buffer limits (/usr/lib/sysctl.d/60-pulsar.conf): applied at every boot by
+# UDP socket buffer limits (/usr/lib/sysctl.d/10-pulsar.conf): applied at every boot by
 # systemd-sysctl; load them now so the first session does not run with the stock 208 KiB cap.
 # Only ever RAISES the caps: a machine already tuned higher keeps its values.
 pulsar_sysctl() {

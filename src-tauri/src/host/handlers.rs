@@ -2125,6 +2125,16 @@ pub(super) fn make_on_stream(
 	// is applied live (the forwarders keep running), so they'd otherwise pace a stale rate.
 	let pace_target_kbps = Arc::new(std::sync::atomic::AtomicU32::new(0));
 	move |req: StreamReq, addr: SocketAddr| {
+		// SECURITY: media goes only through the encrypted session (media-over-session, see the
+		// media destinations below). A request without it (a pre-mos client) gets NO stream and
+		// a stream-error line on the client, never plaintext RTP — refused before any fast path
+		// or baseline bookkeeping, so it leaves the running stream's state untouched.
+		if !req.media_over_session {
+			tracing::warn!(%addr, "stream request without media-over-session — refusing a plaintext stream");
+			let msg = crate::i18n::t("host.plaintextRefused").to_string();
+			let _ = stats_out.try_send(DataMsg::Stats(format!("!{msg}")));
+			return;
+		}
 		// Client-requested bitrate wins; 0 falls back to the host config (as the encoders do).
 		let eff_target = if req.bitrate_kbps > 0 {
 			req.bitrate_kbps
@@ -2406,12 +2416,6 @@ pub(super) fn make_on_stream(
 		}
 		*nack_slot.lock().unwrap() = None;
 		let lo = std::net::IpAddr::from([127, 0, 0, 1]);
-		if !req.media_over_session {
-			tracing::warn!(%addr, "stream request without media-over-session — refusing a plaintext stream");
-			let msg = crate::i18n::t("host.plaintextRefused").to_string();
-			let _ = stats_out.try_send(DataMsg::Stats(format!("!{msg}")));
-			return;
-		}
 		let (vdest, adest) = match spawn_media_forwarders(
 			&media_tx,
 			&nack_slot,
@@ -2429,6 +2433,22 @@ pub(super) fn make_on_stream(
 				tracing::error!("media forwarders failed to start — no stream (never plaintext)");
 				let msg = crate::i18n::t("host.mediaForwarderFailed").to_string();
 				let _ = stats_out.try_send(DataMsg::Stats(format!("!{msg}")));
+				// The running encode (if any) now feeds dead loopback intakes: forget every
+				// live-restream baseline so the client's next request takes the full restart
+				// (which replaces that encode) instead of being absorbed as a bitrate step.
+				#[cfg(not(target_os = "linux"))]
+				{
+					last_ff_req = None;
+				}
+				#[cfg(any(windows, target_os = "macos"))]
+				{
+					last_native_req = None;
+				}
+				#[cfg(target_os = "linux")]
+				{
+					last_wl_req = None;
+					last_libav_req = None;
+				}
 				return;
 			}
 		};

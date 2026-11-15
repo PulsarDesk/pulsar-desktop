@@ -218,6 +218,8 @@
 	"devices.lanTitle": "Yerel ağda bulunanlar",
 	"devices.lanScanning": "Ağ taranıyor… aynı ağdaki Pulsar cihazları burada görünür.",
 	"devices.lanSave": "Kaydet",
+	"devices.lanUnnamed": "Pulsar cihazı",
+	"devices.lanUnnamedOn": "Pulsar cihazı ({platform})",
 	"devices.savedBadge": "Kaydedildi",
 	"devices.editTitle": "Cihazı düzenle",
 	"devices.edit": "Düzenle",
