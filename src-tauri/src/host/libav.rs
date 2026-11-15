@@ -23,14 +23,23 @@
 //! GPU surfaces: `x11grab → scale + format=nv12 → hwupload` (the CLI's chain, CPU colour
 //! conversion; `PULSAR_VAAPI_VPP=1` uploads RGB and converts with `scale_vaapi` instead) on
 //! the render node `StreamCfg::vaapi_device` names (`crate::drm_node`: the GPU driving the
-//! screen). QSV takes system-memory NV12 on a QSV device derived from the same node. Both run
-//! with no B-frames, `async_depth=1`, a ~125 ms VBV in game mode and CBR (VA-API) / the
-//! `veryfast` + `low_power` preset (QSV, retried without `low_power` on GPUs that lack it).
-//! A keyframe request is `pict_type = I` (VA-API forces an IDR on it; QSV with `forced_idr`).
+//! screen). QSV takes system-memory NV12 on a QSV device whose VA-API child is the first Intel
+//! GPU's node (`drm_node::qsv_node`). Both convert RGB → YUV with BT.709 limited range and tag
+//! the VUI so (what the client decodes), and run with no B-frames, `async_depth=1`; game mode
+//! is CBR with the ~0.5 s VBV (`PULSAR_LIBAV_SHORT_VBV=1`: ~125 ms, unmeasured), the desktop
+//! keeps the CLI's burst headroom (2x peak, 1 s buffer). QSV uses the `veryfast` + `low_power`
+//! preset in game mode (opened without `low_power` on GPUs that lack it — remembered, so a
+//! re-open does not try again). A keyframe request is `pict_type = I` (VA-API forces an IDR on
+//! it; QSV with `forced_idr`).
 //! Bitrate: `*_vaapi` reads its rate control only at open, and QSV does before FFmpeg 6.0, so a
 //! step re-opens the ENCODER alone at the next IDR the stream has anyway (a ≥ 25 % cut goes at
 //! once) — capture, filter graph, surfaces and the RTP muxer stay (`libav_policy`). QSV on
 //! FFmpeg ≥ 6.0 changes it live. `PULSAR_LIBAV_HW=0` sends VA-API / QSV back to the ffmpeg CLI.
+//! A runtime guard (`libav_policy::HwGuard`) ends an engine whose hardware encoder stopped
+//! working after the start (every frame rejected, or no packet for 3 s), and a bitrate re-open
+//! that fails twice ends it too; either turns the in-process hardware path off for the rest of
+//! the process ([`hw_in_process_failed`]) and the session restarts the stream at once on the
+//! CLI chain (host.rs's dead-engine watcher).
 //!
 //! **NVENC through the SDK** (`pulsar_capture::NvencCuda`): an NVENC plan encodes with the NVENC
 //! SDK on a CUDA context instead of libavcodec's `h264_nvenc`/`hevc_nvenc` — the scaled NV12
@@ -184,10 +193,28 @@ pub fn supported(plan: &StreamPlan) -> bool {
 			HwEncoder::Software | HwEncoder::Nvenc => true,
 			HwEncoder::Vaapi | HwEncoder::Qsv => {
 				policy::hw_in_process_enabled(std::env::var("PULSAR_LIBAV_HW").ok().as_deref())
+					&& !hw_in_process_failed()
 			}
 			_ => false,
 		}
 		&& plan.encoder.ffmpeg_name(plan.codec).is_some()
+}
+
+/// Set once an in-process VA-API / QSV encode failed AFTER it started (the runtime guard, or a
+/// bitrate re-open that failed twice): from then on [`supported`] sends VA-API / QSV to the
+/// ffmpeg CLI chain for the rest of the process, instead of re-entering the same failing engine
+/// on every restart. Setup failures need no flag (they fall back to the CLI at once).
+static HW_IN_PROCESS_FAILED: AtomicBool = AtomicBool::new(false);
+
+/// See [`HW_IN_PROCESS_FAILED`].
+pub fn hw_in_process_failed() -> bool {
+	HW_IN_PROCESS_FAILED.load(Ordering::Relaxed)
+}
+
+fn mark_hw_in_process_failed(why: &str) {
+	if !HW_IN_PROCESS_FAILED.swap(true, Ordering::Relaxed) {
+		tracing::error!("in-process VA-API / QSV encode failed after its start ({why}); using the ffmpeg CLI chain from now on");
+	}
 }
 
 enum Cmd {
@@ -332,6 +359,9 @@ struct Ctx {
 	/// VA-API / QSV device (null for software / NVENC); unreferenced after the graph and the
 	/// encoder, which hold their own references.
 	hw_dev: *mut ff::AVBufferRef,
+	/// QSV game mode: whether the encoder opened with `low_power` (VDENC) — learnt at the first
+	/// open, so a bitrate re-open goes straight to the variant that works (no second MFX init).
+	qsv_low_power: Option<bool>,
 }
 
 impl Drop for Ctx {
@@ -430,9 +460,18 @@ unsafe fn open_decoder(ictx: *mut ff::AVFormatContext, vs: c_int) -> Result<*mut
 	Ok(dc)
 }
 
-/// The CPU chain: `scale/format` so the encoder gets exactly `w×h` in `pix_fmt`.
-fn cpu_graph_desc(w: u32, h: u32, pix_fmt: ff::AVPixelFormat) -> String {
-	format!("scale={}:{}:flags=fast_bilinear,format=pix_fmts={}", w, h, pix_fmt as c_int)
+/// The CPU chain: `scale/format` so the encoder gets exactly `w×h` in `pix_fmt`. `bt709`
+/// converts with the BT.709 matrix the client decodes (QSV; the encoder's VUI says so). The
+/// software / NVENC chain keeps swscale's default (BT.601, untagged) as it always had — a known
+/// mismatch with the client's BT.709 decode, recorded in docs/agents/status.md.
+fn cpu_graph_desc(w: u32, h: u32, pix_fmt: ff::AVPixelFormat, bt709: bool) -> String {
+	let scale = if bt709 { policy::bt709_scale(w, h) } else { format!("scale={}:{}:flags=fast_bilinear", w, h) };
+	format!("{scale},format=pix_fmts={}", pix_fmt as c_int)
+}
+
+/// `PULSAR_LIBAV_SHORT_VBV` (libav_policy::rate_limits).
+fn short_vbv() -> bool {
+	policy::short_vbv_enabled(std::env::var("PULSAR_LIBAV_SHORT_VBV").ok().as_deref())
 }
 
 /// `buffer → desc → buffersink`, the sink pinned to `pix_fmt`. `hw_dev` (VA-API) is handed to
@@ -540,9 +579,10 @@ fn int_list_len(list: &[c_int], term: c_int) -> usize {
 /// The hardware device VA-API / QSV encode on (null for software / NVENC).
 ///
 /// VA-API: the render node of [`Params::vaapi_device`]; failing to open it fails the start
-/// (→ the ffmpeg CLI chain). QSV: a QSV device whose VA-API child is that node, so libmfx /
-/// oneVPL runs on the same GPU; if it cannot be created the encoder opens its own internal
-/// session (libva's default node) instead.
+/// (→ the ffmpeg CLI chain). QSV: a QSV device whose VA-API child is an Intel GPU's node
+/// (`drm_node::qsv_node`: `vaapi_device` when that is Intel, else the first Intel card — FFmpeg
+/// forces the iHD driver on the child, so a screen GPU from another vendor cannot be it); if it
+/// cannot be created the encoder opens its own internal session (libva's default node).
 unsafe fn open_hw_device(p: &Params) -> Result<*mut ff::AVBufferRef, String> {
 	let mut dev: *mut ff::AVBufferRef = ptr::null_mut();
 	match p.encoder {
@@ -560,8 +600,9 @@ unsafe fn open_hw_device(p: &Params) -> Result<*mut ff::AVBufferRef, String> {
 			}
 		}
 		HwEncoder::Qsv => {
+			let child = crate::drm_node::qsv_node(&p.vaapi_device);
 			let mut opts: *mut ff::AVDictionary = ptr::null_mut();
-			dict_set(&mut opts, "child_device", &p.vaapi_device);
+			dict_set(&mut opts, "child_device", &child);
 			let r = ff::av_hwdevice_ctx_create(
 				&mut dev,
 				ff::AVHWDeviceType::AV_HWDEVICE_TYPE_QSV,
@@ -571,7 +612,7 @@ unsafe fn open_hw_device(p: &Params) -> Result<*mut ff::AVBufferRef, String> {
 			);
 			ff::av_dict_free(&mut opts);
 			if r < 0 {
-				tracing::warn!(node = %p.vaapi_device, "QSV device failed ({}), the encoder opens its own session", averr(r));
+				tracing::warn!(node = %child, "QSV device failed ({}), the encoder opens its own session", averr(r));
 				dev = ptr::null_mut();
 			}
 		}
@@ -582,22 +623,41 @@ unsafe fn open_hw_device(p: &Params) -> Result<*mut ff::AVBufferRef, String> {
 
 /// Open the encoder at `kbps`. `sink` is the graph's buffersink (its GPU frame pool feeds a
 /// VA-API encoder), `hw_dev` the QSV device. QSV in game mode tries `low_power` (VDENC, the
-/// CLI's choice) first and opens without it on a GPU that has none.
+/// CLI's choice) first and opens without it on a GPU that has none; `low_power` remembers
+/// which variant opened, so a re-open (a bitrate step on FFmpeg < 6.0) pays one MFX init.
 unsafe fn open_encoder(
 	p: &Params,
 	pix_fmt: ff::AVPixelFormat,
 	kbps: u32,
 	sink: *mut ff::AVFilterContext,
 	hw_dev: *mut ff::AVBufferRef,
+	low_power: &mut Option<bool>,
 ) -> Result<*mut ff::AVCodecContext, String> {
 	if p.encoder == HwEncoder::Qsv && p.low_latency {
+		if let Some(lp) = *low_power {
+			return open_encoder_with(p, pix_fmt, kbps, sink, hw_dev, lp);
+		}
 		match open_encoder_with(p, pix_fmt, kbps, sink, hw_dev, true) {
-			Ok(ec) => return Ok(ec),
+			Ok(ec) => {
+				*low_power = Some(true);
+				return Ok(ec);
+			}
 			Err(e) => tracing::info!("QSV low_power encode unavailable ({e}), opening without it"),
 		}
-		return open_encoder_with(p, pix_fmt, kbps, sink, hw_dev, false);
+		let ec = open_encoder_with(p, pix_fmt, kbps, sink, hw_dev, false)?;
+		*low_power = Some(false);
+		return Ok(ec);
 	}
 	open_encoder_with(p, pix_fmt, kbps, sink, hw_dev, false)
+}
+
+/// Tag the encoder's VUI BT.709 limited range — the matrix `libav_policy::bt709_scale` /
+/// `scale_vaapi` converted with.
+unsafe fn tag_bt709(ec: *mut ff::AVCodecContext) {
+	(*ec).colorspace = ff::AVColorSpace::AVCOL_SPC_BT709;
+	(*ec).color_primaries = ff::AVColorPrimaries::AVCOL_PRI_BT709;
+	(*ec).color_trc = ff::AVColorTransferCharacteristic::AVCOL_TRC_BT709;
+	(*ec).color_range = ff::AVColorRange::AVCOL_RANGE_MPEG;
 }
 
 unsafe fn open_encoder_with(
@@ -623,9 +683,11 @@ unsafe fn open_encoder_with(
 	(*ec).framerate = ff::AVRational { num: p.fps as c_int, den: 1 };
 	(*ec).pix_fmt = pix_fmt;
 	(*ec).bit_rate = kbps.max(200) as i64 * 1000;
-	(*ec).rc_max_rate = (*ec).bit_rate;
-	// ~0.5 s VBV: low latency, no spikes (VA-API / QSV game streams: ~125 ms, libav_policy).
-	(*ec).rc_buffer_size = policy::vbv_bits((*ec).bit_rate, p.encoder, p.low_latency) as c_int;
+	// ~0.5 s VBV, peak = target: low latency, no spikes. VA-API / QSV desktop streams keep the
+	// CLI's burst headroom instead (libav_policy::rate_limits).
+	let (max_rate, vbv) = policy::rate_limits((*ec).bit_rate, p.encoder, p.low_latency, short_vbv());
+	(*ec).rc_max_rate = max_rate;
+	(*ec).rc_buffer_size = vbv as c_int;
 	(*ec).max_b_frames = 0;
 	// GOP as the CLI path: game ≈ 0.25 s, remote ≈ 2 s; the recovery modes force keyframes
 	// from the loop instead of changing this live.
@@ -641,16 +703,15 @@ unsafe fn open_encoder_with(
 			}
 			(*ec).hw_frames_ctx = ff::av_buffer_ref(frames);
 			(*ec).sw_pix_fmt = ff::AVPixelFormat::AV_PIX_FMT_NV12;
-			if policy::vpp_enabled(std::env::var("PULSAR_VAAPI_VPP").ok().as_deref()) {
-				// scale_vaapi converted with BT.709 limited range (libav_policy::vaapi_graph_desc).
-				(*ec).colorspace = ff::AVColorSpace::AVCOL_SPC_BT709;
-				(*ec).color_primaries = ff::AVColorPrimaries::AVCOL_PRI_BT709;
-				(*ec).color_trc = ff::AVColorTransferCharacteristic::AVCOL_TRC_BT709;
-				(*ec).color_range = ff::AVColorRange::AVCOL_RANGE_MPEG;
-			}
+			// Both VA-API chains convert with BT.709 limited range (libav_policy::vaapi_graph_desc).
+			tag_bt709(ec);
 		}
-		HwEncoder::Qsv if !hw_dev.is_null() => {
-			(*ec).hw_device_ctx = ff::av_buffer_ref(hw_dev);
+		HwEncoder::Qsv => {
+			if !hw_dev.is_null() {
+				(*ec).hw_device_ctx = ff::av_buffer_ref(hw_dev);
+			}
+			// The QSV graph converts with BT.709 limited range (libav_policy::bt709_scale).
+			tag_bt709(ec);
 		}
 		_ => {}
 	}
@@ -760,14 +821,14 @@ unsafe fn reopen_encoder(
 	ff::avcodec_send_frame(cx.enc, ptr::null());
 	write_packets(cx, pkt, enc_tb, ost_tb);
 	ff::avcodec_free_context(&mut cx.enc);
-	match open_encoder(p, pix_fmt, kbps, cx.sink, cx.hw_dev) {
+	match open_encoder(p, pix_fmt, kbps, cx.sink, cx.hw_dev, &mut cx.qsv_low_power) {
 		Ok(ec) => {
 			cx.enc = ec;
 			Ok(kbps)
 		}
 		Err(e) => {
 			tracing::warn!(kbps, "libav host: encoder re-open at the new rate failed ({e}), keeping the old rate");
-			cx.enc = open_encoder(p, pix_fmt, prev_kbps, cx.sink, cx.hw_dev)?;
+			cx.enc = open_encoder(p, pix_fmt, prev_kbps, cx.sink, cx.hw_dev, &mut cx.qsv_low_power)?;
 			Ok(prev_kbps)
 		}
 	}
@@ -816,6 +877,7 @@ unsafe fn run(p: &Params, rx: Receiver<Cmd>, ready: Sender<Result<(), String>>) 
 		octx: ptr::null_mut(),
 		header_written: false,
 		hw_dev: ptr::null_mut(),
+		qsv_low_power: None,
 	};
 	let mut sdk: Option<pulsar_capture::NvencCuda> = None;
 	// libx264/libx265 want yuv420p; NVENC + SVT-AV1 take nv12/yuv420p — yuv420p works for
@@ -837,7 +899,8 @@ unsafe fn run(p: &Params, rx: Receiver<Cmd>, ready: Sender<Result<(), String>>) 
 			let desc = policy::vaapi_graph_desc(p.width, p.height, vpp);
 			build_graph(cx.dec, st, &desc, pix_fmt, cx.hw_dev)?
 		} else {
-			build_graph(cx.dec, st, &cpu_graph_desc(p.width, p.height, pix_fmt), pix_fmt, ptr::null_mut())?
+			let bt709 = p.encoder == HwEncoder::Qsv;
+			build_graph(cx.dec, st, &cpu_graph_desc(p.width, p.height, pix_fmt, bt709), pix_fmt, ptr::null_mut())?
 		};
 		cx.graph = graph;
 		cx.src = src;
@@ -853,7 +916,7 @@ unsafe fn run(p: &Params, rx: Receiver<Cmd>, ready: Sender<Result<(), String>>) 
 				Err(e) => tracing::warn!("NVENC SDK (CUDA) encoder unavailable, using libavcodec NVENC: {e}"),
 			}
 		}
-		cx.enc = open_encoder(p, pix_fmt, p.bitrate_kbps, cx.sink, cx.hw_dev)?;
+		cx.enc = open_encoder(p, pix_fmt, p.bitrate_kbps, cx.sink, cx.hw_dev, &mut cx.qsv_low_power)?;
 		let (octx, ost) = open_output(p, cx.enc)?;
 		cx.octx = octx;
 		cx.header_written = true;
@@ -905,6 +968,10 @@ unsafe fn run(p: &Params, rx: Receiver<Cmd>, ready: Sender<Result<(), String>>) 
 	let gop = if cx.enc.is_null() { u32::MAX } else { (*cx.enc).gop_size.max(1) as u32 };
 	// Frames since the last IDR, forced or the encoder's own (every `gop` frames).
 	let mut since_idr: u32 = 0;
+	// VA-API / QSV only: ends an encode whose hardware stopped working after the start.
+	let hw = matches!(p.encoder, HwEncoder::Vaapi | HwEncoder::Qsv) && sdk.is_none();
+	let mut guard = policy::HwGuard::new(std::time::Instant::now());
+	let mut failed: Option<String> = None;
 	'main: loop {
 		// Commands from the app (non-blocking).
 		loop {
@@ -927,9 +994,10 @@ unsafe fn run(p: &Params, rx: Receiver<Cmd>, ready: Sender<Result<(), String>>) 
 				}
 				Ok(Cmd::Bitrate(kbps)) => {
 					let br = kbps as i64 * 1000;
+					let (max_rate, vbv) = policy::rate_limits(br, p.encoder, p.low_latency, short_vbv());
 					(*cx.enc).bit_rate = br;
-					(*cx.enc).rc_max_rate = br;
-					(*cx.enc).rc_buffer_size = policy::vbv_bits(br, p.encoder, p.low_latency) as c_int;
+					(*cx.enc).rc_max_rate = max_rate;
+					(*cx.enc).rc_buffer_size = vbv as c_int;
 					cur_kbps = kbps;
 					tracing::info!(kbps, "libav host: bitrate applied live");
 				}
@@ -994,10 +1062,16 @@ unsafe fn run(p: &Params, rx: Receiver<Cmd>, ready: Sender<Result<(), String>>) 
 								);
 								cur_kbps = applied;
 								key = true;
+								guard.reset(std::time::Instant::now());
 							}
 							Err(e) => {
 								ff::av_frame_unref(filt);
-								tracing::error!("libav host: encoder re-open failed, ending the stream: {e}");
+								// The encoder is gone: end the engine; the session's dead-engine
+								// watcher (host.rs) restarts the stream at once (on the CLI chain).
+								if hw {
+									mark_hw_in_process_failed(&format!("encoder re-open failed: {e}"));
+								}
+								failed = Some(format!("encoder re-open failed: {e}"));
 								break 'main;
 							}
 						}
@@ -1046,13 +1120,23 @@ unsafe fn run(p: &Params, rx: Receiver<Cmd>, ready: Sender<Result<(), String>>) 
 				}
 				let r = ff::avcodec_send_frame(cx.enc, filt);
 				ff::av_frame_unref(filt);
+				guard.sent(r >= 0);
 				if r < 0 {
 					tracing::warn!("libav host: encoder rejected a frame: {}", averr(r));
-					continue;
+				} else {
+					let n = write_packets(&cx, pkt, enc_tb, ost_tb);
+					guard.output(n, std::time::Instant::now());
+					stats_bytes += n;
+					enc_us_acc += t0.elapsed().as_micros();
+					stats_frames += 1;
 				}
-				stats_bytes += write_packets(&cx, pkt, enc_tb, ost_tb);
-				enc_us_acc += t0.elapsed().as_micros();
-				stats_frames += 1;
+				if hw {
+					if let Some(why) = guard.verdict(std::time::Instant::now()) {
+						mark_hw_in_process_failed(&why);
+						failed = Some(why);
+						break 'main;
+					}
+				}
 			}
 		}
 		if stats_t.elapsed().as_secs() >= 2 && stats_frames > 0 {
@@ -1084,7 +1168,10 @@ unsafe fn run(p: &Params, rx: Receiver<Cmd>, ready: Sender<Result<(), String>>) 
 	ff::av_frame_free(&mut frame);
 	ff::av_frame_free(&mut filt);
 	drop(cx);
-	Ok(())
+	match failed {
+		Some(why) => Err(why),
+		None => Ok(()),
+	}
 }
 
 #[cfg(test)]

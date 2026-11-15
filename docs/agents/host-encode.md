@@ -64,23 +64,47 @@ Part of the pulsar-desktop agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
   live bitrate, forced IDR on request, short-GOP recovery; `PULSAR_LIBAV_HOST=0` disables).
   Falls back to the ffmpeg CLI below when it cannot start or for Vulkan/HDR/4:4:4.
   - **AMD / Intel (VA-API, QSV) in-process** (2026-11-15, untested on Linux hardware):
-    VA-API = `scale,format=nv12,hwupload` (the CLI's chain; `PULSAR_VAAPI_VPP=1` =
-    `hwupload,scale_vaapi` GPU conversion, BT.709-tagged) → `h264/hevc/av1_vaapi` (CBR game /
-    VBR desktop, `async_depth=1`, no B-frames); QSV = system-memory NV12 on a QSV device whose
-    VA-API child is the same node (`veryfast` + `low_power`, retried without, `look_ahead=0`,
-    `async_depth=1`, `forced_idr`). Game mode gets a ~125 ms VBV (others keep ~0.5 s).
+    VA-API = `scale(BT.709 limited),format=nv12,hwupload` (`PULSAR_VAAPI_VPP=1` =
+    `hwupload,scale_vaapi` GPU conversion) → `h264/hevc/av1_vaapi` (`async_depth=1`, no
+    B-frames); QSV = system-memory NV12 (BT.709) on a QSV device whose VA-API child is an Intel
+    GPU's node (`drm_node::qsv_node`) (`veryfast` + `low_power` in game mode — opened without it
+    on GPUs that lack VDENC, remembered for re-opens — `look_ahead=0`, `async_depth=1`,
+    `forced_idr`). Both tag the VUI BT.709 (what the client decodes). Rate (`rate_limits`):
+    game = CBR with the ~0.5 s VBV (`PULSAR_LIBAV_SHORT_VBV=1`: ~125 ms, unmeasured); desktop
+    = the CLI's burst headroom (2x peak, 1 s buffer → VBR on both, never CBR).
     `*_vaapi` (and QSV before FFmpeg 6.0) read the rate only at open, so a bitrate step
     re-opens the ENCODER alone on the same capture/graph/surfaces/RTP muxer at the next IDR
     the stream has anyway (≤ 0.25 s in game mode, ≤ 2 s desktop; a ≥ 25 % cut at once) —
     one IDR, no ffmpeg restart. QSV on FFmpeg ≥ 6.0 takes it live. Rules + tests:
     `host/libav_policy.rs`. `PULSAR_LIBAV_HW=0` sends VA-API / QSV back to the CLI.
+    **Runtime guard** (`HwGuard`): 30 rejected frames in a row, or 3 s of frames in with no
+    packet out, or a re-open failing twice ends the engine and turns the in-process hardware
+    path off for the process (`libav::hw_in_process_failed`); host.rs's dead-engine watcher
+    re-issues the request at once, and it lands on the CLI chain.
   - **Render node** (`src-tauri/src/drm_node.rs`): `StreamCfg::vaapi_device` (CLI
-    `-vaapi_device`, the encoder probes / caps, the in-process engine) is the render node of
-    the first non-NVIDIA GPU with an enabled, connected connector (sysfs), else the first
-    non-NVIDIA GPU, else `renderD128`; `PULSAR_VAAPI_DEVICE` overrides. Picked once at start.
+    `-vaapi_device`, the VA-API encoder probes / caps, the in-process VA-API engine) is the
+    render node of the first non-NVIDIA GPU with an enabled, connected connector (sysfs), then
+    the other non-NVIDIA GPUs, else `renderD128`; `PULSAR_VAAPI_DEVICE` overrides. Picked once
+    per process (memoised); with more than one candidate the startup probe
+    (`process::settle_vaapi_node`, from the caps probe / the warm-up) takes the first node a
+    VA-API encode probe passes on, so a display-only screen GPU never drops the host to x264.
+    **Not following it** (Linux sub-platform gaps): the CLI QSV encode and its caps probe
+    (`-init_hw_device qsv=qs` in pulsar-core `pipeline/command.rs` — libva's default node; the
+    in-process QSV picks an Intel node itself), and **Wayland** hosts, which encode VA-API
+    through GStreamer (`vah26Xenc` / `vaapih26Xenc` in pulsar-core `pipeline/gst.rs`): those
+    elements open GStreamer's default/first VA device, so a hybrid Wayland box may encode on
+    the other GPU. Mapping the node there needs the per-device element names
+    (`varenderD129h264enc`) or a device env in pulsar-core — not done.
   - **CLI fallback absorbs ABR steps on Linux too** (as Windows/macOS): a bitrate-only step
     under 30 % down / 40 % up, or within 6 s of the last restart, keeps the running ffmpeg —
     only while the stream is actually on the CLI (a libav / Wayland stream clears it).
+  - **Host-ordered restarts are never absorbed** (every OS): the display-mode watcher, the
+    per-window watcher (window resized / closed), the CLI keyframe restart (`on_nack`, desktop)
+    and the dead-engine watcher re-send the stored request unchanged; they set the session's
+    `host_restart` flag first, so neither the CLI absorb nor the in-process libav fast path
+    (x11grab keeps the size it opened with) swallows them. Wayland's in-process fast path
+    still takes them (a portal restart there leaves the cast black). The keyframe request on a
+    live in-process engine is answered with `request_keyframe` and sends no restart.
   - **NVENC there goes through the NVENC SDK** (2026-11-14, untested on Linux hardware):
     `pulsar_capture::NvencCuda` (`crates/pulsar-capture/src/encode/cuda_enc.rs`) instead of
     libavcodec's `h264_nvenc`. See "Linux NVENC SDK" below.

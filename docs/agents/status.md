@@ -77,9 +77,23 @@ hardware, not compiled for Linux here):** X11 hosts on `*_vaapi` / `*_qsv` run i
 encoder alone at the next IDR instead of restarting ffmpeg, and the CLI fallback absorbs small
 steps on Linux too. See [host-encode.md](host-encode.md) "Linux X11". Windows (AMD/Intel: the
 Media Foundation native path, separate work) and macOS (VideoToolbox native, live bitrate)
-have their own engines; the CLI absorb already covered them. To check on hardware: the re-open
-time (log `encoder re-opened`), CBR rate accuracy on radeonsi / iHD, `PULSAR_VAAPI_VPP=1`
-colours, QSV `low_power` on pre-Ice-Lake iGPUs.
+have their own engines; the CLI absorb already covered them. Host-ordered restarts (display
+mode / window watcher, CLI keyframe restart) now bypass the absorb on EVERY OS — before, an
+identical re-issue was swallowed on Windows/macOS too (wrong size / no IDR on the CLI path).
+To check on hardware: the re-open time (log `encoder re-opened`; FFmpeg 4.4 / Ubuntu 22.04
+build, QSV MFX init per step), CBR rate accuracy on radeonsi / iHD, desktop VBR (2x peak, 1 s
+buffer) sharpness vs the CLI, the IDR size / QP with `PULSAR_LIBAV_SHORT_VBV=1` (125 ms VBV,
+4 IDRs/s in game mode) vs the default 0.5 s, `PULSAR_VAAPI_VPP=1` colours, the BT.709 colours
+of both chains on a real client, QSV `low_power` on pre-Ice-Lake iGPUs, the runtime guard
+(an encoder that stops: log `using the ffmpeg CLI chain from now on`), the multi-GPU node
+probe (log `confirmed by an encode probe`), QSV on an Intel iGPU + AMD screen hybrid.
+
+**Known colour mismatch (not fixed):** the ffmpeg CLI host chains and the in-process
+software / NVENC chain convert RGB → YUV with swscale's default BT.601 matrix and leave the
+stream untagged, while every client decodes untagged video as BT.709 (pulsar-render
+`video.rs`, macOS `decode.rs`) — a slight hue shift on reds / greens. The in-process VA-API /
+QSV chains convert with BT.709 and tag it. Fixing the others changes shipped paths on every
+OS (CLI args in pulsar-core) and needs a look on hardware first.
 
 **macOS host virtual gamepad (2026-11-14, untested on macOS hardware):** pulsar-core
 `input/mac_hid.rs` creates an `IOHIDUserDevice` virtual HID pad (Xbox target = Xbox Wireless

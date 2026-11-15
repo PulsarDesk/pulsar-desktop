@@ -67,6 +67,10 @@ pub(crate) fn probe_all(app: &AppHandle) -> LocalCaps {
 
 	// --- Encode: ffmpeg families (probe-validated), then gst families merged in. ---
 	let ffmpeg = crate::process::ffmpeg_bin(app);
+	// Linux: the VA-API node settled first (a screen GPU that cannot encode is skipped).
+	#[cfg(target_os = "linux")]
+	let vaapi = crate::process::settle_vaapi_node(&ffmpeg, &app.state::<crate::state::AppState>().stream_cfg);
+	#[cfg(not(target_os = "linux"))]
 	let vaapi = app
 		.state::<crate::state::AppState>()
 		.stream_cfg

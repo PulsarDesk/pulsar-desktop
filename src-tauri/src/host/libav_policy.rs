@@ -43,27 +43,114 @@ pub(crate) fn reopen_now(cur_kbps: u32, want_kbps: u32, key_due: bool) -> bool {
 	key_due || (want_kbps as u64) * 4 <= (cur_kbps as u64) * 3
 }
 
-/// The VBV (`rc_buffer_size`, bits) for `bit_rate` (bits/s). VA-API / QSV in game mode get a
-/// short buffer (~125 ms: a frame never bursts far past the link's rate, yet the 0.25 s GOP's
-/// IDRs keep their quality); everything else keeps the ~0.5 s the engine always used.
-pub(crate) fn vbv_bits(bit_rate: i64, enc: HwEncoder, low_latency: bool) -> i64 {
-	let div = if low_latency && matches!(enc, HwEncoder::Vaapi | HwEncoder::Qsv) { 8 } else { 2 };
-	(bit_rate / div).max(1)
+/// The rate limits `(rc_max_rate, rc_buffer_size)` (bits/s, bits) for `bit_rate` (bits/s).
+///
+/// * Software / NVENC (unchanged): peak = target, ~0.5 s VBV — low latency, no spikes.
+/// * VA-API / QSV, desktop: the CLI's rate control, which leans on burst headroom for a sharp
+///   frame on a scene change / scroll / window switch — the CLI sets only `-b:v`, so
+///   `vaapi_encode` runs VBR with a 2x peak and a 1 s HRD buffer, and QSV runs VBR/AVBR. A peak
+///   equal to the target would make `*_vaapi` VBR (rc_target_percentage 100 %) and QSV CBR.
+/// * VA-API / QSV, game: CBR (peak = target) with the ~0.5 s VBV the in-process NVENC / x264
+///   keep. `short_vbv` (`PULSAR_LIBAV_SHORT_VBV=1`) takes ~125 ms instead: a frame never bursts
+///   far past the link's rate, but every IDR of the 0.25 s GOP is capped near 5-6 average
+///   frames — the IDR size / QP it costs is not measured on radeonsi / iHD yet, so opt-in.
+pub(crate) fn rate_limits(bit_rate: i64, enc: HwEncoder, low_latency: bool, short_vbv: bool) -> (i64, i64) {
+	let bit_rate = bit_rate.max(1);
+	let hw = matches!(enc, HwEncoder::Vaapi | HwEncoder::Qsv);
+	match (hw, low_latency) {
+		(true, false) => (bit_rate * 2, bit_rate),
+		(true, true) if short_vbv => (bit_rate, (bit_rate / 8).max(1)),
+		_ => (bit_rate, (bit_rate / 2).max(1)),
+	}
+}
+
+/// `PULSAR_LIBAV_SHORT_VBV` = `1` / `true` / `on`: the ~125 ms VBV for VA-API / QSV game
+/// streams ([`rate_limits`]).
+pub(crate) fn short_vbv_enabled(env: Option<&str>) -> bool {
+	matches!(env.map(str::trim), Some("1") | Some("true") | Some("on"))
+}
+
+/// Watches a VA-API / QSV encode that started fine and then stopped working — the encoder
+/// rejecting every frame, or taking frames and handing back no packets — so the engine can
+/// end and the stream move to the ffmpeg CLI chain instead of staying alive with no video
+/// (an alive engine takes every later request on its fast path). Before it only setup
+/// failures fell back. Pure: the caller passes the clock.
+#[derive(Debug)]
+pub(crate) struct HwGuard {
+	rejects: u32,
+	sent_since_out: u32,
+	last_out: std::time::Instant,
+}
+
+impl HwGuard {
+	/// Consecutive frames the encoder refused before the engine gives up (~0.5 s at 60 fps).
+	pub(crate) const MAX_REJECTS: u32 = 30;
+	/// How long frames may go in with no packet coming out.
+	pub(crate) const MAX_SILENCE: std::time::Duration = std::time::Duration::from_secs(3);
+
+	pub(crate) fn new(now: std::time::Instant) -> Self {
+		Self { rejects: 0, sent_since_out: 0, last_out: now }
+	}
+
+	/// A frame was handed to the encoder (`accepted` = `avcodec_send_frame` took it).
+	pub(crate) fn sent(&mut self, accepted: bool) {
+		if accepted {
+			self.rejects = 0;
+			self.sent_since_out = self.sent_since_out.saturating_add(1);
+		} else {
+			self.rejects = self.rejects.saturating_add(1);
+		}
+	}
+
+	/// Packets written after a frame (`bytes` > 0 = the encoder works).
+	pub(crate) fn output(&mut self, bytes: u64, now: std::time::Instant) {
+		if bytes > 0 {
+			self.sent_since_out = 0;
+			self.last_out = now;
+		}
+	}
+
+	/// The encoder was re-opened: a fresh start for the silence clock.
+	pub(crate) fn reset(&mut self, now: std::time::Instant) {
+		*self = Self::new(now);
+	}
+
+	/// `Some(why)` once the encode has failed for good.
+	pub(crate) fn verdict(&self, now: std::time::Instant) -> Option<String> {
+		if self.rejects >= Self::MAX_REJECTS {
+			return Some(format!("the encoder rejected {} frames in a row", self.rejects));
+		}
+		if self.sent_since_out > 0 && now.duration_since(self.last_out) >= Self::MAX_SILENCE {
+			return Some(format!(
+				"{} frames in, no packet out for {} s",
+				self.sent_since_out,
+				Self::MAX_SILENCE.as_secs()
+			));
+		}
+		None
+	}
+}
+
+/// The CPU `scale` of x11grab's RGB into the encoder's YUV with the BT.709 matrix, limited
+/// range — what every Pulsar client decodes an untagged stream as (pulsar-render's shader and
+/// the macOS decoder assume BT.709). swscale's default would be BT.601 (a hue shift on reds
+/// and greens). The VA-API / QSV encoders tag their VUI BT.709 to match.
+pub(crate) fn bt709_scale(w: u32, h: u32) -> String {
+	format!("scale={w}:{h}:flags=fast_bilinear:out_color_matrix=bt709:out_range=tv")
 }
 
 /// The VA-API filter chain behind `buffer` (x11grab's `bgr0`) ending in GPU NV12 surfaces.
+/// Both chains convert with BT.709 limited range ([`bt709_scale`]).
 ///
-/// * default — CPU `scale` + `format=nv12`, then `hwupload`: exactly the ffmpeg CLI's VA-API
-///   chain (`format=nv12,hwupload`), so the colours (swscale's BT.601 matrix) match what the
-///   client has always decoded.
+/// * default — CPU `scale` + `format=nv12`, then `hwupload` (the ffmpeg CLI's VA-API chain,
+///   with the matrix the client decodes instead of swscale's BT.601 default).
 /// * `vpp` (`PULSAR_VAAPI_VPP=1`) — upload the RGB frame and let the GPU scale + convert
-///   (`scale_vaapi`): no CPU colour conversion, but the matrix is the driver's (BT.709 for HD
-///   on Mesa / iHD), so the encoder's VUI is tagged BT.709 to match. Opt-in until measured.
+///   (`scale_vaapi`): no CPU colour conversion. Opt-in until measured.
 pub(crate) fn vaapi_graph_desc(w: u32, h: u32, vpp: bool) -> String {
 	if vpp {
 		format!("hwupload,scale_vaapi=w={w}:h={h}:format=nv12:out_color_matrix=bt709:out_range=tv")
 	} else {
-		format!("scale={w}:{h}:flags=fast_bilinear,format=nv12,hwupload")
+		format!("{},format=nv12,hwupload", bt709_scale(w, h))
 	}
 }
 
@@ -109,20 +196,68 @@ mod tests {
 	}
 
 	#[test]
-	fn short_vbv_only_for_hw_game_streams() {
-		assert_eq!(vbv_bits(8_000_000, HwEncoder::Vaapi, true), 1_000_000);
-		assert_eq!(vbv_bits(8_000_000, HwEncoder::Qsv, true), 1_000_000);
-		assert_eq!(vbv_bits(8_000_000, HwEncoder::Vaapi, false), 4_000_000);
-		// Unchanged for the encoders the engine already had.
-		assert_eq!(vbv_bits(8_000_000, HwEncoder::Software, true), 4_000_000);
-		assert_eq!(vbv_bits(8_000_000, HwEncoder::Nvenc, true), 4_000_000);
+	fn hw_desktop_keeps_the_clis_burst_headroom() {
+		// VA-API / QSV desktop: 2x peak, 1 s buffer (the CLI's -b:v-only VBR), never CBR.
+		assert_eq!(rate_limits(8_000_000, HwEncoder::Vaapi, false, false), (16_000_000, 8_000_000));
+		assert_eq!(rate_limits(8_000_000, HwEncoder::Qsv, false, true), (16_000_000, 8_000_000));
+		// Game: CBR with the 0.5 s VBV; ~125 ms only on the opt-in.
+		assert_eq!(rate_limits(8_000_000, HwEncoder::Vaapi, true, false), (8_000_000, 4_000_000));
+		assert_eq!(rate_limits(8_000_000, HwEncoder::Qsv, true, false), (8_000_000, 4_000_000));
+		assert_eq!(rate_limits(8_000_000, HwEncoder::Vaapi, true, true), (8_000_000, 1_000_000));
+		// Unchanged for the encoders the engine already had, in both modes.
+		for ll in [false, true] {
+			assert_eq!(rate_limits(8_000_000, HwEncoder::Software, ll, true), (8_000_000, 4_000_000));
+			assert_eq!(rate_limits(8_000_000, HwEncoder::Nvenc, ll, true), (8_000_000, 4_000_000));
+		}
 	}
 
 	#[test]
-	fn vaapi_chains_end_on_the_gpu() {
-		assert_eq!(vaapi_graph_desc(1920, 1080, false), "scale=1920:1080:flags=fast_bilinear,format=nv12,hwupload");
+	fn vaapi_chains_end_on_the_gpu_in_bt709() {
+		assert_eq!(
+			vaapi_graph_desc(1920, 1080, false),
+			"scale=1920:1080:flags=fast_bilinear:out_color_matrix=bt709:out_range=tv,format=nv12,hwupload"
+		);
 		let vpp = vaapi_graph_desc(1280, 720, true);
 		assert!(vpp.starts_with("hwupload,scale_vaapi=w=1280:h=720:format=nv12"));
+		assert!(vpp.contains("out_color_matrix=bt709"));
+	}
+
+	#[test]
+	fn hw_guard_ends_a_dead_encode_only() {
+		let t0 = std::time::Instant::now();
+		let s = |ms: u64| t0 + std::time::Duration::from_millis(ms);
+		let mut g = HwGuard::new(t0);
+		// A healthy encode: frames in, packets out.
+		for i in 0..200u64 {
+			g.sent(true);
+			g.output(5000, s(i * 16));
+		}
+		assert_eq!(g.verdict(s(10_000)), None);
+		// A few rejects in a row are tolerated; the counter resets on an accepted frame.
+		for _ in 0..(HwGuard::MAX_REJECTS - 1) {
+			g.sent(false);
+		}
+		assert_eq!(g.verdict(s(10_000)), None);
+		g.sent(true);
+		g.output(1, s(10_000));
+		for _ in 0..HwGuard::MAX_REJECTS {
+			g.sent(false);
+		}
+		assert!(g.verdict(s(10_000)).is_some());
+		// Frames accepted but nothing comes out for 3 s.
+		let mut g = HwGuard::new(t0);
+		g.sent(true);
+		assert_eq!(g.verdict(s(2_999)), None);
+		assert!(g.verdict(s(3_000)).is_some());
+		// No frames in at all (a still capture) is not the encoder's fault.
+		let g = HwGuard::new(t0);
+		assert_eq!(g.verdict(s(60_000)), None);
+		// A re-open restarts the clock.
+		let mut g = HwGuard::new(t0);
+		g.sent(true);
+		g.reset(s(2_900));
+		g.sent(true);
+		assert_eq!(g.verdict(s(5_000)), None);
 	}
 
 	#[test]
@@ -134,5 +269,8 @@ mod tests {
 		assert!(!vpp_enabled(None));
 		assert!(vpp_enabled(Some("1")));
 		assert!(!vpp_enabled(Some("0")));
+		assert!(!short_vbv_enabled(None));
+		assert!(short_vbv_enabled(Some("1")));
+		assert!(!short_vbv_enabled(Some("0")));
 	}
 }

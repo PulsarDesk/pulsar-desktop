@@ -458,7 +458,9 @@ impl Default for StreamCfg {
 			capture: "auto".into(),
 			display: std::env::var("DISPLAY").unwrap_or_else(|_| ":0.0".into()),
 			// Linux: the render node of the GPU driving the screen (not blindly renderD128 —
-			// on a hybrid box that is often the NVIDIA dGPU with no VA-API encode).
+			// on a hybrid box that is often the NVIDIA dGPU with no VA-API encode). Memoised in
+			// drm_node (this runs on every settings push from the UI) and confirmed by the startup
+			// encoder probe (process::settle_vaapi_node).
 			#[cfg(target_os = "linux")]
 			vaapi_device: crate::drm_node::screen_render_node(),
 			#[cfg(not(target_os = "linux"))]

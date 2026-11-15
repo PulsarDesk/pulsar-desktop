@@ -3,19 +3,31 @@
 //! libva's default device is `/dev/dri/renderD128`, the first GPU the kernel probed. On a
 //! hybrid machine that is often NOT the GPU driving the screen: an AMD/Intel iGPU panel next to
 //! an NVIDIA dGPU (no VA-API encode on the NVIDIA node), or two AMD GPUs where the monitor hangs
-//! off the second. The ffmpeg CLI's `-vaapi_device`, the encoder probes (`caps.rs`) and the
-//! in-process libav host (`host/libav.rs`) all read `StreamCfg::vaapi_device`, so this picks it
-//! once at startup from sysfs:
+//! off the second. The ffmpeg CLI's `-vaapi_device`, the VA-API encoder probes (`caps.rs`) and
+//! the in-process libav host (`host/libav.rs`) all read `StreamCfg::vaapi_device`, so this picks
+//! it once per process from sysfs (memoised: `StreamCfg::default` runs on every settings push
+//! from the UI, which never sends the node):
 //!
 //! 1. `PULSAR_VAAPI_DEVICE` (a path) wins, untouched.
 //! 2. The render node of the first VA-capable GPU (not NVIDIA) with an enabled, connected
 //!    connector — the one scanning out the desktop.
-//! 3. The first VA-capable GPU at all (a headless iGPU still encodes uploaded frames).
+//! 3. The other VA-capable GPUs (a headless iGPU still encodes uploaded frames).
 //! 4. `/dev/dri/renderD128`, the old default.
 //!
-//! The pure walk ([`pick_from`]) takes a sysfs root so it is tested on every OS; only Linux
-//! calls it. A monitor moved to another GPU after startup keeps the startup pick (the encode
-//! still works: the frames come from x11grab in system memory). Untested on Linux hardware.
+//! With more than one candidate, the startup encoder probe ([`verify_encode_node`]) takes the
+//! first one that really encodes through VA-API — a screen GPU without VA-API encode (an old
+//! radeon without VCE/VCN support in Mesa, virtio-gpu, a display-only card) must not push the
+//! host onto x264 while another GPU could encode.
+//!
+//! Not every Linux path follows this node: QSV opens an Intel GPU ([`qsv_node`] for the
+//! in-process engine; the CLI's `-init_hw_device qsv` and its caps probe use libva's default
+//! node), and Wayland hosts encode VA-API through GStreamer's `va*`/`vaapi*` elements, which
+//! pick their own device (see docs/agents/host-encode.md).
+//!
+//! The pure parts ([`pick_from`], [`pick_verified`], [`qsv_node_in`]) take a sysfs root / list so
+//! they are tested on every OS; only Linux calls them. A monitor moved to another GPU after
+//! startup keeps the startup pick (the encode still works: the frames come from x11grab in
+//! system memory). Untested on Linux hardware.
 
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
@@ -24,6 +36,7 @@ use std::path::Path;
 /// libva's own default; the result when nothing better is found.
 pub(crate) const DEFAULT_NODE: &str = "/dev/dri/renderD128";
 const VENDOR_NVIDIA: u16 = 0x10de;
+const VENDOR_INTEL: u16 = 0x8086;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Card {
@@ -36,30 +49,113 @@ struct Card {
 	active_outputs: usize,
 }
 
-/// The render node for VA-API / QSV on this machine (see the module doc).
+/// The node [`verify_encode_node`] confirmed (set once the startup probe ran).
+#[cfg(target_os = "linux")]
+static VERIFIED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// `/sys/class/drm`, read once per process.
+#[cfg(target_os = "linux")]
+fn cards() -> &'static [Card] {
+	static CARDS: std::sync::OnceLock<Vec<Card>> = std::sync::OnceLock::new();
+	CARDS.get_or_init(|| scan(Path::new("/sys/class/drm")))
+}
+
+#[cfg(target_os = "linux")]
+fn env_override() -> Option<String> {
+	let v = std::env::var("PULSAR_VAAPI_DEVICE").ok()?;
+	let v = v.trim();
+	(!v.is_empty()).then(|| v.to_string())
+}
+
+/// The render node for VA-API on this machine (see the module doc): the probe-confirmed one
+/// once [`verify_encode_node`] ran, else the sysfs pick. Memoised — no sysfs walk or log per call.
 #[cfg(target_os = "linux")]
 pub(crate) fn screen_render_node() -> String {
-	if let Ok(v) = std::env::var("PULSAR_VAAPI_DEVICE") {
-		let v = v.trim();
-		if !v.is_empty() {
-			return v.to_string();
-		}
+	if let Some(v) = VERIFIED.get() {
+		return v.clone();
 	}
-	let node = pick_from(Path::new("/sys/class/drm")).unwrap_or_else(|| DEFAULT_NODE.to_string());
-	tracing::info!(node = %node, "VA-API render node (the GPU driving the screen)");
-	node
+	static PICK: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+	PICK.get_or_init(|| {
+		let node = env_override()
+			.or_else(|| candidates(cards()).into_iter().next())
+			.unwrap_or_else(|| DEFAULT_NODE.to_string());
+		tracing::info!(node = %node, "VA-API render node (the GPU driving the screen)");
+		node
+	})
+	.clone()
+}
+
+/// Pick the VA-API node that really encodes: `probe(node)` = a VA-API encode probe on that node.
+/// Runs the probes only when there is something to choose between (more than one candidate,
+/// no `PULSAR_VAAPI_DEVICE`); memoised, so later calls (and [`screen_render_node`]) return the
+/// same node. With no candidate passing, the screen pick stays (the probes then report VA-API
+/// as unavailable, as before).
+#[cfg(target_os = "linux")]
+pub(crate) fn verify_encode_node(probe: impl FnMut(&str) -> bool) -> String {
+	VERIFIED
+		.get_or_init(|| {
+			if env_override().is_some() {
+				return screen_render_node();
+			}
+			let cands = candidates(cards());
+			match pick_verified(&cands, probe) {
+				Some(n) => {
+					if cands.len() > 1 {
+						tracing::info!(node = %n, ?cands, "VA-API render node confirmed by an encode probe");
+					}
+					n
+				}
+				None => screen_render_node(),
+			}
+		})
+		.clone()
+}
+
+/// The VA-API child node for QSV (in-process engine): `preferred` when it is an Intel GPU,
+/// else the first Intel GPU's node (FFmpeg forces the iHD driver on the QSV child device, so a
+/// screen GPU from another vendor can never be it), else `preferred`.
+#[cfg(target_os = "linux")]
+pub(crate) fn qsv_node(preferred: &str) -> String {
+	if env_override().is_some() {
+		return preferred.to_string();
+	}
+	qsv_node_in(cards(), preferred)
 }
 
 /// Walk a `/sys/class/drm`-shaped directory and pick the render node (rules 2-3).
 pub(crate) fn pick_from(root: &Path) -> Option<String> {
-	let cards = scan(root);
-	let va_capable = |c: &&Card| c.vendor != Some(VENDOR_NVIDIA);
-	cards
-		.iter()
-		.filter(va_capable)
-		.find(|c| c.active_outputs > 0)
-		.or_else(|| cards.iter().find(va_capable))
-		.map(|c| c.render_node.clone())
+	candidates(&scan(root)).into_iter().next()
+}
+
+/// The VA-capable render nodes (not NVIDIA) in preference order: GPUs driving a screen first,
+/// then the rest, each group in the kernel's probe order.
+fn candidates(cards: &[Card]) -> Vec<String> {
+	let va: Vec<&Card> = cards.iter().filter(|c| c.vendor != Some(VENDOR_NVIDIA)).collect();
+	let mut out: Vec<String> = va.iter().filter(|c| c.active_outputs > 0).map(|c| c.render_node.clone()).collect();
+	for c in va.iter().filter(|c| c.active_outputs == 0) {
+		if !out.contains(&c.render_node) {
+			out.push(c.render_node.clone());
+		}
+	}
+	out
+}
+
+/// The first candidate `probe` accepts. A single candidate is taken without a probe (there is
+/// nothing to fall back to; the caps probe reports whether it encodes).
+pub(crate) fn pick_verified(cands: &[String], mut probe: impl FnMut(&str) -> bool) -> Option<String> {
+	if cands.len() <= 1 {
+		return cands.first().cloned();
+	}
+	cands.iter().find(|n| probe(n)).cloned()
+}
+
+/// See [`qsv_node`].
+fn qsv_node_in(cards: &[Card], preferred: &str) -> String {
+	let intel = |c: &&Card| c.vendor == Some(VENDOR_INTEL);
+	if cards.iter().filter(intel).any(|c| c.render_node == preferred) {
+		return preferred.to_string();
+	}
+	cards.iter().find(intel).map(|c| c.render_node.clone()).unwrap_or_else(|| preferred.to_string())
 }
 
 fn scan(root: &Path) -> Vec<Card> {
@@ -177,6 +273,45 @@ mod tests {
 		connector(&r, 0, "DP-1", "connected", Some("enabled"));
 		assert_eq!(pick_from(&r.0), None);
 		assert_eq!(pick_from(&r.0.join("missing")), None);
+	}
+
+	#[test]
+	fn a_screen_gpu_without_va_encode_falls_back_to_the_next_candidate() {
+		let r = root("verify");
+		card(&r, 0, 128, Some("0x1002")); // encode-capable, no screen
+		card(&r, 1, 129, Some("0x1002")); // drives the screen, no VA-API encode
+		connector(&r, 1, "DP-1", "connected", Some("enabled"));
+		card(&r, 2, 130, Some("0x10de"));
+		let cands = candidates(&scan(&r.0));
+		assert_eq!(cands, vec!["/dev/dri/renderD129".to_string(), "/dev/dri/renderD128".to_string()]);
+		let mut probed = Vec::new();
+		let got = pick_verified(&cands, |n| {
+			probed.push(n.to_string());
+			n == "/dev/dri/renderD128"
+		});
+		assert_eq!(got.as_deref(), Some("/dev/dri/renderD128"));
+		assert_eq!(probed, vec!["/dev/dri/renderD129", "/dev/dri/renderD128"]);
+		// Nothing passes: no pick (the caller keeps the screen GPU).
+		assert_eq!(pick_verified(&cands, |_| false), None);
+		// One candidate: taken without a probe.
+		let one = vec!["/dev/dri/renderD128".to_string()];
+		assert_eq!(pick_verified(&one, |_| panic!("no probe for a single candidate")).as_deref(), Some("/dev/dri/renderD128"));
+	}
+
+	#[test]
+	fn qsv_takes_an_intel_node() {
+		let r = root("qsv");
+		card(&r, 0, 128, Some("0x8086")); // Intel iGPU, no screen
+		card(&r, 1, 129, Some("0x1002")); // AMD dGPU drives the screen
+		connector(&r, 1, "DP-1", "connected", Some("enabled"));
+		let cards = scan(&r.0);
+		assert_eq!(qsv_node_in(&cards, "/dev/dri/renderD129"), "/dev/dri/renderD128");
+		// The preferred node is Intel already: kept.
+		assert_eq!(qsv_node_in(&cards, "/dev/dri/renderD128"), "/dev/dri/renderD128");
+		// No Intel GPU at all: the preferred node (QSV then fails and the CLI takes over).
+		let r2 = root("qsv-none");
+		card(&r2, 0, 128, Some("0x1002"));
+		assert_eq!(qsv_node_in(&scan(&r2.0), "/dev/dri/renderD128"), "/dev/dri/renderD128");
 	}
 
 	#[test]
