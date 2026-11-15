@@ -974,6 +974,7 @@ mod tests {
 			low_latency: true,
 			gpu_zerocopy: false,
 			output_idx: 0,
+			capture_size: None,
 			hdr: false,
 			yuv444: false,
 			loss_recovery: LossRecovery::Normal,

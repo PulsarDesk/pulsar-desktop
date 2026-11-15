@@ -3498,6 +3498,18 @@ pub(super) fn make_on_stream(
 		};
 		#[cfg(not(windows))]
 		let ffmpeg_display_idx: u32 = 0;
+		// That output's own size (DXGI desktop coordinates, the order `ddagrab=output_idx`
+		// counts in): the hybrid NVENC ffmpeg branch streams it as-is when the request equals it
+		// and scales on the NVIDIA GPU when it doesn't (`StreamPlan::capture_size`). Off Windows
+		// there is no ddagrab: unused.
+		#[cfg(windows)]
+		let ffmpeg_capture_size = pulsar_capture::list_displays()
+			.into_iter()
+			.find(|d| d.0 == ffmpeg_display_idx)
+			.map(|d| (d.2, d.3))
+			.filter(|&(w, h)| w > 0 && h > 0);
+		#[cfg(not(windows))]
+		let ffmpeg_capture_size: Option<(u32, u32)> = None;
 		let plan = StreamPlan {
 			encoder,
 			codec,
@@ -3518,6 +3530,7 @@ pub(super) fn make_on_stream(
 			},
 			gpu_zerocopy,
 			output_idx: ffmpeg_display_idx,
+			capture_size: ffmpeg_capture_size,
 			hdr: req.hdr,
 			yuv444: req.yuv444,
 			loss_recovery: req.loss_recovery,
@@ -4057,6 +4070,7 @@ pub(super) fn make_on_stream(
 							&& enc == pipeline::HwEncoder::Nvenc
 							&& cap == base.capture,
 						output_idx: base.output_idx,
+						capture_size: base.capture_size,
 						hdr: base.hdr,
 						yuv444: base.yuv444,
 						loss_recovery: base.loss_recovery,
