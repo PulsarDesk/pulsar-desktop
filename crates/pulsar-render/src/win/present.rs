@@ -149,6 +149,14 @@ enum Upscaler {
 	Vendor,
 }
 
+/// `src` is a 4:4:4 decoder picture (`win/decode.rs` hands those over as AYUV).
+fn is_ayuv(src: &ID3D11Texture2D) -> bool {
+	let mut d = windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC::default();
+	// SAFETY: plain query on a live texture.
+	unsafe { src.GetDesc(&mut d) };
+	d.Format == windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_AYUV
+}
+
 fn pick(mode: u8, vendor: u32) -> Upscaler {
 	let ai = vendor == VENDOR_NVIDIA || vendor == VENDOR_INTEL;
 	match mode {
@@ -183,6 +191,15 @@ pub struct Present {
 	fsr: std::cell::RefCell<Option<super::fsr::Fsr>>,
 	fsr_failed: std::cell::Cell<bool>,
 	logged: std::cell::Cell<Option<Upscaler>>,
+	/// HDR10 (P010) pictures: our own shader present (`hdr.rs`), built on the first one.
+	hdr: std::cell::RefCell<Option<super::hdr::HdrPresent>>,
+	/// The swapchain is HDR10 (R10G10B10A2 + PQ colour space): P010 passes through as PQ;
+	/// otherwise it is tone-mapped to SDR. Set by the renderer (`mod.rs`) with the swapchain.
+	hdr_out: std::cell::Cell<bool>,
+	/// The current P010 picture is PQ (HDR10); false = 10-bit BT.709 SDR (`set_picture_pq`).
+	picture_pq: std::cell::Cell<bool>,
+	/// FSR failed on the HDR (P010 shader) path; kept apart from `fsr_failed` (the SDR path).
+	fsr_failed_hdr: std::cell::Cell<bool>,
 }
 
 impl Present {
@@ -212,6 +229,10 @@ impl Present {
 			fsr: std::cell::RefCell::new(None),
 			fsr_failed: std::cell::Cell::new(false),
 			logged: std::cell::Cell::new(None),
+			hdr: std::cell::RefCell::new(None),
+			hdr_out: std::cell::Cell::new(false),
+			picture_pq: std::cell::Cell::new(true),
+			fsr_failed_hdr: std::cell::Cell::new(false),
 		};
 		// Black bars for letterboxing.
 		s.set_black_background();
@@ -384,30 +405,24 @@ impl Present {
 	/// Convert+scale the NV12 `src` onto the swapchain `back` buffer (RGB): one GPU Blt — with
 	/// the GPU's own upscaler on it, or into a source-sized texture that FSR scales up.
 	pub unsafe fn blt(&self, src: &ID3D11Texture2D, back: &ID3D11Texture2D) -> Result<()> {
+		let mut sd = windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC::default();
+		src.GetDesc(&mut sd);
+		if sd.Format == windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_P010 {
+			return self.blt_hdr(src, sd.Width, sd.Height, back);
+		}
 		let (_, dst, crop) = self.blt_rects_crop();
 		let up = (dst.right - dst.left) as u32 > crop.0 || (dst.bottom - dst.top) as u32 > crop.1;
 		let mut which = pick(UPSCALE.load(std::sync::atomic::Ordering::Relaxed), self.vendor);
+		// The drivers' super resolution (RTX / Intel VSR) is documented and used (Moonlight) on
+		// NV12 / P010 input only, and was never verified on a 4:4:4 (AYUV) stream: FSR there,
+		// so the overlay never names an upscaler that may not be running.
+		if which == Upscaler::Vendor && is_ayuv(src) {
+			which = Upscaler::Fsr;
+		}
 		if !up || (matches!(which, Upscaler::Fsr | Upscaler::Sgsr) && self.fsr_failed.get()) {
 			which = Upscaler::None;
 		}
-		if self.logged.get() != Some(which) {
-			self.logged.set(Some(which));
-			crate::overlay::set_upscaler_active(match which {
-				Upscaler::None => "",
-				Upscaler::Fsr => "FSR",
-				Upscaler::Sgsr => "SGSR",
-				Upscaler::Vendor if self.vendor == VENDOR_NVIDIA => "NVIDIA VSR",
-				Upscaler::Vendor => "Intel VSR",
-			});
-			eprintln!(
-				"pulsar-render(win): upscaler {which:?} (gpu vendor 0x{:04x}, {}x{} -> {}x{})",
-				self.vendor,
-				crop.0,
-				crop.1,
-				dst.right - dst.left,
-				dst.bottom - dst.top
-			);
-		}
+		self.note_upscaler(which, crop, dst);
 		let vendor_want = which == Upscaler::Vendor;
 		if vendor_want != self.vendor_on.get() {
 			self.set_vendor_upscale(vendor_want);
@@ -442,6 +457,119 @@ impl Present {
 			}
 		}
 		self.blt_to(src, back, None)
+	}
+
+	/// Tell the overlay (and the log) which upscaler runs now, on a change.
+	fn note_upscaler(&self, which: Upscaler, crop: (u32, u32), dst: RECT) {
+		if self.logged.get() == Some(which) {
+			return;
+		}
+		self.logged.set(Some(which));
+		crate::overlay::set_upscaler_active(match which {
+			Upscaler::None => "",
+			Upscaler::Fsr => "FSR",
+			Upscaler::Sgsr => "SGSR",
+			Upscaler::Vendor if self.vendor == VENDOR_NVIDIA => "NVIDIA VSR",
+			Upscaler::Vendor => "Intel VSR",
+		});
+		eprintln!(
+			"pulsar-render(win): upscaler {which:?} (gpu vendor 0x{:04x}, {}x{} -> {}x{})",
+			self.vendor,
+			crop.0,
+			crop.1,
+			dst.right - dst.left,
+			dst.bottom - dst.top
+		);
+	}
+
+	/// The decoder's transfer for the next P010 picture: PQ (HDR10) or not (a 10-bit SDR
+	/// stream, BT.709). Set by the renderer from `Decoder::is_hdr` (MF_MT_TRANSFER_FUNCTION).
+	pub fn set_picture_pq(&self, pq: bool) {
+		self.picture_pq.set(pq);
+	}
+
+	/// The swapchain's mode (see `hdr_out`).
+	pub fn set_hdr_output(&self, on: bool) {
+		self.hdr_out.set(on);
+	}
+
+	/// An HDR10 (P010) picture: our shader (`hdr.rs`) — PQ pass-through onto an HDR10
+	/// swapchain, or tone-mapped to SDR (then optionally FSR / SGSR, which work on 8-bit SDR;
+	/// the GPU's own video upscaler is a VideoProcessor feature and has no P010 path here, so
+	/// a pick of it runs FSR instead). Letterbox bars are cleared black (PQ 0 = black too).
+	unsafe fn blt_hdr(&self, src: &ID3D11Texture2D, tex_w: u32, tex_h: u32, back: &ID3D11Texture2D) -> Result<()> {
+		use super::hdr::{HdrPresent, Out};
+		let (src_r, dst, crop) = self.blt_rects_crop();
+		let mut slot = self.hdr.borrow_mut();
+		if slot.is_none() {
+			*slot = Some(HdrPresent::new(&self.device)?);
+			eprintln!("pulsar-render(win): HDR10 stream — shader present");
+		}
+		let hp = slot.as_mut().unwrap();
+		// A P010 picture that is not PQ (a 10-bit SDR / BT.709 stream) is shown as BT.709 SDR —
+		// never through the PQ maths.
+		let out = if !self.picture_pq.get() {
+			Out::Bt709
+		} else if self.hdr_out.get() {
+			Out::Pq
+		} else {
+			Out::Sdr
+		};
+		let crop_rect = (
+			src_r.left as f32,
+			src_r.top as f32,
+			(src_r.right - src_r.left) as f32,
+			(src_r.bottom - src_r.top) as f32,
+		);
+		let up = (dst.right - dst.left) as u32 > crop.0 || (dst.bottom - dst.top) as u32 > crop.1;
+		let which = match pick(UPSCALE.load(std::sync::atomic::Ordering::Relaxed), self.vendor) {
+			// Own failure flag: an FSR failure on this path must not turn FSR off for the SDR
+			// streams this renderer shows later (and vice versa).
+			_ if out == Out::Pq || !up || self.fsr_failed_hdr.get() => Upscaler::None,
+			Upscaler::Vendor => Upscaler::Fsr,
+			u => u,
+		};
+		// The overlay names what really runs on this path (the vendor VSR never does here).
+		self.note_upscaler(which, crop, dst);
+		if matches!(which, Upscaler::Fsr | Upscaler::Sgsr) {
+			let mut fs = self.fsr.borrow_mut();
+			if fs.is_none() {
+				match super::fsr::Fsr::new(&self.device) {
+					Ok(f) => *fs = Some(f),
+					Err(_) => self.fsr_failed_hdr.set(true),
+				}
+			}
+			if let Some(fsr) = fs.as_mut() {
+				let sgsr = which == Upscaler::Sgsr && fsr.has_sgsr();
+				let r = fsr.source(crop.0, crop.1).and_then(|mid| {
+					let mut rtv = None;
+					self.device.CreateRenderTargetView(&mid, None, Some(&mut rtv))?;
+					hp.draw(src, tex_w, tex_h, crop_rect, rotation(), &rtv.unwrap(), (0.0, 0.0, crop.0 as f32, crop.1 as f32), out)?;
+					if sgsr { fsr.run_sgsr(back, dst) } else { fsr.run(back, dst) }
+				});
+				match r {
+					Ok(()) => return Ok(()),
+					Err(e) => {
+						eprintln!("pulsar-render(win): FSR pass on HDR failed ({e}) — plain scaling");
+						self.fsr_failed_hdr.set(true);
+					}
+				}
+			}
+		}
+		let mut rtv = None;
+		self.device.CreateRenderTargetView(back, None, Some(&mut rtv))?;
+		let rtv = rtv.unwrap();
+		self.device.GetImmediateContext()?.ClearRenderTargetView(&rtv, &[0.0, 0.0, 0.0, 1.0]);
+		hp.draw(
+			src,
+			tex_w,
+			tex_h,
+			crop_rect,
+			rotation(),
+			&rtv,
+			(dst.left as f32, dst.top as f32, (dst.right - dst.left) as f32, (dst.bottom - dst.top) as f32),
+			out,
+		)
 	}
 
 	/// One VideoProcessor Blt of `src` onto `out`: the fit/letterbox placement on the window, or

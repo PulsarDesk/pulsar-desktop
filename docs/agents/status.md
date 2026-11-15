@@ -68,8 +68,34 @@ needs a mac C toolchain); the crate can.
 **Linux host RFI (2026-11-14, LOCAL, unpushed, untested on Linux hardware):** an NVIDIA
 Linux host (X11 and Wayland) encodes with the NVENC SDK on CUDA and heals a client-reported
 loss with reference-frame invalidation like the Windows host — see
-[host-encode.md](host-encode.md) "Linux NVENC SDK". Open: the Linux client does not ask for
-RFI yet (`play.rs` `cfg!(windows)`); VA-API / QSV / AMF hosts have no equivalent (keyframe).
+[host-encode.md](host-encode.md) "Linux NVENC SDK". VA-API / QSV / AMF hosts have no
+equivalent (keyframe). **RFI clients on every OS (2026-11-15, fix/rfi-clients, LOCAL, unpushed,
+untested in a real Linux / macOS session):** Linux and macOS clients ask for RFI too — see
+[client-video.md](client-video.md) "Loss recovery — reference-frame invalidation".
+
+**Linux AMD / Intel host, in-process VA-API / QSV (2026-11-15, LOCAL, untested on Linux
+hardware, not compiled for Linux here):** X11 hosts on `*_vaapi` / `*_qsv` run inside the app
+(`host/libav.rs`) on the screen GPU's render node (`drm_node.rs`); a bitrate step re-opens the
+encoder alone at the next IDR instead of restarting ffmpeg, and the CLI fallback absorbs small
+steps on Linux too. See [host-encode.md](host-encode.md) "Linux X11". Windows (AMD/Intel: the
+Media Foundation native path, separate work) and macOS (VideoToolbox native, live bitrate)
+have their own engines; the CLI absorb already covered them. Host-ordered restarts (display
+mode / window watcher, CLI keyframe restart) now bypass the absorb on EVERY OS — before, an
+identical re-issue was swallowed on Windows/macOS too (wrong size / no IDR on the CLI path).
+To check on hardware: the re-open time (log `encoder re-opened`; FFmpeg 4.4 / Ubuntu 22.04
+build, QSV MFX init per step), CBR rate accuracy on radeonsi / iHD, desktop VBR (2x peak, 1 s
+buffer) sharpness vs the CLI, the IDR size / QP with `PULSAR_LIBAV_SHORT_VBV=1` (125 ms VBV,
+4 IDRs/s in game mode) vs the default 0.5 s, `PULSAR_VAAPI_VPP=1` colours, the BT.709 colours
+of both chains on a real client, QSV `low_power` on pre-Ice-Lake iGPUs, the runtime guard
+(an encoder that stops: log `using the ffmpeg CLI chain from now on`), the multi-GPU node
+probe (log `confirmed by an encode probe`), QSV on an Intel iGPU + AMD screen hybrid.
+
+**Known colour mismatch (not fixed):** the ffmpeg CLI host chains and the in-process
+software / NVENC chain convert RGB → YUV with swscale's default BT.601 matrix and leave the
+stream untagged, while every client decodes untagged video as BT.709 (pulsar-render
+`video.rs`, macOS `decode.rs`) — a slight hue shift on reds / greens. The in-process VA-API /
+QSV chains convert with BT.709 and tag it. Fixing the others changes shipped paths on every
+OS (CLI args in pulsar-core) and needs a look on hardware first.
 
 **macOS host virtual gamepad (2026-11-14, untested on macOS hardware):** pulsar-core
 `input/mac_hid.rs` creates an `IOHIDUserDevice` virtual HID pad (Xbox target = Xbox Wireless
@@ -84,14 +110,17 @@ tarafta çalışmıyor: …" in-session (`pad_notice.rs` → `play_notice`), the
 toast. Whether GameController / SDL accept a virtual (non-USB/BT) device with these VID/PIDs
 is unverified.
 
-**Scaffolded / known gaps:** HW encode on
-the Wayland/gst path (software x264 only); media-over-the-session for
+**Scaffolded / known gaps:** the Wayland/gst path encodes in hardware (`pick_gst`: MPP →
+VA-API → NVIDIA → x264) but has no AV1 and has not run on hardware since the hardware families
+were added; media-over-the-session for
 symmetric-NAT (media is a direct UDP RTP flow today — fine for LAN/cone-NAT/
 relay-direct). The Windows↔Windows black-screen work (probe-validated caps, encoder
 fallback chain, host verdict → client banner, Linux decoder fallback, daily log file) is
-merged (2026-09-02); AMD-on-Windows, macOS and Windows ARM64 are CI-built but **never run
-on hardware** — read [host-encode.md](host-encode.md) before touching encoder/decoder
-selection.
+merged (2026-09-02). Windows ARM64 (Snapdragon / Adreno) has been a daily client + host on real
+hardware since 2026-11-07. A discrete-AMD-only Windows host and macOS have **never run on
+hardware** (AMF ran only as the failover encoder on a hybrid box's Vega iGPU). The per-OS × GPU
+table is in [host-encode.md](host-encode.md) "Support matrix" — read it before touching
+encoder/decoder selection.
 
 **Picture upscaling parity (2026-11-14, untested on hardware):** Windows = NVIDIA/Intel VSR,
 FSR, SGSR; Linux pulsar-render = FSR, SGSR (`gl_fsr.rs` + `sgsr1.glsl`; not on the KMS lease
@@ -320,5 +349,5 @@ Linux X11 and macOS paths are **untested on hardware**.
 | Auto-update setting / kiosk silent update | yes | AppImage only — a package install needs the admin password, so it is offered (badge + modal) but never installed unasked | yes |
 | Pad wake / bring forward (`pad_wake.rs`) | AttachThreadInput + SetForegroundWindow | X11: `present_with_time(server time)` + EWMH `_NET_ACTIVE_WINDOW` source=pager (what `wmctrl -a` sends) + move to the current workspace. **Wayland: not possible** — a background client cannot take focus (xdg-activation needs a token from a focused surface or a launcher); `present()` only makes the compositor flag it ("Pulsar is ready" / task-bar flash) | `mac_activate.rs`: unhide + `activateIgnoringOtherApps` + `NSRunningApplication activateWithOptions` + `-[NSApp activate]` (14+) + deminiaturize / `orderFrontRegardless`. macOS 14+ cooperative activation may refuse to make Pulsar active; the window is still ordered above the others |
 | Firewall | installer + elevated app add program rules (`firewall.rs`) | packages ship a ufw app profile (`/etc/ufw/applications.d/pulsar`) and a firewalld service (`pulsar.xml`) for **21117/udp (LAN discovery)**; postinst opens it only on the first install and only where ufw/firewalld is ACTIVE (an update never re-adds a rule the user removed), prerm removes it on a real removal (before the profile/service files are deleted). Sessions need no rule: they are UDP hole-punched (outbound first), which a stateful firewall admits. Not covered: a direct `ip:port` connect from another LAN machine to a host behind an active ufw/firewalld (the client sends first; the node port is ephemeral/sticky, so no static rule fits) — open the port by hand or set a fixed node port and allow it. AppImage: no install step, nothing is changed | `firewall_mac.rs`: when the Application Firewall is ON (off by default) and one of pulsar / pulsar-render / ffmpeg / ffplay is not permitted, ONE admin prompt per version (`osascript … with administrator privileges` → `socketfilterfw --add` + `--unblockapp`); cancelled = not asked again for that version (the marker dir is created first; if the marker cannot be written the prompt is skipped) |
-| Decoder caps (`caps.rs`) | `pulsar-render --probe` (MFT enumeration; AV1 needs the AV1 Video Extension MFT) | `pulsar-render --probe` (real canned-frame decodes incl. AV1: dav1d/libaom/hwaccel) | hard-coded `h264` + `h265` software (mpv era) — **AV1 is never advertised** to a macOS client even where the decoder could do it (VideoToolbox AV1 is M3+ only; software dav1d depends on the bundled ffmpeg). Needs a `pulsar-render --probe` on macOS — owned by the macOS renderer work |
+| Decoder caps (`caps.rs`) | `pulsar-render --probe` (MFT enumeration; AV1 needs the AV1 Video Extension MFT; `hw` / `tier` per codec = D3D11-aware MFT + DXVA profile on the default adapter, measured 2026-11-15; the DXVA query is bounded at 2.5 s — a wedged driver gives `hw:false`, never a lost codec) | `pulsar-render --probe` (real canned-frame decodes incl. AV1: dav1d/libaom/hwaccel) | `pulsar-render --probe` (`mac/decode.rs`: `VTIsHardwareDecodeSupported` per codec — H.264 / HEVC always ok, hw or not; AV1 only in hardware, M3+). The hard-coded `h264` + `h265` software pair is only the fallback when the probe cannot run (`caps.rs::probe_unavailable`; Windows: `h264` software only). `auto` codec prefers the `hw` codecs (`play.rs::resolve_codec`) |
 

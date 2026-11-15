@@ -15,6 +15,19 @@ pub fn output_size(want_w: u32, want_h: u32, native_w: u32, native_h: u32) -> (u
 	(pick(want_w, native_w), pick(want_h, native_h))
 }
 
+/// The output size of a WINDOW stream: the host already fitted the window's aspect into the
+/// client's box (`want_w × want_h`); a 0 axis means "the window's own size" (`window_px`, asked
+/// only then). Even, at least 2×2. ScreenCaptureKit keeps the window's aspect inside it.
+pub fn window_output_size(want_w: u32, want_h: u32, window_px: impl FnOnce() -> Option<(u32, u32)>) -> (u32, u32) {
+	let (w, h) = if want_w == 0 || want_h == 0 {
+		let (pw, ph) = window_px().unwrap_or((1280, 720));
+		(if want_w == 0 { pw } else { want_w }, if want_h == 0 { ph } else { want_h })
+	} else {
+		(want_w, want_h)
+	};
+	(w.max(2) & !1, h.max(2) & !1)
+}
+
 /// `DataRateLimits` byte budget per second for a `kbps` average: 1.5 × the average, so a
 /// keyframe may overshoot but cannot flood the link.
 pub fn data_rate_limit_bytes(kbps: u32) -> i64 {
@@ -80,6 +93,18 @@ mod tests {
 		let (w, h) = output_size(1920, 1080, 3024, 1964);
 		assert_eq!((w, h), (1920, 1080));
 		assert_ne!(w * 1964, h * 3024);
+	}
+
+	#[test]
+	fn window_output_size_keeps_the_fitted_box_and_evens() {
+		// Fitted by the host: taken as is (made even); the window is not asked.
+		assert_eq!(window_output_size(1280, 801, || panic!("not asked")), (1280, 800));
+		assert_eq!(window_output_size(1, 1, || None), (2, 2));
+		// 0 = the window's own size.
+		assert_eq!(window_output_size(0, 0, || Some((1513, 983))), (1512, 982));
+		assert_eq!(window_output_size(0, 720, || Some((1000, 500))), (1000, 720));
+		// The window is gone meanwhile: a sane default (the start then fails on the window).
+		assert_eq!(window_output_size(0, 0, || None), (1280, 720));
 	}
 
 	#[test]

@@ -1,0 +1,53 @@
+name: Rockchip renderer check
+
+# Manual: build the linux-arm64 Rockchip renderer variant (scripts/rkmpp/build-rkmpp-render.sh:
+# MPP + ffmpeg-rockchip + pulsar-render-rkmpp) exactly as the release's linux-arm64 job does,
+# without cutting a release, and upload the staged files. To try them on a board, unpack the
+# artifact next to an installed Pulsar's renderer (/usr/lib/Pulsar/resources/ for the .deb) and
+# run `chmod +x pulsar-render-rkmpp` (artifacts drop the exec bit), then
+# `LD_LIBRARY_PATH=pulsar-rkmpp ./pulsar-render-rkmpp --probe`: on an RK3588 with the
+# vendor kernel the h264/h265 entries should read `*_rkmpp` / `hw-zerocopy`.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'commit or branch to build'
+        required: true
+        default: 'main'
+
+permissions:
+  contents: read
+
+jobs:
+  rkmpp:
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      # pulsar-render's own Linux build deps (EGL/GL/X11 + libdrm); the script adds the
+      # MPP/ffmpeg ones (cmake, pkg-config, patchelf, clang).
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libegl1-mesa-dev libgl1-mesa-dev \
+            libgles2-mesa-dev libx11-dev libdrm-dev libgbm-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: rkmpp-check
+      # Own cargo target dir outside target/, as in release.yml: never cached, so a pin bump
+      # always rebuilds ffmpeg-sys-next against the new headers.
+      - name: Build + stage pulsar-render-rkmpp
+        run: |
+          RKMPP_WORK="$RUNNER_TEMP/rkmpp-build" CARGO_TARGET_DIR="$RUNNER_TEMP/rkmpp-target" \
+            INSTALL_DEPS=1 bash scripts/rkmpp/build-rkmpp-render.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pulsar-render-rkmpp
+          path: |
+            src-tauri/resources/pulsar-render-rkmpp
+            src-tauri/resources/pulsar-rkmpp/
+          if-no-files-found: error

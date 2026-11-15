@@ -11,8 +11,8 @@ use windows::Win32::Graphics::Direct3D11::{
 use windows_core::Interface; // for `.cast::<T>()` and `.as_raw()`
 
 use super::d3d::{
-	build_video_processor, chk, create_nv12_texture, create_nvidia_device, device_vendor_id,
-	parse_rtp_dest, CrossAdapterBridge, SessionGuard,
+	build_video_processor, chk, create_input_texture, create_nvidia_device, device_vendor_id,
+	parse_rtp_dest, CrossAdapterBridge, InputFormat, SessionGuard,
 };
 use super::encoder::Encoder;
 use super::{cap_dbg, nvenc, policy, EncParams, VENDOR_NVIDIA};
@@ -139,12 +139,23 @@ impl Encoder {
 		let kept_vdevice = vdevice.clone();
 		let kept_vcontext = vcontext.clone();
 
+		// HDR10 runs only where the FP16 frames already sit on the NVENC device (the hybrid
+		// bridge stages 8-bit BGRA through system memory).
+		if p.hdr.is_some() && bridge.is_some() {
+			return Err("HDR: the capture is not on the NVIDIA device (hybrid bridge is 8-bit)".into());
+		}
+		if p.hdr.is_some() && !super::hdr_conv::p010_render_supported(&kept_device) {
+			return Err("HDR: this GPU cannot render into P010".into());
+		}
+
 		// -- 1. ID3D11VideoProcessor for BGRA→NV12 (one GPU Blt/frame) on the NVENC device.
+		//    (Built for HDR too — unused there, but it keeps the struct one shape.)
 		let (vp_enum, vproc) = build_video_processor(&vdevice, cap_w, cap_h, w, h)?;
 
-		// -- 2. Allocate OUR own NV12 texture (Sunshine single-texture model) on the NVENC
-		//    device. NVENC has no hwframe pool — we Blt into THIS every frame, register once.
-		let nv12_tex = create_nv12_texture(&kept_device, w, h)?;
+		// -- 2. OUR own input texture (Sunshine single-texture model) is allocated on the NVENC
+		//    device at step 9, once `configure` has said whether this stream is 4:4:4 (its
+		//    format follows; HDR10 is a P010 surface). NVENC has no hwframe pool — we Blt into it
+		//    every frame, register once.
 
 		// -- 3. Parse `p.dest` ("rtp://host:port") → SocketAddr; spawn the decoupled RTP
 		//    egress (sender thread owns the socket, so the blocking send never stalls the
@@ -212,12 +223,15 @@ impl Encoder {
 				low_latency: p.low_latency,
 				intra_refresh: p.intra_refresh,
 				rfi: p.rfi,
+				hdr: p.hdr.is_some(),
+				yuv444: p.yuv444,
 			},
 		)?;
 		let super::nvsession::Configured {
 			init_params,
 			enc_config,
 			rfi,
+			yuv444,
 			intra_refresh,
 			dpb,
 			gop,
@@ -227,7 +241,22 @@ impl Encoder {
 			preset_kf_scale,
 		} = configured;
 
-		// -- 9. Register our NV12 texture as an NVENC input resource. ------------------
+		// -- 9. Allocate our input texture and register it as an NVENC input resource: NV12 for
+		//    4:2:0; for 4:4:4 the BGRA itself (the Blt still scales / rotates) and NVENC converts
+		//    RGB → YUV 4:4:4 (see `InputFormat::Argb`). HDR10: a P010 surface filled by the
+		//    scRGB → PQ shader passes (hdr_conv.rs); `configure` never makes an HDR stream 4:4:4.
+		let input = if p.hdr.is_some() {
+			InputFormat::P010
+		} else if yuv444 {
+			InputFormat::Argb
+		} else {
+			InputFormat::Nv12
+		};
+		let input_tex = create_input_texture(&kept_device, w, h, input)?;
+		let hdr_conv = match p.hdr {
+			Some(_) => Some(super::hdr_conv::HdrConverter::new(&kept_device, &input_tex, w, h, p.rotation)?),
+			None => None,
+		};
 		let mut reg: nvenc::NV_ENC_REGISTER_RESOURCE = std::mem::zeroed();
 		reg.version = nvenc::NV_ENC_REGISTER_RESOURCE_VER;
 		reg.resourceType = nvenc::NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
@@ -235,13 +264,14 @@ impl Encoder {
 		reg.height = h;
 		reg.pitch = 0; // ignored for DirectX resources
 		reg.subResourceIndex = 0;
-		reg.resourceToRegister = nv12_tex.as_raw();
-		reg.bufferFormat = nvenc::NV_ENC_BUFFER_FORMAT_NV12;
+		reg.resourceToRegister = input_tex.as_raw();
+		reg.bufferFormat = input.nvenc();
 		reg.bufferUsage = nvenc::NV_ENC_INPUT_IMAGE;
 		let reg_fn = fns
 			.nvEncRegisterResource
 			.ok_or("nvenc: nvEncRegisterResource missing")?;
-		chk(reg_fn(enc, &mut reg), &fns, enc).map_err(|e| format!("nvEncRegisterResource: {e}"))?;
+		chk(reg_fn(enc, &mut reg), &fns, enc)
+			.map_err(|e| format!("nvEncRegisterResource({input:?}): {e}"))?;
 		let registered = reg.registeredResource;
 
 		// -- 10. Create the output bitstream buffer. ----------------------------------
@@ -277,7 +307,8 @@ impl Encoder {
 			enc,
 			registered,
 			bitstream,
-			nv12_tex,
+			input_tex,
+			input,
 			vctx: vcontext,
 			vproc,
 			vp_enum,
@@ -322,6 +353,153 @@ impl Encoder {
 			cached_output_view: None,
 			cached_input_src: ptr::null_mut(),
 			rotation_set: false,
+			hdr: p.hdr,
+			hdr_conv,
 		})
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::super::d3d::create_nvidia_device;
+	use super::super::{EncParams, Encoder};
+	use crate::{Codec, Frame};
+	use windows::Win32::Graphics::Direct3D11::{
+		ID3D11Texture2D, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_SUBRESOURCE_DATA,
+		D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+	};
+	use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+
+	/// A real NVENC encode of a 4:4:4 stream next to the same stream in 4:2:0: both must build
+	/// and encode on the native path, and the 4:4:4 one must report 4:4:4. Prints the input
+	/// surface it got and the per-frame submit time of each. Needs an NVIDIA GPU, so ignored:
+	///
+	/// ```text
+	/// PULSAR_DUMP_DIR=C:\tmp cargo test -p pulsar-capture nvenc_444 -- --ignored --nocapture
+	/// ```
+	/// With `PULSAR_DUMP_DIR` set, each stream's Annex-B goes to `<dir>\nvenc-<codec>-<chroma>`
+	/// (`ffprobe` it: `High 4:4:4 Predictive` / `Rext`, `yuv444p`).
+	///
+	/// Besides the game profile (P1) it builds the combinations a session can ask for: RFI
+	/// (deep reference buffer), intra refresh, and the remote profile (LOW_LATENCY, preset
+	/// capped at P2 for 4:4:4). `PULSAR_TEST_SIZE=WxH` / `PULSAR_TEST_FPS` change the size
+	/// (default 1280x720@60) — the numbers behind `policy::YUV444_MAX_PIXEL_RATE`.
+	#[test]
+	#[ignore]
+	fn nvenc_444_encodes_on_the_native_path() {
+		let (w, h) = std::env::var("PULSAR_TEST_SIZE")
+			.ok()
+			.and_then(|s| {
+				let (a, b) = s.split_once('x')?;
+				Some((a.parse::<u32>().ok()?, b.parse::<u32>().ok()?))
+			})
+			.unwrap_or((1280, 720));
+		let fps: u32 = std::env::var("PULSAR_TEST_FPS").ok().and_then(|s| s.parse().ok()).unwrap_or(60);
+		// Top half: flat colour bars (red, green, blue, white, black, yellow, cyan, grey) to read
+		// the colour matrix back from a dump; bottom half: 1-px red/blue columns over a grey
+		// ramp, the worst case for 4:2:0 chroma.
+		const BARS: [[u8; 3]; 8] =
+			[[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 255], [0, 0, 0], [255, 255, 0], [0, 255, 255], [128, 128, 128]];
+		let mut px = vec![0u8; (w * h * 4) as usize];
+		for y in 0..h {
+			for x in 0..w {
+				let i = ((y * w + x) * 4) as usize;
+				let [r, g, b] = if y < h / 2 {
+					BARS[(x * 8 / w) as usize]
+				} else {
+					let g = (y * 255 / h) as u8;
+					if x % 2 == 0 { [255, g, 0] } else { [0, g, 255] }
+				};
+				px[i..i + 4].copy_from_slice(&[b, g, r, 255]);
+			}
+		}
+		let dump = std::env::var("PULSAR_DUMP_DIR").ok();
+		unsafe {
+			let (dev, ctx) = create_nvidia_device().expect("an NVIDIA D3D11 device");
+			let desc = D3D11_TEXTURE2D_DESC {
+				Width: w,
+				Height: h,
+				MipLevels: 1,
+				ArraySize: 1,
+				Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+				SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+				Usage: D3D11_USAGE_DEFAULT,
+				BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+				CPUAccessFlags: 0,
+				MiscFlags: 0,
+			};
+			let init = D3D11_SUBRESOURCE_DATA { pSysMem: px.as_ptr() as *const _, SysMemPitch: w * 4, SysMemSlicePitch: 0 };
+			let mut tex: Option<ID3D11Texture2D> = None;
+			dev.CreateTexture2D(&desc, Some(&init), Some(&mut tex)).expect("BGRA texture");
+			let tex = tex.unwrap();
+			let sink = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+			sink.set_read_timeout(Some(std::time::Duration::from_millis(200))).unwrap();
+			// (name, low_latency, rfi, intra_refresh)
+			const VARIANTS: [(&str, bool, bool, bool); 4] =
+				[("game", true, false, false), ("rfi", true, true, false), ("intra-refresh", true, false, true), ("remote+rfi", false, true, false)];
+			for (variant, low_latency, rfi, intra_refresh) in VARIANTS {
+			for codec in [Codec::H264, Codec::H265] {
+				for yuv444 in [false, true] {
+					if let Some(d) = &dump {
+						let name = std::path::Path::new(d)
+							.join(format!("nvenc-{codec:?}-{variant}-{}", if yuv444 { "444" } else { "420" }));
+						let _ = std::fs::remove_file(&name);
+						std::env::set_var("PULSAR_DUMP_BITSTREAM", &name);
+					}
+					let p = EncParams {
+						width: w,
+						height: h,
+						capture_width: w,
+						capture_height: h,
+						fps,
+						bitrate_kbps: 20_000,
+						dest: format!("rtp://{}", sink.local_addr().unwrap()),
+						codec,
+						low_latency,
+						intra_refresh,
+						rotation: 0,
+						rfi,
+						hdr: None,
+						yuv444,
+					};
+					let mut enc =
+						Encoder::new(&dev, &ctx, &p).unwrap_or_else(|e| panic!("{variant} {codec:?} 444={yuv444}: {e}"));
+					assert_eq!(enc.yuv444(), yuv444, "{variant} {codec:?}: the GPU should encode what was asked");
+					let mut us = Vec::new();
+					for i in 0..120i64 {
+						let f = Frame {
+							texture: &tex,
+							format: DXGI_FORMAT_B8G8R8A8_UNORM,
+							width: w,
+							height: h,
+							is_new: true,
+							force_idr: false,
+							present_ns: 0,
+						};
+						let t0 = std::time::Instant::now();
+						enc.submit(&f, i, (i as u32) * (90_000 / fps))
+							.unwrap_or_else(|e| panic!("{variant} {codec:?} 444={yuv444} submit: {e}"));
+						us.push(t0.elapsed().as_micros() as u64);
+					}
+					let input = enc.input;
+					enc.flush_and_close();
+					drop(enc); // joins the RTP sender: everything sent is in the sink now
+					let (mut bytes, mut buf) = (0usize, vec![0u8; 65536]);
+					while let Ok(n) = sink.recv(&mut buf) {
+						bytes += n;
+					}
+					us.sort_unstable();
+					println!(
+						"{w}x{h}@{fps} {variant} {codec:?} 444={yuv444} input={:?}: submit p50 {} us p90 {} us, {bytes} RTP bytes",
+						input,
+						us[us.len() / 2],
+						us[us.len() * 9 / 10]
+					);
+					assert!(bytes > 0, "{variant} {codec:?} 444={yuv444}: nothing was sent");
+				}
+			}
+			}
+			std::env::remove_var("PULSAR_DUMP_BITSTREAM");
+		}
 	}
 }

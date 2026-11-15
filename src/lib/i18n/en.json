@@ -301,7 +301,7 @@
 	"settings.coopMissing": "Component not installed — put the ProtoInput files in the folder",
 	"settings.coopOpenDir": "Open folder",
 	"settings.hdr": "Stream HDR",
-	"settings.hdrDesc": "10-bit HDR streaming on supported displays.",
+	"settings.hdrDesc": "10-bit HDR when the remote screen has HDR on (Windows with NVIDIA). On an SDR screen the picture is tone-mapped.",
 	"settings.audioQuality": "Audio quality",
 	"settings.audioQualityDesc": "Automatic: Raw on a local network, otherwise High. Also in the session menu.",
 	"settings.aq.auto": "Auto",

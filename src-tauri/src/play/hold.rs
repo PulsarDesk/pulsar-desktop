@@ -115,8 +115,29 @@ fn fixed_rate(ctl: &Controller) -> u32 {
 /// that. Field log 2026-11-09 (Orange Pi client, 9.6 Mbit/s policer + 1 % loss, IR stream): a
 /// `hold` on every sweep with a written-off packet, 1-1.7 s freezes, "renderer fps very low"
 /// 11-23 times in 80 s.
-fn loss_hold_ms(recovery: LossRecovery) -> Option<u32> {
-	(recovery != LossRecovery::IntraRefresh).then_some(HOLD_MS)
+/// RFI (`rfi`: the renderer runs `rfi 1`, see the stats-window `rfi` line): none either. The
+/// depacketizer already withholds every access unit until the recovery frame or a keyframe, so
+/// nothing smeared is shown — and the recovery frame is no keyframe: a hold armed by the sweep
+/// (which writes the packet off after the renderer already reported it) froze the healed
+/// picture for the full HOLD_MS (Linux; the other renderers ignore `hold`).
+fn loss_hold_ms(recovery: LossRecovery, rfi: bool) -> Option<u32> {
+	(recovery != LossRecovery::IntraRefresh && !rfi).then_some(HOLD_MS)
+}
+
+/// The recovery mode to stream in for the controller's flip to `want`, on the current codec.
+/// An intra-refresh flip becomes the short GOP while RFI reaches (H.264 / HEVC from an RFI
+/// host): the client turns RFI off under intra refresh (`rfi 0`), and a host whose encoder was
+/// built without the wave (it cannot start one live) then left every loss smeared until its
+/// long-GOP IDR. The short GOP keeps RFI, which the RFI hosts absorb. Re-derived on a codec
+/// switch: AV1 has no recovery tag, so there the flip stays intra refresh (the Linux renderer
+/// resumes on it). Only a FLIP is mapped — a session that started in intra refresh on purpose
+/// (play.rs `ir_bad_link`) never flips.
+fn flip_recovery(want: LossRecovery, host_rfi: bool, codec: &str) -> LossRecovery {
+	if want == LossRecovery::IntraRefresh && rfi_reach(host_rfi, codec) {
+		LossRecovery::ShortGop
+	} else {
+		want
+	}
 }
 
 /// Keyframe-request pacing. While losses keep coming, every request within 5 s of the previous
@@ -571,6 +592,9 @@ pub(super) async fn hold_session(
 	codec_h: String,
 	game_mode: bool,
 	decode_codecs: Vec<String>,
+	// Codecs the renderer decodes in 4:4:4 (`play::yuv444_request`): a re-request with another
+	// codec re-decides 4:4:4 for it.
+	decode_yuv444: Vec<String>,
 	render_stdin: std::sync::Arc<std::sync::Mutex<Option<std::process::ChildStdin>>>,
 	mos: bool,
 	host_nack: bool,
@@ -592,7 +616,8 @@ pub(super) async fn hold_session(
 	// The kind of path the session started on (the memory's second key); followed live below.
 	path_class: crate::adapt_memory::PathClass,
 	cursor_external: bool,
-	req_hdr: bool,
+	// Decides hdr10 per codec (Settings, host FEAT_HDR, the 10-bit decoders, PULSAR_HDR).
+	hdr_neg: super::HdrNeg,
 	init_quality: QualityPref,
 	// The resolved audio quality the session started with, what "auto" resolved to (a menu
 	// pick of auto goes back to it), and whether the host can send Raw.
@@ -712,6 +737,8 @@ pub(super) async fn hold_session(
 		// bad link — play.rs `ir_bad_link`; else Normal until the first sustained loss).
 		_ => ctl.recovery(),
 	};
+	// The controller's loss-recovery flip, as it asked for it (`flip_recovery` maps it per codec).
+	let mut flip_want: Option<LossRecovery> = None;
 	// Game mode over a high-RTT path: drop a hole fast (see `FAST_DROP_RTT_ON_MS`); NACKs only
 	// while it is off (their answer would come after the renderer gave up).
 	let mut fast_drop = false;
@@ -862,9 +889,11 @@ pub(super) async fn hold_session(
 	// (already resolved in play.rs: "hq"→Quality, "fast"→Latency, "auto"→mode default).
 	// The session overlay's quality picker (Restream::Quality) can override it live.
 	let mut cur_quality = init_quality;
-	// HDR preference from the UI toggle (Settings → Display). The PULSAR_HDR env var
-	// is a debug override: if set it wins regardless of the UI value.
-	let cur_hdr = req_hdr || std::env::var_os("PULSAR_HDR").is_some();
+	// HDR10 for the CURRENT codec (Settings → Display + host FEAT_HDR + this renderer's 10-bit
+	// decode of that codec; PULSAR_HDR is a debug override). Re-decided on every codec change:
+	// a switch to a codec whose decoder failed the 10-bit probe must drop HDR, and a session
+	// that started on H.264 gets HDR after a switch to HEVC.
+	let mut cur_hdr = hdr_neg.want(&cur_codec);
 	// Inbound file reassembly (file-manager downloads — the host streams an FsGet
 	// back as FileBegin/Chunk/End): Begin → state, Chunk → store BY INDEX,
 	// End → save in the received-files folder. The session transport is unordered UDP,
@@ -925,8 +954,11 @@ pub(super) async fn hold_session(
 				game_mode,
 				bitrate_kbps: cur_bitrate,
 				quality: cur_quality,
-				hdr: cur_hdr,
-				yuv444: std::env::var_os("PULSAR_YUV444").is_some(),
+				// Never the legacy bit (see play.rs); HDR10 only through hdr10.
+				hdr: false,
+				hdr10: cur_hdr,
+				yuv444: super::yuv444_request(&cur_codec, &decode_yuv444),
+				decode_yuv444: decode_yuv444.clone(),
 				decode_codecs: decode_codecs.clone(),
 				media_over_session: mos,
 				cursor_external,
@@ -1380,6 +1412,15 @@ pub(super) async fn hold_session(
 									}
 								}
 								let _ = app_ev.emit("host-stats", PlayStats { id, label });
+							}
+							DataMsg::HdrMeta { sdr_white_nits, peak_nits } => {
+								// The HDR10 stream's brightness reference (host SDR content
+								// brightness + monitor peak): the renderer tone-maps PQ to SDR
+								// around the host's real SDR white instead of a fixed 203 nits.
+								use std::io::Write as _;
+								if let Some(si) = render_stdin.lock().unwrap().as_mut() {
+									let _ = writeln!(si, "hdrref {sdr_white_nits} {peak_nits}");
+								}
 							}
 							DataMsg::DisplayRotation(deg) => {
 								// Render the video upright for a rotated host display (vidsink
@@ -1909,7 +1950,7 @@ pub(super) async fn hold_session(
 						}
 						// Sent on every sweep that writes a packet off: the renderer arms one hold per
 						// loss episode and treats the rest as that episode going on.
-						let hold = loss_hold_ms(cur_recovery);
+						let hold = loss_hold_ms(cur_recovery, rfi && !ir);
 						if let Some(ms) = hold {
 							use std::io::Write as _;
 							if let Some(si) = render_stdin.lock().unwrap().as_mut() {
@@ -2110,7 +2151,8 @@ pub(super) async fn hold_session(
 					let sig = ctl.last();
 					let mut rerequest = false;
 					if let Some(r) = d.recovery {
-						cur_recovery = r;
+						flip_want = Some(r);
+						cur_recovery = flip_recovery(r, host_rfi, &cur_codec);
 						rerequest = true;
 					}
 					if let Some(kbps) = d.bitrate {
@@ -2281,6 +2323,12 @@ pub(super) async fn hold_session(
 							// The rungs' minimum bitrates follow the codec's efficiency.
 							ctl.set_codec(pulsar_core::adapt::codec_from_wire(&c));
 							cur_codec = c;
+							// HDR10 follows the codec (its decoder may not do 10-bit).
+							cur_hdr = hdr_neg.want(&cur_codec);
+							// RFI reaches the new codec or not: the flip's mode follows.
+							if let Some(w) = flip_want {
+								cur_recovery = flip_recovery(w, host_rfi, &cur_codec);
+							}
 						}
 						Restream::Fps(f) => {
 							manual_fps = f != 0;
@@ -2651,10 +2699,32 @@ mod kf_tests {
 	#[test]
 	fn an_intra_refreshed_stream_gets_no_loss_hold() {
 		// IR: keep decoding + presenting through the loss — the wave heals it.
-		assert_eq!(loss_hold_ms(LossRecovery::IntraRefresh), None);
+		assert_eq!(loss_hold_ms(LossRecovery::IntraRefresh, false), None);
 		// The keyframe-recovered modes keep the bounded hold.
-		assert_eq!(loss_hold_ms(LossRecovery::Normal), Some(HOLD_MS));
-		assert_eq!(loss_hold_ms(LossRecovery::ShortGop), Some(HOLD_MS));
+		assert_eq!(loss_hold_ms(LossRecovery::Normal, false), Some(HOLD_MS));
+		assert_eq!(loss_hold_ms(LossRecovery::ShortGop, false), Some(HOLD_MS));
+	}
+
+	#[test]
+	fn an_rfi_stream_gets_no_loss_hold() {
+		// The recovery frame is no keyframe: a hold would freeze the healed picture.
+		assert_eq!(loss_hold_ms(LossRecovery::Normal, true), None);
+		assert_eq!(loss_hold_ms(LossRecovery::ShortGop, true), None);
+		assert_eq!(loss_hold_ms(LossRecovery::IntraRefresh, true), None);
+	}
+
+	#[test]
+	fn an_intra_refresh_flip_keeps_rfi_where_it_reaches() {
+		use LossRecovery::*;
+		// H.264 / HEVC from an RFI host: the short GOP (RFI stays on).
+		assert_eq!(flip_recovery(IntraRefresh, true, "h265"), ShortGop);
+		assert_eq!(flip_recovery(IntraRefresh, true, "h264"), ShortGop);
+		// AV1 (no recovery tag) or a host without RFI: intra refresh as asked.
+		assert_eq!(flip_recovery(IntraRefresh, true, "av1"), IntraRefresh);
+		assert_eq!(flip_recovery(IntraRefresh, false, "h265"), IntraRefresh);
+		// Other flips pass through.
+		assert_eq!(flip_recovery(ShortGop, true, "h265"), ShortGop);
+		assert_eq!(flip_recovery(ShortGop, false, "av1"), ShortGop);
 	}
 
 	#[test]

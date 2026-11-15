@@ -1,4 +1,6 @@
-//! The macOS capture+encode thread (see `mac/mod.rs`).
+//! The macOS capture+encode thread (see `mac/mod.rs`): one display, or one window
+//! (`CaptureConfig::window_hwnd` = a `CGWindowID`) through the same VideoToolbox encoder,
+//! RTP egress, live bitrate and keyframe-on-request.
 
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -11,8 +13,11 @@ use super::policy;
 use super::vt::{EncodedAu, VtCodec, VtEncoder, VtSpec};
 use crate::{CaptureConfig, CaptureHandle, Codec, DisplayDesc, DisplayRect, LiveStats, RtpEgress};
 
-/// `LiveStats::source` id of this path ("sck").
+/// `LiveStats::source` id of this path: "sck" (a display) / "sck-window" (one window).
 const SOURCE_SCK: u32 = 5;
+/// 8, not 6: ids 6 / 7 are the Windows Media Foundation sources ("wgc-mf" / "wgc-window-mf",
+/// branch feat/native-encode). The id table lives in `LiveStats::snapshot` (lib.rs).
+const SOURCE_SCK_WINDOW: u32 = 8;
 /// How long `start_capture_encode` waits for the first build (SCK's content query + start).
 const INIT_TIMEOUT: Duration = Duration::from_secs(8);
 /// A stream SCK stopped on its own (display gone, sleep, permission revoked) is rebuilt at
@@ -64,12 +69,19 @@ struct OutStats {
 	latency_us: Vec<u32>,
 }
 
-/// A built pipeline on one display.
+/// A built pipeline on one display or window.
 struct Built {
 	stream: ScStream,
 	enc: VtEncoder,
 	slot: Arc<FrameSlot>,
-	display_id: u32,
+	/// The display streamed (`None` for a window: the input path maps onto the window's own
+	/// frame, `window_src::input_area`).
+	display_id: Option<u32>,
+}
+
+/// The window this capture streams (`CaptureConfig::window_hwnd` as a `CGWindowID`), if any.
+fn window_id(cfg: &CaptureConfig) -> Option<u32> {
+	cfg.window_hwnd.and_then(|h| u32::try_from(h).ok()).filter(|id| *id > 0)
 }
 
 /// Publishes the streamed display for the macOS input injector (absolute pointer mapping) and
@@ -100,12 +112,26 @@ fn build(
 	out_stats: &Arc<Mutex<OutStats>>,
 	encode_us: &Arc<AtomicU32>,
 ) -> Result<Built, String> {
-	let displays = sck::displays();
-	let display = displays
-		.get(output_idx as usize)
-		.or_else(|| displays.first())
-		.ok_or_else(|| "no active display".to_string())?;
-	let (w, h) = policy::output_size(cfg.width, cfg.height, display.width, display.height);
+	let window = window_id(cfg);
+	let (display_id, w, h) = match window {
+		// The host sized the frame to the window's aspect (`window_src::encode_size`); asked
+		// for 0 it takes the window's own pixel size.
+		Some(id) => {
+			let (w, h) = policy::window_output_size(cfg.width, cfg.height, || {
+				pulsar_core::window_capture::size(id as u64)
+			});
+			(None, w, h)
+		}
+		None => {
+			let displays = sck::displays();
+			let display = displays
+				.get(output_idx as usize)
+				.or_else(|| displays.first())
+				.ok_or_else(|| "no active display".to_string())?;
+			let (w, h) = policy::output_size(cfg.width, cfg.height, display.width, display.height);
+			(Some(display.id), w, h)
+		}
+	};
 	let fps = cfg.fps.max(1);
 	let slot = Arc::new(FrameSlot { frame: Mutex::new(None), ready: Condvar::new(), died: AtomicBool::new(false) });
 	let codec = match cfg.codec {
@@ -137,31 +163,33 @@ fn build(
 	)?;
 	let slot_v = slot.clone();
 	let slot_s = slot.clone();
-	let stream = ScStream::start(
-		StreamSpec {
-			display_id: display.id,
-			video: Some(VideoSpec { width: w, height: h, fps, cursor: cfg.draw_mouse }),
-			audio: None,
-		},
-		Some(Box::new(move |f: VideoFrame| {
-			if let Ok(mut g) = slot_v.frame.lock() {
-				*g = Some(f);
-			}
-			slot_v.ready.notify_one();
-		})),
-		None,
-		Some(Box::new(move |_why: String| {
-			slot_s.died.store(true, Ordering::SeqCst);
-			slot_s.ready.notify_one();
-		})),
-	)
+	let video = VideoSpec { width: w, height: h, fps, cursor: cfg.draw_mouse };
+	let on_video: pulsar_core::macos_capture::sck::VideoCallback = Box::new(move |f: VideoFrame| {
+		if let Ok(mut g) = slot_v.frame.lock() {
+			*g = Some(f);
+		}
+		slot_v.ready.notify_one();
+	});
+	let on_stop: pulsar_core::macos_capture::sck::StopCallback = Box::new(move |_why: String| {
+		slot_s.died.store(true, Ordering::SeqCst);
+		slot_s.ready.notify_one();
+	});
+	let stream = match (window, display_id) {
+		(Some(id), _) => ScStream::start_window(id, video, Some(on_video), Some(on_stop)),
+		(None, display_id) => ScStream::start(
+			StreamSpec { display_id: display_id.unwrap_or(0), video: Some(video), audio: None },
+			Some(on_video),
+			None,
+			Some(on_stop),
+		),
+	}
 	.map_err(|e| match e {
 		ScError::PermissionDenied => "screen recording permission denied".to_string(),
 		e => e.to_string(),
 	})?;
-	let display_id = display.id;
 	tracing::info!(
-		display_id,
+		?display_id,
+		?window,
 		w,
 		h,
 		fps,
@@ -169,6 +197,12 @@ fn build(
 		"macOS native capture built (ScreenCaptureKit + VideoToolbox)"
 	);
 	Ok(Built { stream, enc, slot, display_id })
+}
+
+/// A build error that no retry can fix: the streamed window is gone (closed). The thread then
+/// ends at once; the host's window watcher restarts the stream on the screen.
+fn window_gone(err: &str) -> bool {
+	err.starts_with("no window")
 }
 
 /// Keeps the displays awake while streaming (`IOPMAssertion` "PreventUserIdleDisplaySleep").
@@ -268,7 +302,8 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 		// SAFETY: sets this thread's own QoS class (user-interactive = 0x21).
 		unsafe { pthread_set_qos_class_self_np(0x21, 0) };
 		let _awake = DisplayAwake::engage();
-		stats_t.source.store(SOURCE_SCK, Ordering::Relaxed);
+		let window = window_id(&cfg);
+		stats_t.source.store(if window.is_some() { SOURCE_SCK_WINDOW } else { SOURCE_SCK }, Ordering::Relaxed);
 		let codec = match cfg.codec {
 			Codec::H265 => Codec::H265,
 			_ => Codec::H264,
@@ -307,6 +342,10 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 					output_idx = prev_good;
 					continue 'build;
 				}
+				Err(e) if window_gone(&e) => {
+					tracing::info!(?window, "macOS capture: the streamed window is gone ({e}) — ending");
+					return;
+				}
 				Err(e) => {
 					rebuilds += 1;
 					tracing::warn!(output_idx, rebuilds, "macOS capture: rebuild failed ({e})");
@@ -326,7 +365,7 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 			}
 			let Built { stream, enc, slot, display_id } = built;
 			drop(published.take());
-			published = Some(StreamedDisplay::publish(display_id));
+			published = display_id.map(StreamedDisplay::publish);
 			let mut last_kbps = kbps;
 			let mut last_frame: Option<VideoFrame> = None;
 			// A fresh encoder starts on a keyframe; the client needs one after a switch too.
@@ -347,7 +386,13 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 				}
 				let req = out_t.swap(u32::MAX, Ordering::SeqCst);
 				if req != u32::MAX && req != output_idx {
-					break Some(req);
+					// A window stream has no display to switch: the window stays (a new window
+					// or the screen comes through a new StreamReq / full restart).
+					if window.is_some() {
+						tracing::debug!(req, "macOS capture: display switch ignored on a window stream");
+					} else {
+						break Some(req);
+					}
 				}
 				let k = kbps_t.load(Ordering::Relaxed);
 				if k != last_kbps {

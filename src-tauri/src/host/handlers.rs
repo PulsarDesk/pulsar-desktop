@@ -2018,7 +2018,7 @@ pub(super) fn make_on_stream(
 	#[cfg(windows)] native_gen_arc: Arc<Mutex<Option<Arc<std::sync::atomic::AtomicU32>>>>,
 	// Publishes the HWND the CURRENT stream actually per-window (WGC) captures, for the input path
 	// (Bug 0). Set to the window target ONLY when the native NVENC per-window path started; cleared
-	// to `None` on every other outcome (whole-monitor ddagrab, ffmpeg fallback, HDR/4:4:4, or a
+	// to `None` on every other outcome (whole-monitor ddagrab, ffmpeg fallback, 4:4:4, or a
 	// capture-start error). `on_input` gates its per-window PostMessage routing on THIS — never on
 	// the raw `launched_hwnd`, which can point at a window the stream isn't actually showing.
 	// The id is per OS (HWND / X11 XID / CGWindowID), matching `pulsar_core::input::WindowInput`.
@@ -2050,6 +2050,12 @@ pub(super) fn make_on_stream(
 	// restart capture at the new geometry.  On Windows this is only populated when
 	// native_started=false (ffmpeg fallback); native DXGI sessions self-heal via ACCESS_LOST.
 	last_req_store: Arc<Mutex<Option<StreamReq>>>,
+	// Raised by the host's own watchers (display mode / streamed window / keyframe-by-restart /
+	// a dead in-process engine, `host::send_host_restart`) right before they re-issue the stored
+	// request: an IDENTICAL request that must restart capture in full, so neither the "nothing
+	// changed" fast paths (in-process libav / X11 gst) nor the bitrate-step absorbs below take
+	// it (new capture geometry / an IDR). Every OS.
+	host_restart: Arc<std::sync::atomic::AtomicBool>,
 	// Set by failover.rs right before it re-issues a request through the restream channel: the
 	// next request is a restart the host ordered (this session's native capture stalled, or
 	// NVENC is back for a session on a fallback encoder) and is carried out in full.
@@ -2079,10 +2085,22 @@ pub(super) fn make_on_stream(
 	// bitrate-only re-stream (ABR) can be absorbed instead of tearing the live pipeline down.
 	#[cfg(target_os = "linux")]
 	let mut last_wl_req: Option<StreamReq> = None;
+	// What the Wayland raw-frame NVENC SDK encoder of that capture really does (RFI / intra
+	// refresh, filled in by its factory once built): whether the restream fast path absorbs a
+	// recovery flip (`nvenc_frames::short_gop`). None = the capture has no SDK encoder.
+	#[cfg(target_os = "linux")]
+	let mut wl_heals: Option<Arc<super::nvenc_frames::BuiltHeals>> = None;
 	// The request the running in-process libav encode was started with (X11 hosts): a
 	// bitrate / recovery-only re-request is applied live on it instead of restarting.
 	#[cfg(target_os = "linux")]
 	let mut last_libav_req: Option<StreamReq> = None;
+	// X11 gst hosts (RK3588 / Orange Pi MPP): the IN-PROCESS `ximagesrc` pipeline (held in
+	// `cap_slot`, `pulsar_core::capture::start_pipeline`) and its request — a bitrate /
+	// recovery-only re-request is applied live on it, no restart — or the `gst-launch` child.
+	// Shared with the thread that starts that pipeline off the session loop (it can fall back
+	// to a `gst-launch` child, recorded here too). See `x11_gst::X11GstRun`.
+	#[cfg(target_os = "linux")]
+	let x11_run: Arc<Mutex<super::x11_gst::X11GstRun>> = Arc::new(Mutex::new(Default::default()));
 	// Wayland window casts: the portal restore token of THIS session's window pick, kept
 	// apart from the session's screen token so a re-stream (resolution / codec change)
 	// re-opens the same window without the dialog, and a window pick never replaces the
@@ -2119,7 +2137,9 @@ pub(super) fn make_on_stream(
 	// started with, and when: ffmpeg can't change its bitrate live, so every ABR step used to
 	// restart capture (a visible gap + keyframe each time → stutter, and the gap itself read as
 	// congestion → more steps). Small/rapid bitrate-only steps are absorbed instead.
-	#[cfg(not(target_os = "linux"))]
+	// Linux: only while the stream really is on the CLI (VA-API / QSV / kmsgrab fallbacks) —
+	// the in-process libav and Wayland pipelines take steps live above, and a stream on one of
+	// them clears this so a request for a dead engine is never absorbed.
 	let mut last_ff_req: Option<(StreamReq, std::time::Instant)> = None;
 	// Cancel flag for the current stream's G2 native encode-stats reporter thread (spawned per
 	// native (re)stream below). Held across restreams so a slow-path restream/teardown can stop
@@ -2147,12 +2167,21 @@ pub(super) fn make_on_stream(
 		// entirely. The mode change is intentionally allowed to trip the host display-mode watcher
 		// / native encoder rebuild downstream — that's how the capture picks up the new geometry.
 		apply_screen_adaptation(&req, &adapt_state);
-		// A restart the host itself ordered (failover.rs): no live fast path and no "unchanged
-		// bitrate step" absorb may swallow it.
+		// A restart the host itself ordered (failover.rs, the window watcher): no live fast path
+		// and no "unchanged bitrate step" absorb may swallow it.
 		#[cfg(windows)]
 		let forced = force_restart.swap(false, std::sync::atomic::Ordering::SeqCst);
-		#[cfg(not(any(windows, target_os = "linux")))]
+		#[cfg(not(windows))]
 		let forced = false;
+		// A restart the host's own watchers ordered (`host::send_host_restart`): an identical
+		// request that must rebuild capture (new display geometry, a closed window, an IDR by
+		// restart on an encoder with no live keyframe hook) — no "unchanged" fast path or bitrate
+		// absorb may take it. The Wayland portal capture follows size changes itself and ignores it.
+		let host_ordered = host_restart.swap(false, std::sync::atomic::Ordering::SeqCst);
+		// A window stream keeps its newest request for the window watcher (a step applied live
+		// below returns before the window source is registered again).
+		#[cfg(not(windows))]
+		super::window_src::note_request(sid, &req);
 		// last_req_store is updated below (after native_started is resolved) so the
 		// display-mode watcher only fires for ffmpeg-path sessions on Windows.
 		// WAYLAND BITRATE-ONLY FAST PATH — the client's ABR re-sends the full StreamReq just to
@@ -2168,11 +2197,13 @@ pub(super) fn make_on_stream(
 		#[cfg(target_os = "linux")]
 		{
 			let slot = libav_slot.lock().unwrap();
-			if let (Some(engine), Some(prev)) = (slot.as_ref(), last_libav_req.as_ref()) {
+			// A host-ordered restart (new X11 geometry: host resolution change, streamed window
+			// resized / closed) must rebuild x11grab, which keeps the size it opened with.
+			if let (Some(engine), Some(prev)) = (slot.as_ref().filter(|_| !host_ordered), last_libav_req.as_ref()) {
 				let mut probe = prev.clone();
 				probe.bitrate_kbps = req.bitrate_kbps;
 				probe.loss_recovery = req.loss_recovery;
-				if probe == req && engine.is_alive() {
+				if probe == req && engine.is_alive() && !host_ordered {
 					if req.bitrate_kbps > 0 && req.bitrate_kbps != prev.bitrate_kbps {
 						engine.set_bitrate(req.bitrate_kbps);
 					}
@@ -2181,6 +2212,7 @@ pub(super) fn make_on_stream(
 					}
 					drop(slot);
 					last_libav_req = Some(req.clone());
+					refresh_last_req(&last_req_store, &req);
 					tracing::info!(
 						bitrate_kbps = req.bitrate_kbps,
 						recovery = ?req.loss_recovery,
@@ -2190,10 +2222,45 @@ pub(super) fn make_on_stream(
 				}
 			}
 		}
+		// X11 GST FAST PATHS (RK3588 / Orange Pi MPP hosts, `x11_gst.rs`). In-process `ximagesrc`
+		// pipeline: a bitrate step goes to the running encoder (`bps`), a recovery flip to the
+		// forced-key-unit timer — no restart, no gap. Full restart instead: a host-ordered restart
+		// (new geometry / closed window), a dead pipeline (bus error), or one whose encoded-frame
+		// count stopped moving (a driver call hung without a bus error — the Windows
+		// NATIVE_WEDGED_AFTER lesson). While it is still STARTING (off the session loop), a
+		// same-shape request only updates what it applies once up.
+		#[cfg(target_os = "linux")]
+		if !(pulsar_core::capture::is_wayland() && !super::mock_capture())
+			&& super::x11_gst::try_live(&x11_run, &cap_slot, &req, host_ordered)
+		{
+			refresh_last_req(&last_req_store, &req);
+			return;
+		}
+		// `gst-launch` child (KMS zero-copy / no in-process gst): it can't change its bitrate, so
+		// a bitrate-only step it can live with is absorbed (`cli_bitrate_absorbs`: never a real
+		// down-step, an up-step at most every 6 s) — the same rule as the ffmpeg CLI path on
+		// Windows/macOS. The forwarder's pacer keeps the rate the child really encodes at. A dead
+		// child, a host-ordered restart or any other change restarts.
+		#[cfg(target_os = "linux")]
+		if !host_ordered {
+			if let Some(running) = super::x11_gst::child_absorbs(&x11_run, &procs, &req, cli_bitrate_absorbs) {
+				pace_target_kbps.store(running, std::sync::atomic::Ordering::Relaxed);
+				refresh_last_req(&last_req_store, &req);
+				tracing::info!(
+					from = running,
+					to = req.bitrate_kbps,
+					"gst child restream: bitrate-only step absorbed (a restart is a visible gap)"
+				);
+				return;
+			}
+		}
+		// Wayland: a host-ordered re-issue (`host_ordered`) is absorbed here as before — tearing
+		// the portal cast down for it is what leaves the video black (above); a PipeWire cast
+		// renegotiates its size on a mode change itself (not verified on hardware).
 		#[cfg(target_os = "linux")]
 		if (pulsar_core::capture::is_wayland() && !super::mock_capture()) {
 			let slot = cap_slot.lock().unwrap();
-			if let (Some(cap), Some(prev)) = (slot.as_ref(), last_wl_req.as_ref()) {
+			if let (Some(cap), Some(prev)) = (slot.as_ref().filter(|_| !forced), last_wl_req.as_ref()) {
 				let mut probe = prev.clone();
 				probe.bitrate_kbps = req.bitrate_kbps;
 				probe.loss_recovery = req.loss_recovery;
@@ -2201,8 +2268,11 @@ pub(super) fn make_on_stream(
 					// The pipeline is in-process now: apply the bitrate and the recovery mode
 					// LIVE on the running encoder (no restart, no portal churn).
 					let applied = if req.bitrate_kbps > 0 { cap.set_bitrate(req.bitrate_kbps) } else { false };
-					cap.set_short_gop(req.loss_recovery.is_active());
+					// Not where the built NVENC SDK encoder absorbs the flip (see `short_gop`).
+					let sdk = if cap.is_raw_frames() { wl_heals.as_ref().and_then(|h| h.get()) } else { None };
+					cap.set_short_gop(super::nvenc_frames::short_gop(req.loss_recovery, sdk));
 					last_wl_req = Some(req.clone());
+					refresh_last_req(&last_req_store, &req);
 					tracing::info!(
 						bitrate_kbps = req.bitrate_kbps,
 						applied,
@@ -2270,6 +2340,9 @@ pub(super) fn make_on_stream(
 					}
 					native_watch.reset();
 					last_native_req = None;
+					// The retired stream's request is also `last_ff_req` (the "unchanged
+					// request" check below): a retire must restart, never be absorbed.
+					last_ff_req = None;
 				}
 			}
 		}
@@ -2340,12 +2413,15 @@ pub(super) fn make_on_stream(
 					);
 					native_watch.reset();
 					last_native_req = None;
+					// `last_ff_req` holds the retired stream's request too (it doubles as the
+					// "unchanged request" check): this request must restart, never be absorbed.
+					last_ff_req = None;
 				}
 			}
 		}
 		#[cfg(target_os = "macos")]
 		if let Some((disp, bitrate)) =
-			last_native_req.as_ref().and_then(|prev| live_change(prev, &req))
+			last_native_req.as_ref().filter(|_| !forced && !host_ordered).and_then(|prev| live_change(prev, &req))
 		{
 			let handled = {
 				let slot = native_slot.lock().unwrap();
@@ -2367,35 +2443,41 @@ pub(super) fn make_on_stream(
 				}
 			};
 			if handled {
+				// The watchers re-issue the stored request: keep its bitrate the live one.
+				refresh_last_req(&last_req_store, &req);
 				tracing::info!(display_idx = req.display_idx, disp, bitrate, "macOS native live restream (fast path)");
 				return;
 			}
 		}
-		// FFMPEG BITRATE-ONLY: restart only for a large step (≥ 30 % down / 40 % up) and at most
-		// once per 6 s; anything else keeps the running encode at its rate. A deferred step is not
-		// lost — the client keeps adapting, and a later request compares against what ffmpeg is
-		// actually streaming. A recovery-mode flip still restarts (short GOP needs a new encoder).
-		#[cfg(not(target_os = "linux"))]
-		if let Some((prev, at)) = last_ff_req.as_ref().filter(|_| !forced) {
+		// FFMPEG BITRATE-ONLY: ffmpeg can't change its bitrate live, so a step it can live with is
+		// absorbed (`cli_bitrate_absorbs`: a deep down-step always restarts — the link is the
+		// limit, latency first — a small one at most once per 3 s, an up-step once per 6 s). A
+		// deferred step is not lost: the client keeps re-sending, and each request compares
+		// against what ffmpeg is actually streaming. The pacer keeps that real rate. A recovery-mode flip still
+		// restarts (short GOP needs a new encoder). Every OS: Linux X11 hosts on the CLI chain
+		// (AMD/Intel VA-API / QSV when the in-process engine could not start, kmsgrab) restarted
+		// ffmpeg on every ABR step before 2026-11-15 (a stream on an in-process engine, Wayland or
+		// X11 gst clears `last_ff_req`). Never for a restart the host ordered itself (`forced` /
+		// `host_ordered`): that request is identical to the running one ON PURPOSE (new geometry,
+		// or a keyframe the CLI can only give by restarting). `last_ff_req` is set on every full
+		// restart, native ones included: for a native stream it is what keeps the client's
+		// periodic, unchanged re-request from restarting it (the live fast path above returns only
+		// on a change); retiring a native thread clears it.
+		if let Some((prev, at)) = last_ff_req.as_ref().filter(|_| !forced && !host_ordered) {
 			let mut probe = prev.clone();
 			probe.bitrate_kbps = req.bitrate_kbps;
-			if probe == req && req.bitrate_kbps > 0 && prev.bitrate_kbps > 0 {
-				let ratio = req.bitrate_kbps as f32 / prev.bitrate_kbps as f32;
-				let large = !(0.7..=1.4).contains(&ratio);
-				if !large || at.elapsed() < std::time::Duration::from_secs(6) {
-					tracing::info!(
-						from = prev.bitrate_kbps,
-						to = req.bitrate_kbps,
-						"ffmpeg restream: bitrate-only step absorbed (a restart is a visible gap)"
-					);
-					return;
-				}
+			if probe == req && cli_bitrate_absorbs(prev.bitrate_kbps, req.bitrate_kbps, at.elapsed()) {
+				pace_target_kbps.store(prev.bitrate_kbps, std::sync::atomic::Ordering::Relaxed);
+				refresh_last_req(&last_req_store, &req);
+				tracing::info!(
+					from = prev.bitrate_kbps,
+					to = req.bitrate_kbps,
+					"ffmpeg restream: bitrate-only step absorbed (a restart is a visible gap)"
+				);
+				return;
 			}
 		}
-		#[cfg(not(target_os = "linux"))]
-		{
-			last_ff_req = Some((req.clone(), std::time::Instant::now()));
-		}
+		last_ff_req = Some((req.clone(), std::time::Instant::now()));
 		let cfg = stream_cfg.lock().unwrap().clone();
 		// A (re-)stream supersedes any prior cursor poller; the (maybe) new KMS branch below
 		// starts a fresh one. Stopping here keeps it at most one per session.
@@ -2525,6 +2607,8 @@ pub(super) fn make_on_stream(
 			// Record the req that this full (re)start streams, so a later bitrate-only ABR
 			// re-stream is absorbed by the fast path above instead of restarting the pipeline.
 			last_wl_req = Some(req.clone());
+			// Not an ffmpeg CLI video stream: never absorb a step for it below.
+			last_ff_req = None;
 			// A (re-)stream restarts capture: kill any audio ffmpeg already running for
 			// this session before spawning the new one, so a live re-stream (resolution/
 			// codec/fps/audio-toggle change) doesn't stack audio encoders. (The video
@@ -2648,6 +2732,7 @@ pub(super) fn make_on_stream(
 			// The codec list is only read once the background probe answered (it is cached
 			// then) — never a driver call on this task.
 			let sdk_ready = super::linux_nvenc_sdk();
+			wl_heals = None;
 			let frames = (!wl_window
 				&& super::nvenc_frames::wanted(
 					sdk_ready,
@@ -2673,7 +2758,7 @@ pub(super) fn make_on_stream(
 					intra_refresh: req.loss_recovery == pulsar_core::service::LossRecovery::IntraRefresh,
 					rfi: req.rfi,
 					device: std::env::var("PULSAR_CUDA_DEVICE").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
-				})
+				}, wl_heals.insert(Arc::default()).clone())
 			});
 			// The stats line once the SDK encoder took the stream (the one above names the gst pick).
 			let sdk_label = format!(
@@ -2877,6 +2962,16 @@ pub(super) fn make_on_stream(
 			engine.stop();
 			last_libav_req = None;
 		}
+		// X11 gst: retire the prior in-process `ximagesrc` pipeline (in `cap_slot` — on an X11
+		// host the slot never holds a portal capture) without blocking this loop: taken out of
+		// the slot at once, torn down on a helper thread that an in-process start below joins
+		// first (`x11_gst::retire`). The child (`procs`) was killed by the drain above.
+		#[cfg(target_os = "linux")]
+		let x11_teardown = if !(pulsar_core::capture::is_wayland() && !super::mock_capture()) {
+			super::x11_gst::retire(&x11_run, &cap_slot, &cap_gen)
+		} else {
+			None
+		};
 		// The generation THIS stream's children (and its fallback chain) belong to.
 		let stream_epoch = proc_epoch.load(std::sync::atomic::Ordering::SeqCst);
 		// Same for the native capture thread, if the prior (re)stream used it.
@@ -2981,48 +3076,50 @@ pub(super) fn make_on_stream(
 		let (eff_w, eff_h) = clamp_dims(eff_w, eff_h);
 		// PER-WINDOW capture off Windows (Windows resolves its WGC target further down): the
 		// client's window pick (`req.window_hwnd`), else the window of the game this session
-		// launched. Linux X11 grabs the X window by id; macOS starts a ScreenCaptureKit window
-		// source now and serves its frames to ffmpeg on loopback. The stream is the window's
-		// own aspect fitted into the requested box (never upscaled). A window that is gone (or
-		// a ScreenCaptureKit start that fails) streams the screen instead — as Windows does
+		// launched. Linux X11 grabs the X window by id. macOS captures it through
+		// ScreenCaptureKit: the NATIVE path below (SCK window → VideoToolbox in-process: live
+		// bitrate, keyframe on request) when it is taken, else a loopback frame server for
+		// ffmpeg (`window_capture::serve_for`, started after the native decision so ONE
+		// ScreenCaptureKit stream runs per window). The stream is the window's own aspect
+		// fitted into the requested box (never upscaled). A window that is gone (or a
+		// ScreenCaptureKit start that fails) streams the screen instead — as Windows does
 		// when its window capture can't start. A window stream also maps the session's
 		// pointer onto the window and brings it to the front (`window_src::began`); the
 		// host's window watcher restarts the stream when it is resized or closed. Run off
-		// the async workers (`blocking`): the ScreenCaptureKit query + start can wait ~10 s
-		// behind the Screen Recording prompt. Untested on Linux X11 / macOS hardware.
+		// the async workers (`blocking`): the ScreenCaptureKit query can wait ~5 s behind the
+		// Screen Recording prompt. Untested on Linux X11 / macOS hardware.
+		#[cfg(target_os = "macos")]
+		let window_box = (eff_w, eff_h);
 		#[cfg(not(windows))]
-		let host_window: Option<(super::window_src::Target, (u32, u32), Option<String>)> = {
+		let host_window: Option<(super::window_src::Target, (u32, u32))> = {
 			use super::window_src::{self as ws, Target};
 			let want = req.window_hwnd.or_else(|| *launched_hwnd.lock().unwrap());
 			ws::blocking(|| {
 				let picked = match ws::current_target(want) {
-					Some(t @ Target::X11(id)) => match ws::window_size(id) {
-						Some(size) => Some((t, ws::encode_size(size, (eff_w, eff_h)), None)),
+					Some(t @ (Target::X11(id) | Target::Mac(id))) => match ws::window_size(id) {
+						Some(size) => Some((t, ws::encode_size(size, (eff_w, eff_h)))),
 						None => {
 							tracing::warn!(id, "the chosen window is gone, streaming the screen");
 							None
 						}
 					},
-					// One ScreenCaptureKit query gives the window, its size and the stream.
-					Some(t @ Target::Mac(id)) => {
-						match pulsar_core::window_capture::serve_for(sid, id, (eff_w, eff_h), eff_fps) {
-							Ok((url, size)) => Some((t, size, Some(url))),
-							Err(e) => {
-								tracing::warn!(id, "window capture failed to start, streaming the screen: {e}");
-								None
-							}
-						}
-					}
 					_ => None,
 				};
-				if let Some((Target::X11(id) | Target::Mac(id), ..)) = picked {
-					ws::began(sid, id);
+				// macOS registers the window once its source has started (below).
+				if let Some((Target::X11(id), _)) = picked {
+					ws::began(sid, id, req.clone());
 				}
 				picked
 			})
 		};
 		#[cfg(not(windows))]
-		let (eff_w, eff_h) = host_window.as_ref().map_or((eff_w, eff_h), |(_, s, _)| *s);
+		let (eff_w, eff_h) = host_window.as_ref().map_or((eff_w, eff_h), |(_, s)| *s);
+		// The macOS window this stream should show (`None` = the screen).
+		#[cfg(target_os = "macos")]
+		let mac_window: Option<u64> = match host_window {
+			Some((super::window_src::Target::Mac(id), _)) => Some(id),
+			_ => None,
+		};
 		// The X window this stream grabs (gst `ximagesrc xid=` / x11grab `-window_id`).
 		#[cfg(target_os = "linux")]
 		let win_xid: Option<u64> = match host_window {
@@ -3285,33 +3382,34 @@ pub(super) fn make_on_stream(
 						// MPP eats BGRx via the RGA blitter — skip the CPU convert.
 						// (Not for a window grab: its pipeline always converts + scales.)
 						let direct_bgrx = genc == pipeline::gst::GstEncoder::Mpp && win_xid.is_none();
-						let pipeline_str = if kms {
-							pipeline::gst::kms_pipeline(
-								eff_fps,
-								&metered,
-								&vdest.ip().to_string(),
-								vdest.port(),
-							)
-						} else if let Some(xid) = win_xid {
-							pipeline::gst::x11_window_pipeline(
-								&cfg.display,
-								xid,
-								eff_fps,
-								(eff_w, eff_h),
-								&metered,
-								&vdest.ip().to_string(),
-								vdest.port(),
-							)
-						} else {
-							pipeline::gst::x11_pipeline(
-								&cfg.display,
-								eff_fps,
-								&metered,
-								&vdest.ip().to_string(),
-								vdest.port(),
-								direct_bgrx,
-								region,
-							)
+						// One description builder for both runners: the in-process pipeline takes
+						// the plain `fragment` (its encode meter is pad probes on the encoder), a
+						// `gst-launch` child the `encpace`-metered one.
+						let vip = vdest.ip().to_string();
+						let build = |frag: &str, bgrx: bool| -> String {
+							if kms {
+								pipeline::gst::kms_pipeline(eff_fps, frag, &vip, vdest.port())
+							} else if let Some(xid) = win_xid {
+								pipeline::gst::x11_window_pipeline(
+									&cfg.display,
+									xid,
+									eff_fps,
+									(eff_w, eff_h),
+									frag,
+									&vip,
+									vdest.port(),
+								)
+							} else {
+								pipeline::gst::x11_pipeline(
+									&cfg.display,
+									eff_fps,
+									frag,
+									&vip,
+									vdest.port(),
+									bgrx,
+									region,
+								)
+							}
 						};
 						let fps_part = if eff_fps != req_fps {
 							format!(
@@ -3346,86 +3444,94 @@ pub(super) fn make_on_stream(
 							(eff_bitrate as f32 / 1000.0).round() as u32,
 							crate::i18n::t("stream.mbitTarget")
 						);
-						let stats_enc = stats_out.clone();
-						let label_enc = base_label.clone();
-						// `PULSAR_GST_METER=0` bypasses the pace meter (plain -q spawn) —
-						// the regression-bisect knob for the encode-ms instrumentation.
-						let started = if std::env::var("PULSAR_GST_METER").as_deref() == Ok("0") {
-							spawn_gst_tracked(&procs, &pipeline_str).is_ok()
-						} else {
-							match spawn_gst_paced(&procs, &pipeline_str, move |ms| {
-								let _ = stats_enc.try_send(DataMsg::Stats(format!(
-									"{label_enc} · {ms:.1} {}",
-									crate::i18n::t("stream.msEncode")
-								)));
-							}) {
-								Ok((pid, ticked)) => {
-									if !kms && direct_bgrx {
-										// RGA >4G watchdog. The BGRx-direct path hands
-										// ximagesrc's malloc'd pool straight to the RGA
-										// blitter, and the RGA2 core can't map memory
-										// above 4 GiB phys (dmesg: "RGA_MMU unsupported
-										// Memory larger than 4G!"). The pool is allocated
-										// once per spawn, so it's allocation luck: same
-										// pipeline sometimes runs at 76 fps, sometimes
-										// never emits a single frame (black screen). No
-										// first frame within 2.6 s → kill + respawn with
-										// the CPU-convert (I420) variant, which feeds the
-										// encoder RGA-safe buffers.
-										let fb_pipeline = pipeline::gst::x11_pipeline(
-											&cfg.display,
-											eff_fps,
-											&metered,
-											&vdest.ip().to_string(),
-											vdest.port(),
-											false,
-											region,
-										);
-										let procs_fb = procs.clone();
-										let stats_fb = stats_out.clone();
-										let label_fb = base_label.clone();
-										std::thread::spawn(move || {
-											std::thread::sleep(std::time::Duration::from_millis(
-												2600,
-											));
-											if ticked.load(std::sync::atomic::Ordering::Relaxed) {
-												return;
-											}
-											// The whole kill-and-respawn runs under the procs lock,
-											// keyed to the ORIGINAL child: teardown and a re-stream
-											// drain `procs` under this same lock, so once our child
-											// is gone from it the session moved on — a fallback
-											// spawned past that point would run as an untracked
-											// orphan (or duplicate the new encode's RTP).
-											let mut g = procs_fb.lock().unwrap();
-											let Some(idx) = g.iter().position(|c| c.id() == pid)
-											else {
-												return;
-											};
-											tracing::warn!(
-												pid,
-												"gst BGRx-direct produced no frames in 2.6 s (RGA >4G map failure) — respawning with CPU convert"
-											);
-											let mut old = g.remove(idx);
-											let _ = old.kill();
-											let _ = old.wait();
-											let _ = spawn_gst_paced_locked(
-												&mut g,
-												&fb_pipeline,
-												move |ms| {
-													let _ = stats_fb.try_send(DataMsg::Stats(
-														format!("{label_fb} · {ms:.1} {}", crate::i18n::t("stream.msEncode")),
-													));
-												},
-											);
-										});
-									}
-									true
-								}
-								Err(_) => false,
-							}
+						// The `gst-launch` child runner: the `encpace`-metered description (built with
+						// the request's recovery GOP — a child restarts on every recovery flip) and,
+						// for BGRx-direct, its CPU-convert twin for the RGA >4G watchdog.
+						let child_run = super::x11_gst::X11GstChild {
+							procs: procs.clone(),
+							proc_epoch: proc_epoch.clone(),
+							stream_epoch,
+							desc_bgrx: (!kms && direct_bgrx).then(|| build(&metered, true)),
+							desc_plain: build(&metered, false),
+							stats: stats_out.clone(),
+							label: base_label.clone(),
 						};
-						tracing::info!(encoder = ?genc, codec = ?gcodec, started, "x11 gst encode spawned");
+						// IN-PROCESS first (every pipeline but KMS): the same description runs
+						// inside the app, so ABR steps / keyframe requests / recovery flips apply
+						// live (fast path above, `on_nack` via `cap_slot`). KMS keeps the child:
+						// only the CAP_SYS_ADMIN `~/pulsar-gst-launch` may read the scanout FB.
+						// The start (MPP init + the first encoded frame, up to 2 × 2.6 s when the
+						// BGRx variant fails) runs on its own thread, never on this session loop;
+						// it falls back to the child itself. Its description is built with the
+						// NORMAL GOP: recovery runs only through the short-GOP key-unit timer, so a
+						// later flip back to Normal really returns to the long GOP.
+						let in_process = !kms && super::x11_gst::in_process_wanted();
+						let started = if in_process {
+							let my_gen = cap_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+							let inproc_fragment = pipeline::gst::encoder_fragment_with(
+								genc,
+								gcodec,
+								eff_bitrate,
+								eff_fps,
+								pulsar_core::service::LossRecovery::Normal,
+							)
+							.unwrap_or_else(|| fragment.clone());
+							let now = std::time::Instant::now();
+							x11_run.lock().unwrap().inproc = Some(super::x11_gst::X11InProc {
+								req: req.clone(),
+								since: now,
+								starting: true,
+								frames: 0,
+								frames_at: now,
+							});
+							let job = super::x11_gst::X11InProcStart {
+								cap_slot: cap_slot.clone(),
+								cap_gen: cap_gen.clone(),
+								my_gen,
+								x11_run: x11_run.clone(),
+								teardown: x11_teardown,
+								desc_bgrx: direct_bgrx.then(|| build(&inproc_fragment, true)),
+								desc_plain: build(&inproc_fragment, false),
+								start_req: req.clone(),
+								stats: stats_out.clone(),
+								label: base_label.clone(),
+								child: child_run,
+								app_h: app_h.clone(),
+								peer: peer.clone(),
+								sid,
+								detail: format!("{} · {}p", genc.label(), eff_h),
+							};
+							match std::thread::Builder::new()
+								.name("pulsar-x11-gst-start".into())
+								.spawn(move || job.run())
+							{
+								Ok(_) => true,
+								Err(e) => {
+									tracing::warn!("x11 gst start thread could not spawn: {e}");
+									x11_run.lock().unwrap().inproc = None;
+									false
+								}
+							}
+						} else {
+							// Not waited for: a child spawn is milliseconds; only the in-process
+							// start must not overlap the old pipeline's teardown.
+							drop(x11_teardown);
+							let pid = child_run.spawn(true);
+							if let Some(pid) = pid.clone() {
+								// Remembered for the bitrate-step absorb (fast path above); the
+								// RGA fallback swaps in its new child's pid.
+								x11_run.lock().unwrap().child = Some((req.clone(), std::time::Instant::now(), pid));
+							}
+							pid.is_some()
+						};
+						// The host's watchers (display mode / streamed window / keyframe-by-restart)
+						// re-issue this request — before 2026-11-15 the gst path returned without
+						// storing it, so they never fired on an X11 gst host.
+						*last_req_store.lock().unwrap() = Some(req.clone());
+						// Not an ffmpeg CLI stream: its steps go to `x11_gst` (live / child absorb
+						// above), never to the ffmpeg CLI absorb, which would keep a dead pipeline.
+						last_ff_req = None;
+						tracing::info!(encoder = ?genc, codec = ?gcodec, started, in_process, "x11 gst encode spawned");
 						let _ = stats_out.try_send(DataMsg::Stats(base_label));
 						let _ = stats_out.try_send(DataMsg::DisplayRotation(display_rotation(None)));
 						// No per-process audio loopback on the x11/gst (Linux) path (Windows-only).
@@ -3514,6 +3620,39 @@ pub(super) fn make_on_stream(
 		};
 		#[cfg(not(windows))]
 		let ffmpeg_display_idx: u32 = 0;
+		// 4:4:4 only when the client asked AND decodes it in the codec actually streamed (its
+		// renderer's probe really decoded a 4:4:4 keyframe — `StreamReq::decode_yuv444`). Every
+		// other client gets 4:2:0: a 4:4:4 stream on a 4:2:0-only decoder was a black screen.
+		let yuv444 = req.wants_yuv444(match codec {
+			pipeline::VCodec::H264 => "h264",
+			pipeline::VCodec::H265 => "h265",
+			pipeline::VCodec::Av1 => "av1",
+		});
+		if req.yuv444 && !yuv444 {
+			tracing::info!(?codec, decode_yuv444 = ?req.decode_yuv444, "4:4:4 asked for, but the client cannot show it in this codec: 4:2:0");
+		}
+		// Which encoders may encode it: ONLY the Windows native NVENC path
+		// (`CaptureConfig::yuv444` below; it checks the GPU's 4:4:4 caps and falls back to 4:2:0
+		// on the same path). The ffmpeg chain never gets 4:4:4 (`StreamPlan::yuv444` = false):
+		// AMF / VAAPI refuse `yuv444p` + `rext`, so the fallback chain ended on a CPU
+		// libx264/libx265 4:4:4 encode; on a Linux NVENC/X11 host it pushed the stream off the
+		// in-process libav path (live bitrate, keyframe on request, RFI) onto the ffmpeg CLI.
+		// The same latency trade the macOS host refuses — 4:2:0 in-process on every OS instead.
+		if yuv444 && !(cfg!(windows) && encoder == HwEncoder::Nvenc) {
+			tracing::info!(?encoder, "4:4:4 asked for, but only native NVENC (Windows) encodes it: 4:2:0");
+		}
+		// That output's own size (DXGI desktop coordinates, the order `ddagrab=output_idx`
+		// counts in): the hybrid NVENC ffmpeg branch clamps the request to it per axis (never
+		// upscales; a request at or above it streams that size) and scales a smaller request on
+		// the NVIDIA GPU (`StreamPlan::capture_size`). Off Windows there is no ddagrab: unused.
+		#[cfg(windows)]
+		let ffmpeg_capture_size = pulsar_capture::list_displays()
+			.into_iter()
+			.find(|d| d.0 == ffmpeg_display_idx)
+			.map(|d| (d.2, d.3))
+			.filter(|&(w, h)| w > 0 && h > 0);
+		#[cfg(not(windows))]
+		let ffmpeg_capture_size: Option<(u32, u32)> = None;
 		let plan = StreamPlan {
 			encoder,
 			codec,
@@ -3534,17 +3673,17 @@ pub(super) fn make_on_stream(
 			},
 			gpu_zerocopy,
 			output_idx: ffmpeg_display_idx,
+			capture_size: ffmpeg_capture_size,
 			hdr: req.hdr,
-			yuv444: req.yuv444,
+			// Never 4:4:4 on the ffmpeg chain (see above).
+			yuv444: false,
 			loss_recovery: req.loss_recovery,
 			// Off Windows: the window picked above (Windows' own window capture is WGC on the
-			// native path below; its ffmpeg fallback streams the monitor).
+			// native path below; its ffmpeg fallback streams the monitor). A macOS window is
+			// filled in after the native attempt (`mac_window_src`).
 			#[cfg(not(windows))]
 			window: match &host_window {
-				Some((super::window_src::Target::X11(id), ..)) => Some(pipeline::WindowInput::X11 { id: *id }),
-				Some((super::window_src::Target::Mac(_), _, Some(url))) => {
-					Some(pipeline::WindowInput::RawNv12 { url: url.clone() })
-				}
+				Some((super::window_src::Target::X11(id), _)) => Some(pipeline::WindowInput::X11 { id: *id }),
 				_ => None,
 			},
 			#[cfg(windows)]
@@ -3606,13 +3745,14 @@ pub(super) fn make_on_stream(
 		#[cfg(windows)]
 		// The native path runs for the normal display capture (ddagrab) OR whenever a
 		// per-window WGC target is set — WGC is a separate capture SOURCE that does not need the
-		// ddagrab display-capture method. HDR / 4:4:4 still force the ffmpeg path (the
-		// native pipeline doesn't do them yet); a window target with HDR/444 falls back to ffmpeg
-		// (whole-monitor) for now — documented limit. PULSAR_FFMPEG_CAPTURE still forces ffmpeg.
+		// ddagrab display-capture method, NVENC or Media Foundation (`native_encoder`). HDR stays
+		// native on NVENC (the capture streams HDR10 from a monitor in HDR mode, SDR otherwise —
+		// `CaptureConfig::hdr`), and so does 4:4:4 (NVENC H.264 High 4:4:4 / HEVC RExt where the
+		// GPU encodes it, else 4:2:0 — `CaptureConfig::yuv444`; an HDR10 build is 4:2:0). The
+		// Media Foundation path streams SDR 4:2:0 for either request. PULSAR_FFMPEG_CAPTURE still
+		// forces ffmpeg.
 		let native_started = if native_encoder.is_some()
 			&& (capture == CaptureMethod::Ddagrab || target_hwnd.is_some())
-			&& !req.hdr
-			&& !req.yuv444
 			&& std::env::var_os("PULSAR_FFMPEG_CAPTURE").is_none()
 		{
 			let ncodec = native_codec(codec);
@@ -3648,6 +3788,8 @@ pub(super) fn make_on_stream(
 				intra_refresh: req.loss_recovery == pulsar_core::service::LossRecovery::IntraRefresh,
 				// Reference-frame invalidation for a client that resumes at the recovery tag.
 				rfi: req.rfi,
+				// 4:4:4 for a client that shows it (see `yuv444` above).
+				yuv444,
 				draw_mouse: true,
 				// Phase 2b co-op: when the session targets a specific WINDOW (client-picked via
 				// `req.window_hwnd`, or the game this session launched in game mode), capture that
@@ -3657,6 +3799,12 @@ pub(super) fn make_on_stream(
 				// monitor). `None` (no window target) => the full-monitor DXGI source, unchanged.
 				window_hwnd: target_hwnd.map(|h| h as isize),
 				encoder: native_encoder.unwrap_or_default(),
+				// HDR10 only on the new `hdr10` opt-in (a new client sets it when this host
+				// advertised FEAT_HDR and its renderer decodes + shows the codec's 10-bit stream)
+				// and only while the monitor is in HDR mode; SDR otherwise (pulsar-capture decides
+				// per build). Never on the legacy `hdr` bit: old desktop clients and the mobile app
+				// set that from a setting alone and cannot all show 10-bit PQ.
+				hdr: req.hdr10,
 			}) {
 				Ok(h) => {
 					native_is_mf = native_mf;
@@ -3716,17 +3864,24 @@ pub(super) fn make_on_stream(
 		};
 		// NATIVE macOS path: ScreenCaptureKit + VideoToolbox in-process (pulsar-capture `mac/`):
 		// live bitrate, keyframe on request, live display switch — what the ffmpeg CLI cannot do.
-		// Taken when the resolved encoder is VideoToolbox; the ffmpeg avfoundation chain below
+		// Taken when the resolved encoder is VideoToolbox, for a display or ONE window
+		// (`mac_window`: SCK desktop-independent window, same encoder). The ffmpeg chain below
 		// stays the fallback (macOS < 12.3, no Screen Recording permission, a codec VideoToolbox
-		// refuses, HDR / 4:4:4). PULSAR_FFMPEG_CAPTURE=1 forces ffmpeg. Untested on macOS hardware.
+		// refuses). An HDR request is streamed SDR here like on the ffmpeg path (neither
+		// captures HDR on macOS yet), so it no longer forces ffmpeg. A 4:4:4 request stays here
+		// too and streams 4:2:0: the native encoder has no 4:4:4 yet, and leaving the low-latency
+		// path for the ffmpeg CLI (whose VideoToolbox 4:4:4 is unverified) would trade latency
+		// for a maybe. A window this path does not take goes through the loopback frame server.
+		// PULSAR_FFMPEG_CAPTURE=1 forces ffmpeg. Untested on macOS hardware.
+		// Set when the native start failed in a way the ffmpeg window source would only repeat
+		// (no Screen Recording permission, ScreenCaptureKit not answering): a window then
+		// streams the screen at once instead of waiting through a second SCK query + start.
+		#[cfg(target_os = "macos")]
+		let mut mac_sck_unusable = false;
 		#[cfg(target_os = "macos")]
 		let native_started = if encoder == HwEncoder::VideoToolbox
 			&& capture == CaptureMethod::AvFoundation
-			// A window pick streams through the ScreenCaptureKit window source + ffmpeg below.
-			&& plan.window.is_none()
 			&& codec != pipeline::VCodec::Av1
-			&& !req.hdr
-			&& !req.yuv444
 			&& std::env::var_os("PULSAR_FFMPEG_CAPTURE").is_none()
 		{
 			let display_count = pulsar_capture::list_displays().len() as u32;
@@ -3752,14 +3907,24 @@ pub(super) fn make_on_stream(
 				// on request heal a loss instead.
 				intra_refresh: false,
 				rfi: req.rfi,
+				// The native VideoToolbox encoder is 4:2:0 only (see above).
+				yuv444: false,
 				draw_mouse: true,
-				window_hwnd: None,
+				// A `CGWindowID`: SCK captures that window; `eff_w × eff_h` already has its
+				// aspect (fitted above).
+				window_hwnd: mac_window.and_then(|id| isize::try_from(id).ok()),
+				// macOS host: ScreenCaptureKit here is set up for 8-bit NV12, so the stream is SDR
+				// (no HDR capture on macOS yet — docs/agents/host-encode.md).
+				hdr: false,
 				encoder: pulsar_capture::NativeEncoder::default(),
 			}) {
 				Ok(h) => {
 					native_enc_us = Some(h.encode_us_arc());
 					native_stats = Some(h.stats_arc());
 					*native_slot.lock().unwrap() = Some(h);
+					if let Some(id) = mac_window {
+						super::window_src::blocking(|| super::window_src::began(sid, id, req.clone()));
+					}
 					true
 				}
 				Err(e) => {
@@ -3770,6 +3935,8 @@ pub(super) fn make_on_stream(
 					if e.kind() == std::io::ErrorKind::PermissionDenied {
 						notify_screen_permission(&app_h, &stats_out);
 					}
+					mac_sck_unusable =
+						matches!(e.kind(), std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::TimedOut);
 					false
 				}
 			}
@@ -3778,11 +3945,50 @@ pub(super) fn make_on_stream(
 		};
 		#[cfg(not(any(windows, target_os = "macos")))]
 		let native_started = false;
+		// macOS window without the native path: serve the window's frames on loopback for the
+		// ffmpeg chain (raw NV12 → VideoToolbox CLI), sized by its own ScreenCaptureKit query.
+		// A start that fails streams the screen at the requested box (not the window's shape).
+		// Only for what the native path does not take (AV1, PULSAR_FFMPEG_CAPTURE)
+		// or a VideoToolbox refusal: after a permission / timeout failure it would run the same
+		// SCK query again for up to ~10 s more (`mac_sck_unusable`).
+		#[cfg(target_os = "macos")]
+		let mac_window_src: Option<(String, (u32, u32))> = match mac_window {
+			Some(id) if !native_started && mac_sck_unusable => {
+				tracing::warn!(id, "ScreenCaptureKit unusable (permission / no answer), streaming the screen");
+				None
+			}
+			Some(id) if !native_started => super::window_src::blocking(|| {
+				match pulsar_core::window_capture::serve_for(sid, id, window_box, eff_fps) {
+					Ok(src) => {
+						super::window_src::began(sid, id, req.clone());
+						Some(src)
+					}
+					Err(e) => {
+						tracing::warn!(id, "window capture failed to start, streaming the screen: {e}");
+						None
+					}
+				}
+			}),
+			_ => None,
+		};
+		#[cfg(target_os = "macos")]
+		let plan = match (mac_window, native_started, &mac_window_src) {
+			(Some(_), false, Some((url, (w, h)))) => StreamPlan {
+				width: *w,
+				height: *h,
+				window: Some(pipeline::WindowInput::RawNv12 { url: url.clone() }),
+				..plan
+			},
+			(Some(_), false, None) => StreamPlan { width: window_box.0, height: window_box.1, window: None, ..plan },
+			_ => plan,
+		};
+		#[cfg(target_os = "macos")]
+		let eff_h = plan.height;
 
 		// Publish the per-window capture state for the input path (Bug 0): the current stream routes
 		// kb/mouse to WindowInput ONLY when it ACTUALLY WGC-captured a specific window — i.e. the
 		// native path started AND a window target was set. Every other outcome (whole-monitor
-		// ddagrab, ffmpeg fallback, HDR/4:4:4, or a start_capture_encode error) streams the whole
+		// ddagrab, ffmpeg fallback, 4:4:4, or a start_capture_encode error) streams the whole
 		// monitor, so the window must NOT be the input target even if `launched_hwnd` holds an HWND.
 		#[cfg(windows)]
 		{
@@ -3792,15 +3998,18 @@ pub(super) fn make_on_stream(
 			crate::coop::set_capture(sid, if native_started { target_hwnd } else { None });
 		}
 		// Linux X11 / macOS: the window `host_window` resolved above is what this stream shows
-		// (X11: x11grab -window_id / libav / gst ximagesrc xid=; macOS: the ScreenCaptureKit
-		// window source over rawvideo — the native display path never takes a window plan), so
-		// its id is the input target: `WindowInput` (X11 SendEvent / XTest when in front, macOS
+		// (X11: x11grab -window_id / libav / gst ximagesrc xid=; macOS: the native SCK window →
+		// VideoToolbox path, or the SCK window source over rawvideo for ffmpeg), so its id is
+		// the input target: `WindowInput` (X11 SendEvent / XTest when in front, macOS
 		// CGEventPostToPid). A screen stream (Wayland window casts included: no id) clears it.
 		#[cfg(not(windows))]
 		{
 			let w = match &host_window {
-				Some((super::window_src::Target::X11(id), ..)) => i64::try_from(*id).ok(),
-				Some((super::window_src::Target::Mac(id), _, Some(_))) => Some(*id as i64),
+				Some((super::window_src::Target::X11(id), _)) => i64::try_from(*id).ok(),
+				#[cfg(target_os = "macos")]
+				Some((super::window_src::Target::Mac(id), _)) if native_started || mac_window_src.is_some() => {
+					i64::try_from(*id).ok()
+				}
 				_ => None,
 			};
 			*win_capture_hwnd.lock().unwrap() = w;
@@ -3841,7 +4050,10 @@ pub(super) fn make_on_stream(
 		// fire for them (it would restart ffmpeg on top of a running native capture). Clearing
 		// to None here ensures the watcher stays inert for the duration of a native session even
 		// if a prior ffmpeg session on this same connection left a stale entry.
-		// On non-Windows: native_started is always false so we always store.
+		// Linux: native_started is always false, so the request is always stored. macOS: the
+		// native ScreenCaptureKit -> VideoToolbox path (display or window) clears it like Windows
+		// does (a keyframe request is served by request_idr, not a restart). The window watcher
+		// does not read this store: a window stream's request lives in `window_src` (`began`).
 		if !native_started {
 			*last_req_store.lock().unwrap() = Some(req.clone());
 		} else {
@@ -3878,6 +4090,8 @@ pub(super) fn make_on_stream(
 		let label_encoder = if native_started && native_mf { HwEncoder::MediaFoundation } else { encoder };
 		#[cfg(not(windows))]
 		let label_encoder = encoder;
+		// A 4:4:4 stream is marked by the native path, from what its encoder really got
+		// (`CaptureStats::yuv444`), in the reporter below (the ffmpeg chain is always 4:2:0).
 		let base_label = format!(
 			"{} · {} · {} · {} · {} {}",
 			vcodec_label(codec),
@@ -3903,6 +4117,9 @@ pub(super) fn make_on_stream(
 				Some(Ok(engine)) => {
 					*libav_slot.lock().unwrap() = Some(engine);
 					last_libav_req = Some(req.clone());
+					// Steps go to the engine (fast path above); if it dies, the next request
+					// must restart, not be absorbed as a CLI step.
+					last_ff_req = None;
 					true
 				}
 				Some(Err(e)) => {
@@ -4012,8 +4229,20 @@ pub(super) fn make_on_stream(
 							fresh_per_s = c.fresh_per_s,
 							rfi_recovered = c.rfi_recovered,
 							rfi_declined = c.rfi_declined,
+							hdr = c.hdr,
 							"native capture"
 						);
+					}
+					// HDR10 stream: tell the client where this host's SDR content sits (Windows "SDR
+					// content brightness") and the monitor's peak, so its SDR tone-map keeps the
+					// desktop as bright as on an SDR stream (DataMsg::HdrMeta). Every 2 s: the session
+					// transport is lossy and the slider can move mid-stream. Only Windows has an HDR
+					// capture (macOS / Linux hosts stream SDR — docs/agents/host-encode.md).
+					#[cfg(windows)]
+					if let Some((sdr_white_nits, peak_nits)) =
+						cap_stats.as_ref().filter(|_| ticks % 4 == 1).and_then(|c| c.hdr_reference())
+					{
+						let _ = stats_enc.try_send(DataMsg::HdrMeta { sdr_white_nits, peak_nits });
 					}
 					let us = enc_us.load(std::sync::atomic::Ordering::Relaxed);
 					if us == 0 {
@@ -4031,8 +4260,22 @@ pub(super) fn make_on_stream(
 					} else {
 						label_enc.clone()
 					};
+					// The codec leads the label ("H.265 · …"): mark a stream NVENC encodes in 4:4:4.
+					#[cfg(windows)]
+					let label_now = if cap_stats.as_ref().is_some_and(|c| c.snapshot().yuv444) {
+						label_now.replacen(" · ", " 4:4:4 · ", 1)
+					} else {
+						label_now
+					};
 					#[cfg(not(windows))]
 					let label_now = label_enc.clone();
+					// The native capture streams real HDR10 right now (an HDR monitor, FEAT_HDR).
+					#[cfg(windows)]
+					let label_now = if cap_stats.as_ref().is_some_and(|c| c.snapshot().hdr) {
+						format!("{label_now} · HDR10")
+					} else {
+						label_now
+					};
 					if let Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) = stats_enc.try_send(
 						DataMsg::Stats(format!(
 							"{label_now} · {:.1} {}",
@@ -4121,6 +4364,7 @@ pub(super) fn make_on_stream(
 							&& enc == pipeline::HwEncoder::Nvenc
 							&& cap == base.capture,
 						output_idx: base.output_idx,
+						capture_size: base.capture_size,
 						hdr: base.hdr,
 						yuv444: base.yuv444,
 						loss_recovery: base.loss_recovery,
@@ -4296,161 +4540,77 @@ fn vcodec_label(c: pipeline::VCodec) -> &'static str {
 	}
 }
 
-/// Like `spawn_gst_tracked`, but with the ENCODE-PACE meter: the pipeline carries an
-/// `identity name=encpace silent=false` right after the encoder, and `-v` makes
-/// gst-launch print one `last-message = chain …` line per encoded frame. The parser
-/// thread times the line gaps (Δwall per frame ≈ encode pace, same semantics as the
-/// ffmpeg `-progress` meter) and calls `on_ms` about once a second — so a gst host
-/// (Pi MPP) finally feeds the client's "Kodlama ms" tile instead of "—".
-/// Returns the child's pid + a flag that flips on the FIRST encoded frame — the
-/// caller's no-output watchdog reads it (see the BGRx-direct RGA fallback).
-#[cfg(target_os = "linux")]
-fn spawn_gst_paced(
-	procs: &Arc<Mutex<Vec<Child>>>,
-	pipeline: &str,
-	on_ms: impl Fn(f32) + Send + 'static,
-) -> Result<(u32, Arc<std::sync::atomic::AtomicBool>), String> {
-	let mut g = procs.lock().unwrap();
-	spawn_gst_paced_locked(&mut g, pipeline, on_ms)
+/// Whether a bitrate-only re-request can leave a running CLI encoder — the ffmpeg CLI
+/// (Windows/macOS fallback) or a `gst-launch` child (Linux KMS / no in-process gst), neither of
+/// which can change its bitrate — streaming at `running_kbps` instead of restarting it (a
+/// visible gap plus a keyframe, and the gap itself reads as congestion to the client's ABR):
+/// - the same rate (the client's periodic re-send, `0` = auto included): keep it;
+/// - a deep DOWN-step (25 %+ cut): never absorbed, at any time — the link can't carry the rate;
+///   holding it means sustained queueing / loss on the latency-critical path, so latency wins
+///   over the gap;
+/// - a small DOWN-step (10-25 %, one ABR cut is ~15 %): absorbed for 3 s after the encoder
+///   started, restarts after. Restarting on every cut gave a restart (gap + IDR on an already
+///   congested link) up to every 1.5 s under congestion (2026-11-16 review); the pacer holds
+///   the real rate meanwhile and two quick cuts add up to a deep one;
+/// - an UP-step beyond 10 %: at most once per 6 s since the encoder started (a deferred one
+///   isn't lost: the client keeps re-sending and each request compares against what really
+///   runs);
+/// - `0` (auto → the host default) on one side only: never absorbed (re-resolve in full).
+fn cli_bitrate_absorbs(running_kbps: u32, new_kbps: u32, since_start: std::time::Duration) -> bool {
+	if new_kbps == running_kbps {
+		return true;
+	}
+	if running_kbps == 0 || new_kbps == 0 {
+		return false;
+	}
+	let ratio = new_kbps as f32 / running_kbps as f32;
+	if ratio < 0.75 {
+		return false;
+	}
+	if ratio < 0.9 {
+		return since_start < std::time::Duration::from_secs(3);
+	}
+	ratio <= 1.1 || since_start < std::time::Duration::from_secs(6)
 }
 
-/// `spawn_gst_paced` with the `procs` lock already held: the BGRx-direct RGA
-/// watchdog needs its find-dead → kill → respawn → push sequence atomic against
-/// the teardown/re-stream drains (which run under this same lock).
-#[cfg(target_os = "linux")]
-fn spawn_gst_paced_locked(
-	procs: &mut Vec<Child>,
-	pipeline: &str,
-	on_ms: impl Fn(f32) + Send + 'static,
-) -> Result<(u32, Arc<std::sync::atomic::AtomicBool>), String> {
-	use std::os::unix::process::CommandExt;
-	let mut cmd = std::process::Command::new(crate::process::gst_launch_bin());
-	pulsar_core::capture::use_system_gst_env(&mut cmd);
-	cmd.arg("-v").args(pipeline.split_whitespace());
-	cmd.stdout(std::process::Stdio::piped());
-	// stderr to a per-host scratch file (truncated each spawn): gst dying at start
-	// is otherwise invisible — this is the only channel that says WHY.
-	let errlog = std::fs::File::create(std::env::temp_dir().join("pulsar-gst-stderr.log")).ok();
-	match errlog {
-		Some(f) => {
-			cmd.stderr(f);
-		}
-		None => {
-			cmd.stderr(std::process::Stdio::null());
-		}
-	}
-	unsafe {
-		cmd.pre_exec(|| {
-			// SAFETY: async-signal-safe libc calls only.
-			libc::prctl(
-				libc::PR_SET_PDEATHSIG,
-				libc::SIGKILL as libc::c_ulong,
-				0,
-				0,
-				0,
-			);
-			if libc::getppid() == 1 {
-				libc::_exit(0);
-			}
-			Ok(())
-		});
-	}
-	let ticked = Arc::new(std::sync::atomic::AtomicBool::new(false));
-	match cmd.spawn() {
-		Ok(mut child) => {
-			if let Some(mut stdout) = child.stdout.take() {
-				let ticked = ticked.clone();
-				std::thread::spawn(move || {
-					use std::io::Read;
-					// BYTE-safe line scan — `BufRead::lines()` returns Err on any
-					// non-UTF-8 byte in the `-v` dump and a `break` there DROPS the
-					// pipe: gst-launch then dies of SIGPIPE on its next print (the
-					// "video never starts" regression). This reader only ends at EOF,
-					// i.e. when gst itself exited.
-					let mut buf = [0u8; 8192];
-					let mut line: Vec<u8> = Vec::with_capacity(256);
-					let mut last: Option<std::time::Instant> = None;
-					let mut ema_ms: f32 = 0.0;
-					let mut last_push = std::time::Instant::now();
-					loop {
-						let n = match stdout.read(&mut buf) {
-							Ok(0) | Err(_) => break,
-							Ok(n) => n,
-						};
-						for &b in &buf[..n] {
-							if b != b'\n' {
-								// Cap pathological unterminated lines; the marker fits well within.
-								if line.len() < 4096 {
-									line.push(b);
-								}
-								continue;
-							}
-							let is_tick = {
-								let s = String::from_utf8_lossy(&line);
-								s.contains("encpace") && s.contains("last-message")
-							};
-							line.clear();
-							if !is_tick {
-								continue;
-							}
-							ticked.store(true, std::sync::atomic::Ordering::Relaxed);
-							let now = std::time::Instant::now();
-							if let Some(t0) = last {
-								let ms = now.duration_since(t0).as_secs_f32() * 1000.0;
-								ema_ms = if ema_ms == 0.0 {
-									ms
-								} else {
-									ema_ms * 0.9 + ms * 0.1
-								};
-								if last_push.elapsed().as_millis() >= 1000 {
-									on_ms(ema_ms);
-									last_push = now;
-								}
-							}
-							last = Some(now);
-						}
-					}
-				});
-			}
-			let pid = child.id();
-			procs.push(child);
-			Ok((pid, ticked))
-		}
-		Err(e) => Err(format!("gst-launch-1.0 {}: {e}", crate::i18n::t("err.spawn"))),
+/// Keep the stored request (`last_req_store`, which the host's watchers re-issue) on the latest
+/// one when a fast path absorbs it: a re-issued stale request used to put an old bitrate back
+/// on the encoder, over the client's ABR. Only an already-stored request is replaced — on
+/// Windows the store stays empty for native sessions (they self-heal), and must.
+fn refresh_last_req(store: &Mutex<Option<StreamReq>>, req: &StreamReq) {
+	if let Some(stored) = store.lock().unwrap().as_mut() {
+		*stored = req.clone();
 	}
 }
 
-/// Spawn a `gst-launch-1.0` encode pipeline tracked in `procs` (killed on
-/// (re-)stream/teardown like the ffmpeg children). `PR_SET_PDEATHSIG` mirrors the
-/// Wayland capture spawn so an app crash can never orphan a streaming encoder.
-#[cfg(target_os = "linux")]
-fn spawn_gst_tracked(procs: &Arc<Mutex<Vec<Child>>>, pipeline: &str) -> Result<(), String> {
-	use std::os::unix::process::CommandExt;
-	let mut cmd = std::process::Command::new(crate::process::gst_launch_bin());
-	pulsar_core::capture::use_system_gst_env(&mut cmd);
-	cmd.arg("-q").args(pipeline.split_whitespace());
-	unsafe {
-		cmd.pre_exec(|| {
-			// SAFETY: async-signal-safe libc calls only.
-			libc::prctl(
-				libc::PR_SET_PDEATHSIG,
-				libc::SIGKILL as libc::c_ulong,
-				0,
-				0,
-				0,
-			);
-			if libc::getppid() == 1 {
-				libc::_exit(0);
-			}
-			Ok(())
-		});
-	}
-	match cmd.spawn() {
-		Ok(child) => {
-			procs.lock().unwrap().push(child);
-			Ok(())
-		}
-		Err(e) => Err(format!("gst-launch-1.0 {}: {e}", crate::i18n::t("err.spawn"))),
+#[cfg(test)]
+mod cli_bitrate_absorb_tests {
+	use super::cli_bitrate_absorbs;
+	use std::time::Duration;
+
+	#[test]
+	fn down_steps_restart_up_steps_at_most_every_6s() {
+		let early = Duration::from_secs(2);
+		let late = Duration::from_secs(10);
+		// The same rate (a periodic re-send, auto included) and a step inside the band: keep it.
+		assert!(cli_bitrate_absorbs(20_000, 20_000, early));
+		assert!(cli_bitrate_absorbs(0, 0, early));
+		assert!(cli_bitrate_absorbs(20_000, 18_500, late));
+		assert!(cli_bitrate_absorbs(20_000, 21_500, late));
+		// A real down-step restarts at once, however soon after the start (the 2026-11-15
+		// review: 20 → 8 Mbit/s within 6 s used to keep sending 20).
+		assert!(!cli_bitrate_absorbs(20_000, 8_000, early));
+		assert!(!cli_bitrate_absorbs(20_000, 14_000, Duration::ZERO));
+		// A single ~15 % ABR cut waits 3 s after a restart (no restart storm), then restarts.
+		assert!(cli_bitrate_absorbs(20_000, 17_000, early));
+		assert!(!cli_bitrate_absorbs(20_000, 17_000, late));
+		assert!(!cli_bitrate_absorbs(20_000, 15_500, late));
+		// An up-step: deferred within 6 s of the start, taken after.
+		assert!(cli_bitrate_absorbs(20_000, 27_000, early));
+		assert!(!cli_bitrate_absorbs(20_000, 27_000, late));
+		// Auto (0) on one side re-resolves the host default: full restart.
+		assert!(!cli_bitrate_absorbs(0, 10_000, Duration::ZERO));
+		assert!(!cli_bitrate_absorbs(20_000, 0, Duration::ZERO));
 	}
 }
 

@@ -109,6 +109,11 @@ pub(crate) mod window_src;
 mod libav;
 // Capture-time RTP timestamps for the libav host (pure; tested on every OS).
 mod capture_clock;
+// libav.rs's VA-API / QSV rate + graph rules: compiled everywhere so they are tested on every OS.
+mod libav_policy;
+// X11 GStreamer host encode (RK3588 MPP): in-process runner + `gst-launch` child.
+#[cfg(target_os = "linux")]
+mod x11_gst;
 // The NVENC SDK encoder as the Wayland capture's raw-frame encoder (RFI on Wayland hosts).
 #[cfg(target_os = "linux")]
 mod nvenc_frames;
@@ -120,6 +125,23 @@ pub(crate) fn mock_capture() -> bool {
 	cfg!(target_os = "linux") && std::env::var_os("PULSAR_MOCK_CAPTURE").is_some_and(|v| v == "1")
 }
 use handlers::{make_on_audio, make_on_file, make_on_stream};
+
+/// Re-issue the stored request as a restart the HOST ordered (display mode / streamed window
+/// changed, a keyframe-by-restart): raise `flag` so `make_on_stream` carries this identical
+/// request out in full instead of absorbing it as "nothing changed". The flag is lowered again
+/// when the request could not be queued, so it can't leak onto the next client request.
+fn send_host_restart(
+	tx: &tokio::sync::mpsc::Sender<StreamReq>,
+	flag: &AtomicBool,
+	req: StreamReq,
+) -> Result<(), tokio::sync::mpsc::error::TrySendError<StreamReq>> {
+	flag.store(true, Ordering::SeqCst);
+	let sent = tx.try_send(req);
+	if sent.is_err() {
+		flag.store(false, Ordering::SeqCst);
+	}
+	sent
+}
 
 /// Transport features this host advertises in its `StreamCaps` reply: it can carry
 /// the RTP media inside the session (single socket) and honors NACK retransmits.
@@ -162,7 +184,12 @@ fn media_features() -> Vec<String> {
 	#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 	v.push(pulsar_core::service::media::FEAT_PINCH.to_string());
 	// Reference-frame invalidation: the native NVENC path heals a client-reported loss without
-	// a keyframe (other paths answer MediaRfi with a keyframe).
+	// a keyframe. Advertised for the whole host, not per stream: a stream whose encoder cannot
+	// (another encoder pick, a fallback encoder, a Wayland window cast) ignores the report —
+	// `on_rfi` below never answers it with a keyframe, since a hole the client's NACK repair
+	// fills must cost nothing. The client's renderer asks for the keyframe itself once its
+	// repair gave up: at once until this stream has shown a recovery frame, later after its
+	// recovery wait (pulsar-render `stream/rtp.rs` `Depacketizer::rfi_proven`).
 	#[cfg(windows)]
 	v.push(pulsar_core::service::media::FEAT_RFI.to_string());
 	// Linux: the x11grab host's NVENC SDK encoder (pulsar_capture::NvencCuda) — advertised once
@@ -182,6 +209,17 @@ fn media_features() -> Vec<String> {
 	#[cfg(target_os = "linux")]
 	if linux_nvenc_sdk() {
 		v.push(pulsar_core::service::media::FEAT_IR.to_string());
+	}
+	// HDR10: the Windows native NVENC path captures a monitor in HDR mode as FP16 and streams
+	// 10-bit PQ (HEVC Main10 / AV1); needs an NVENC with HEVC or AV1. No other host path has an
+	// HDR capture (ffmpeg grabs, macOS ScreenCaptureKit / VideoToolbox here, Linux x11grab /
+	// PipeWire all hand over 8-bit SDR — see docs/agents/host-encode.md), so they never claim it.
+	#[cfg(windows)]
+	if pulsar_capture::nvenc_codecs()
+		.iter()
+		.any(|c| matches!(c, pulsar_capture::Codec::H265 | pulsar_capture::Codec::Av1))
+	{
+		v.push(pulsar_core::service::media::FEAT_HDR.to_string());
 	}
 	// Pen + multi-touch: real injection on Windows (synthetic pointer devices) and Linux
 	// (uinput tablet + multitouch screen); on macOS the pen is a CGEvent tablet and touch is
@@ -218,7 +256,9 @@ fn linux_nvenc_sdk() -> bool {
 	static STATE: AtomicU8 = AtomicU8::new(0);
 	if STATE.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
 		let spawned = std::thread::Builder::new().name("nvenc-sdk-probe".into()).spawn(|| {
-			let ok = pulsar_capture::nvenc_supported() && std::env::var("PULSAR_NVENC_SDK").map(|v| v != "0").unwrap_or(true);
+			// The encoders' own switch (`0` / `false` / `off`): a host whose SDK encoder is off must
+			// not advertise RFI — its clients would wait out every recovery tag that never comes.
+			let ok = pulsar_capture::nvenc_supported() && libav::sdk_enabled(std::env::var("PULSAR_NVENC_SDK").ok().as_deref());
 			tracing::info!(codecs = ?pulsar_capture::nvenc_codecs(), ok, "Linux NVENC SDK (CUDA) probe");
 			STATE.store(if ok { 3 } else { 2 }, Ordering::SeqCst);
 		});
@@ -525,8 +565,14 @@ pub(crate) async fn bring_online(
 	// back to H.264 even though MPP HEVC was available.)
 	{
 		let ffmpeg = crate::process::ffmpeg_bin(&app);
+		#[cfg(target_os = "linux")]
+		let stream_cfg = state.stream_cfg.clone();
+		#[cfg(not(target_os = "linux"))]
 		let vaapi = state.stream_cfg.lock().unwrap().vaapi_device.clone();
 		std::thread::spawn(move || {
+			// Linux: settle the VA-API node first (probes the candidates on a multi-GPU box).
+			#[cfg(target_os = "linux")]
+			let vaapi = crate::process::settle_vaapi_node(&ffmpeg, &stream_cfg);
 			let _ = crate::process::validated_encoders(&ffmpeg, &vaapi);
 			#[cfg(target_os = "linux")]
 			let _ = crate::process::validated_gst_encoders();
@@ -1262,6 +1308,14 @@ pub(crate) async fn bring_online(
 				// an IDR on) a client keyframe-request — MediaNack([0]) — re-issues the last StreamReq
 				// here so capture restarts with a fresh IDR (see on_nack below for the gating).
 				let nack_restream_tx = restream_tx.clone();
+				// Set right before the HOST's own watchers re-issue the stored request (display
+				// mode / streamed window changed, a keyframe-by-restart, a dead in-process engine):
+				// that request is identical to the running one on purpose, and must restart capture
+				// in full — no "nothing changed" fast path / bitrate absorb (CLI or in-process
+				// libav) may swallow it, or capture keeps its old geometry / never gets its IDR.
+				// Every OS. (Windows' `force_restart` below is failover.rs's own, with NVENC-stall
+				// meaning: it also retires NVENC.)
+				let host_restart = Arc::new(std::sync::atomic::AtomicBool::new(false));
 				// And to failover.rs: the stream handler's own restarts when the native NVENC path
 				// stalls on a driver that stopped answering, and when NVENC is back.
 				// `nvenc_told`: whether the caps this client was sent listed NVENC (true until it
@@ -1273,14 +1327,18 @@ pub(crate) async fn bring_online(
 					failover::register(sid, restream_tx.clone(), last_req_store.clone(), nvenc_told.clone());
 				// Per-window capture off Windows: x11grab keeps the size it opened with and a
 				// ScreenCaptureKit stream scales the window into its old frame, so when the
-				// streamed window settles at a new size — or is closed — re-issue the stored
-				// StreamReq once (the restart re-reads the size, or streams the screen when the
-				// window is gone). Inert while no window is streamed. Exits with the session.
-				// Untested on Linux X11 / macOS hardware.
+				// streamed window settles at a new size — or is closed — re-issue the window
+				// stream's request once, as a host-ordered restart (`host_restart`: no live fast
+				// path in on_stream may absorb it as unchanged; the restart re-reads the size, or
+				// streams the screen when the window is gone). The request comes from
+				// `window_src` (recorded when the window source started, native or ffmpeg), not
+				// from `last_req_store`: that one is empty while a native capture runs (the macOS
+				// SCK window -> VideoToolbox path). Inert while no window is streamed. Exits with
+				// the session. Untested on Linux X11 / macOS hardware.
 				#[cfg(not(windows))]
 				{
-					let last_req_store = last_req_store.clone();
 					let restream_tx = restream_tx.clone();
+					let host_restart = host_restart.clone();
 					tokio::spawn(async move {
 						let mut debounce = window_src::Debounce::default();
 						loop {
@@ -1293,12 +1351,50 @@ pub(crate) async fn bring_online(
 								.ok()
 								.flatten();
 							let Some(change) = debounce.feed(seen) else { continue };
-							let Some(req) = last_req_store.lock().unwrap().clone() else { continue };
+							let Some(req) = window_src::restart_request(sid) else { continue };
 							tracing::info!(sid, ?change, "streamed window changed -> restarting capture");
 							// Don't fire again before the restart registers the window anew.
 							window_src::ended(sid);
-							if let Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) = restream_tx.try_send(req) {
+							// The request is unchanged: without the flag a live fast path (native
+							// encoder, libav) or the ffmpeg bitrate-step absorb would swallow it.
+							if let Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) =
+								send_host_restart(&restream_tx, &host_restart, req)
+							{
 								break;
+							}
+						}
+					});
+				}
+				// Linux X11: the in-process libav encode ended on its own (not stopped by a
+				// restream/teardown, which take it out of the slot first) — e.g. the VA-API / QSV
+				// runtime guard gave up on an encoder that stopped producing packets, or a bitrate
+				// re-open failed twice. Re-issue the stored request at once (marked as a host
+				// restart) so a fresh engine — or the ffmpeg CLI, once the guard turned the
+				// in-process hardware path off — takes over instead of the video staying frozen
+				// until the client's next request.
+				#[cfg(target_os = "linux")]
+				{
+					let last_req_store = last_req_store.clone();
+					let restream_tx = restream_tx.clone();
+					let host_restart = host_restart.clone();
+					let libav_slot = libav_slot.clone();
+					tokio::spawn(async move {
+						loop {
+							tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+							if restream_tx.is_closed() {
+								break;
+							}
+							let dead = libav_slot.lock().unwrap().as_ref().is_some_and(|e| !e.is_alive());
+							if !dead {
+								continue;
+							}
+							let Some(req) = last_req_store.lock().unwrap().clone() else { continue };
+							tracing::warn!(sid, "in-process encode ended on its own -> restarting the stream");
+							match send_host_restart(&restream_tx, &host_restart, req) {
+								// Give the restart time to replace the dead engine.
+								Ok(_) => tokio::time::sleep(std::time::Duration::from_secs(2)).await,
+								Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {}
+								Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
 							}
 						}
 					});
@@ -1310,6 +1406,7 @@ pub(crate) async fn bring_online(
 				// loops without ever firing. Exits when the channel closes (session teardown).
 				let mode_watcher = {
 					let last_req_store = last_req_store.clone();
+					let host_restart = host_restart.clone();
 					tokio::spawn(async move {
 						// Baseline size of the currently-streamed display; re-baselined on a monitor
 						// switch. `None` until the first stream request establishes a display_idx.
@@ -1392,7 +1489,7 @@ pub(crate) async fn bring_online(
 										// Channel full (a prior restart still in flight) → skip
 										// this send but keep looping; next poll re-detects delta.
 										// Closed → session torn down; exit the watcher.
-										match restream_tx.try_send(fresh_req) {
+										match send_host_restart(&restream_tx, &host_restart, fresh_req) {
 											Ok(_) => {
 												baseline = Some((idx, size));
 											}
@@ -1453,7 +1550,7 @@ pub(crate) async fn bring_online(
 				let launched_hwnd: Arc<Mutex<Option<i64>>> = Arc::new(Mutex::new(None));
 				// The HWND the CURRENT stream is ACTUALLY per-window (WGC) capturing, published by
 				// `make_on_stream` (Bug 0). `launched_hwnd` only records the resolver's discovered
-				// window; the stream may still fall back to WHOLE-MONITOR capture (no NVENC / HDR /
+				// window; the stream may still fall back to WHOLE-MONITOR capture (no NVENC /
 				// 4:4:4 / PULSAR_FFMPEG_CAPTURE / a capture-start error), in which case the video
 				// shows the monitor, not the window. `on_input` must gate its per-window PostMessage
 				// routing on THIS (the confirmed capture target) — NOT on `launched_hwnd` — so kb/
@@ -1598,6 +1695,7 @@ pub(crate) async fn bring_online(
 					#[cfg(target_os = "linux")]
 					cap_gen.clone(),
 					last_req_store.clone(),
+					host_restart.clone(),
 					#[cfg(windows)]
 					force_restart,
 					#[cfg(windows)]
@@ -1631,7 +1729,7 @@ pub(crate) async fn bring_online(
 					// Gate per-window routing on the CONFIRMED capture target (Bug 0): the HWND the
 					// current stream is actually WGC-capturing, published by make_on_stream. Reading
 					// `launched_hwnd` directly here routed kb/mouse into the window even when the stream
-					// fell back to whole-monitor capture (non-NVENC host / HDR / 4:4:4 / capture error) —
+					// fell back to whole-monitor capture (non-NVENC host / 4:4:4 / capture error) —
 					// clicks remapped onto an invisible window while the video showed the monitor.
 					// Linux (X11 SendEvent/XTest) and macOS (CGEventPostToPid) have the same
 					// `WindowInput` API; each backend documents its own ceiling.
@@ -2554,6 +2652,7 @@ pub(crate) async fn bring_online(
 					// ffmpeg/capture opens on an IDR, and last_kf_restart debounces the client's
 					// ~400 ms nack cadence so it can't restart-storm.
 					let last_req_store = last_req_store.clone();
+					let host_restart = host_restart.clone();
 					let mut last_kf_restart: Option<std::time::Instant> = None;
 					move |seqs: Vec<u16>| {
 						// MediaNack([0]) is the client's keyframe-request sentinel (its decoder
@@ -2561,18 +2660,30 @@ pub(crate) async fn bring_online(
 						// GOP). seq 0 is ~never in the retransmit ring, so before this the sentinel
 						// was a silent no-op.
 						if seqs.contains(&0) {
+							// Whether a LIVE encoder took the request: then the IDR is already on its
+							// way and the restart below would only add a gap (and, re-issuing the
+							// stored request, used to put a stale bitrate back on the encoder).
+							#[allow(unused_mut)]
+							let mut idr_live = false;
 							// Native (NVENC / VideoToolbox) path: force an immediate IDR on the live encoder.
 							#[cfg(any(windows, target_os = "macos"))]
 							if let Some(h) = native_idr.lock().unwrap().as_ref() {
 								h.request_idr();
+								idr_live = true;
 							}
+							// In-process GStreamer (Wayland portal capture, or the X11 RK3588 MPP
+							// pipeline): `false` on a `gst-launch` child backend. X11 libav: only a
+							// live engine (a dead one is restarted by the request below).
 							#[cfg(target_os = "linux")]
 							if let Some(c) = wl_cap.lock().unwrap().as_ref() {
-								c.request_keyframe();
+								idr_live |= c.request_keyframe();
 							}
 							#[cfg(target_os = "linux")]
 							if let Some(e) = libav_kf.lock().unwrap().as_ref() {
-								e.request_keyframe();
+								if e.is_alive() {
+									e.request_keyframe();
+									idr_live = true;
+								}
 							}
 							// ffmpeg fallback (no live CaptureHandle): a spawned CLI ffmpeg has no
 							// runtime force-keyframe hook, so re-issue the last StreamReq — a fresh
@@ -2581,7 +2692,7 @@ pub(crate) async fn bring_online(
 							// there would only regress it) and debounced (1.5 s) so the client's
 							// ~400 ms nack cadence can't restart-storm. last_req_store is populated
 							// only on the ffmpeg path, so native sessions skip this branch entirely.
-							if let Some(req) = last_req_store.lock().unwrap().clone() {
+							if let Some(req) = last_req_store.lock().unwrap().clone().filter(|_| !idr_live) {
 								let due = last_kf_restart
 									.map(|t| t.elapsed() >= std::time::Duration::from_millis(1500))
 									.unwrap_or(true);
@@ -2591,7 +2702,9 @@ pub(crate) async fn bring_online(
 								if !req.game_mode && !req.loss_recovery.is_active() && due {
 									// Full (a restart already queued / in flight) or Closed (session
 									// torn down) → skip; the next nack or the natural GOP still recovers.
-									if nack_restream_tx.try_send(req).is_ok() {
+									// Host-ordered: an identical request, which the fast paths
+									// would otherwise absorb as "nothing changed".
+									if send_host_restart(&nack_restream_tx, &host_restart, req).is_ok() {
 										last_kf_restart = Some(std::time::Instant::now());
 									}
 								}

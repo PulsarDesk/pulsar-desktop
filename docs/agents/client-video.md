@@ -11,6 +11,36 @@ VideoToolbox+Metal zero-copy (mpv only as a fallback — see "macOS renderer" be
 too (`src-tauri/src/native_audio.rs`, libopus + SDL3; see audio.md), so no media
 reaches the webview. Don't resurrect a webview video path.
 
+## 4:4:4 streams (2026-11-15, LOCAL, not tested in a real session)
+
+A host encodes 4:4:4 only in a codec this renderer's probe really decoded in 4:4:4
+(`pulsar-render --probe-444`, a separate opt-in probe; the gates are in host-encode.md, "4:4:4
+chroma"). Per renderer:
+
+- **Windows** (`win/decode.rs`): the Media Foundation decoder offers no NV12 for a 4:4:4
+  stream; `set_output` then takes AYUV and the present VideoProcessor Blts it like NV12. HEVC
+  only (the Microsoft H.264 decoder has no 4:4:4), and only where the renderer's D3D11 device
+  has HEVC RExt DXVA: yes on NVIDIA (RTX 3080 Laptop), no on AMD Vega / Snapdragon X Adreno —
+  a hybrid laptop renders on its iGPU, so it does not ask. No software fallback (the renderer
+  links no libavcodec on Windows). Upscaling an AYUV picture uses FSR, never the drivers' RTX /
+  Intel VSR (`present.rs::is_ayuv`): VSR is documented for NV12 / P010 input only and was never
+  verified on AYUV.
+- **macOS** (`mac/decode.rs`): a session whose SPS says 4:4:4 asks VideoToolbox for
+  `444f`/`444v` (Metal samples the full-size CbCr plane like NV12's), else falls back to the
+  4:2:0 formats; the probe decodes the fixture first. Untested on a Mac.
+- **Linux** (`video.rs`): a keyframe whose SPS (`stream::chroma`) says 4:4:4 → the decoder
+  switches to libavcodec in software (`decode::yuv444_decoder`: validated once per process —
+  warmed before the first keyframe when `PULSAR_YUV444` is set — so the switch only opens it)
+  and its yuv444p goes through the planar GL upload. A later keyframe that says 4:2:0 (the
+  host's encoder rebuilt without 4:4:4) switches back to the hardware decoder it replaced. The
+  software decode is effectively single-threaded (slice threads; NVENC writes one slice), so
+  the app asks for 4:4:4 only within the measured `max_px_s` of `--probe-444` (host-encode.md). VAAPI / CUDA stay out for 4:4:4: their packed
+  4:4:4 surfaces and the NV12 interop/readback have no presenter. With
+  `PULSAR_LINUX_DEMUX=ffmpeg` the SPS may sit in the SDP instead of in-band — then nothing
+  switches, and a hardware decoder that accepts 4:4:4 hands out frames no presenter shows (one
+  that refuses it falls back to software inside libavcodec). Not compiled on Windows: CI / the
+  Pi check it.
+
 ## Linux / RK3588 (Orange Pi 5) renderer — the reality (IMPORTANT)
 
 - **VSync (Linux renderer, `linux.rs`):** the swap interval follows the compositor.
@@ -25,9 +55,59 @@ reaches the webview. Don't resurrect a webview video path.
     overrides the choice.
 - **Orange Pi 5B appliance image:** `scripts/opi5-image/` (+ `.github/workflows/opi5-image.yml`,
   manual). It builds ubuntu-rockchip 22.04 server + a Pulsar `.deb` linked against the
-  rockchip-multimedia PPA's rkmpp libavcodec, set up as a kiosk. The generic linux-arm64 release
-  links Ubuntu's libavcodec, which has no rkmpp, so it decodes in software on the board. The
-  image is prepared but not yet built or booted; see the verify checklist in its README.
+  rockchip-multimedia PPA's rkmpp libavcodec, set up as a kiosk. The image is prepared but not
+  yet built or booted; see the verify checklist in its README.
+- **Generic linux-arm64 release on Rockchip boards (`pulsar-render-rkmpp`, 2026-11-15, NOT yet
+  built by CI nor run on a board):**
+  - The generic arm64 `pulsar-render` links Ubuntu 22.04's libavcodec58, which has no rkmpp,
+    so on an RK3588 it decodes in software.
+  - So the release workflow's linux-arm64 job also runs `scripts/rkmpp/build-rkmpp-render.sh`.
+    It builds Rockchip MPP, dav1d and a minimal ffmpeg-rockchip (nyanmisaka, FFmpeg 7.1,
+    threaded, pinned SHAs) into a private prefix and builds the SAME renderer source against it.
+  - ffmpeg-rockchip 7.x declares the rkmpp decoders' DRM_PRIME output only in their hw configs
+    (no `pix_fmts`), so tier 0 in `decode.rs` also accepts a hardware decoder whose hw config
+    offers DRM_PRIME with internal setup. The build fails unless `pulsar-render-rkmpp
+    --list-zerocopy` names `h264_rkmpp` and `hevc_rkmpp`, and unless its `--probe` decodes all
+    three codecs (off-board: the software floor).
+  - The bundles (AppImage/.deb/.rpm) then carry `resources/pulsar-render-rkmpp` and its private
+    libs in `resources/pulsar-rkmpp/` (libavcodec.so.61, libavformat.so.61, libavutil.so.59,
+    librockchip_mpp.so.1, libdav1d.so.7). From the board they need glibc ≥ 2.35, libdrm, and
+    libstdc++ / libgcc_s (MPP is partly C++).
+  - Selection (`process.rs` `rkmpp_choice`, once per run), in this order. The variant is used
+    only when every step passes:
+    1. it is bundled;
+    2. an MPP node exists (`/dev/mpp_service`, or `/dev/vpu_service` / `/dev/vpu-service` on
+       old vendor kernels);
+    3. `PULSAR_PREFER_SYSTEM_FFMPEG` is not `1`/`on`/`true` (that keeps `pulsar-render` on the
+       board's own ffmpeg, as before);
+    4. the GENERIC `pulsar-render --probe`, with its usual lib env, puts no codec on a
+       zero-copy `*_rkmpp` decoder. A board whose system libavcodec58 already has rkmpp keeps
+       the generic renderer;
+    5. the variant's own `--probe` puts at least one codec on a zero-copy `*_rkmpp` decoder.
+    Otherwise `pulsar-render` runs as before: x64, other arm64 boards, mainline-kernel
+    Rockchip boards, and boards without access to the MPP nodes. The probe that decided is kept
+    and reused by the caps probe (`caps.rs` `probe_decoders`), so startup runs at most two
+    probes. A transient probe failure keeps the generic renderer for that run.
+  - `apply_render_lib_env` gives the variant LD_LIBRARY_PATH = its private dir first. It does
+    not use the system-ffmpeg preference below, so a distro libavcodec.so.61 without rkmpp
+    cannot shadow it.
+  - `PULSAR_RKMPP_RENDER=0` never uses the variant; `=1` always uses it when bundled (no device
+    check, no probe).
+  - Software fallback inside the variant (runtime zero-output fallback, codecs MPP rejects):
+    native h264/hevc (threaded) and libdav1d for AV1 — the same floor as the generic renderer.
+    FFmpeg's native `av1` decoder is hwaccel-only, so it is not built.
+  - `pulsar --selftest` adds an optional `pulsar-render-rkmpp` line (a WARN never fails the
+    AppImage smoke test).
+  - The CI step is best effort (`continue-on-error`): if the MPP or ffmpeg build fails, the
+    arm64 bundles are built exactly as before and the run summary shows a warning. If bundling
+    fails WITH the variant's resources, the job rebuilds the bundles without them (also with a
+    warning). The variant's cargo target dir lives in `$RUNNER_TEMP` (never cached), so a pin
+    bump always rebuilds ffmpeg-sys-next against the new headers.
+  - To try it without a release: run the manual **Rockchip renderer check** workflow
+    (`.github/workflows/rkmpp-check.yml`). It uploads the staged files; its header says how to
+    probe them on a board.
+  - Still separate: the opi5 `.deb`/image (PPA ffmpeg, its own update channel) and the bundled
+    ffmpeg CLI (host capture/encode; on RK3588 the host encodes through gst `mpph26xenc`).
 
 - **WebKitGTK can't hardware-decode** the stream. Video MUST be native:
   historically `mpv --wid=<XID>` with `--hwdec` → `h264_rkmpp`/`hevc_rkmpp`
@@ -139,11 +219,44 @@ acceptable; priority is Moonlight-class latency during play.
   run the renderer in a test window fed by `ffmpeg testsrc2` and drive it over stdin /
   posted mouse messages (the renderer draws no overlay before its first decoded frame).
 
-## Loss recovery on Windows — reference-frame invalidation (RFI)
+## Loss recovery — reference-frame invalidation (RFI)
 
 When the host advertises `rfi` (native NVENC — a Windows host, or since 2026-11-14 a Linux
 host with an NVIDIA GPU through the NVENC SDK on CUDA, see host-encode.md "Linux NVENC SDK";
-untested on Linux hardware), the Windows client asks for `StreamReq::rfi`.
+untested on Linux hardware), the client asks for `StreamReq::rfi` (H.264 / HEVC; never AV1 —
+no recovery tag there).
+
+- **Which clients** (`play.rs` `rfi_client`, 2026-11-15; Windows-only before): every desktop OS
+  when the session's renderer is `pulsar-render` — Windows (Media Foundation), macOS
+  (VideoToolbox) and Linux (libavcodec / rkmpp) all run the same `stream/rtp.rs` reorder buffer
+  + depacketizer (hole reports, release-at-tag, the reorder-aware report delay). Not on Linux's
+  `PULSAR_LINUX_DEMUX=ffmpeg` libavformat demux, and not with an mpv / ffplay fallback: neither
+  reports a hole, and `hold.rs` skips the keyframe request on an unrepaired loss while RFI is on
+  (`rfi_reach`). Untested in a real Linux / macOS session (unit tests + type checks only).
+- The report goes out from the renderer's RTP receive thread (`rtp::report_rfi`, the `pump`
+  tick) on all three OSes; Windows and macOS printed it from the render loop before, up to one
+  decode + present later.
+- A Linux client streaming with RFI no longer flips to intra refresh on sustained loss:
+  `hold.rs` `flip_recovery` turns the controller's intra-refresh flip into the short GOP while
+  RFI reaches the current codec (re-derived on a codec switch; AV1 keeps intra refresh), which an
+  RFI host absorbs, so RFI stays on. An intra-refresh flip used to turn RFI off (`rfi 0`) while
+  the host — which cannot start an intra wave mid-session — kept its long GOP.
+- No loss `hold` on an RFI stream (Linux renderer; the others ignore `hold`): the depacketizer
+  already withholds every access unit until the recovery frame or a keyframe, and the recovery
+  frame is no keyframe, so a hold froze the healed picture for its full 300 ms. `hold.rs` sends
+  none (`loss_hold_ms`), `video.rs` `hold_for_ms` treats `RFI_MODE` like `IR_MODE`.
+- `FEAT_RFI` is per host, not per stream: a stream whose encoder cannot do RFI (another encoder
+  pick, a fallback encoder, a Wayland window cast) ignores the reports. Until a stream has shown
+  one recovery frame (`Depacketizer::rfi_proven`, reset on an encoder restart) the recovery wait
+  is short (`RFI_UNPROVEN_WAIT` 40 ms, or the RTT) before the keyframe request, instead of
+  `rfi_timeout` (≥ 150 ms) on every unrepaired loss; a late recovery frame still ends the
+  keyframe wait. Cost on a healing stream: at most one early keyframe request per stream.
+- Decoder stall watch (`recovery::DecodeStall`: access units in, no picture out → keyframe
+  request) runs in all three renderers now (macOS and Linux added 2026-11-15): VideoToolbox
+  drops a picture with a missing reference silently, rkmpp may too.
+- A Linux resident renderer's `reopen` (reuse for another session, RK3588 codec switch) resets
+  `ir` / `rfi` to the wait-for-keyframe default until the app's next stats window, like a fresh
+  renderer on Windows / macOS.
 The host then keeps a level-5.1-sized DPB (`encode/policy.rs` `rfi_dpb`: 16 at ≤ 1080p,
 12 at 1440p, 8 at 4K; one reference for prediction). The flow:
 
@@ -434,6 +547,24 @@ to `DefWindowProc` and the mouse hook forwards the synthesized mouse as before.
   `uv`, `tex`, `con0`) or translate it to Metal.
 - ABR: with an upscaler on, game mode uses `min_kbps_scale = 1.25` (gives resolution up earlier).
 
+## HDR10 on the client (2026-11-15, LOCAL branch `feat/hdr`)
+
+A host's HDR stream is HEVC Main10 / AV1 10-bit, BT.2020, SMPTE ST 2084 (PQ), limited range.
+Every renderer shows it with the same tone curve when the output is SDR: PQ → nits → BT.709 →
+identity up to 80 % of the reference white, a roll-off that puts the peak on 1.0 → sRGB
+(`win/hdr.rs::roll_off`, mirrored in MSL and GLSL). Reference white and peak are the HOST's SDR
+content brightness and monitor peak (`DataMsg::HdrMeta` → `hdrref <sdr> <peak>` stdin line →
+`hdr_ref.rs`), so the streamed desktop is as bright as on an SDR stream whatever the host's
+slider says; 203 nits (BT.2408) / 1000 nits until the host sends them. The probe field
+`ten_bit` gates the request per codec (see host-encode.md "HDR10"); it must mean "this
+renderer really decodes AND presents that codec's 10-bit stream without making it worse".
+
+| Client | Decode | Output | Status |
+| --- | --- | --- | --- |
+| Windows | MF picks P010 when the decoder lists it ahead of NV12; PQ from `MF_MT_TRANSFER_FUNCTION` (unset on 10-bit = PQ). Probe decodes `testdata/test-hdr10.*` on its own thread under a 4 s budget, after the MFT enumeration (a wedged driver only clears `ten_bit`, never the base caps). | P010 skips the VideoProcessor (its HDR colour-space support is optional per driver) → `win/hdr.rs` shader; a P010 picture the decoder does not flag PQ is drawn as BT.709 SDR (`ps_709`). Monitor in HDR mode (`IDXGIOutput6` colour space): checked at most every 500 ms with `MonitorFromWindow` + a cached factory's `IsCurrent()`, outputs re-walked only on a change; a swapchain that refuses HDR10 is latched SDR until the display setup changes (no ResizeBuffers retry hitch). HDR monitor: swapchain R10G10B10A2 + `RGB_FULL_G2084_NONE_P2020`, PQ passes through, egui re-encoded to PQ at 203 nits. SDR monitor: tone-mapped, then FSR / SGSR (the GPU's VSR is a VideoProcessor feature → FSR there; own failure flag, the overlay names the upscaler that really runs). | Real NVENC HDR10 stream decoded + tone-mapped on the Snapdragon laptop (ignored test `real_hdr10_stream_decodes_and_tone_maps`). HDR10 swapchain switch untested (no HDR monitor here; no windows opened). AV1 10-bit untested (no AV1 MFT on the test laptop). `PULSAR_HDR_OUT=0/1` forces SDR / HDR output, `PULSAR_DEC_10BIT=0` keeps NV12. |
+| macOS | VideoToolbox; a format description tagged PQ asks for x420 / xf20 first (8-bit first otherwise). PQ from `kCVImageBufferTransferFunctionKey`. Probe really decodes `testdata/test-hdr10.*`: `ten_bit` only for a 10-bit picture tagged PQ. | `video_fs` tone-maps every PQ-tagged frame (8 or 10 bit) to the 8-bit SDR layer. True HDR output (EDR: RGBA16Float `CAMetalLayer`, `wantsExtendedDynamicRangeContent`, PQ / extended-linear colour space) is not wired. | cargo check aarch64-apple-darwin only; MSL not compiled here. |
+| Linux | **`ten_bit` is reported false** (the client never asks for HDR): on every path but one the picture would be worse than the SDR stream with no HDR benefit (the output is 8-bit SDR anyway). Software decode and every hwaccel readback (NVDEC's CUDA interop is NV12-only) go through a single-threaded CPU 10 → 8-bit shift (`video.rs::ten_bit_to_8`; several ms per 1080p frame, and 8-bit PQ bands worse than 8-bit sRGB). rkmpp / v4l2m2m (Orange Pi, RK3588) hand 10-bit out as NV15 / AFBC dmabufs with no import path, and the kiosk's KMS plane has no PQ handling. Only VAAPI's two-layer R16 + GR1616 dmabuf keeps 10 bits to the tone-map; unverified on hardware → `PULSAR_LINUX_TEN_BIT=1` advertises HEVC / AV1 10-bit for that test. A stream that is HDR anyway (`PULSAR_HDR`, an old host) still shows right: readback copies the frame props (`av_frame_copy_props`, the PQ tag survives), PQ frames take tone-mapping twins of all four GL programs (`pq_fragment`, `hdr_ref` uniform), and the DRM-lease KMS plane declines PQ frames (`kms_lease::frame_ok`) so they take the GL path. The external-OES path only fixes the transfer (the driver's matrix converts YUV). X11 / EGL has no HDR output; Wayland colour management could take PQ — not wired. | Not compiled here (no Linux build on this machine), untested on hardware. |
+
 ## macOS renderer (`crates/pulsar-render/src/mac/`, 2026-11-14, UNTESTED on Mac hardware)
 
 Written and type-checked on Windows (`cargo check --target aarch64-apple-darwin -p
@@ -498,6 +629,7 @@ pulsar-render`); never run on a Mac. The macOS analogue of `win/`:
   to ~30 ms until the re-order runs (a short flicker); moving / dragging the app window makes the
   panel follow with ≥ 8 ms lag, because the window server is polled (no cross-process
   window-move notification exists without Accessibility permission).
-- **Not done / unverified:** HDR (PQ/HLG) is shown as SDR; every claim above is untested on
+- **Not done / unverified:** HDR10 (PQ) is tone-mapped to SDR (no EDR output; HLG is shown as
+  SDR — no Pulsar host sends it); every claim above is untested on
   hardware (window ordering against other apps, Spaces / full screen, Retina scale changes
   between displays, AV1 on M3, 10-bit HEVC, MetalFX on Apple silicon / its absence on Intel).

@@ -131,6 +131,9 @@ pub fn run_synthetic_mf(cfg: &SynthConfig) -> Result<SynthReport, String> {
 			intra_refresh: false,
 			rotation: 0,
 			rfi: cfg.rfi,
+			// Media Foundation is SDR 4:2:0 only.
+			hdr: None,
+			yuv444: false,
 		};
 		let mut enc = crate::encode::mf::MfEncoder::new(&device, &ctx, &params)?;
 		// Like the real capture thread.

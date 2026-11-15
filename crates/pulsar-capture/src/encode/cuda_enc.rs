@@ -211,6 +211,7 @@ impl NvencCuda {
 			init_params,
 			enc_config,
 			rfi,
+			yuv444: _,
 			intra_refresh,
 			dpb,
 			gop,
@@ -230,6 +231,12 @@ impl NvencCuda {
 				low_latency: p.low_latency,
 				intra_refresh: p.intra_refresh,
 				rfi: p.rfi,
+				// No Linux capture delivers HDR pixels (x11grab / PipeWire hand over 8-bit), so
+				// the Linux SDK encoder stays 8-bit SDR (docs/agents/host-encode.md, HDR).
+				hdr: false,
+				// The Linux CUDA encoder takes NV12 frames from libavfilter: 4:2:0 only (a 4:4:4
+				// request takes the host's ffmpeg path, which feeds yuv444p).
+				yuv444: false,
 			},
 		)?;
 
@@ -315,6 +322,12 @@ impl NvencCuda {
 	/// not AV1, not intra refresh).
 	pub fn rfi_enabled(&self) -> bool {
 		self.rfi
+	}
+
+	/// The session rolls an intra-refresh wave instead of scheduled IDRs (built that way; it
+	/// cannot change live).
+	pub fn intra_refresh_enabled(&self) -> bool {
+		self.intra_refresh
 	}
 
 	/// (losses healed by invalidation, losses declined) since the encoder was built.

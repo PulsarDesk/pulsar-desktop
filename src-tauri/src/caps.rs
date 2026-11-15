@@ -37,6 +37,21 @@ pub(crate) struct DecoderCap {
 	/// RK3588). The negotiator drops a host-encoder × this-decoder combo that lands here.
 	#[serde(default)]
 	pub incompatible_with: Vec<String>,
+	/// The renderer decodes this codec's 10-bit HDR10 profile (HEVC Main10 / AV1 10-bit) and
+	/// can show it — on an HDR monitor, or tone-mapped to SDR (`pulsar-render --probe`
+	/// `ten_bit`; Windows really decodes a canned HDR10 keyframe). Gates `StreamReq::hdr`.
+	#[serde(default)]
+	pub ten_bit: bool,
+	/// The renderer really decoded AND presented a 4:4:4 keyframe of this codec (its separate
+	/// `--probe-444`, run only when 4:4:4 is wanted — see `with_yuv444`): only then may a
+	/// session ask a host for 4:4:4 in it (`StreamReq::decode_yuv444`).
+	#[serde(default)]
+	pub yuv444: bool,
+	/// Highest session pixel rate (width × height × fps) the 4:4:4 decode keeps up with; 0 = no
+	/// known limit (a hardware decoder: Windows, macOS). Linux decodes 4:4:4 in software on one
+	/// thread and measures it (`pulsar-render --probe-444`): a session above it asks for 4:2:0.
+	#[serde(default)]
+	pub yuv444_max_px_s: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -67,6 +82,10 @@ pub(crate) fn probe_all(app: &AppHandle) -> LocalCaps {
 
 	// --- Encode: ffmpeg families (probe-validated), then gst families merged in. ---
 	let ffmpeg = crate::process::ffmpeg_bin(app);
+	// Linux: the VA-API node settled first (a screen GPU that cannot encode is skipped).
+	#[cfg(target_os = "linux")]
+	let vaapi = crate::process::settle_vaapi_node(&ffmpeg, &app.state::<crate::state::AppState>().stream_cfg);
+	#[cfg(not(target_os = "linux"))]
 	let vaapi = app
 		.state::<crate::state::AppState>()
 		.stream_cfg
@@ -168,7 +187,8 @@ pub(crate) fn probe_all(app: &AppHandle) -> LocalCaps {
 	// --- Decode: the renderer's own tiered probe (real canned-frame decodes). ---
 	let t_dec = std::time::Instant::now();
 	tracing::info!("caps probe: decoders");
-	let decoders = probe_decoders(app, &platform);
+	let mut decoders = probe_decoders(app, &platform);
+	with_yuv444(app, &mut decoders);
 	tracing::info!(ms = t_dec.elapsed().as_millis() as u64, n = decoders.len(), "caps probe: decoders done");
 
 	LocalCaps {
@@ -183,8 +203,11 @@ pub(crate) fn probe_all(app: &AppHandle) -> LocalCaps {
 /// Media Foundation, and reporting NOTHING would grey out every codec in Settings on a box
 /// that can in fact stream. HEVC is deliberately NOT claimed here — it needs the (optional)
 /// HEVC Video Extensions, so an unprobed guess is exactly what steered negotiation into a
-/// black screen. macOS keeps the pair its fallback players (mpv / ffplay) decode in software
-/// on every Mac. Elsewhere, report nothing rather than guessing.
+/// black screen. That H.264 claim is `hw:false, tier:"software"`: whether the GPU decodes it
+/// (DXVA) is unknown without the probe, and a WARP / basic-display box has no hardware decoder
+/// at all, so the unprobed entry never claims one. macOS keeps the pair its fallback players
+/// (mpv / ffplay) decode in software on every Mac. Elsewhere, report nothing rather than
+/// guessing.
 fn probe_unavailable(platform: &str) -> Vec<DecoderCap> {
 	if platform == "macos" {
 		return ["h264", "h265"]
@@ -196,6 +219,10 @@ fn probe_unavailable(platform: &str) -> Vec<DecoderCap> {
 				hw: false,
 				tier: "software".into(),
 				incompatible_with: Vec::new(),
+				// The fallback players show no HDR: never ask for it unprobed.
+				ten_bit: false,
+				yuv444: false,
+				yuv444_max_px_s: 0,
 			})
 			.collect();
 	}
@@ -206,9 +233,12 @@ fn probe_unavailable(platform: &str) -> Vec<DecoderCap> {
 		codec: "h264".into(),
 		ok: true,
 		name: "mediafoundation".into(),
-		hw: true,
-		tier: "hwaccel".into(),
+		hw: false,
+		tier: "software".into(),
 		incompatible_with: Vec::new(),
+		ten_bit: false,
+		yuv444: false,
+		yuv444_max_px_s: 0,
 	}]
 }
 
@@ -220,22 +250,29 @@ fn probe_decoders(app: &AppHandle, platform: &str) -> Vec<DecoderCap> {
 	// hardware), Linux decodes canned frames.
 	{
 		let render = crate::process::render_bin(app);
-		let mut cmd = std::process::Command::new(&render);
-		cmd.arg("--probe").stderr(std::process::Stdio::null());
-		// Probe with the SAME lib resolution the real renderer uses, so the reported
-		// decoder/tier match what will actually run (rkmpp HW on RK3588, not software).
-		crate::process::apply_render_lib_env(&mut cmd);
-		// Windows: the probe must never flash a console window (GUI host).
-		crate::process::no_window(&mut cmd);
-		// Bounded: a renderer probe that hangs (a wedged decoder init) must not hold the
-		// whole caps probe forever.
-		let out = output_within(cmd, std::time::Duration::from_secs(15));
-		let Ok(out) = out else {
-			// Renderer missing: software ffmpeg decode still exists inside it when present;
-			// report nothing rather than guessing.
-			return probe_unavailable(platform);
+		// Linux: choosing between `pulsar-render` and the Rockchip variant may already have
+		// run this very probe (process.rs `rkmpp_choice`) — reuse it, don't open MPP twice.
+		let text = match crate::process::cached_render_probe(app, &render) {
+			Some(text) => text,
+			None => {
+				let mut cmd = std::process::Command::new(&render);
+				cmd.arg("--probe").stderr(std::process::Stdio::null());
+				// Probe with the SAME lib resolution the real renderer uses, so the reported
+				// decoder/tier match what will actually run (rkmpp HW on RK3588, not software).
+				crate::process::apply_render_lib_env(&mut cmd);
+				// Windows: the probe must never flash a console window (GUI host).
+				crate::process::no_window(&mut cmd);
+				// Bounded: a renderer probe that hangs (a wedged decoder init) must not hold the
+				// whole caps probe forever.
+				let out = output_within(cmd, std::time::Duration::from_secs(15));
+				let Ok(out) = out else {
+					// Renderer missing: software ffmpeg decode still exists inside it when
+					// present; report nothing rather than guessing.
+					return probe_unavailable(platform);
+				};
+				String::from_utf8_lossy(&out.stdout).into_owned()
+			}
 		};
-		let text = String::from_utf8_lossy(&out.stdout);
 		let Ok(parsed) = serde_json::from_str::<serde_json::Value>(text.trim()) else {
 			return probe_unavailable(platform);
 		};
@@ -267,12 +304,54 @@ fn probe_decoders(app: &AppHandle, platform: &str) -> Vec<DecoderCap> {
 										.collect()
 								})
 								.unwrap_or_default(),
+							ten_bit: e.get("ten_bit").and_then(|v| v.as_bool()).unwrap_or(false),
+							// Filled by `with_yuv444` (a separate, opt-in probe).
+							yuv444: false,
+							yuv444_max_px_s: 0,
 						})
 					})
 					.collect()
 			})
 			.unwrap_or_default()
 	}
+}
+
+/// 4:4:4 decode caps, merged into the 4:2:0 ones from `--probe`. Only when 4:4:4 is wanted
+/// (`PULSAR_YUV444`, opt-in): `pulsar-render --probe-444` creates a hardware D3D11 device and
+/// runs real decodes on Windows (a wedged GPU driver can hang there — the NVIDIA one does while
+/// another process is stuck in it) and times a software decode on Linux; nobody else should pay
+/// that at startup. Its own short timeout, and additive: a hang or a failure here leaves every
+/// codec at 4:2:0 and never touches the caps `--probe` reported.
+fn with_yuv444(app: &AppHandle, decoders: &mut [DecoderCap]) {
+	if std::env::var_os("PULSAR_YUV444").is_none() {
+		return;
+	}
+	let t0 = std::time::Instant::now();
+	let mut cmd = std::process::Command::new(crate::process::render_bin(app));
+	cmd.arg("--probe-444").stderr(std::process::Stdio::null());
+	crate::process::apply_render_lib_env(&mut cmd);
+	crate::process::no_window(&mut cmd);
+	let out = match output_within(cmd, std::time::Duration::from_secs(6)) {
+		Ok(o) => o,
+		Err(e) => {
+			tracing::warn!(%e, "caps probe: 4:4:4 probe failed — 4:2:0 only");
+			return;
+		}
+	};
+	let parsed = serde_json::from_slice::<serde_json::Value>(out.stdout.trim_ascii()).unwrap_or_default();
+	for e in parsed.as_array().map(Vec::as_slice).unwrap_or_default() {
+		let Some(codec) = e.get("codec").and_then(|v| v.as_str()) else { continue };
+		let max = e.get("max_px_s").and_then(|v| v.as_u64()).unwrap_or(0);
+		if let Some(d) = decoders.iter_mut().find(|d| d.ok && d.codec == codec) {
+			d.yuv444 = true;
+			d.yuv444_max_px_s = max;
+		}
+	}
+	tracing::info!(
+		ms = t0.elapsed().as_millis() as u64,
+		yuv444 = ?decoders.iter().filter(|d| d.yuv444).map(|d| (d.codec.as_str(), d.yuv444_max_px_s)).collect::<Vec<_>>(),
+		"caps probe: 4:4:4 decode"
+	);
 }
 
 /// Spawn the startup probe: runs in the background, stores the result in AppState and
@@ -372,7 +451,7 @@ pub(crate) fn refresh_nvenc(app: &AppHandle) {
 }
 
 /// `Command::output` with a deadline (the child is killed past it → Err TimedOut).
-fn output_within(mut cmd: std::process::Command, limit: std::time::Duration) -> std::io::Result<std::process::Output> {
+pub(crate) fn output_within(mut cmd: std::process::Command, limit: std::time::Duration) -> std::io::Result<std::process::Output> {
 	use std::io::Read as _;
 	cmd.stdout(std::process::Stdio::piped());
 	let mut child = cmd.spawn()?;

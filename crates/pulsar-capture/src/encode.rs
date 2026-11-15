@@ -33,7 +33,8 @@
 //!   nvidia_bgra BGRA (plain, MiscFlags:0)                [NVIDIA device]
 //!        │  ID3D11VideoProcessorBlt  (BGRA → NV12, one GPU call; scales if needed)
 //!        ▼
-//!   nv12_tex NV12 (DEFAULT, BIND_RENDER_TARGET)          [NVIDIA device]
+//!   input_tex NV12 (DEFAULT, BIND_RENDER_TARGET)         [NVIDIA device]
+//!            (a 4:4:4 stream: BGRA that NVENC converts — d3d::InputFormat)
 //!        │  nvEncMapInputResource → nvEncEncodePicture (SYNC, no B-frames)
 //!        ▼
 //!   NVENC H.264 (preset P1 / tune ULL / CBR, repeatSPSPPS) → bitstream buffer
@@ -97,6 +98,9 @@ pub(crate) mod cuda_enc;
 mod d3d;
 #[cfg(windows)]
 mod encoder;
+// FP16 scRGB → P010 (BT.2020 PQ) shader passes of the HDR stream.
+#[cfg(windows)]
+pub(crate) mod hdr_conv;
 // The display GPU's own hardware encoder via Media Foundation (measured against NVENC).
 #[cfg(windows)]
 pub(crate) mod mf;
@@ -112,6 +116,9 @@ pub(crate) mod nvenc;
 mod nvsession;
 // GPU-free encoder decisions (reference-buffer depth, RFI vs keyframe, keyframe schedule).
 mod policy;
+// The capture loop decides by the encode size whether to ask for 4:4:4 at all.
+#[cfg(windows)]
+pub(crate) use policy::yuv444_fits;
 #[cfg(windows)]
 mod submit;
 
@@ -124,6 +131,12 @@ pub use encoder::Encoder;
 /// accept in `nvEncOpenEncodeSessionEx`). 0x1002 = AMD, 0x8086 = Intel (display owners).
 #[cfg(windows)]
 const VENDOR_NVIDIA: u32 = 0x10DE;
+
+/// Is `device` on the NVIDIA adapter (NVENC can take its textures without a bridge)?
+#[cfg(windows)]
+pub(crate) fn device_is_nvidia(device: &windows::Win32::Graphics::Direct3D11::ID3D11Device) -> bool {
+	(unsafe { d3d::device_vendor_id(device) }) == Some(VENDOR_NVIDIA)
+}
 
 /// Which codecs THIS machine's NVENC can actually encode — asked of the NVENC SDK itself
 /// (open a session, enumerate its encode GUIDs, close). Empty = no usable NVENC at all.
@@ -277,6 +290,15 @@ pub struct EncParams {
 	/// Reference-frame invalidation (the client asked, `StreamReq::rfi`): keep a deep reference
 	/// buffer (`policy::rfi_dpb`) so a lost one can be skipped (`Encoder::invalidate_lost`).
 	pub rfi: bool,
+	/// HDR10 stream: the capture delivers FP16 scRGB from a monitor in HDR mode (its mastering
+	/// data here). NVENC then encodes P010 as HEVC Main10 / AV1 10-bit with BT.2020 / PQ VUI
+	/// and the metadata on every keyframe. `None` = the SDR NV12 path, unchanged. Only the
+	/// same-device NVENC path takes it (no hybrid bridge, not Media Foundation).
+	pub hdr: Option<crate::hdr::HdrMeta>,
+	/// 4:4:4 chroma (the client decodes it): NVENC H.264 High 4:4:4 / HEVC RExt where the GPU
+	/// encodes it, else 4:2:0 on the same path. The Media Foundation encoder is 4:2:0 only.
+	/// An HDR10 stream (`hdr` set) is 4:2:0 (P010): HDR wins.
+	pub yuv444: bool,
 }
 
 /// The SEI NAL that tags an RFI recovery frame (user_data_unregistered with

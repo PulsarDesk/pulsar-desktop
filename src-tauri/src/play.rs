@@ -96,6 +96,48 @@ fn cursor_external_enabled() -> bool {
 	)
 }
 
+/// Ask the host for 4:4:4 chroma in `codec`? Opt-in (`PULSAR_YUV444`; 4:2:0 stays the default)
+/// and only for a codec this client's renderer really decodes and presents in 4:4:4
+/// (`decode_yuv444`, from its startup probe) — asking regardless was a black screen on every
+/// client whose decoder is 4:2:0-only (the Windows one before the AYUV path).
+pub(crate) fn yuv444_request(codec: &str, decode_yuv444: &[String]) -> bool {
+	yuv444_for(std::env::var_os("PULSAR_YUV444").is_some(), codec, decode_yuv444)
+}
+
+fn yuv444_for(wanted: bool, codec: &str, decode_yuv444: &[String]) -> bool {
+	wanted && decode_yuv444.iter().any(|c| c == codec)
+}
+
+/// Does a 4:4:4 decode limited to `max_px_s` (0 = no known limit) keep up with a session whose
+/// top point is `(w, h, fps)`? An unknown size (0: the host's default) counts as too much for
+/// a limited decoder; an unknown fps as 60.
+fn yuv444_fits(max_px_s: u64, (w, h, fps): (u32, u32, u32)) -> bool {
+	if max_px_s == 0 {
+		return true;
+	}
+	let fps = if fps == 0 { 60 } else { fps };
+	w > 0 && h > 0 && u64::from(w) * u64::from(h) * u64::from(fps) <= max_px_s
+}
+
+/// The session codec: `resolve_codec`, except that with 4:4:4 wanted an "auto" pick is made
+/// among the codecs the renderer shows in 4:4:4 first — "auto" goes best-first (AV1 > HEVC >
+/// H.264), and an AV1 pick would stream 4:2:0 although HEVC 4:4:4 was there.
+fn pick_codec(
+	requested: &str,
+	allowed: &[String],
+	hw: &[String],
+	decode_yuv444: &[String],
+	yuv444_wanted: bool,
+) -> String {
+	if yuv444_wanted && (requested.is_empty() || requested == "auto") {
+		let both: Vec<String> = allowed.iter().filter(|c| decode_yuv444.contains(c)).cloned().collect();
+		if !both.is_empty() {
+			return resolve_codec("auto", &both, hw);
+		}
+	}
+	resolve_codec(requested, allowed, hw)
+}
+
 /// Format the host's monitors for the renderer's `caps` line `displays=` field, as
 /// `idx:name:w:h:primary` comma-joined â€” NO spaces (the caps line is whitespace-tokenized,
 /// and session_cmds patches it token-wise, so a spaced value would corrupt both). The
@@ -318,15 +360,9 @@ pub(crate) async fn start_remote_play(
 		.features
 		.iter()
 		.any(|f| f == pulsar_core::service::media::FEAT_NACK);
-	// Reference-frame invalidation: the Windows renderer reports a lost frame's packets and
-	// resumes at the host's tagged recovery frame instead of waiting for a keyframe (H.264 /
-	// HEVC; the recovery tag is an SEI). Needs the media-over-session NACK path.
-	let host_rfi = cfg!(windows)
-		&& mos
-		&& host_nack
-		&& host_caps.features.iter().any(|f| f == pulsar_core::service::media::FEAT_RFI)
-		// A/B knob: PULSAR_RFI=0 keeps the keyframe recovery.
-		&& std::env::var("PULSAR_RFI").map(|v| v != "0").unwrap_or(true);
+	// Reference-frame invalidation: the host can do it (its renderer side is checked once the
+	// renderer is up, see `host_rfi` below). Needs the media-over-session NACK path.
+	let host_rfi_cap = mos && host_nack && host_caps.features.iter().any(|f| f == pulsar_core::service::media::FEAT_RFI);
 	// This client's DECODE caps (startup probe). Unknown (probe still running /
 	// macOS stub failure) â†’ assume the universal software pair. `incompat` maps a codec
 	// to the host encoder families whose REAL bitstream this client can't decode even
@@ -375,8 +411,21 @@ pub(crate) async fn start_remote_play(
 		})
 		.cloned()
 		.collect();
-	let codec = resolve_codec(&codec, &allowed);
-	tracing::info!(%codec, ?allowed, "stream codec resolved");
+	// Codecs this renderer decodes AND presents in 4:4:4 (startup probe), within the negotiated
+	// set; travels in every request so the host encodes 4:4:4 only in one of them. Narrowed to
+	// the session's pixel rate below (`yuv444_fits`) once that is known.
+	let mut decode_yuv444: Vec<String> = probed_decoders
+		.iter()
+		.filter(|d| d.ok && d.yuv444 && allowed.contains(&d.codec))
+		.map(|d| d.codec.clone())
+		.collect();
+	let yuv444_wanted = std::env::var_os("PULSAR_YUV444").is_some();
+	// Codecs this client decodes in HARDWARE (probe `hw`): "auto" prefers them, so a box
+	// with a software-only AV1 decoder (the MF AV1 extension on a GPU without the DXVA
+	// profile) streams hardware HEVC instead of AV1 on the CPU — lower decode latency.
+	let hw_codecs = hw_decoded_codecs(&probed_decoders);
+	let codec = pick_codec(&codec, &allowed, &hw_codecs, &decode_yuv444, yuv444_wanted);
+	tracing::info!(%codec, ?allowed, ?hw_codecs, "stream codec resolved");
 
 	// Same machine? (loopback P2P) â†’ control would feed back, so flag it.
 	let local = matches!(sess.transport(), Transport::Direct)
@@ -897,6 +946,16 @@ pub(crate) async fn start_remote_play(
 		}
 	}
 	let native = native_child.is_some() || single_surface || render_child.is_some();
+	// Reference-frame invalidation: pulsar-render reports a lost frame's packets and resumes at
+	// the host's tagged recovery frame instead of waiting for a keyframe (H.264 / HEVC; the tag
+	// is an SEI; `stream/rtp.rs` RFI_MODE) — on Windows, macOS and Linux alike.
+	let host_rfi = rfi_client(
+		host_rfi_cap,
+		render_child.is_some(),
+		cfg!(target_os = "linux"),
+		native_view::video_unix_name(video_port).is_some(),
+		std::env::var("PULSAR_RFI").ok().as_deref(),
+	);
 
 	if !game_id.is_empty() {
 		if let Err(e) = request_launch(&mut sess, &game_id).await {
@@ -954,9 +1013,23 @@ pub(crate) async fn start_remote_play(
 	// Held copies so the session menu can re-request the stream at a new resolution.
 	let codec_h = codec.clone();
 	let encoder_h = encoder.clone();
-	// HDR: read from the UI setting persisted in stream_cfg. The PULSAR_HDR env var is a
-	// debug override that wins if set. The UI value is the normal production path.
-	let req_hdr = state.stream_cfg.lock().unwrap().hdr || std::env::var_os("PULSAR_HDR").is_some();
+	// HDR: the UI setting persisted in stream_cfg (Settings → Display). It is only ASKED for
+	// when it can work end to end (`hdr_possible`): the host streams real HDR10 (FEAT_HDR —
+	// a Windows NVENC host; it still sends SDR when its monitor is not in HDR mode), the codec
+	// has a 10-bit profile (HEVC / AV1) and this client's renderer decodes it (`ten_bit`) and
+	// can show it (HDR10 output on an HDR monitor, tone-mapped to SDR otherwise). The PULSAR_HDR
+	// env var is a debug override that asks regardless.
+	// The same decision is re-made in hold.rs whenever the codec changes (HdrNeg::want).
+	let hdr_neg = HdrNeg {
+		pref: state.stream_cfg.lock().unwrap().hdr,
+		host: host_caps.features.iter().any(|f| f == pulsar_core::service::media::FEAT_HDR),
+		ten_bit: probed_decoders.iter().filter(|d| d.ok && d.ten_bit).map(|d| d.codec.clone()).collect(),
+		force: std::env::var_os("PULSAR_HDR").is_some(),
+	};
+	if hdr_neg.pref && !hdr_neg.want(&codec) {
+		tracing::info!(%codec, features = ?host_caps.features, ten_bit = ?hdr_neg.ten_bit, "HDR asked in Settings but not possible end to end — SDR stream");
+	}
+	let req_hdr = hdr_neg.want(&codec);
 	// Quality bias from the Settings â†’ Display 'VarsayÄ±lan kalite' control (ui.quality).
 	// "hq" â†’ Quality, "fast" â†’ Latency; "auto" (or absent) defers to the mode-natural default
 	// (game=Latency, remote=Quality). Also seeded into hold_session so re-requests (adaptive
@@ -1201,9 +1274,16 @@ pub(crate) async fn start_remote_play(
 		acfg.startup_windows = 0;
 	}
 	// Only the Linux libav renderer resumes on a partially intra-refreshed picture (libav
-	// conceals the lost reference). Windows heals a loss by reference-frame invalidation instead
-	// (`host_rfi`; the 2026-11-08 IR attempt there overflowed the AU queue â€” see stream/rtp.rs
-	// IR_MODE), macOS waits for an IDR and gets a short GOP.
+	// conceals the lost reference). Windows and macOS heal a loss by reference-frame
+	// invalidation instead (`host_rfi`, with pulsar-render; the 2026-11-08 IR attempt on Windows
+	// overflowed the AU queue — see stream/rtp.rs IR_MODE); their flip is the short GOP, which an
+	// RFI host absorbs, and only the mpv / ffplay fallback (no RFI) really gets one. On Linux the
+	// controller's intra-refresh flip becomes the short GOP while RFI reaches the current codec
+	// (`hold.rs` `flip_recovery`, re-derived on a codec switch): a flip to intra refresh turns
+	// RFI off (`rfi 0`) while a host that cannot start a rolling intra wave mid-session keeps its
+	// long GOP — every loss then smeared until the next safety IDR. On AV1 (no recovery tag) the
+	// flip stays intra refresh.
+	let rfi_req = host_rfi && codec != "av1";
 	acfg.ir_capable = cfg!(target_os = "linux");
 	// A game session over a WAN / phone link: loss there is a given, and on Windows each one the
 	// host's RFI can't reach (a handover stall is seconds long) became a keyframe — 5-10× a frame,
@@ -1335,7 +1415,23 @@ pub(crate) async fn start_remote_play(
 		req_w, req_h, req_fps, req_kbps,
 		"adaptive controller seeded"
 	);
-	let rfi_req = host_rfi && codec != "av1";
+	// The host's per-monitor HDR state (`DisplayInfo::hdr`) is logged, not used as a gate: it
+	// is a caps-time snapshot (the user can turn HDR on after connecting), and a host asked for
+	// HDR10 from an SDR monitor streams SDR on its own, so asking costs nothing.
+	if req_hdr {
+		let mon_hdr = host_caps.displays.iter().find(|d| d.idx == display_idx.unwrap_or(0)).map(|d| d.hdr);
+		tracing::info!(%codec, ?mon_hdr, "asking the host for HDR10");
+	}
+	// 4:4:4 only where the decode keeps up with the session's top pixel rate (Linux decodes it
+	// in software on one thread and measured how fast — `DecoderCap::yuv444_max_px_s`).
+	decode_yuv444.retain(|c| {
+		let max = probed_decoders.iter().find(|d| &d.codec == c).map_or(0, |d| d.yuv444_max_px_s);
+		yuv444_fits(max, native_dims)
+	});
+	let req_yuv444 = yuv444_request(&codec, &decode_yuv444);
+	if yuv444_wanted && !req_yuv444 {
+		tracing::info!(%codec, ?decode_yuv444, ?native_dims, "4:4:4 asked for (PULSAR_YUV444) but this client cannot show it in this codec at this size/fps — 4:2:0");
+	}
 	let req = StreamReq {
 		port: video_port,
 		codec,
@@ -1357,8 +1453,12 @@ pub(crate) async fn start_remote_play(
 		// 0 = host default; quality: "hq"â†’Quality, "fast"â†’Latency, "auto"/missingâ†’mode-derived default.
 		bitrate_kbps: req_kbps,
 		quality: req_quality,
-		hdr: req_hdr,
-		yuv444: std::env::var_os("PULSAR_YUV444").is_some(),
+		// Never the legacy bit (an old host could tag an 8-bit capture as PQ on it); real HDR10
+		// only through hdr10, which only hosts with FEAT_HDR read.
+		hdr: false,
+		hdr10: req_hdr,
+		yuv444: req_yuv444,
+		decode_yuv444: decode_yuv444.clone(),
 		// PRUNED set (host-encoder-aware), not raw `client_codecs`: the host clamps its
 		// auto-degraded codec to this, so it can never land on a codec the client dropped
 		// because its decoder is incompatible with the host's encoder family (e.g. the Pi's
@@ -2155,6 +2255,7 @@ pub(crate) async fn start_remote_play(
 		// as `decode_codecs`, so the host's clamp keeps excluding host-encoder-incompatible
 		// codecs across the whole session, not just the first request (see `allowed` above).
 		allowed.clone(),
+		decode_yuv444,
 		overlay_stdin.clone(),
 		mos,
 		host_nack,
@@ -2168,7 +2269,7 @@ pub(crate) async fn start_remote_play(
 		peer_key,
 		path_class,
 		req.cursor_external,
-		req_hdr,
+		hdr_neg,
 		req_quality,
 		req.audio_quality,
 		auto_audio,
@@ -2488,18 +2589,33 @@ pub(crate) async fn stop_stream(
 	Ok(())
 }
 
+/// The codecs a decoder probe reports as usable (`ok`) AND decoded in hardware (`hw`).
+pub(crate) fn hw_decoded_codecs(decoders: &[crate::caps::DecoderCap]) -> Vec<String> {
+	decoders
+		.iter()
+		.filter(|d| d.ok && d.hw)
+		.map(|d| d.codec.clone())
+		.collect()
+}
+
 /// The codec to actually stream for a requested one against the negotiated set. "auto" (or
-/// empty) picks by quality (av1 > h265 > h264). An explicit codec outside the set (the host
+/// empty) picks by quality (av1 > h265 > h264) among the codecs this client decodes in
+/// hardware (`hw`) first, then among the whole set: a software decode of a "better" codec
+/// costs more decode latency (and drops frames at high fps) than a hardware decode of an
+/// older one. An empty `hw` (software-only box, no probe) leaves the plain order. An explicit codec outside the set (the host
 /// can't encode it, or this client can't decode the host's bitstream for it) degrades to that
 /// pick: honoring it verbatim puts one codec in the renderer's SDP and another on the wire â†’
 /// the decoder consumes AUs forever without a frame (permanent black). `PULSAR_FORCE_CODEC`
 /// bypasses the clamp for testing. An EMPTY set means we learned nothing (caps timed out / old
 /// host), not "nothing is supported" â€” the request is honored and the host degrades it.
-pub(crate) fn resolve_codec(requested: &str, allowed: &[String]) -> String {
+pub(crate) fn resolve_codec(requested: &str, allowed: &[String], hw: &[String]) -> String {
 	let auto_pick = || {
-		["av1", "h265", "h264"]
+		const ORDER: [&str; 3] = ["av1", "h265", "h264"];
+		let in_set = |c: &&str| allowed.iter().any(|a| a == *c);
+		ORDER
 			.iter()
-			.find(|c| allowed.iter().any(|a| a == **c))
+			.find(|c| in_set(c) && hw.iter().any(|h| h == **c))
+			.or_else(|| ORDER.iter().find(|c| in_set(c)))
 			.map(|c| c.to_string())
 			.unwrap_or_else(|| "h264".to_string())
 	};
@@ -2515,6 +2631,95 @@ pub(crate) fn resolve_codec(requested: &str, allowed: &[String]) -> String {
 	}
 }
 
+/// Can this session be HDR10 end to end? The host says it streams HDR (`FEAT_HDR`), the
+/// codec has a 10-bit profile the host encodes (HEVC Main10 / AV1 10-bit; NVENC has no H.264
+/// High 10) and this client's renderer decodes + shows that codec's 10-bit stream.
+pub(crate) fn hdr_possible(host_hdr: bool, codec: &str, client_ten_bit: bool) -> bool {
+	host_hdr && matches!(codec, "h265" | "av1") && client_ten_bit
+}
+/// What decides StreamReq::hdr10 for a session: the Settings preference, the host's
+/// FEAT_HDR, the codecs this client's renderer really decodes + shows at 10 bits, and the
+/// PULSAR_HDR debug override. Kept for the whole session so a codec change (session menu,
+/// fallback) re-decides HDR for the NEW codec instead of keeping the first codec's answer.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct HdrNeg {
+	pub pref: bool,
+	pub host: bool,
+	pub ten_bit: Vec<String>,
+	pub force: bool,
+}
+
+impl HdrNeg {
+	/// Ask the host for HDR10 on codec?
+	pub(crate) fn want(&self, codec: &str) -> bool {
+		self.force || (self.pref && hdr_possible(self.host, codec, self.ten_bit.iter().any(|c| c == codec)))
+	}
+}
+
+#[cfg(test)]
+mod hdr_tests {
+	use super::hdr_possible;
+
+	#[test]
+	fn hdr_is_asked_only_when_every_link_can_carry_it() {
+		assert!(hdr_possible(true, "h265", true));
+		assert!(hdr_possible(true, "av1", true));
+		assert!(!hdr_possible(false, "h265", true), "host without FEAT_HDR");
+		assert!(!hdr_possible(true, "h264", true), "no 10-bit H.264 on the host");
+		assert!(!hdr_possible(true, "h265", false), "client cannot decode 10-bit");
+	}
+	#[test]
+	fn a_codec_switch_re_decides_hdr() {
+		use super::HdrNeg;
+		// The client's AV1 decoder failed the 10-bit probe; HEVC passed.
+		let n = HdrNeg { pref: true, host: true, ten_bit: vec!["h265".into()], force: false };
+		assert!(n.want("h265"));
+		assert!(!n.want("av1"), "h265 -> av1 must drop HDR (8-bit-only AV1 decoder)");
+		assert!(!n.want("h264"));
+		// A session that started on h264 asks for HDR after a switch to h265.
+		assert!(!n.want("h264") && n.want("h265"));
+		// Settings off / host without FEAT_HDR: never, whatever the codec.
+		assert!(!HdrNeg { pref: false, ..n.clone() }.want("h265"));
+		assert!(!HdrNeg { host: false, ..n.clone() }.want("h265"));
+		// The debug override asks regardless.
+		assert!(HdrNeg { force: true, pref: false, ..n }.want("h264"));
+	}
+}
+
+/// Whether this client streams with reference-frame invalidation: the host can do it
+/// (`host_cap`: FEAT_RFI over the media-over-session NACK path) and the session's renderer takes
+/// part — pulsar-render (`pulsar_render`; its `stream/rtp.rs` reports a hole as `vidsink-rfi` and
+/// resumes at the recovery tag), on Linux only through its Rust RTP path (`rust_rtp`: the app's
+/// Unix video socket; `PULSAR_LINUX_DEMUX=ffmpeg` = libavformat's demux, which does neither). An
+/// mpv / ffplay fallback never reports a hole, and the app skips the keyframe request on an
+/// unrepaired loss when RFI is on (`hold.rs` `rfi_reach`) — such a session must not ask for RFI.
+/// `env` = `PULSAR_RFI` (`0` keeps the keyframe recovery, A/B).
+fn rfi_client(host_cap: bool, pulsar_render: bool, linux: bool, rust_rtp: bool, env: Option<&str>) -> bool {
+	host_cap && pulsar_render && (!linux || rust_rtp) && env != Some("0")
+}
+
+#[cfg(test)]
+mod rfi_tests {
+	use super::rfi_client;
+
+	#[test]
+	fn rfi_on_every_os_with_pulsar_render() {
+		// Windows / macOS (`linux` false: the UDP path always runs stream/rtp.rs).
+		assert!(rfi_client(true, true, false, false, None));
+		// Linux on the Rust RTP path.
+		assert!(rfi_client(true, true, true, true, None));
+	}
+
+	#[test]
+	fn no_rfi_without_the_renderer_side_or_the_host() {
+		assert!(!rfi_client(false, true, false, false, None), "host without FEAT_RFI");
+		assert!(!rfi_client(true, false, false, false, None), "mpv / ffplay fallback");
+		assert!(!rfi_client(true, true, true, false, None), "Linux libavformat demux");
+		assert!(!rfi_client(true, true, false, false, Some("0")), "PULSAR_RFI=0");
+		assert!(rfi_client(true, true, false, false, Some("1")));
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::resolve_codec;
@@ -2524,19 +2729,80 @@ mod tests {
 	}
 
 	#[test]
+	fn yuv444_auto_prefers_a_444_codec() {
+		use super::pick_codec;
+		let all = set(&["h264", "h265", "av1"]);
+		// Not wanted: the normal best-first pick.
+		assert_eq!(pick_codec("auto", &all, &[], &set(&["h265"]), false), "av1");
+		// Wanted: HEVC 4:4:4 beats AV1 4:2:0.
+		assert_eq!(pick_codec("auto", &all, &[], &set(&["h265"]), true), "h265");
+		assert_eq!(pick_codec("", &all, &[], &set(&["h264", "h265"]), true), "h265");
+		// Nothing decodes 4:4:4: the normal order.
+		assert_eq!(pick_codec("auto", &all, &[], &[], true), "av1");
+		// A codec picked by name stays.
+		assert_eq!(pick_codec("h264", &all, &[], &set(&["h265"]), true), "h264");
+	}
+
+	#[test]
+	fn yuv444_within_the_decoders_pixel_rate() {
+		use super::yuv444_fits;
+		// No limit (hardware decode).
+		assert!(yuv444_fits(0, (3840, 2160, 120)));
+		assert!(yuv444_fits(0, (0, 0, 0)));
+		let max = 1920 * 1080 * 60;
+		assert!(yuv444_fits(max, (1920, 1080, 60)));
+		assert!(!yuv444_fits(max, (1920, 1080, 120)));
+		assert!(!yuv444_fits(max, (2560, 1440, 60)));
+		// Unknown size with a limit: 4:2:0. Unknown fps = 60.
+		assert!(!yuv444_fits(max, (0, 0, 60)));
+		assert!(yuv444_fits(max, (1920, 1080, 0)));
+	}
+
+	#[test]
+	fn yuv444_only_in_a_codec_the_renderer_shows_in_444() {
+		use super::yuv444_for;
+		// Not opted in: never (4:2:0 stays the default).
+		assert!(!yuv444_for(false, "h265", &set(&["h265"])));
+		assert!(yuv444_for(true, "h265", &set(&["h265"])));
+		// The renderer cannot show 4:4:4 at all (e.g. a Windows GPU without HEVC RExt decode).
+		assert!(!yuv444_for(true, "h265", &[]));
+		// Another codec than the one it decodes in 4:4:4.
+		assert!(!yuv444_for(true, "h264", &set(&["h265"])));
+	}
+
+	#[test]
 	fn auto_picks_the_best_negotiated_codec() {
-		assert_eq!(resolve_codec("auto", &set(&["h264", "h265"])), "h265");
-		assert_eq!(resolve_codec("", &set(&["h264"])), "h264");
-		assert_eq!(resolve_codec("auto", &set(&[])), "h264");
+		let none = set(&[]);
+		assert_eq!(resolve_codec("auto", &set(&["h264", "h265"]), &none), "h265");
+		assert_eq!(resolve_codec("", &set(&["h264"]), &none), "h264");
+		assert_eq!(resolve_codec("auto", &set(&[]), &none), "h264");
+	}
+
+	#[test]
+	fn auto_prefers_a_hardware_decoded_codec() {
+		// The gaming PC as client: AV1 decodes in software, H.264/HEVC in hardware.
+		let all = set(&["av1", "h265", "h264"]);
+		assert_eq!(resolve_codec("auto", &all, &set(&["h264", "h265"])), "h265");
+		assert_eq!(resolve_codec("auto", &all, &set(&["h264"])), "h264");
+		assert_eq!(resolve_codec("auto", &all, &set(&["av1", "h265", "h264"])), "av1");
+		// A hw codec the host cannot send does not count: the plain order applies.
+		assert_eq!(resolve_codec("auto", &set(&["h265", "h264"]), &set(&["av1"])), "h265");
+		// No hardware decoder at all: the plain quality order.
+		assert_eq!(resolve_codec("auto", &all, &set(&[])), "av1");
+		// An explicit pick in the set still wins over the hardware preference.
+		assert_eq!(resolve_codec("av1", &all, &set(&["h264", "h265"])), "av1");
+		// An explicit pick outside the set degrades to the hw-aware pick.
+		assert_eq!(resolve_codec("av1", &set(&["h265", "h264"]), &set(&["h264"])), "h264");
 	}
 
 	#[test]
 	fn a_codec_the_host_cannot_send_degrades_instead_of_going_black() {
+		let none = set(&[]);
 		// The 2026-10-29 session: an h264-only software host, h265 picked in the menu.
-		assert_eq!(resolve_codec("h265", &set(&["h264"])), "h264");
-		assert_eq!(resolve_codec("h264", &set(&["h264", "h265"])), "h264");
+		assert_eq!(resolve_codec("h265", &set(&["h264"]), &none), "h264");
+		assert_eq!(resolve_codec("h264", &set(&["h264", "h265"]), &none), "h264");
 		// Nothing learned (old host / caps timeout): honored, the host degrades it.
-		assert_eq!(resolve_codec("av1", &set(&[])), "av1");
+		assert_eq!(resolve_codec("av1", &set(&[]), &none), "av1");
 	}
 }
 

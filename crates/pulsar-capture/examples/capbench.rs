@@ -2,8 +2,9 @@
 //! local UDP sink and prints the live `CaptureStats` once a second.
 //!
 //! ```text
-//! capbench [output_idx=0] [fps=120] [seconds=10] [h264|h265|av1] [--no-anim]
+//! capbench [output_idx=0] [fps=120] [seconds=10] [h264|h265|av1] [--no-anim] [--444]
 //! ```
+//! `--444` asks for a 4:4:4 stream (NVENC H.264 High 4:4:4 / HEVC RExt where the GPU has it).
 //! `PULSAR_CAPTURE=dxgi|wgc` pins the source, `PULSAR_EMIT_ON_ARRIVAL=0` restores the old
 //! slot-deadline emission. Unless `--no-anim`, a small window on the monitor repaints every
 //! ~2 ms so there is fresh content to measure (a static desktop has no present→encoded latency).
@@ -59,6 +60,7 @@ fn main() {
 		low_latency: true,
 		intra_refresh: false,
 		rfi: false,
+		yuv444: args.iter().any(|a| a == "--444"),
 		draw_mouse: true,
 		window_hwnd: None,
 		encoder: if std::env::var("PULSAR_NATIVE_ENCODER").as_deref() == Ok("mf") {
@@ -66,6 +68,8 @@ fn main() {
 		} else {
 			pulsar_capture::NativeEncoder::Nvenc
 		},
+		// PULSAR_BENCH_HDR=1 measures the HDR10 path (FP16 capture → P010 Main10) on an HDR monitor.
+		hdr: std::env::var("PULSAR_BENCH_HDR").is_ok_and(|v| v == "1"),
 	};
 	let h = pulsar_capture::start_capture_encode(cfg.clone()).expect("start_capture_encode");
 	let h2 = twice.then(|| {

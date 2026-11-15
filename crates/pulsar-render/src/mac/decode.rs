@@ -36,6 +36,15 @@ impl Frame {
 		// SAFETY: a live pixel buffer.
 		unsafe { CVPixelBufferGetPixelFormatType(self.ptr()) }
 	}
+	/// The decoder attached SMPTE ST 2084 (PQ) as the transfer function (the stream's colour
+	/// description says HDR10).
+	pub fn is_pq(&self) -> bool {
+		// SAFETY: a live buffer; the attachment is a +0 CFString (or null) we only compare.
+		unsafe {
+			let t = CVBufferGetAttachment(self.ptr(), kCVImageBufferTransferFunctionKey, std::ptr::null_mut());
+			!t.is_null() && CFEqual(t, kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ) != 0
+		}
+	}
 	/// The colour matrix the decoder attached (from the stream's VUI / colour config); BT.709
 	/// when it says nothing — what Pulsar hosts encode.
 	pub fn matrix(&self) -> Matrix {
@@ -229,10 +238,35 @@ impl Decoder {
 	}
 
 	fn make_session(&mut self) -> Result<(), String> {
-		let Some(format) = self.format.as_ref() else { return Err("no format".into()) };
+		// A 4:4:4 stream (its SPS says so) asks for a 4:4:4 picture; a VideoToolbox that cannot
+		// make one gets the 4:2:0 formats (it subsamples: blurrier chroma, still a picture).
+		let yuv444 = matches!(self.codec, Codec::H264 | Codec::H265)
+			&& self.sps.as_ref().and_then(|s| crate::stream::chroma::sps_chroma_format(self.codec, s)) == Some(3);
+		if yuv444 {
+			match self.make_session_for(&[PIX_444F, PIX_444V]) {
+				Ok(()) => return Ok(()),
+				Err(e) => eprintln!("pulsar-render(mac): no 4:4:4 decoder output ({e}) — 4:2:0"),
+			}
+		}
 		// Any of the 4:2:0 bi-planar formats, Metal-compatible, IOSurface-backed (zero-copy into
-		// the CVMetalTextureCache). 8-bit first: a 10-bit stream still comes out as P010.
-		let fmts: Vec<Cf> = [PIX_420V, PIX_420F, PIX_X420, PIX_XF20].iter().map(|f| cf_i32(*f as i32)).collect();
+		// the CVMetalTextureCache). 8-bit first for an SDR stream (half the memory traffic of
+		// P010). An HDR10 stream (the parameter sets' colour description says PQ) lists the
+		// 10-bit formats first, so VideoToolbox does not hand 10-bit PQ out as 8-bit (banding);
+		// the Metal pass tone-maps PQ at either depth (metal.rs keys it on `Frame::is_pq`).
+		let Some(format) = self.format.as_ref() else { return Err("no format".into()) };
+		// SAFETY: live format description; the extension is +0 (or null) and only compared.
+		let pq = unsafe {
+			let t = CMFormatDescriptionGetExtension(format.ptr(), kCVImageBufferTransferFunctionKey);
+			!t.is_null() && CFEqual(t, kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ) != 0
+		};
+		let order = if pq { [PIX_X420, PIX_XF20, PIX_420V, PIX_420F] } else { [PIX_420V, PIX_420F, PIX_X420, PIX_XF20] };
+		self.make_session_for(&order)
+	}
+
+	/// Create the session with `pixel_formats` as the decoder's output choices.
+	fn make_session_for(&mut self, pixel_formats: &[u32]) -> Result<(), String> {
+		let Some(format) = self.format.as_ref() else { return Err("no format".into()) };
+		let fmts: Vec<Cf> = pixel_formats.iter().map(|f| cf_i32(*f as i32)).collect();
 		let fmt_arr = cf_array(&fmts.iter().collect::<Vec<_>>());
 		let iosurf = cf_dict(&[]);
 		// SAFETY: the statics are framework CFStrings; values are live CF objects.
@@ -427,7 +461,7 @@ fn obu_payload(obu: &[u8]) -> Option<(usize, usize)> {
 
 /// Headless capability probe (main.rs `--probe`), the same JSON as the Windows / Linux
 /// probes: H.264 / HEVC decode everywhere (hardware or Apple's software decoder), AV1 only
-/// where VideoToolbox decodes it in hardware.
+/// where VideoToolbox decodes it in hardware. 4:4:4 is a separate probe (`probe_444_json`).
 pub fn probe_json() -> String {
 	register_av1();
 	let mut entries = Vec::new();
@@ -435,10 +469,60 @@ pub fn probe_json() -> String {
 		// SAFETY: plain query.
 		let hw = unsafe { VTIsHardwareDecodeSupported(codec_type(c)) } != 0;
 		let ok = hw || c != Codec::Av1;
+		// 10-bit (HDR10): REALLY decode the canned HDR10 keyframe (`testdata/test-hdr10.*`) the
+		// way a session does; only a picture that comes out 10-bit (x420 / xf20) and tagged PQ
+		// counts (the Metal pass then tone-maps it, metal.rs). Like the Windows probe; an 8-bit
+		// or untagged result keeps HDR off. Unverified on macOS hardware.
+		let ten_bit = ok && decodes_hdr10(c);
 		entries.push(format!(
-			"{{\"codec\":\"{name}\",\"ok\":{ok},\"decoder\":\"videotoolbox\",\"hw\":{hw},\"tier\":\"{}\",\"incompatible_with\":[]}}",
+			"{{\"codec\":\"{name}\",\"ok\":{ok},\"decoder\":\"videotoolbox\",\"hw\":{hw},\"tier\":\"{}\",\"incompatible_with\":[],\"ten_bit\":{ten_bit}}}",
 			if hw { "hwaccel" } else { "software" }
 		));
 	}
 	format!("[{}]", entries.join(","))
+}
+
+/// 64×64 HDR10 keyframes (HEVC Main10 / AV1 10-bit, BT.2020 PQ) for the `ten_bit` probe.
+const TEST_HDR10_H265: &[u8] = include_bytes!("../../testdata/test-hdr10.h265");
+const TEST_HDR10_AV1: &[u8] = include_bytes!("../../testdata/test-hdr10.av1.obu");
+
+/// Decode the canned HDR10 keyframe of `c`: true when the picture is 10-bit and tagged PQ.
+fn decodes_hdr10(c: Codec) -> bool {
+	let sample = match c {
+		Codec::H265 => TEST_HDR10_H265,
+		Codec::Av1 => TEST_HDR10_AV1,
+		Codec::H264 => return false,
+	};
+	let mut d = Decoder::new(c);
+	let au = AccessUnit { data: sample.to_vec(), pts_90k: 0, key: true, conceal: false };
+	let out = d.decode(&au).unwrap_or_default();
+	out.first().is_some_and(|f| f.is_pq() && matches!(f.pixel_format(), PIX_X420 | PIX_XF20))
+}
+
+/// `--probe-444` (main.rs): the codecs whose canned 4:4:4 keyframe VideoToolbox really decodes
+/// into a 4:4:4 picture, as `[{"codec":"h265"}]`. Separate from `--probe` so the app runs these
+/// decodes only when 4:4:4 is wanted (`PULSAR_YUV444`), under their own timeout.
+pub fn probe_444_json() -> String {
+	let entries: Vec<String> = [(Codec::H264, "h264"), (Codec::H265, "h265")]
+		.into_iter()
+		.filter(|(c, _)| decodes_444(*c))
+		.map(|(_, name)| format!("{{\"codec\":\"{name}\"}}"))
+		.collect();
+	format!("[{}]", entries.join(","))
+}
+
+/// Decode the canned 4:4:4 keyframe (`testdata/test-444.*`) and check a 4:4:4 picture came out
+/// (not one VideoToolbox subsampled to 4:2:0). AV1: no fixture, never.
+fn decodes_444(c: Codec) -> bool {
+	let fixture: &[u8] = match c {
+		Codec::H264 => include_bytes!("../../testdata/test-444.h264"),
+		Codec::H265 => include_bytes!("../../testdata/test-444.h265"),
+		Codec::Av1 => return false,
+	};
+	let mut dec = Decoder::new(c);
+	let au = AccessUnit { data: fixture.to_vec(), pts_90k: 0, key: true, conceal: false };
+	match dec.decode(&au) {
+		Ok(frames) => frames.iter().any(|f| matches!(f.pixel_format(), PIX_444V | PIX_444F)),
+		Err(_) => false,
+	}
 }

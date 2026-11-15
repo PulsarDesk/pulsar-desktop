@@ -113,6 +113,20 @@ pub const NV_ENC_DEVICE_TYPE_CUDA: u32 = 1;
 pub const NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR: u32 = 1;
 pub const NV_ENC_INPUT_IMAGE: u32 = 0; // NV_ENC_INPUT_RESOURCE_USAGE
 pub const NV_ENC_BUFFER_FORMAT_NV12: u32 = 0x00000001;
+/// 10-bit 4:2:0 semi-planar, MSB-aligned in 16 bits (= DXGI P010) — the HDR encode surface.
+pub const NV_ENC_BUFFER_FORMAT_YUV420_10BIT: u32 = 0x00010000;
+/// `NV_ENC_BIT_DEPTH_10` (SDK 12.1+ `inputBitDepth` / `outputBitDepth`).
+pub const NV_ENC_BIT_DEPTH_10: u32 = 10;
+/// `NV_ENC_CAPS_SUPPORT_10BIT_ENCODE` (nvEncodeAPI.h 12.2 enum ordinal).
+pub const NV_ENC_CAPS_SUPPORT_10BIT_ENCODE: u32 = 39;
+/// H.273 code points for HDR10 (VUI / AV1 colour config): BT.2020 primaries, SMPTE ST 2084
+/// transfer, BT.2020 non-constant-luminance matrix.
+pub const VUI_PRIMARIES_BT2020: u32 = 9;
+pub const VUI_TRANSFER_SMPTE2084: u32 = 16;
+pub const VUI_MATRIX_BT2020_NCL: u32 = 9;
+/// 8-bit packed A8R8G8B8 (word order: B lowest = DXGI B8G8R8A8): NVENC converts the RGB to YUV
+/// itself — the 4:4:4 input (`d3d::InputFormat::Argb`).
+pub const NV_ENC_BUFFER_FORMAT_ARGB: u32 = 0x01000000;
 pub const NV_ENC_PIC_STRUCT_FRAME: u32 = 0x01;
 pub const NV_ENC_PARAMS_RC_CBR: u32 = 0x2; // NV_ENC_PARAMS_RC_MODE
 										   // NV_ENC_TUNING_INFO: 1=HIGH_QUALITY, 2=LOW_LATENCY, 3=ULTRA_LOW_LATENCY, 4=LOSSLESS
@@ -130,6 +144,7 @@ pub const NV_ENC_NUM_REF_FRAMES_1: u32 = 0x1;
 pub const NV_ENC_PIC_TYPE_IDR: u32 = 0x03;
 // NV_ENC_CAPS ordinals (nvEncodeAPI.h 12.2 enum order — implicit values from 0).
 pub const NV_ENC_CAPS_SUPPORT_REF_PIC_INVALIDATION: u32 = 28;
+pub const NV_ENC_CAPS_SUPPORT_YUV444_ENCODE: u32 = 33;
 pub const NV_ENC_CAPS_SUPPORT_MULTIPLE_REF_FRAMES: u32 = 47;
 pub const NV_ENC_CAPS_PARAM_VER: u32 = struct_version(1);
 
@@ -162,6 +177,13 @@ pub const NV_ENC_H264_PROFILE_HIGH_GUID: GUID = GUID::from_values(
 	0x4b89,
 	[0xAF, 0x2A, 0xD5, 0x37, 0xC9, 0x2B, 0xE3, 0x10],
 );
+// Profile: H.264 High 4:4:4 (Predictive) = 7AC663CB-A598-4960-B844-339B261A7D52
+pub const NV_ENC_H264_PROFILE_HIGH_444_GUID: GUID = GUID::from_values(
+	0x7AC663CB,
+	0xA598,
+	0x4960,
+	[0xB8, 0x44, 0x33, 0x9B, 0x26, 0x1A, 0x7D, 0x52],
+);
 // Codec: HEVC (H.265) = 790CDC88-4522-4d7b-9425-BDA9975F7603
 pub const NV_ENC_CODEC_HEVC_GUID: GUID = GUID::from_values(
 	0x790CDC88,
@@ -176,12 +198,26 @@ pub const NV_ENC_HEVC_PROFILE_MAIN_GUID: GUID = GUID::from_values(
 	0x40fa,
 	[0x87, 0x8F, 0xF1, 0x25, 0x3B, 0x4D, 0xFD, 0xEC],
 );
+// Profile: HEVC Format Range Extensions (RExt: 4:4:4) = 51EC32B5-1B4C-453C-9CBD-B616BD621341
+pub const NV_ENC_HEVC_PROFILE_FREXT_GUID: GUID = GUID::from_values(
+	0x51EC32B5,
+	0x1B4C,
+	0x453C,
+	[0x9C, 0xBD, 0xB6, 0x16, 0xBD, 0x62, 0x13, 0x41],
+);
 // Codec: AV1 = 0A352289-0AA7-4759-862D-5D15CD16D254
 pub const NV_ENC_CODEC_AV1_GUID: GUID = GUID::from_values(
 	0x0A352289,
 	0x0AA7,
 	0x4759,
 	[0x86, 0x2D, 0x5D, 0x15, 0xCD, 0x16, 0xD2, 0x54],
+);
+// Profile: HEVC Main10 = FA4D2B6C-3A5B-411a-8018-0A3F5E3C9BE5
+pub const NV_ENC_HEVC_PROFILE_MAIN10_GUID: GUID = GUID::from_values(
+	0xFA4D2B6C,
+	0x3A5B,
+	0x411a,
+	[0x80, 0x18, 0x0A, 0x3F, 0x5E, 0x3C, 0x9B, 0xE5],
 );
 // Profile: AV1 Main = 5f2a39f5-f14e-4f95-9a9e-b76d568fcf97
 pub const NV_ENC_AV1_PROFILE_MAIN_GUID: GUID = GUID::from_values(
@@ -429,6 +465,23 @@ impl NV_ENC_CONFIG_H264 {
 	pub fn set_numRefL0(&mut self, v: u32) {
 		self.numRefL0 = v;
 	}
+	pub fn vui_mut(&mut self) -> &mut [u32; 28] {
+		&mut self.h264VUIParameters
+	}
+}
+
+/// Write the colour description into an `NV_ENC_CONFIG_{H264,HEVC}_VUI_PARAMETERS` (SDK 12.x:
+/// overscanInfoPresentFlag, overscanInfo, videoSignalTypePresentFlag, videoFormat,
+/// videoFullRangeFlag, colourDescriptionPresentFlag, colourPrimaries, transferCharacteristics,
+/// colourMatrix, …). Codes are the H.273 ones (1 = BT.709); `videoFormat` 5 = unspecified.
+pub fn set_vui_colour(vui: &mut [u32; 28], full_range: bool, primaries: u32, transfer: u32, matrix: u32) {
+	vui[2] = 1; // videoSignalTypePresentFlag
+	vui[3] = 5; // videoFormat: unspecified
+	vui[4] = full_range as u32;
+	vui[5] = 1; // colourDescriptionPresentFlag
+	vui[6] = primaries;
+	vui[7] = transfer;
+	vui[8] = matrix;
 }
 
 // NV_ENC_CONFIG_HEVC — HEVC (H.265) codec config (nvEncodeAPI.h, 12.x). Layout:
@@ -482,6 +535,34 @@ impl NV_ENC_CONFIG_HEVC {
 	pub fn set_flags(&mut self, bits: u32) {
 		self.flags |= bits;
 	}
+	pub fn vui_mut(&mut self) -> &mut [u32; 28] {
+		&mut self.hevcVUIParameters
+	}
+	/// HDR10: 10-bit in and out (`pixelBitDepthMinus8` = 2 for drivers that still read it,
+	/// plus the SDK 12.1+ `inputBitDepth` / `outputBitDepth`) and the VUI colour description
+	/// (limited range, BT.2020 / PQ / BT.2020 NCL).
+	pub fn set_hdr10(&mut self) {
+		self.flags = (self.flags & !NV_ENC_HEVC_PIXEL_BIT_DEPTH_MASK) | (2 << 11);
+		self.inputBitDepth = NV_ENC_BIT_DEPTH_10;
+		self.outputBitDepth = NV_ENC_BIT_DEPTH_10;
+		set_vui_hdr10(&mut self.hevcVUIParameters);
+	}
+}
+/// HEVC `pixelBitDepthMinus8` (bits 11..12 of the HEVC bitfield word, see the layout comment).
+pub const NV_ENC_HEVC_PIXEL_BIT_DEPTH_MASK: u32 = 0b11 << 11;
+
+/// Write the HDR10 colour description into an `NV_ENC_CONFIG_H264_VUI_PARAMETERS` (the HEVC
+/// VUI is the same struct): [2] videoSignalTypePresentFlag, [3] videoFormat (5 = unspecified),
+/// [4] videoFullRangeFlag, [5] colourDescriptionPresentFlag, [6] colourPrimaries,
+/// [7] transferCharacteristics, [8] colourMatrix (SDK 12.2 field order).
+fn set_vui_hdr10(vui: &mut [u32; 28]) {
+	vui[2] = 1;
+	vui[3] = 5;
+	vui[4] = 0;
+	vui[5] = 1;
+	vui[6] = VUI_PRIMARIES_BT2020;
+	vui[7] = VUI_TRANSFER_SMPTE2084;
+	vui[8] = VUI_MATRIX_BT2020_NCL;
 }
 /// HEVC `repeatSPSPPS` bit (bit 7 of the HEVC bitfield word) — re-emit VPS/SPS/PPS in-band
 /// on each IDR so a late-joining RTP client (no out-of-band SDP) always has parameter sets.
@@ -499,6 +580,8 @@ pub const NV_ENC_AV1_FLAG_INTRA_REFRESH: u32 = 1 << 6;
 pub const NVENC_INFINITE_GOPLENGTH: u32 = 0xFFFF_FFFF;
 /// HEVC `chromaFormatIDC` = 1 (4:2:0) packed at bits 9..10.
 pub const NV_ENC_HEVC_CHROMA_420: u32 = 1 << 9;
+/// HEVC `chromaFormatIDC` = 3 (4:4:4) packed at bits 9..10.
+pub const NV_ENC_HEVC_CHROMA_444: u32 = 3 << 9;
 
 // NV_ENC_CONFIG_AV1 — AV1 codec config (nvEncodeAPI.h, 12.2). Layout:
 //   level, tier, minPartSize, maxPartSize (4 × u32), then ONE bitfield word `flags`
@@ -549,6 +632,16 @@ impl NV_ENC_CONFIG_AV1 {
 	/// OR named AV1 bitfield bits in (preserving the preset's reserved bits).
 	pub fn set_flags(&mut self, bits: u32) {
 		self.flags |= bits;
+	}
+	/// HDR10: 10-bit in and out and the sequence header colour config (studio range,
+	/// BT.2020 / PQ / BT.2020 NCL). AV1 Main covers 10-bit 4:2:0.
+	pub fn set_hdr10(&mut self) {
+		self.inputBitDepth = NV_ENC_BIT_DEPTH_10;
+		self.outputBitDepth = NV_ENC_BIT_DEPTH_10;
+		self.colorPrimaries = VUI_PRIMARIES_BT2020;
+		self.transferCharacteristics = VUI_TRANSFER_SMPTE2084;
+		self.matrixCoefficients = VUI_MATRIX_BT2020_NCL;
+		self.colorRange = 0;
 	}
 }
 /// AV1 `repeatSeqHdr` bit (bit 5 of the AV1 bitfield word) — re-emit the sequence header
@@ -845,11 +938,40 @@ mod tests {
 		let mut h = unsafe { std::mem::zeroed::<NV_ENC_CONFIG_HEVC>() };
 		h.set_flags(NV_ENC_HEVC_FLAG_REPEAT_SPSPPS | NV_ENC_HEVC_CHROMA_420);
 		assert_eq!(h.flags, (1 << 7) | (1 << 9)); // repeatSPSPPS(7) + chromaFormatIDC=1(9)
+		// 4:4:4 over a preset that already said 4:2:0: chromaFormatIDC = 3, and never the
+		// pixelBitDepthMinus8 field above it (bits 11..12 — that would make it 10-bit).
+		let mut h = unsafe { std::mem::zeroed::<NV_ENC_CONFIG_HEVC>() };
+		h.set_flags(NV_ENC_HEVC_CHROMA_420);
+		h.set_flags(NV_ENC_HEVC_CHROMA_444);
+		assert_eq!((h.flags >> 9) & 0b11, 3);
+		assert_eq!(h.flags & (0b11 << 11), 0);
+		// The VUI colour description lands on videoSignalTypePresentFlag .. colourMatrix.
+		let mut v = [0u32; 28];
+		set_vui_colour(&mut v, true, 1, 1, 1);
+		assert_eq!(&v[..10], &[0, 0, 1, 5, 1, 1, 1, 1, 1, 0]);
 		let mut a = unsafe { std::mem::zeroed::<NV_ENC_CONFIG_AV1>() };
 		a.set_flags(NV_ENC_AV1_FLAG_REPEAT_SEQ_HDR | NV_ENC_AV1_CHROMA_420);
 		assert_eq!(a.flags, (1 << 5) | (1 << 7)); // repeatSeqHdr(5) + chromaFormatIDC=1(7)
 		// …and never disableSeqHdr (bit 4) or enableIntraRefresh (bit 6) by accident.
 		assert_eq!(a.flags & ((1 << 4) | (1 << 6)), 0);
 		assert_eq!(NV_ENC_AV1_FLAG_INTRA_REFRESH, 1 << 6);
+	}
+
+	// HDR10 writes the bit depth and the VUI colour description where SDK 12.2 has them, and
+	// leaves the SDR flags alone.
+	#[test]
+	fn hevc_and_av1_hdr10_fields() {
+		let mut h = unsafe { std::mem::zeroed::<NV_ENC_CONFIG_HEVC>() };
+		h.set_flags(NV_ENC_HEVC_FLAG_REPEAT_SPSPPS | NV_ENC_HEVC_CHROMA_420);
+		h.set_hdr10();
+		assert_eq!(h.flags, (1 << 7) | (1 << 9) | (2 << 11));
+		assert_eq!((h.inputBitDepth, h.outputBitDepth), (10, 10));
+		assert_eq!(&h.hevcVUIParameters[2..9], &[1, 5, 0, 1, 9, 16, 9]);
+		assert_eq!(core::mem::offset_of!(NV_ENC_CONFIG_HEVC, hevcVUIParameters), 64);
+		assert_eq!(core::mem::offset_of!(NV_ENC_CONFIG_HEVC, outputBitDepth), 200);
+		let mut a = unsafe { std::mem::zeroed::<NV_ENC_CONFIG_AV1>() };
+		a.set_hdr10();
+		assert_eq!((a.colorPrimaries, a.transferCharacteristics, a.matrixCoefficients), (9, 16, 9));
+		assert_eq!((a.inputBitDepth, a.outputBitDepth), (10, 10));
 	}
 }

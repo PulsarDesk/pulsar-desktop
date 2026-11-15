@@ -301,7 +301,7 @@
 	"settings.coopMissing": "Компонент орнатылмаған — ProtoInput файлдарын қалтаға салыңыз",
 	"settings.coopOpenDir": "Қалтаны ашу",
 	"settings.hdr": "HDR тарату",
-	"settings.hdrDesc": "Қолдау көрсетілетін экрандарда 10 биттік HDR ағыны.",
+	"settings.hdrDesc": "Қашықтағы экранда HDR қосулы болса (NVIDIA бар Windows), 10 биттік HDR. SDR экранда сурет бейімделеді.",
 	"settings.audioQuality": "Дыбыс сапасы",
 	"settings.audioQualityDesc": "Автоматты: жергілікті желіде Шикі, әйтпесе Жоғары. Сеанс мәзірінде де бар.",
 	"settings.aq.auto": "Автоматты",

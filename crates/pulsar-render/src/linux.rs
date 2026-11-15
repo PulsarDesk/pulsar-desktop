@@ -607,6 +607,13 @@ pub fn run() {
 						// the stale GPU texture — otherwise host-A's pointer bitmap stays
 						// uploaded and is drawn over host-B's video on the resident-reuse path.
 						CURSOR_IMG_GEN.fetch_add(1, Ordering::SeqCst);
+						// The reopened stream starts in the safe wait-for-keyframe mode, like a
+						// fresh renderer (Windows / macOS respawn one): the app sends its `ir` /
+						// `rfi` with the next stats window. A resident renderer reused for another
+						// host (no RFI) or a codec switch to AV1 (no recovery tag) must not keep
+						// waiting for a recovery tag that never comes.
+						video::set_ir_mode(false);
+						video::set_rfi_mode(false);
 						video::request_reopen(p);
 					}
 				}
@@ -637,6 +644,8 @@ pub fn run() {
 					crate::overlay::set_upscale_mode(m);
 				}
 				Some("hostname") => crate::overlay::set_host_name(&it.collect::<Vec<_>>().join(" ")),
+				// HDR10 tone-map reference from the host (SDR white, peak nits) — hdr_ref.rs.
+				Some("hdrref") => crate::hdr_ref::set_from_args(it),
 				// Session audio truth from the app (atx/amute/mic 0|1) so the overlay's
 				// Ses toggles highlight the real state.
 				Some("audio") => {

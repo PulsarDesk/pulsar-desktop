@@ -11,6 +11,8 @@
 
 mod i18n;
 mod overlay;
+// HDR10 → SDR tone-map reference (host SDR white + peak), shared by every renderer.
+mod hdr_ref;
 
 /// `--lang tr|en` (from the app's `Config.language`) — picks the native UI language
 /// for the overlay/hints (the renderer can't share the webview's i18n tables; the
@@ -72,6 +74,18 @@ fn main() {
 		println!("{}", decode::probe_json());
 		return;
 	}
+	// `--probe-444`: the codecs a 4:4:4 stream decodes AND presents in here, with the measured
+	// software decode speed (only asked for when 4:4:4 is wanted — see `decode::probe_444_json`).
+	if std::env::args().any(|a| a == "--probe-444") {
+		println!("{}", decode::probe_444_json());
+		return;
+	}
+	// `--list-zerocopy`: the tier-0 (zero-copy SoC) decoder names this libavcodec offers,
+	// nothing opened — the off-board build check of the Rockchip variant.
+	if std::env::args().any(|a| a == "--list-zerocopy") {
+		println!("{}", decode::list_zero_copy_json());
+		return;
+	}
 	apply_lang();
 	linux::run();
 }
@@ -83,6 +97,23 @@ fn main() {
 	// analogue of the Linux probe above.
 	if std::env::args().any(|a| a == "--probe") {
 		println!("{}", win::decode::probe_json());
+		if win::decode::probe_abandoned_worker() {
+			use std::io::Write as _;
+			let _ = std::io::stdout().flush();
+			// SAFETY: ends this process only; the JSON is already flushed.
+			unsafe {
+				let _ = windows::Win32::System::Threading::TerminateProcess(
+					windows::Win32::System::Threading::GetCurrentProcess(),
+					0,
+				);
+			}
+		}
+		return;
+	}
+	// `--probe-444`: the codecs a 4:4:4 stream decodes AND presents in here (real decodes on a
+	// hardware D3D11 device; only asked for when 4:4:4 is wanted — see `probe_444_json`).
+	if std::env::args().any(|a| a == "--probe-444") {
+		println!("{}", win::decode::probe_444_json());
 		return;
 	}
 	apply_lang();
@@ -95,6 +126,12 @@ fn main() {
 	// Windows / Linux probes.
 	if std::env::args().any(|a| a == "--probe") {
 		println!("{}", mac::decode::probe_json());
+		return;
+	}
+	// `--probe-444`: the codecs VideoToolbox decodes into a 4:4:4 picture here (only asked for
+	// when 4:4:4 is wanted — see `probe_444_json`).
+	if std::env::args().any(|a| a == "--probe-444") {
+		println!("{}", mac::decode::probe_444_json());
 		return;
 	}
 	apply_lang();
