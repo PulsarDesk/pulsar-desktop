@@ -689,8 +689,9 @@ fn probe_gst_pipeline(mut cmd: std::process::Command, pipeline: &str) -> bool {
 /// Sunshine-style runtime VALIDATION of one encoder+codec: actually encode a single
 /// synthetic frame and check ffmpeg exits 0. Catches the cases name-presence detection
 /// misses — encoder listed but the GPU/driver can't init it (e.g. `av1_nvenc` on an Ampere
-/// card, `h264_qsv` with no Intel GPU). Results are cached per (encoder, codec) for the
-/// process lifetime so we probe at most once each.
+/// card, `h264_qsv` with no Intel GPU). Results are cached per (encoder, codec) — and per
+/// render node for VA-API, whose probe runs on `vaapi_device` (the startup node check probes
+/// several) — for the process lifetime so we probe at most once each.
 fn probe_encoder_codec(
 	ffmpeg: &str,
 	encoder: HwEncoder,
@@ -699,9 +700,11 @@ fn probe_encoder_codec(
 ) -> bool {
 	use std::collections::HashMap;
 	use std::sync::{Mutex, OnceLock};
-	static CACHE: OnceLock<Mutex<HashMap<(HwEncoder, VCodec), bool>>> = OnceLock::new();
+	static CACHE: OnceLock<Mutex<HashMap<(HwEncoder, VCodec, String), bool>>> = OnceLock::new();
 	let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-	if let Some(&hit) = cache.lock().unwrap().get(&(encoder, codec)) {
+	let node = if encoder == HwEncoder::Vaapi { vaapi_device.to_string() } else { String::new() };
+	let key = (encoder, codec, node);
+	if let Some(&hit) = cache.lock().unwrap().get(&key) {
 		return hit;
 	}
 	let ok = match pipeline::probe_command(encoder, codec, vaapi_device) {
@@ -715,8 +718,24 @@ fn probe_encoder_codec(
 		}
 		None => false,
 	};
-	cache.lock().unwrap().insert((encoder, codec), ok);
+	cache.lock().unwrap().insert(key, ok);
 	ok
+}
+
+/// Linux: settle the VA-API render node before the encoder probes read it — the sysfs pick,
+/// or on a multi-GPU box the first candidate a VA-API encode probe passes on
+/// (`drm_node::verify_encode_node`) — and store it in `StreamCfg::vaapi_device`, so the caps,
+/// the CLI and the in-process engine all use the GPU that encodes. Memoised; cheap after the
+/// first call. Returns the node.
+#[cfg(target_os = "linux")]
+pub(crate) fn settle_vaapi_node(ffmpeg: &str, stream_cfg: &std::sync::Mutex<crate::state::StreamCfg>) -> String {
+	let node = crate::drm_node::verify_encode_node(|n| !validated_codecs(ffmpeg, HwEncoder::Vaapi, n).is_empty());
+	let mut cfg = stream_cfg.lock().unwrap();
+	if cfg.vaapi_device != node {
+		tracing::info!(from = %cfg.vaapi_device, to = %node, "VA-API render node updated after the encode probe");
+		cfg.vaapi_device = node.clone();
+	}
+	node
 }
 
 /// PCI vendor id of Intel GPUs (the only ones Quick Sync runs on).

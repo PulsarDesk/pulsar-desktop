@@ -30,6 +30,7 @@ mod screen_permission;
 #[cfg(windows)]
 mod dpi_watch;
 mod display_watch;
+mod drm_node;
 #[cfg(not(windows))]
 mod scale_watch;
 mod clipboard_sync;

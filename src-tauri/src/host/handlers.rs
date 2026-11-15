@@ -2050,6 +2050,11 @@ pub(super) fn make_on_stream(
 	// restart capture at the new geometry.  On Windows this is only populated when
 	// native_started=false (ffmpeg fallback); native DXGI sessions self-heal via ACCESS_LOST.
 	last_req_store: Arc<Mutex<Option<StreamReq>>>,
+	// Every OS: set by the host's own re-issues of the stored request (display-mode watcher,
+	// window watcher, the CLI keyframe restart, a dead in-process engine — host.rs). The request
+	// is identical to the running one, so neither the in-process libav fast path nor the CLI
+	// bitrate-step absorb may take it: it is a full restart (new capture geometry / an IDR).
+	host_restart: Arc<std::sync::atomic::AtomicBool>,
 	// Set by failover.rs right before it re-issues a request through the restream channel: the
 	// next request is a restart the host ordered (this session's native capture stalled, or
 	// NVENC is back for a session on a fallback encoder) and is carried out in full.
@@ -2111,7 +2116,9 @@ pub(super) fn make_on_stream(
 	// started with, and when: ffmpeg can't change its bitrate live, so every ABR step used to
 	// restart capture (a visible gap + keyframe each time → stutter, and the gap itself read as
 	// congestion → more steps). Small/rapid bitrate-only steps are absorbed instead.
-	#[cfg(not(target_os = "linux"))]
+	// Linux: only while the stream really is on the CLI (VA-API / QSV / kmsgrab fallbacks) —
+	// the in-process libav and Wayland pipelines take steps live above, and a stream on one of
+	// them clears this so a request for a dead engine is never absorbed.
 	let mut last_ff_req: Option<(StreamReq, std::time::Instant)> = None;
 	// Cancel flag for the current stream's G2 native encode-stats reporter thread (spawned per
 	// native (re)stream below). Held across restreams so a slow-path restream/teardown can stop
@@ -2143,8 +2150,10 @@ pub(super) fn make_on_stream(
 		// bitrate step" absorb may swallow it.
 		#[cfg(windows)]
 		let forced = force_restart.swap(false, std::sync::atomic::Ordering::SeqCst);
-		#[cfg(not(any(windows, target_os = "linux")))]
+		#[cfg(not(windows))]
 		let forced = false;
+		// A restart the host's own watchers ordered (see `host_restart` above).
+		let host_ordered = host_restart.swap(false, std::sync::atomic::Ordering::SeqCst);
 		// last_req_store is updated below (after native_started is resolved) so the
 		// display-mode watcher only fires for ffmpeg-path sessions on Windows.
 		// WAYLAND BITRATE-ONLY FAST PATH — the client's ABR re-sends the full StreamReq just to
@@ -2160,7 +2169,9 @@ pub(super) fn make_on_stream(
 		#[cfg(target_os = "linux")]
 		{
 			let slot = libav_slot.lock().unwrap();
-			if let (Some(engine), Some(prev)) = (slot.as_ref(), last_libav_req.as_ref()) {
+			// A host-ordered restart (new X11 geometry: host resolution change, streamed window
+			// resized / closed) must rebuild x11grab, which keeps the size it opened with.
+			if let (Some(engine), Some(prev)) = (slot.as_ref().filter(|_| !host_ordered), last_libav_req.as_ref()) {
 				let mut probe = prev.clone();
 				probe.bitrate_kbps = req.bitrate_kbps;
 				probe.loss_recovery = req.loss_recovery;
@@ -2182,6 +2193,9 @@ pub(super) fn make_on_stream(
 				}
 			}
 		}
+		// Wayland: a host-ordered re-issue (`host_ordered`) is absorbed here as before — tearing
+		// the portal cast down for it is what leaves the video black (above); a PipeWire cast
+		// renegotiates its size on a mode change itself (not verified on hardware).
 		#[cfg(target_os = "linux")]
 		if (pulsar_core::capture::is_wayland() && !super::mock_capture()) {
 			let slot = cap_slot.lock().unwrap();
@@ -2364,8 +2378,12 @@ pub(super) fn make_on_stream(
 		// once per 6 s; anything else keeps the running encode at its rate. A deferred step is not
 		// lost — the client keeps adapting, and a later request compares against what ffmpeg is
 		// actually streaming. A recovery-mode flip still restarts (short GOP needs a new encoder).
-		#[cfg(not(target_os = "linux"))]
-		if let Some((prev, at)) = last_ff_req.as_ref().filter(|_| !forced) {
+		// Every OS: Linux X11 hosts on the CLI chain (AMD/Intel VA-API / QSV when the in-process
+		// engine could not start, kmsgrab) restarted ffmpeg on every ABR step before 2026-11-15.
+		// Never for a restart the host ordered itself (`forced` / `host_ordered`): that request is
+		// identical to the running one ON PURPOSE (new geometry, or a keyframe the CLI can only
+		// give by restarting).
+		if let Some((prev, at)) = last_ff_req.as_ref().filter(|_| !forced && !host_ordered) {
 			let mut probe = prev.clone();
 			probe.bitrate_kbps = req.bitrate_kbps;
 			if probe == req && req.bitrate_kbps > 0 && prev.bitrate_kbps > 0 {
@@ -2381,10 +2399,7 @@ pub(super) fn make_on_stream(
 				}
 			}
 		}
-		#[cfg(not(target_os = "linux"))]
-		{
-			last_ff_req = Some((req.clone(), std::time::Instant::now()));
-		}
+		last_ff_req = Some((req.clone(), std::time::Instant::now()));
 		let cfg = stream_cfg.lock().unwrap().clone();
 		// A (re-)stream supersedes any prior cursor poller; the (maybe) new KMS branch below
 		// starts a fresh one. Stopping here keeps it at most one per session.
@@ -2514,6 +2529,8 @@ pub(super) fn make_on_stream(
 			// Record the req that this full (re)start streams, so a later bitrate-only ABR
 			// re-stream is absorbed by the fast path above instead of restarting the pipeline.
 			last_wl_req = Some(req.clone());
+			// Not an ffmpeg CLI video stream: never absorb a step for it below.
+			last_ff_req = None;
 			// A (re-)stream restarts capture: kill any audio ffmpeg already running for
 			// this session before spawning the new one, so a live re-stream (resolution/
 			// codec/fps/audio-toggle change) doesn't stack audio encoders. (The video
@@ -3845,6 +3862,9 @@ pub(super) fn make_on_stream(
 				Some(Ok(engine)) => {
 					*libav_slot.lock().unwrap() = Some(engine);
 					last_libav_req = Some(req.clone());
+					// Steps go to the engine (fast path above); if it dies, the next request
+					// must restart, not be absorbed as a CLI step.
+					last_ff_req = None;
 					true
 				}
 				Some(Err(e)) => {
