@@ -889,6 +889,87 @@ unsafe fn set_shortcut_hook(
 	}
 }
 
+const WM_HOOK_ON: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 0x31;
+const WM_HOOK_OFF: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 0x32;
+
+/// The thread that owns the shortcut hook: it does nothing but pump messages, so Windows always
+/// gets the hook's answer at once. On the render thread a frame busy in decode / present could
+/// let the first key after taking control slip past the hook (2026-11-15: the first Win press
+/// opened the Start menu locally AND reached the host). 0 = could not be started.
+fn shortcut_hook_thread() -> u32 {
+	static TID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+	*TID.get_or_init(|| {
+		let (tx, rx) = std::sync::mpsc::channel::<u32>();
+		let spawned = std::thread::Builder::new().name("pulsar-kbd-hook".into()).spawn(move || unsafe {
+			#[link(name = "kernel32")]
+			extern "system" {
+				fn GetCurrentThreadId() -> u32;
+			}
+			use windows::Win32::UI::WindowsAndMessaging::{
+				DispatchMessageW, GetMessageW, PeekMessageW, TranslateMessage, MSG, PM_NOREMOVE,
+			};
+			let mut m = MSG::default();
+			// Create this thread's message queue before anyone posts to it.
+			let _ = PeekMessageW(&mut m, None, 0, 0, PM_NOREMOVE);
+			let _ = tx.send(GetCurrentThreadId());
+			let mut hook = None;
+			while GetMessageW(&mut m, None, 0, 0).as_bool() {
+				match m.message {
+					// Re-installed on every take of control: the newest hook in the chain runs first.
+					WM_HOOK_ON => {
+						set_shortcut_hook(&mut hook, false);
+						set_shortcut_hook(&mut hook, true);
+					}
+					WM_HOOK_OFF => set_shortcut_hook(&mut hook, false),
+					_ => {
+						let _ = TranslateMessage(&m);
+						DispatchMessageW(&m);
+					}
+				}
+			}
+		});
+		if spawned.is_err() {
+			return 0;
+		}
+		rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap_or(0)
+	})
+}
+
+/// Install (control taken + focus) / remove (released) the shortcut hook on its own thread.
+fn post_shortcut_hook(on: bool) {
+	use windows::Win32::UI::WindowsAndMessaging::PostThreadMessageW;
+	let tid = shortcut_hook_thread();
+	if tid != 0 {
+		// SAFETY: posting a plain message to our own thread's queue.
+		let _ = unsafe { PostThreadMessageW(tid, if on { WM_HOOK_ON } else { WM_HOOK_OFF }, WPARAM(0), LPARAM(0)) };
+	}
+}
+
+/// A Win key press reached the window itself while in control: the hook did not swallow it, so
+/// Windows will open the Start menu when it is released. Tap an unassigned key (0xE8, the key
+/// AutoHotkey's menu mask uses) while Win is held — Windows opens the Start menu only for a Win
+/// press with no other key in between. The tap is injected: the hook lets it through and the
+/// window drops it (see the key handler).
+fn mask_start_menu() {
+	use windows::Win32::UI::Input::KeyboardAndMouse::{
+		SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
+	};
+	let key = |up: bool| INPUT {
+		r#type: INPUT_KEYBOARD,
+		Anonymous: INPUT_0 {
+			ki: KEYBDINPUT {
+				wVk: VIRTUAL_KEY(0xE8),
+				wScan: 0,
+				dwFlags: if up { KEYEVENTF_KEYUP } else { Default::default() },
+				time: 0,
+				dwExtraInfo: 0,
+			},
+		},
+	};
+	// SAFETY: two well-formed keyboard INPUTs.
+	unsafe { SendInput(&[key(false), key(true)], std::mem::size_of::<INPUT>() as i32) };
+}
+
 /// Left/right-resolved virtual key for a WM_(SYS)KEY* message, matching what WH_KEYBOARD_LL
 /// reports (VK_LCONTROL / VK_RMENU / VK_RSHIFT ...), so the app maps both sources the same way.
 fn resolve_vk(wp: WPARAM, lp: LPARAM) -> u16 {
@@ -948,6 +1029,14 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
 		{
 			// The touchpad pinch's synthesized Ctrl: stays local (see SKIP_CTRL_MSGS).
 			return unsafe { DefWindowProcW(hwnd, msg, wp, lp) };
+		}
+		// Our own Start-menu mask tap (mask_start_menu): nothing for the remote.
+		if vk == 0xE8 {
+			return LRESULT(0);
+		}
+		if down && matches!(vk, 0x5B | 0x5C) && ENGAGED_R.load(Ordering::SeqCst) {
+			eprintln!("pulsar-render(win): Win key reached the window (hook missed it) — masking the Start menu");
+			mask_start_menu();
 		}
 		println!("key {} {}", vk, down as u8);
 		let _ = std::io::stdout().flush();
@@ -2409,7 +2498,6 @@ unsafe fn event_loop(
 	// Rate limit for `vidsink-needidr` (see stream::rtp::NEED_IDR).
 	let mut last_needidr = std::time::Instant::now() - std::time::Duration::from_secs(1);
 	start_shortcut_capture();
-	let mut shortcut_hook: Option<windows::Win32::UI::WindowsAndMessaging::HHOOK> = None;
 	// Rate-cap the idle (video-stall) overlay repaint to ~60 Hz so a frozen/paused host
 	// doesn't pin the CPU re-presenting the same frame every 2 ms loop tick.
 	let mut last_idle_paint = std::time::Instant::now();
@@ -2567,7 +2655,7 @@ unsafe fn event_loop(
 				}
 				SHORTCUT_CAPTURE.store(want, Ordering::Relaxed);
 				SKIP_CTRL_MSGS.store(0, Ordering::Relaxed);
-				set_shortcut_hook(&mut shortcut_hook, want);
+				post_shortcut_hook(want);
 				use std::io::Write as _;
 				println!("ov kfocus {}", want as u8);
 				let _ = std::io::stdout().flush();
