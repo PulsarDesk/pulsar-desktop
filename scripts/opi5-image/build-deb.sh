@@ -4,7 +4,8 @@
 # It must be built on arm64 Ubuntu 22.04 with the Rockchip multimedia PPA, the same userland
 # the image ships: pulsar-render then links that PPA's FFmpeg 6 (libavcodec60), which carries
 # the rkmpp hardware decoders. The generic linux-arm64 release links Ubuntu's own libavcodec58
-# (no rkmpp), which is why the image gets its own build. A board that installs the .deb needs
+# (no rkmpp) and carries a separate rkmpp renderer variant instead (scripts/rkmpp/); this
+# build links the PPA's ffmpeg directly and ships no variant. A board that installs the .deb needs
 # that PPA's libavcodec60 too (the image has it; elsewhere: add the PPA, `apt install
 # libavcodec60`).
 #
