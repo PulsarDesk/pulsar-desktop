@@ -17,7 +17,9 @@ describe('webview keymap', () => {
 	it('reaches every key the hosts type, each code once', () => {
 		const codes = Object.values(EVDEV);
 		expect(new Set(codes).size).toBe(codes.length);
-		expect([...codes].sort((a, b) => a - b)).toEqual(CLIENT_KEYS);
+		// 95 (KEY_KPJPCOMMA): the webview has no code for it — the JIS keypad comma is
+		// 'NumpadComma', sent as 121, which every host types as a comma too.
+		expect([...codes].sort((a, b) => a - b)).toEqual(CLIENT_KEYS.filter((k) => k !== 95));
 	});
 
 	it('maps the ISO / JIS / PC extras', () => {

@@ -110,6 +110,28 @@ describe('SessionInput free cursor (canvas path)', () => {
 		stop();
 	});
 
+	it('releasing control lets go of side buttons only when they are held', () => {
+		const { input, stop } = make({ free: false });
+		input.onDown(ev()); // the engaging click is swallowed
+		input.onUp(ev());
+		const btn = (button: number) => ({ ...ev(), button, preventDefault() {} }) as unknown as PointerEvent;
+		input.onDown(btn(4)); // forward held, back pressed and released
+		input.onDown(btn(3));
+		input.onUp(btn(3));
+		vi.mocked(api.inputButton).mockClear();
+		input.stopControl();
+		expect(vi.mocked(api.inputButton).mock.calls).toEqual([
+			[1, 0, false], [1, 1, false], [1, 2, false], [1, 4, false]
+		]);
+		// Nothing held any more: a second release sends no side-button up.
+		input.onDown(ev());
+		input.onUp(ev());
+		vi.mocked(api.inputButton).mockClear();
+		input.stopControl();
+		expect(vi.mocked(api.inputButton).mock.calls).toEqual([[1, 0, false], [1, 1, false], [1, 2, false]]);
+		stop();
+	});
+
 	it('no hover engage while blocked, unfocused, or with the setting off', () => {
 		const blocked = make({ blocked: true });
 		blocked.input.onEnter(ev());

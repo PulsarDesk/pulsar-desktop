@@ -233,9 +233,15 @@ pulsar-macinput`). Same surface and rules as the Windows hook (`imp.rs`):
   Print Screen 99, Pause 119, keypad = and comma, F13-F24). Tests check the Windows host table,
   the macOS host table (`keytables::mac_vk`, ISO section/grave swap from `KBGetLayoutType`),
   the Windows client VK + Interception tables (`kbdhook/imp/keymap.rs`) and the webview
-  `keymap.ts` against it. Engaged, the Windows LL hook swallows a VK it cannot map instead of
-  letting it act locally, except the volume / media / browser keys (stay local). Pause via
-  Interception is its E1 1D 45 pair.
+  `keymap.ts` against it (the webview has no code for the JIS keypad comma 95: it arrives as
+  `NumpadComma` = 121). The Windows LL hook maps by VK, then by scancode + LLKHF_EXTENDED
+  (Numpad Enter 96, JIS Yen 124 / Ro 89, and VKs without a US meaning: VK_OEM_8 = TR-Q `*?\`,
+  VK_CLEAR = Numpad 5, Ctrl+Break); engaged, a key neither maps is swallowed instead of acting
+  locally, except the volume / media / browser keys (stay local). Pause via Interception is its
+  E1 1D 45 pair; Korean Hangul / Hanja (make-only 0xF2 / 0xF1) never reach Interception.
+- **Side-button releases are paired.** The webview releases back / forward on blur / stop only
+  when it pressed them, and every host drops a side-button up it never pressed (a stray
+  WM_XBUTTONUP is a browser Back / Forward on Windows).
 - **`Char` on a Linux host** is typed with the HOST layout's key and level
   (pulsar-core `input/host_keymap_linux.rs`: the compositor's `wl_keyboard` keymap on
   Wayland, `_XKB_RULES_NAMES` on X11, else `XKB_DEFAULT_*` / `00-keyboard.conf` /

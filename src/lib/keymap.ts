@@ -23,10 +23,12 @@ export const EVDEV: Record<string, number> = {
 	IntlBackslash: 86, // ISO <>| next to Left Shift
 	F11: 87, F12: 88,
 	IntlRo: 89, // JIS \_
-	Convert: 92, KanaMode: 93, NonConvert: 94, NumpadJpComma: 95,
+	Convert: 92, KanaMode: 93, NonConvert: 94,
 	NumpadEnter: 96, ControlRight: 97, NumpadDivide: 98, PrintScreen: 99, AltRight: 100,
 	Home: 102, ArrowUp: 103, PageUp: 104, ArrowLeft: 105, ArrowRight: 106,
 	End: 107, ArrowDown: 108, PageDown: 109, Insert: 110, Delete: 111,
+	// The JIS and ABNT keypad commas both arrive as 'NumpadComma' (there is no separate JIS
+	// code), so KEY_KPJPCOMMA (95) is reached as KEY_KPCOMMA (121) from the webview.
 	NumpadEqual: 117, Pause: 119, NumpadComma: 121,
 	Lang1: 122, Lang2: 123, // Korean Hangul / Hanja, Japanese Kana / Eisu (macOS)
 	IntlYen: 124, // JIS ¥|

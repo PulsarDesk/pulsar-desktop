@@ -70,7 +70,6 @@ const FAST_DROP_RTT_OFF_MS: f32 = 25.0;
 const FAST_DROP_MIN_MS: f32 = 30.0;
 const FAST_DROP_MAX_MS: f32 = 80.0;
 
-/// Whether the fast drop is on (`prev` = its last state; hysteresis on the median RTT).
 /// Whether this host takes `ev`. Mouse side buttons (3 = back, 4 = forward) go only to hosts
 /// that advertise `FEAT_MOUSE_X`: older hosts turned every button id they did not know into a
 /// LEFT click, so a back-button press clicked on the remote. Ids past forward never go out.
@@ -84,6 +83,7 @@ fn host_takes(ev: &InputEvent, host_mouse_x: bool) -> bool {
 	}
 }
 
+/// Whether the fast drop is on (`prev` = its last state; hysteresis on the median RTT).
 fn fast_drop_on(prev: bool, game_mode: bool, keyframe_free: bool, rtt_med_ms: f32) -> bool {
 	if !game_mode || !keyframe_free || !(rtt_med_ms > 0.0) {
 		return false;

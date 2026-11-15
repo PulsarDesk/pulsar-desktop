@@ -109,6 +109,10 @@ export class SessionInput {
 	// key-up is suppressed (mirrors the Linux native hook's char_keys) and they're never put in
 	// #heldKeys — nothing to release on blur/disengage.
 	#charKeys = new Set<string>();
+	// Wire ids of the side buttons (3 back, 4 forward) pressed on the host and not yet released.
+	// Only those get a release on blur / stopControl: a stray side-button up is not inert on the
+	// host (Windows turns WM_XBUTTONUP into a browser Back / Forward command).
+	#heldSideButtons = new Set<number>();
 	// Free cursor: a pass over the video may take control. Cleared by an explicit release
 	// (Ctrl+Alt+Z, Ctrl+Shift+F11, the native detach combos) until the pointer has left the
 	// video once — the user asked to let go, hovering must not grab it straight back.
@@ -357,7 +361,9 @@ export class SessionInput {
 	#releaseButtons() {
 		const playId = this.#in.playId();
 		if (playId < 0) return;
-		for (const b of [0, 1, 2, 3, 4]) api.inputButton(playId, b, false).catch(() => {});
+		// Left / right / middle ups are inert when unpaired: always sent, as a safety net.
+		for (const b of [0, 1, 2, ...this.#heldSideButtons]) api.inputButton(playId, b, false).catch(() => {});
+		this.#heldSideButtons.clear();
 	}
 	#releaseHeldKeys() {
 		// Char keys are one-shot (no held VK on the host), so there's nothing to release —
@@ -498,7 +504,9 @@ export class SessionInput {
 		this.#norm(e);
 		this.#moveDirty = true;
 		const b = this.#hostButton(e.button);
-		if (b >= 0) api.inputButton(this.#in.playId(), b, true).catch(() => {});
+		if (b < 0) return;
+		if (b >= 3) this.#heldSideButtons.add(b);
+		api.inputButton(this.#in.playId(), b, true).catch(() => {});
 	};
 	onUp = (e: PointerEvent) => {
 		if (this.#gamePenTouch(e)) {
@@ -514,7 +522,9 @@ export class SessionInput {
 		e.preventDefault();
 		if (this.#penTouch(e, 'up')) return;
 		const b = this.#hostButton(e.button);
-		if (b >= 0) api.inputButton(this.#in.playId(), b, false).catch(() => {});
+		if (b < 0) return;
+		this.#heldSideButtons.delete(b);
+		api.inputButton(this.#in.playId(), b, false).catch(() => {});
 	};
 	#pinchBegin(gesture: boolean) {
 		const playId = this.#in.playId();

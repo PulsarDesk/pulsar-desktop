@@ -14,14 +14,14 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
 	CallNextHookEx, DispatchMessageW, GetMessageW, PostThreadMessageW, SetWindowsHookExW,
-	TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, LLKHF_UP,
+	TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED, LLKHF_UP,
 	LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_LBUTTONDOWN,
 	WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT,
 	WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_XBUTTONDOWN, WM_XBUTTONUP,
 };
 
 mod keymap;
-use keymap::{local_only_vk, scancode_to_evdev, vk_to_evdev};
+use keymap::{ll_key_to_evdev, scancode_to_evdev, vk_to_evdev};
 use pulsar_core::input::mouse_button;
 use windows_sys::Win32::UI::WindowsAndMessaging::{KillTimer, PeekMessageW, SetTimer, PM_NOREMOVE, WM_TIMER};
 
@@ -2413,13 +2413,14 @@ unsafe extern "system" fn ll_keyboard_proc(ncode: i32, wparam: WPARAM, lparam: L
 	}
 	let msg = wparam as u32;
 	let down = matches!(msg, WM_KEYDOWN | WM_SYSKEYDOWN) && (kb.flags & LLKHF_UP == 0);
-	let Some(evdev) = vk_to_evdev(kb.vkCode as u16) else {
-		// Unknown VK (no evdev mapping). Engaged, every key belongs to the remote: one the
-		// remote cannot take must not act on the desktop behind the session (a Kana / IME key
-		// switching the local input method, an OEM key typing into the local app), so it is
-		// swallowed — except the volume / media keys, which keep driving THIS machine.
-		// Disengaged it types locally as always.
-		if ENGAGED.load(Ordering::SeqCst) && !local_only_vk(kb.vkCode as u16) {
+	// By VK, told apart / completed by the scancode (Numpad Enter, JIS Yen / Ro, and VKs
+	// without a US meaning such as VK_OEM_8 = TR-Q `*?\`, VK_CLEAR = Numpad 5, Ctrl+Break).
+	let Some(evdev) = ll_key_to_evdev(kb.vkCode as u16, kb.scanCode as u16, kb.flags & LLKHF_EXTENDED != 0) else {
+		// Neither the VK nor the scancode maps. Engaged, every key belongs to the remote: one
+		// the remote cannot take must not act on the desktop behind the session (an IME key
+		// switching the local input method), so it is swallowed — except the volume / media
+		// keys, which keep driving THIS machine. Disengaged it types locally as always.
+		if ENGAGED.load(Ordering::SeqCst) && !keymap::local_only_vk(kb.vkCode as u16) {
 			return 1;
 		}
 		return CallNextHookEx(std::ptr::null_mut(), ncode, wparam, lparam);
