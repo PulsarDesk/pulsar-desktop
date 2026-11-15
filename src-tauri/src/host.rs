@@ -107,6 +107,9 @@ pub(crate) mod takeover;
 pub(crate) mod window_src;
 #[cfg(target_os = "linux")]
 mod libav;
+// X11 GStreamer host encode (RK3588 MPP): in-process runner + `gst-launch` child.
+#[cfg(target_os = "linux")]
+mod x11_gst;
 // The NVENC SDK encoder as the Wayland capture's raw-frame encoder (RFI on Wayland hosts).
 #[cfg(target_os = "linux")]
 mod nvenc_frames;
@@ -118,6 +121,23 @@ pub(crate) fn mock_capture() -> bool {
 	cfg!(target_os = "linux") && std::env::var_os("PULSAR_MOCK_CAPTURE").is_some_and(|v| v == "1")
 }
 use handlers::{make_on_audio, make_on_file, make_on_stream};
+
+/// Re-issue the stored request as a restart the HOST ordered (display mode / streamed window
+/// changed, a keyframe-by-restart): raise `flag` so `make_on_stream` carries this identical
+/// request out in full instead of absorbing it as "nothing changed". The flag is lowered again
+/// when the request could not be queued, so it can't leak onto the next client request.
+fn send_host_restart(
+	tx: &tokio::sync::mpsc::Sender<StreamReq>,
+	flag: &AtomicBool,
+	req: StreamReq,
+) -> Result<(), tokio::sync::mpsc::error::TrySendError<StreamReq>> {
+	flag.store(true, Ordering::SeqCst);
+	let sent = tx.try_send(req);
+	if sent.is_err() {
+		flag.store(false, Ordering::SeqCst);
+	}
+	sent
+}
 
 /// Transport features this host advertises in its `StreamCaps` reply: it can carry
 /// the RTP media inside the session (single socket) and honors NACK retransmits.
@@ -1260,6 +1280,12 @@ pub(crate) async fn bring_online(
 				// an IDR on) a client keyframe-request — MediaNack([0]) — re-issues the last StreamReq
 				// here so capture restarts with a fresh IDR (see on_nack below for the gating).
 				let nack_restream_tx = restream_tx.clone();
+				// Set right before the HOST's own watchers re-issue the stored request (display
+				// mode / streamed window changed, a keyframe-by-restart): that request is
+				// identical to the running one on purpose, and must restart capture in full — no
+				// "nothing changed" fast path / bitrate absorb may swallow it. Every OS.
+				// (Windows' `force_restart` below is failover.rs's own, with NVENC-stall meaning.)
+				let host_restart = Arc::new(std::sync::atomic::AtomicBool::new(false));
 				// And to failover.rs: the stream handler's own restarts when the native NVENC path
 				// stalls on a driver that stopped answering, and when NVENC is back.
 				// `nvenc_told`: whether the caps this client was sent listed NVENC (true until it
@@ -1279,6 +1305,7 @@ pub(crate) async fn bring_online(
 				{
 					let last_req_store = last_req_store.clone();
 					let restream_tx = restream_tx.clone();
+					let host_restart = host_restart.clone();
 					tokio::spawn(async move {
 						let mut debounce = window_src::Debounce::default();
 						loop {
@@ -1295,7 +1322,9 @@ pub(crate) async fn bring_online(
 							tracing::info!(sid, ?change, "streamed window changed -> restarting capture");
 							// Don't fire again before the restart registers the window anew.
 							window_src::ended(sid);
-							if let Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) = restream_tx.try_send(req) {
+							if let Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) =
+								send_host_restart(&restream_tx, &host_restart, req)
+							{
 								break;
 							}
 						}
@@ -1308,6 +1337,7 @@ pub(crate) async fn bring_online(
 				// loops without ever firing. Exits when the channel closes (session teardown).
 				let mode_watcher = {
 					let last_req_store = last_req_store.clone();
+					let host_restart = host_restart.clone();
 					tokio::spawn(async move {
 						// Baseline size of the currently-streamed display; re-baselined on a monitor
 						// switch. `None` until the first stream request establishes a display_idx.
@@ -1390,7 +1420,7 @@ pub(crate) async fn bring_online(
 										// Channel full (a prior restart still in flight) → skip
 										// this send but keep looping; next poll re-detects delta.
 										// Closed → session torn down; exit the watcher.
-										match restream_tx.try_send(fresh_req) {
+										match send_host_restart(&restream_tx, &host_restart, fresh_req) {
 											Ok(_) => {
 												baseline = Some((idx, size));
 											}
@@ -1596,6 +1626,7 @@ pub(crate) async fn bring_online(
 					#[cfg(target_os = "linux")]
 					cap_gen.clone(),
 					last_req_store.clone(),
+					host_restart.clone(),
 					#[cfg(windows)]
 					force_restart,
 					#[cfg(windows)]
@@ -2552,6 +2583,7 @@ pub(crate) async fn bring_online(
 					// ffmpeg/capture opens on an IDR, and last_kf_restart debounces the client's
 					// ~400 ms nack cadence so it can't restart-storm.
 					let last_req_store = last_req_store.clone();
+					let host_restart = host_restart.clone();
 					let mut last_kf_restart: Option<std::time::Instant> = None;
 					move |seqs: Vec<u16>| {
 						// MediaNack([0]) is the client's keyframe-request sentinel (its decoder
@@ -2559,18 +2591,27 @@ pub(crate) async fn bring_online(
 						// GOP). seq 0 is ~never in the retransmit ring, so before this the sentinel
 						// was a silent no-op.
 						if seqs.contains(&0) {
+							// Whether a LIVE encoder took the request: then the IDR is already on its
+							// way and the restart below would only add a gap (and, re-issuing the
+							// stored request, used to put a stale bitrate back on the encoder).
+							#[allow(unused_mut)]
+							let mut idr_live = false;
 							// Native (NVENC / VideoToolbox) path: force an immediate IDR on the live encoder.
 							#[cfg(any(windows, target_os = "macos"))]
 							if let Some(h) = native_idr.lock().unwrap().as_ref() {
 								h.request_idr();
+								idr_live = true;
 							}
+							// In-process GStreamer (Wayland portal capture, or the X11 RK3588 MPP
+							// pipeline): `false` on a `gst-launch` child backend.
 							#[cfg(target_os = "linux")]
 							if let Some(c) = wl_cap.lock().unwrap().as_ref() {
-								c.request_keyframe();
+								idr_live |= c.request_keyframe();
 							}
 							#[cfg(target_os = "linux")]
 							if let Some(e) = libav_kf.lock().unwrap().as_ref() {
 								e.request_keyframe();
+								idr_live = true;
 							}
 							// ffmpeg fallback (no live CaptureHandle): a spawned CLI ffmpeg has no
 							// runtime force-keyframe hook, so re-issue the last StreamReq — a fresh
@@ -2579,7 +2620,7 @@ pub(crate) async fn bring_online(
 							// there would only regress it) and debounced (1.5 s) so the client's
 							// ~400 ms nack cadence can't restart-storm. last_req_store is populated
 							// only on the ffmpeg path, so native sessions skip this branch entirely.
-							if let Some(req) = last_req_store.lock().unwrap().clone() {
+							if let Some(req) = last_req_store.lock().unwrap().clone().filter(|_| !idr_live) {
 								let due = last_kf_restart
 									.map(|t| t.elapsed() >= std::time::Duration::from_millis(1500))
 									.unwrap_or(true);
@@ -2589,7 +2630,9 @@ pub(crate) async fn bring_online(
 								if !req.game_mode && !req.loss_recovery.is_active() && due {
 									// Full (a restart already queued / in flight) or Closed (session
 									// torn down) → skip; the next nack or the natural GOP still recovers.
-									if nack_restream_tx.try_send(req).is_ok() {
+									// Host-ordered: an identical request, which the fast paths
+									// would otherwise absorb as "nothing changed".
+									if send_host_restart(&nack_restream_tx, &host_restart, req).is_ok() {
 										last_kf_restart = Some(std::time::Instant::now());
 									}
 								}
