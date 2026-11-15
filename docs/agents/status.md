@@ -84,6 +84,33 @@ tarafta çalışmıyor: …" in-session (`pad_notice.rs` → `play_notice`), the
 toast. Whether GameController / SDL accept a virtual (non-USB/BT) device with these VID/PIDs
 is unverified.
 
+**Remote input permission notices (2026-11-15, untested on real hosts):** a host whose input
+cannot reach its desktop used to fail silently on every OS. pulsar-core
+`input::permission::preflight()` checks Linux `/dev/uinput` (writable) and macOS Accessibility
+(`AXIsProcessTrusted`); `foreground_window_blocked()` (Windows) spots an elevated window in
+front of a non-elevated host (UIPI drops `SendInput` while it reports success; skipped while
+the SYSTEM helper injects). The host sends `DataMsg::InputUnavailable { reason }` (an
+`InputFailure` token) at session start (preflight), when the injector fails to open, and on a
+click / key into a newly blocked elevated window (once per window, again after 60 s); the
+client shows "Fare ve klavyen karşı tarafa ulaşmıyor: …" in-session (`input_notice.rs` →
+`play_notice`; mobile: `input-unavailable` event → toast). The host shows an `input-off`
+toast (at host start too; once per cause per 10 min); a click asks for the Accessibility grant
+on macOS and installs the uinput rule through pkexec on Linux. No elevation flow on Windows.
+`--selftest` prints a `remote-input` line. An Android host sends `android_control_off` when
+its control AccessibilityService is off (session start, then on a press, at most once a
+minute).
+
+**Linux uinput rule:** `/dev/uinput` is root-only on stock distros (Steam's `steam-devices`
+package is what usually opens it). The .deb / .rpm now ship
+`/usr/lib/udev/rules.d/70-pulsar-uinput.rules` (`KERNEL=="uinput", SUBSYSTEM=="misc",
+OPTIONS+="static_node=uinput", TAG+="uaccess"` — Steam's rule: the user logged in at the seat
+gets the node's ACL) plus `uinput` in `/usr/lib/modules-load.d/pulsar.conf`; postinst loads the
+module and re-triggers udev so it applies without a re-login. The AppImage installs nothing:
+its host toast's click runs one pkexec prompt that writes the same rule to
+`/etc/udev/rules.d/70-pulsar-uinput.rules` (+ `/etc/modules-load.d/pulsar-uinput.conf`) and
+re-triggers udev (skipped when a rule is already there). Headless hosts (only SSH, no seat
+login) do not get `uaccess`: the rule file's comment says how to grant a group instead.
+
 **Scaffolded / known gaps:** HW encode on
 the Wayland/gst path (software x264 only); media-over-the-session for
 symmetric-NAT (media is a direct UDP RTP flow today — fine for LAN/cone-NAT/

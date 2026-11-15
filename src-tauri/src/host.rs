@@ -499,6 +499,9 @@ pub(crate) async fn bring_online(
 ) -> Result<String, String> {
 	// Shared mode: only the machine-wide host lease holder registers (one host per PC).
 	crate::shared_mode::lease::may_host()?;
+	// Remote input permission (Linux /dev/uinput, macOS Accessibility): a toast now, so the
+	// person here can fix it before anyone connects (input_notice.rs; rate-limited).
+	crate::input_notice::host_started(&app);
 	// Remove the virtual pads a killed Pulsar left behind (orphaned Duo HID devices, Duo /
 	// USB/IP pads whose creating process is gone), once per process and off this thread
 	// (SetupAPI + maybe `usbip`): a dead pad is otherwise picked over the session's new one.
@@ -1134,6 +1137,8 @@ pub(crate) async fn bring_online(
 				// A clone the on_input gamepad path uses to forward the game's rumble back to
 				// the client (one dedicated thread per emulated DS4 pad).
 				let rumble_out = out_tx.clone();
+				// A clone for the on_input "your input does not reach this host" notices.
+				let input_out = out_tx.clone();
 
 				// C9: Register this session at accept time (not deferred to the first
 				// StartStream) so the host operator can always see and kick any
@@ -1182,6 +1187,9 @@ pub(crate) async fn bring_online(
 						.insert(sid, (peer.clone(), out_tx.clone()));
 					None
 				};
+				// Input permission preflight (Linux /dev/uinput, macOS Accessibility): the client
+				// learns at once that its mouse / keyboard will not reach this desktop.
+				crate::input_notice::session_started(&app_h, &out_tx, approved_view_only);
 
 				// Media-over-session: a send-only session handle for the RTP forwarder
 				// tasks (they transmit concurrently with the serve loop's recv), and the
@@ -1651,6 +1659,8 @@ pub(crate) async fn bring_online(
 					// Virtual pads the host can't create are reported (create_pad_or_tell).
 					let pad_app = app_h.clone();
 					let mut pad_told = false;
+					// Input that cannot reach this desktop is reported (input_notice.rs).
+					let mut input_notice = crate::input_notice::SessionNotice::new(input_out, app_h.clone());
 					// Which monitor's geometry is currently applied to the desktop injector, so we
 					// only re-resolve the virtual-desktop rect when the streamed monitor changes.
 					// `u32::MAX` = "none applied yet" (forces the first resolve).
@@ -1997,8 +2007,18 @@ pub(crate) async fn bring_online(
 									tried = true;
 									match sysinput::HostInput::new() {
 										Ok(d) => desktop = Some(d),
-										Err(e) => tracing::warn!("desktop input unavailable: {e}"),
+										Err(e) => {
+											tracing::warn!("desktop input unavailable: {e}");
+											input_notice.open_failed(&e);
+										}
 									}
+								}
+								// Windows: an elevated window in front swallows this input (UIPI) unless
+								// the SYSTEM helper injects; tell the client (rate-limited).
+								#[cfg(windows)]
+								if let Some(d) = desktop.as_mut() {
+									let helper = d.system_helper_active();
+									input_notice.check_window(&other, helper);
 								}
 								// Windows: resolve the streamed monitor's rect for pen / touch (a pen-only
 								// client never sends PointerMotion, which is where the pointer resolves it).

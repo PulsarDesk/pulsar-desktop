@@ -432,6 +432,7 @@
 	"toast.file-del": "Файл жойылды",
 	"toast.file-mod": "Файл өзгертілді",
 	"toast.pad-off": "Виртуалды геймпад жасалмады",
+	"toast.input-off": "Қашықтан басқару жұмыс істемейді",
 	"toast.chat-in": "Жаңа хабарлама",
 	"toast.chat-open": "Чатты ашу үшін басыңыз",
 	"toast.from": "{peer} жіберді",

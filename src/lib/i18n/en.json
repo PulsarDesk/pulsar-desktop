@@ -432,6 +432,7 @@
 	"toast.file-del": "File deleted",
 	"toast.file-mod": "File changed",
 	"toast.pad-off": "No virtual controller",
+	"toast.input-off": "Remote control does not work",
 	"toast.chat-in": "New message",
 	"toast.chat-open": "Click to open the chat",
 	"toast.from": "Sent by {peer}",

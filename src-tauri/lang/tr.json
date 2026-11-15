@@ -66,5 +66,16 @@
 	"pad.host.vigem_missing": "ViGEmBus sürücüsü kurulu değil; kol girişi oyuna gitmiyor",
 	"pad.host.uinput_denied": "/dev/uinput yazılamıyor; kol girişi oyuna gitmiyor",
 	"pad.host.unavailable": "Sanal kol oluşturulamadı; kol girişi oyuna gitmiyor",
+	"input.client.title": "Fare ve klavyen karşı tarafa ulaşmıyor",
+	"input.client.uinput_denied": "Linux'ta /dev/uinput erişimi yok (udev kuralı eksik)",
+	"input.client.mac_accessibility": "Mac'te Pulsar'a Erişilebilirlik izni verilmemiş",
+	"input.client.win_elevated": "öndeki pencere yönetici olarak çalışıyor, Pulsar orada yönetici değil",
+	"input.client.android_control_off": "telefonda Pulsar kontrol hizmeti (Erişilebilirlik) kapalı",
+	"input.client.unavailable": "karşı taraf girişi bilgisayara iletemiyor",
+	"input.host.uinput_denied": "/dev/uinput yazılamıyor; uzaktan fare ve klavye çalışmaz. Kurmak için tıkla",
+	"input.host.mac_accessibility": "Erişilebilirlik izni yok; uzaktan fare ve klavye çalışmaz. Açmak için tıkla",
+	"input.host.win_elevated": "Yönetici penceresi önde; Pulsar yönetici olmadığı için uzaktan giriş ona gitmiyor",
+	"input.host.android_control_off": "Kontrol hizmeti kapalı; uzaktan dokunma çalışmaz",
+	"input.host.unavailable": "Uzaktan fare ve klavye bu bilgisayara iletilemiyor",
 	"fw.macPrompt": "Pulsar, uzak bağlantıların gelebilmesi için güvenlik duvarında kendine ve yayın programlarına izin vermek istiyor."
 }

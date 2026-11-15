@@ -14,7 +14,11 @@ pub fn run() -> i32 {
 	}
 	#[cfg(not(target_os = "linux"))]
 	{
-		println!("PASS selftest: nothing to check on this platform");
+		// macOS: the Accessibility grant remote input needs (never prompts). Optional.
+		match pulsar_core::input::permission::preflight() {
+			None => println!("PASS remote-input: no known permission problem"),
+			Some(f) => println!("WARN remote-input: {} — remote mouse/keyboard will not work as a host", f.as_wire()),
+		}
 		0
 	}
 }
@@ -168,6 +172,16 @@ mod linux {
 				},
 			);
 		}
+		// Remote control as a host: /dev/uinput writable (70-pulsar-uinput.rules). Optional: a
+		// client-only machine or a CI container does not need it.
+		r.line(
+			false,
+			"remote-input",
+			match pulsar_core::input::permission::preflight() {
+				None => Ok("/dev/uinput writable".into()),
+				Some(_) => Err("/dev/uinput not writable — remote mouse/keyboard will not work as a host (see 70-pulsar-uinput.rules)".into()),
+			},
+		);
 		i32::from(r.failed)
 	}
 }

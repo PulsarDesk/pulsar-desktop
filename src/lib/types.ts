@@ -112,9 +112,11 @@ export type PulsarToast = {
 	id: number;
 	/** `kbd-perm`: macOS input capture needs the Accessibility permission (click = settings).
 	 * `pad-off`: a client controller got no virtual pad on this host (`name` = the cause).
+	 * `input-off`: a client's mouse / keyboard cannot reach this host (`name` = the cause;
+	 * click = fix it where possible: macOS Accessibility, Linux uinput udev rule).
 	 * `chat-in`: a chat line while the chat is not on screen (`name` = the text, `peer` = who;
 	 * click = open the chat). */
-	kind: 'file-in' | 'file-del' | 'file-mod' | 'kbd-perm' | 'pad-off' | 'chat-in';
+	kind: 'file-in' | 'file-del' | 'file-mod' | 'kbd-perm' | 'pad-off' | 'input-off' | 'chat-in';
 	name: string;
 	peer: string;
 	path: string | null;
