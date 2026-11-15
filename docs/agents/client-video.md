@@ -33,10 +33,25 @@ constants (`yuv_consts`, shared with macOS) and the EGL / KMS hint values.
   on the Pi / CI.
 - **macOS:** VideoToolbox attaches the stream's matrix (`Frame::matrix`, BT.709 when absent) and
   the range follows the pixel format ('420v' / '420f'); the `CAMetalLayer` is now tagged
-  `kCGColorSpaceITUR_709` (`mac/metal.rs`), so macOS colour-matches it to the display instead
-  of showing the values raw (over-saturated on P3 panels).
+  `kCGColorSpaceSRGB` (`mac/metal.rs`), so macOS colour-matches it to the display instead
+  of showing the values raw (over-saturated on P3 panels). sRGB, NOT `kCGColorSpaceITUR_709`:
+  the pixels are sRGB-encoded (hosts capture sRGB and never convert the transfer; the stream's
+  BT.709 tag is the YUV matrix), and the 709 camera curve (~1.96) would lift midtones
+  (QuickTime's gamma shift) against the host and the Windows / Linux clients. CF / CG pointers
+  given to `msg_send!` must be typed (`ffi::CGColorSpaceObj`, pulsar-core `ffi::CFStringObj`):
+  objc2 checks argument encodings in debug builds and panics on `*const c_void`. Untested on a
+  Mac.
 - **Android:** the decoder `MediaFormat` gets BT.709 / limited / SDR-video keys when the stream
   is not HDR (`PulsarVideoPlugin.kt`); the bitstream's VUI still wins. iOS has no video path yet.
+- **Linux frame props:** `av_hwframe_map` (VA-API → DRM_PRIME) and `av_hwframe_transfer_data`
+  (readback) copy pixels only, so `video.rs` calls `av_frame_copy_props` after either: the VUI
+  (a BT.601 tag, full range) reaches `frame_colour`. The `yr` / `ym` uniforms are cached per
+  program (`ColourUniforms`) and uploaded only when the colour changes. The DRM-lease plane
+  writes `COLOR_ENCODING` / `COLOR_RANGE` only when the plane's enum lists the value
+  (`Req::opt_enum`; an unlisted value fails the whole atomic commit with EINVAL).
+- **Version skew:** an untagged stream is read as BT.709, so an old host's untagged BT.601
+  stream (old Windows NVENC / MF, old ffmpeg / libav) shifts on a new client until the host
+  updates; see host-encode.md "Version skew".
 
 ## Linux / RK3588 (Orange Pi 5) renderer — the reality (IMPORTANT)
 
