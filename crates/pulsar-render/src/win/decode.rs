@@ -489,6 +489,76 @@ fn decode_sample(dev: &ID3D11Device, codec: Codec, sample: &[u8]) -> Option<(DXG
 mod tests {
 	use super::*;
 
+	/// Split an HEVC Annex B stream into access units (parameter sets / prefix SEI open a new
+	/// one after a picture; a slice with first_slice_segment_in_pic_flag starts a picture).
+	fn hevc_aus(bs: &[u8]) -> Vec<Vec<u8>> {
+		let mut starts = vec![];
+		let mut i = 0;
+		while i + 3 < bs.len() {
+			if bs[i..].starts_with(&[0, 0, 1]) {
+				let s = if i > 0 && bs[i - 1] == 0 { i - 1 } else { i };
+				starts.push((s, i + 3));
+				i += 3;
+			} else {
+				i += 1;
+			}
+		}
+		let mut aus: Vec<Vec<u8>> = vec![];
+		let mut cur: Vec<u8> = vec![];
+		let mut has_vcl = false;
+		for (k, &(s, h)) in starts.iter().enumerate() {
+			let end = starts.get(k + 1).map(|n| n.0).unwrap_or(bs.len());
+			let ty = (bs[h] >> 1) & 0x3F;
+			let vcl = ty < 32;
+			let first_slice = vcl && bs.get(h + 2).is_some_and(|b| b & 0x80 != 0);
+			if has_vcl && (matches!(ty, 32..=35 | 39) || first_slice) {
+				aus.push(std::mem::take(&mut cur));
+				has_vcl = false;
+			}
+			cur.extend_from_slice(&bs[s..end]);
+			has_vcl |= vcl;
+		}
+		if !cur.is_empty() {
+			aus.push(cur);
+		}
+		aus
+	}
+
+	/// A REAL HDR10 stream from the host path (pulsar-capture's ignored NVENC test writes one):
+	/// `PULSAR_HDR_STREAM=<file.h265> cargo test -p pulsar-render real_hdr10 -- --ignored`.
+	/// Every picture decodes to P010 PQ, and the tone-mapped SDR present of the last one is not
+	/// black and not one flat colour.
+	#[test]
+	#[ignore]
+	fn real_hdr10_stream_decodes_and_tone_maps() {
+		let path = std::env::var("PULSAR_HDR_STREAM").expect("PULSAR_HDR_STREAM");
+		let bs = std::fs::read(path).unwrap();
+		unsafe {
+			MF_INIT.call_once(|| {
+				let _ = MFStartup(MF_VERSION, MFSTARTUP_FULL);
+			});
+		}
+		let dev = probe_device().expect("device");
+		let mut d = Decoder::new_ex(&dev, Codec::H265, 1280, 720, 60, false).unwrap();
+		let mut pics = vec![];
+		for (n, au) in hevc_aus(&bs).into_iter().enumerate() {
+			let au = AccessUnit { data: au, pts_90k: n as u32 * 1500, key: n == 0, conceal: false };
+			pics.extend(d.decode(&au).unwrap());
+		}
+		assert!(pics.len() >= 20, "{} pictures", pics.len());
+		assert!(d.is_hdr(), "decoder: P010 + PQ");
+		let last = pics.last().unwrap();
+		let mut desc = D3D11_TEXTURE2D_DESC::default();
+		unsafe { last.GetDesc(&mut desc) };
+		assert_eq!(desc.Format, DXGI_FORMAT_P010);
+		let (w, h) = d.visible().unwrap_or((desc.Width, desc.Height));
+		let row = unsafe { super::super::hdr::tests_support::sdr_row(&dev, last, desc.Width, desc.Height, w, h) };
+		let lum: Vec<u32> = row.iter().map(|p| (p >> 8) & 0xFF).collect();
+		let (mn, mx) = (*lum.iter().min().unwrap(), *lum.iter().max().unwrap());
+		eprintln!("{} pictures {w}x{h}; tone-mapped row luma {mn}..{mx}", pics.len());
+		assert!(mx > 100 && mx - mn > 50, "a gradient, not black / flat: {mn}..{mx}");
+	}
+
 	#[test]
 	fn hdr10_samples_decode_to_p010_pq_and_sdr_stays_nv12() {
 		unsafe {

@@ -298,6 +298,49 @@ impl HdrPresent {
 	}
 }
 
+/// Test helper shared with `decode.rs`: tone-map a P010 picture's visible `w`×`h` into a
+/// BGRA8 target of the same size and read back its middle row.
+#[cfg(test)]
+pub(crate) mod tests_support {
+	use super::*;
+	use windows::Win32::Graphics::Direct3D11::{
+		D3D11_BIND_RENDER_TARGET, D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+		D3D11_USAGE_STAGING,
+	};
+	use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+
+	pub(crate) unsafe fn sdr_row(d: &ID3D11Device, src: &ID3D11Texture2D, tw: u32, th: u32, w: u32, h: u32) -> Vec<u32> {
+		let mk = |usage, bind, cpu| D3D11_TEXTURE2D_DESC {
+			Width: w,
+			Height: h,
+			MipLevels: 1,
+			ArraySize: 1,
+			Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+			SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+			Usage: usage,
+			BindFlags: bind,
+			CPUAccessFlags: cpu,
+			MiscFlags: 0,
+		};
+		let (mut t, mut s, mut rtv) = (None, None, None);
+		d.CreateTexture2D(&mk(D3D11_USAGE_DEFAULT, D3D11_BIND_RENDER_TARGET.0 as u32, 0), None, Some(&mut t)).unwrap();
+		d.CreateTexture2D(&mk(D3D11_USAGE_STAGING, 0, D3D11_CPU_ACCESS_READ.0 as u32), None, Some(&mut s)).unwrap();
+		let (t, s): (ID3D11Texture2D, ID3D11Texture2D) = (t.unwrap(), s.unwrap());
+		d.CreateRenderTargetView(&t, None, Some(&mut rtv)).unwrap();
+		let mut hp = HdrPresent::new(d).unwrap();
+		hp.draw(src, tw, th, (0.0, 0.0, w as f32, h as f32), 0, &rtv.unwrap(), (0.0, 0.0, w as f32, h as f32), Out::Sdr)
+			.unwrap();
+		let ctx = d.GetImmediateContext().unwrap();
+		ctx.CopyResource(&s, &t);
+		let mut m = D3D11_MAPPED_SUBRESOURCE::default();
+		ctx.Map(&s, 0, D3D11_MAP_READ, 0, Some(&mut m)).unwrap();
+		let base = (m.pData as *const u8).add(m.RowPitch as usize * (h as usize / 2)) as *const u32;
+		let row = std::slice::from_raw_parts(base, w as usize).to_vec();
+		ctx.Unmap(&s, 0);
+		row
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
