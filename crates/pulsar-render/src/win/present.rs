@@ -135,6 +135,8 @@ pub fn set_upscale(mode: &str) {
 
 const VENDOR_NVIDIA: u32 = 0x10DE;
 const VENDOR_INTEL: u32 = 0x8086;
+/// Qualcomm Adreno (Snapdragon PCs) reports the ACPI id "QCOM" as its vendor.
+const VENDOR_QUALCOMM: u32 = 0x4D4F_4351;
 
 /// The upscaler a frame uses, given the setting and the GPU.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -151,9 +153,12 @@ fn pick(mode: u8, vendor: u32) -> Upscaler {
 	let ai = vendor == VENDOR_NVIDIA || vendor == VENDOR_INTEL;
 	match mode {
 		1 | 3 if ai => Upscaler::Vendor,
-		// Not on Auto — only when picked by name. The 2023 shader math broke desktop text into
-		// jagged dark halos (2026-11-13, Adreno); the 2025 math re-tested clean on 2026-11-15
-		// (no ring past the source range, between plain scaling and FSR in sharpness).
+		// Auto on a Snapdragon GPU = Qualcomm's own upscaler. The 2023 shader math broke desktop
+		// text into jagged dark halos (2026-11-13, Adreno); the 2025 math re-tested clean on
+		// 2026-11-15 (no ring past the source range where FSR has a little; best PSNR on text and
+		// lines; photos not over-sharpened like FSR), so it is Auto's choice there. Elsewhere only
+		// when picked by name.
+		1 if vendor == VENDOR_QUALCOMM => Upscaler::Sgsr,
 		4 => Upscaler::Sgsr,
 		1..=3 => Upscaler::Fsr,
 		_ => Upscaler::None,
@@ -513,5 +518,22 @@ impl Present {
 		std::mem::ManuallyDrop::drop(&mut stream.pInputSurface);
 		std::mem::ManuallyDrop::drop(&mut stream.pInputSurfaceRight);
 		r
+	}
+}
+
+#[cfg(test)]
+mod pick_tests {
+	use super::{pick, Upscaler, VENDOR_INTEL, VENDOR_NVIDIA, VENDOR_QUALCOMM};
+
+	#[test]
+	fn auto_picks_the_gpu_vendors_own() {
+		assert_eq!(pick(1, VENDOR_NVIDIA), Upscaler::Vendor);
+		assert_eq!(pick(1, VENDOR_INTEL), Upscaler::Vendor);
+		assert_eq!(pick(1, VENDOR_QUALCOMM), Upscaler::Sgsr);
+		assert_eq!(pick(1, 0x1002), Upscaler::Fsr);
+		// Named picks stay what they say; off is off.
+		assert_eq!(pick(2, VENDOR_QUALCOMM), Upscaler::Fsr);
+		assert_eq!(pick(4, VENDOR_NVIDIA), Upscaler::Sgsr);
+		assert_eq!(pick(0, VENDOR_QUALCOMM), Upscaler::None);
 	}
 }
