@@ -38,8 +38,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: rkmpp-check
+      # Own cargo target dir outside target/, as in release.yml: never cached, so a pin bump
+      # always rebuilds ffmpeg-sys-next against the new headers.
       - name: Build + stage pulsar-render-rkmpp
-        run: RKMPP_WORK="$RUNNER_TEMP/rkmpp-build" INSTALL_DEPS=1 bash scripts/rkmpp/build-rkmpp-render.sh
+        run: |
+          RKMPP_WORK="$RUNNER_TEMP/rkmpp-build" CARGO_TARGET_DIR="$RUNNER_TEMP/rkmpp-target" \
+            INSTALL_DEPS=1 bash scripts/rkmpp/build-rkmpp-render.sh
       - uses: actions/upload-artifact@v4
         with:
           name: pulsar-render-rkmpp
