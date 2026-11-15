@@ -32,6 +32,9 @@ This file is the **index**. Read the topic file before working in its area:
   **`bun run tauri dev`** to run the app — `cargo tauri` would need a
   separately-installed `cargo-tauri`. **Package manager: bun, never npm.**
 - **Never push a behaviour change before the maintainer tested it** in the real app.
+- **Windows, macOS and Linux, always** — including streaming quality/stability fixes (host
+  encoders, pacing, timers, Wi-Fi, ABR, recovery). Check the other OSes' equivalent path and fix it
+  or document why it doesn't apply. See `../docs/agents/rules.md`.
 - **Video renders natively (`pulsar-render`), never in the webview** — see client-video.md.
 
 ## Run & build
