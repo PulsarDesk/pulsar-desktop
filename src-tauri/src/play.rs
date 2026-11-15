@@ -354,15 +354,9 @@ pub(crate) async fn start_remote_play(
 		.features
 		.iter()
 		.any(|f| f == pulsar_core::service::media::FEAT_NACK);
-	// Reference-frame invalidation: the Windows renderer reports a lost frame's packets and
-	// resumes at the host's tagged recovery frame instead of waiting for a keyframe (H.264 /
-	// HEVC; the recovery tag is an SEI). Needs the media-over-session NACK path.
-	let host_rfi = cfg!(windows)
-		&& mos
-		&& host_nack
-		&& host_caps.features.iter().any(|f| f == pulsar_core::service::media::FEAT_RFI)
-		// A/B knob: PULSAR_RFI=0 keeps the keyframe recovery.
-		&& std::env::var("PULSAR_RFI").map(|v| v != "0").unwrap_or(true);
+	// Reference-frame invalidation: the host can do it (its renderer side is checked once the
+	// renderer is up, see `host_rfi` below). Needs the media-over-session NACK path.
+	let host_rfi_cap = mos && host_nack && host_caps.features.iter().any(|f| f == pulsar_core::service::media::FEAT_RFI);
 	// This client's DECODE caps (startup probe). Unknown (probe still running /
 	// macOS stub failure) â†’ assume the universal software pair. `incompat` maps a codec
 	// to the host encoder families whose REAL bitstream this client can't decode even
@@ -942,6 +936,16 @@ pub(crate) async fn start_remote_play(
 		}
 	}
 	let native = native_child.is_some() || single_surface || render_child.is_some();
+	// Reference-frame invalidation: pulsar-render reports a lost frame's packets and resumes at
+	// the host's tagged recovery frame instead of waiting for a keyframe (H.264 / HEVC; the tag
+	// is an SEI; `stream/rtp.rs` RFI_MODE) — on Windows, macOS and Linux alike.
+	let host_rfi = rfi_client(
+		host_rfi_cap,
+		render_child.is_some(),
+		cfg!(target_os = "linux"),
+		native_view::video_unix_name(video_port).is_some(),
+		std::env::var("PULSAR_RFI").ok().as_deref(),
+	);
 
 	if !game_id.is_empty() {
 		if let Err(e) = request_launch(&mut sess, &game_id).await {
@@ -1260,9 +1264,16 @@ pub(crate) async fn start_remote_play(
 		acfg.startup_windows = 0;
 	}
 	// Only the Linux libav renderer resumes on a partially intra-refreshed picture (libav
-	// conceals the lost reference). Windows heals a loss by reference-frame invalidation instead
-	// (`host_rfi`; the 2026-11-08 IR attempt there overflowed the AU queue â€” see stream/rtp.rs
-	// IR_MODE), macOS waits for an IDR and gets a short GOP.
+	// conceals the lost reference). Windows and macOS heal a loss by reference-frame
+	// invalidation instead (`host_rfi`, with pulsar-render; the 2026-11-08 IR attempt on Windows
+	// overflowed the AU queue — see stream/rtp.rs IR_MODE); their flip is the short GOP, which an
+	// RFI host absorbs, and only the mpv / ffplay fallback (no RFI) really gets one. On Linux the
+	// controller's intra-refresh flip becomes the short GOP while RFI reaches the current codec
+	// (`hold.rs` `flip_recovery`, re-derived on a codec switch): a flip to intra refresh turns
+	// RFI off (`rfi 0`) while a host that cannot start a rolling intra wave mid-session keeps its
+	// long GOP — every loss then smeared until the next safety IDR. On AV1 (no recovery tag) the
+	// flip stays intra refresh.
+	let rfi_req = host_rfi && codec != "av1";
 	acfg.ir_capable = cfg!(target_os = "linux");
 	// A game session over a WAN / phone link: loss there is a given, and on Windows each one the
 	// host's RFI can't reach (a handover stall is seconds long) became a keyframe — 5-10× a frame,
@@ -1401,7 +1412,6 @@ pub(crate) async fn start_remote_play(
 		let mon_hdr = host_caps.displays.iter().find(|d| d.idx == display_idx.unwrap_or(0)).map(|d| d.hdr);
 		tracing::info!(%codec, ?mon_hdr, "asking the host for HDR10");
 	}
-	let rfi_req = host_rfi && codec != "av1";
 	// 4:4:4 only where the decode keeps up with the session's top pixel rate (Linux decodes it
 	// in software on one thread and measured how fast — `DecoderCap::yuv444_max_px_s`).
 	decode_yuv444.retain(|c| {
@@ -2648,6 +2658,40 @@ mod hdr_tests {
 		assert!(!HdrNeg { host: false, ..n.clone() }.want("h265"));
 		// The debug override asks regardless.
 		assert!(HdrNeg { force: true, pref: false, ..n }.want("h264"));
+	}
+}
+
+/// Whether this client streams with reference-frame invalidation: the host can do it
+/// (`host_cap`: FEAT_RFI over the media-over-session NACK path) and the session's renderer takes
+/// part — pulsar-render (`pulsar_render`; its `stream/rtp.rs` reports a hole as `vidsink-rfi` and
+/// resumes at the recovery tag), on Linux only through its Rust RTP path (`rust_rtp`: the app's
+/// Unix video socket; `PULSAR_LINUX_DEMUX=ffmpeg` = libavformat's demux, which does neither). An
+/// mpv / ffplay fallback never reports a hole, and the app skips the keyframe request on an
+/// unrepaired loss when RFI is on (`hold.rs` `rfi_reach`) — such a session must not ask for RFI.
+/// `env` = `PULSAR_RFI` (`0` keeps the keyframe recovery, A/B).
+fn rfi_client(host_cap: bool, pulsar_render: bool, linux: bool, rust_rtp: bool, env: Option<&str>) -> bool {
+	host_cap && pulsar_render && (!linux || rust_rtp) && env != Some("0")
+}
+
+#[cfg(test)]
+mod rfi_tests {
+	use super::rfi_client;
+
+	#[test]
+	fn rfi_on_every_os_with_pulsar_render() {
+		// Windows / macOS (`linux` false: the UDP path always runs stream/rtp.rs).
+		assert!(rfi_client(true, true, false, false, None));
+		// Linux on the Rust RTP path.
+		assert!(rfi_client(true, true, true, true, None));
+	}
+
+	#[test]
+	fn no_rfi_without_the_renderer_side_or_the_host() {
+		assert!(!rfi_client(false, true, false, false, None), "host without FEAT_RFI");
+		assert!(!rfi_client(true, false, false, false, None), "mpv / ffplay fallback");
+		assert!(!rfi_client(true, true, true, false, None), "Linux libavformat demux");
+		assert!(!rfi_client(true, true, false, false, Some("0")), "PULSAR_RFI=0");
+		assert!(rfi_client(true, true, false, false, Some("1")));
 	}
 }
 

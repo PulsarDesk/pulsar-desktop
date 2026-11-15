@@ -169,11 +169,44 @@ acceptable; priority is Moonlight-class latency during play.
   run the renderer in a test window fed by `ffmpeg testsrc2` and drive it over stdin /
   posted mouse messages (the renderer draws no overlay before its first decoded frame).
 
-## Loss recovery on Windows — reference-frame invalidation (RFI)
+## Loss recovery — reference-frame invalidation (RFI)
 
 When the host advertises `rfi` (native NVENC — a Windows host, or since 2026-11-14 a Linux
 host with an NVIDIA GPU through the NVENC SDK on CUDA, see host-encode.md "Linux NVENC SDK";
-untested on Linux hardware), the Windows client asks for `StreamReq::rfi`.
+untested on Linux hardware), the client asks for `StreamReq::rfi` (H.264 / HEVC; never AV1 —
+no recovery tag there).
+
+- **Which clients** (`play.rs` `rfi_client`, 2026-11-15; Windows-only before): every desktop OS
+  when the session's renderer is `pulsar-render` — Windows (Media Foundation), macOS
+  (VideoToolbox) and Linux (libavcodec / rkmpp) all run the same `stream/rtp.rs` reorder buffer
+  + depacketizer (hole reports, release-at-tag, the reorder-aware report delay). Not on Linux's
+  `PULSAR_LINUX_DEMUX=ffmpeg` libavformat demux, and not with an mpv / ffplay fallback: neither
+  reports a hole, and `hold.rs` skips the keyframe request on an unrepaired loss while RFI is on
+  (`rfi_reach`). Untested in a real Linux / macOS session (unit tests + type checks only).
+- The report goes out from the renderer's RTP receive thread (`rtp::report_rfi`, the `pump`
+  tick) on all three OSes; Windows and macOS printed it from the render loop before, up to one
+  decode + present later.
+- A Linux client streaming with RFI no longer flips to intra refresh on sustained loss:
+  `hold.rs` `flip_recovery` turns the controller's intra-refresh flip into the short GOP while
+  RFI reaches the current codec (re-derived on a codec switch; AV1 keeps intra refresh), which an
+  RFI host absorbs, so RFI stays on. An intra-refresh flip used to turn RFI off (`rfi 0`) while
+  the host — which cannot start an intra wave mid-session — kept its long GOP.
+- No loss `hold` on an RFI stream (Linux renderer; the others ignore `hold`): the depacketizer
+  already withholds every access unit until the recovery frame or a keyframe, and the recovery
+  frame is no keyframe, so a hold froze the healed picture for its full 300 ms. `hold.rs` sends
+  none (`loss_hold_ms`), `video.rs` `hold_for_ms` treats `RFI_MODE` like `IR_MODE`.
+- `FEAT_RFI` is per host, not per stream: a stream whose encoder cannot do RFI (another encoder
+  pick, a fallback encoder, a Wayland window cast) ignores the reports. Until a stream has shown
+  one recovery frame (`Depacketizer::rfi_proven`, reset on an encoder restart) the recovery wait
+  is short (`RFI_UNPROVEN_WAIT` 40 ms, or the RTT) before the keyframe request, instead of
+  `rfi_timeout` (≥ 150 ms) on every unrepaired loss; a late recovery frame still ends the
+  keyframe wait. Cost on a healing stream: at most one early keyframe request per stream.
+- Decoder stall watch (`recovery::DecodeStall`: access units in, no picture out → keyframe
+  request) runs in all three renderers now (macOS and Linux added 2026-11-15): VideoToolbox
+  drops a picture with a missing reference silently, rkmpp may too.
+- A Linux resident renderer's `reopen` (reuse for another session, RK3588 codec switch) resets
+  `ir` / `rfi` to the wait-for-keyframe default until the app's next stats window, like a fresh
+  renderer on Windows / macOS.
 The host then keeps a level-5.1-sized DPB (`encode/policy.rs` `rfi_dpb`: 16 at ≤ 1080p,
 12 at 1440p, 8 at 4K; one reference for prediction). The flow:
 

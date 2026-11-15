@@ -143,12 +143,39 @@ fn rfi_timeout(rtt: Option<Duration>) -> Duration {
 }
 /// Upper bound on one recovery wait, however many holes keep restarting `RFI_TIMEOUT`.
 const RFI_GIVE_UP: Duration = Duration::from_millis(1000);
+/// The recovery wait until this stream has shown one recovery frame (`Depacketizer::rfi_proven`):
+/// at least this, else the RTT (the report's round trip), never past [`rfi_timeout`]. The host
+/// advertises RFI per host, not per stream: an encoder that cannot (another encoder pick, a
+/// fallback encoder, a Wayland window cast) ignores the report, and the full wait added ≥150 ms
+/// to every unrepaired loss there before the keyframe request. On a stream that does heal, the
+/// recovery frame has normally arrived by the time the repair gives up (it was asked for at the
+/// first report): the short wait costs at most one early keyframe request per stream.
+const RFI_UNPROVEN_WAIT: Duration = Duration::from_millis(40);
+
+/// The recovery wait for a stream that has not shown a recovery frame yet (see `RFI_UNPROVEN_WAIT`).
+fn rfi_unproven_wait(rtt: Option<Duration>) -> Duration {
+	RFI_UNPROVEN_WAIT.max(rtt.unwrap_or(Duration::ZERO)).min(rfi_timeout(rtt))
+}
 /// `pulsar_core::service::media::RFI_RECOVERY_UUID` (this crate has no core dependency).
 const RFI_UUID: [u8; 16] = *b"PULSAR-RFI-RECOV";
 
 /// The lost range to report to the host, if any (merged since the last call).
 pub fn take_rfi_request() -> Option<(u16, u16)> {
 	RFI_REQ.lock().unwrap().take()
+}
+
+/// Print the pending lost range for the host's reference-frame invalidation
+/// (`vidsink-rfi <first> <last>`) at once. Every backend calls it from its receive thread's
+/// [`pump`] tick, right after the reorder buffer raised the report: the host can only reach a
+/// recent frame, and the render loop's next turn (a decode + present, up to a display refresh)
+/// is too late at 120 fps. The Windows and macOS renderers used to print it from there.
+pub fn report_rfi() {
+	if let Some((first, last)) = take_rfi_request() {
+		use std::io::Write as _;
+		let mut o = std::io::stdout().lock();
+		let _ = writeln!(o, "vidsink-rfi {first} {last}");
+		let _ = o.flush();
+	}
 }
 
 fn report_lost(first: u16, last: u16) {
@@ -571,6 +598,10 @@ pub struct Depacketizer {
 	// RFI: the keyframe wait came from a recovery wait that timed out — a whole recovery frame
 	// still ends it (see `recovered`).
 	rfi_fallback: bool,
+	// RFI: this stream's encoder has answered a hole with a recovery frame. Until then a recovery
+	// wait is short (`RFI_UNPROVEN_WAIT`): the host may not run an RFI encoder on this stream.
+	// Reset with an encoder restart (the new encoder may be a fallback without RFI).
+	rfi_proven: bool,
 	// An access unit has been delivered (the stream was live): a wait from here on is a
 	// mid-stream freeze (`WAITING`), not the session start.
 	delivered: bool,
@@ -596,6 +627,7 @@ impl Depacketizer {
 			awaiting_recovery: None,
 			gap_ts: None,
 			rfi_fallback: false,
+			rfi_proven: false,
 			delivered: false,
 			conceal: super::hevc::Conceal::new(),
 			conceal_gap: false,
@@ -643,6 +675,7 @@ impl Depacketizer {
 			if seq_delta(seq, last) < -RESYNC_DISTANCE {
 				self.awaiting_recovery = None;
 				self.rfi_fallback = false;
+				self.rfi_proven = false;
 				self.awaiting_idr = true;
 				NEED_IDR.store(true, std::sync::atomic::Ordering::Relaxed);
 				self.drop_partial();
@@ -799,6 +832,8 @@ impl Depacketizer {
 			if !key && !self.rfi_fallback_recovers(&nals, false) {
 				return None; // wait for a clean keyframe before resuming.
 			}
+			// Not a keyframe: a recovery frame ended the fallback wait.
+			self.rfi_proven |= !key;
 			self.awaiting_idr = false;
 			self.rfi_fallback = false;
 		}
@@ -898,6 +933,7 @@ impl Depacketizer {
 			if !key && !self.rfi_fallback_recovers(&nals, true) {
 				return None;
 			}
+			self.rfi_proven |= !key;
 			self.awaiting_idr = false;
 			self.rfi_fallback = false;
 		}
@@ -945,10 +981,18 @@ impl Depacketizer {
 		};
 		let whole = self.gap_ts != Some(self.cur_ts);
 		if key || (whole && has_recovery_tag(nals, hevc)) {
+			self.rfi_proven |= !key;
 			self.awaiting_recovery = None;
 			return true;
 		}
-		if last.elapsed() >= rfi_timeout(rtt()) || first.elapsed() >= RFI_GIVE_UP {
+		// Not proven yet: from the first hole, short (`RFI_UNPROVEN_WAIT`) — a stream whose encoder
+		// ignores the reports gets its keyframe request about as early as without RFI.
+		let timed_out = if self.rfi_proven {
+			last.elapsed() >= rfi_timeout(rtt())
+		} else {
+			first.elapsed() >= rfi_unproven_wait(rtt())
+		};
+		if timed_out || first.elapsed() >= RFI_GIVE_UP {
 			self.awaiting_recovery = None;
 			self.awaiting_idr = true;
 			self.rfi_fallback = true;
@@ -1107,11 +1151,13 @@ fn inspect_av1_tu(tu: &[u8]) -> (bool, bool) {
 
 /// Bind `0.0.0.0:<port>` (large SO_RCVBUF if easy), receive RTP, depacketize, and push completed
 /// `AccessUnit`s into `sink`. Blocks; run on a thread. Stops when `stop` is set. Loss handling
-/// (seq gaps → await keyframe) lives in `Depacketizer`.
+/// (seq gaps → await keyframe) lives in `Depacketizer`. `tick` runs after every datagram and
+/// every receive timeout (see [`pump`]); the Windows and macOS renderers report RFI holes from it.
 pub fn recv_loop(
 	port: u16,
 	codec: Codec,
 	sink: impl FnMut(AccessUnit),
+	tick: impl FnMut(),
 	stop: &std::sync::atomic::AtomicBool,
 ) {
 	use std::net::UdpSocket;
@@ -1169,7 +1215,7 @@ pub fn recv_loop(
 	// buffer's time-based release runs while the socket is quiet (a hole with nothing
 	// arriving behind it must still be skipped after `max_delay`).
 	let _ = sock.set_read_timeout(Some(Duration::from_millis(20)));
-	pump(|b| sock.recv(b), codec, sink, || {}, stop);
+	pump(|b| sock.recv(b), codec, sink, tick, stop);
 }
 
 /// Linux: bind the abstract-namespace Unix datagram socket `name` (the app writes it into the
@@ -1223,8 +1269,9 @@ pub fn recv_loop_unix(
 /// The receive → reorder → depacketize loop behind [`recv_loop`], over any datagram source
 /// (`recv` must time out every ~20 ms with `WouldBlock`/`TimedOut` so `stop` and the reorder
 /// buffer's time-based release run while the source is quiet). `tick` runs after every
-/// datagram and every timeout — the Linux backend reports RFI holes / keyframe requests
-/// from it the moment the reorder buffer raises them. Blocks until `stop` or a hard error.
+/// datagram and every timeout — every backend reports RFI holes ([`report_rfi`]) from it the
+/// moment the reorder buffer raises them (Linux its keyframe requests too). Blocks until
+/// `stop` or a hard error.
 pub fn pump(
 	mut recv: impl FnMut(&mut [u8]) -> std::io::Result<usize>,
 	codec: Codec,
@@ -1807,12 +1854,60 @@ mod tests {
 		let p = [0x41u8, 9, 9];
 		assert!(d.push(&rtp(1, 0, true, &idr)).is_some());
 		assert!(d.push(&rtp(3, 2, true, &p)).is_none(), "gap → waiting for the recovery");
+		// A stream that healed before: the full timeout (the unproven one is shorter).
+		d.rfi_proven = true;
 		d.awaiting_recovery = Some((Instant::now(), Instant::now() - RFI_TIMEOUT));
 		assert!(d.push(&rtp(4, 3, true, &p)).is_none());
 		assert!(NEED_IDR.load(std::sync::atomic::Ordering::Relaxed), "keyframe requested");
 		assert!(d.push(&rtp(5, 4, true, &idr)).is_some(), "and the keyframe resumes");
 		RFI_MODE.store(false, std::sync::atomic::Ordering::Relaxed);
 		NEED_IDR.store(false, std::sync::atomic::Ordering::Relaxed);
+	}
+
+	/// RFI before the stream has shown a recovery frame: the host may run an encoder that ignores
+	/// the report (FEAT_RFI is per host), so the keyframe request comes after the short unproven
+	/// wait, not the full recovery timeout. Once a recovery frame healed a hole, the full wait.
+	#[test]
+	fn rfi_mode_an_unproven_stream_asks_for_a_keyframe_early() {
+		let _g = IR_LOCK.lock().unwrap();
+		RFI_MODE.store(true, std::sync::atomic::Ordering::Relaxed);
+		NEED_IDR.store(false, std::sync::atomic::Ordering::Relaxed);
+		let mut d = Depacketizer::new(Codec::H264);
+		let idr = [0x65u8, 1, 2];
+		let p = [0x41u8, 9, 9];
+		assert!(d.push(&rtp(1, 0, true, &idr)).is_some());
+		assert!(d.push(&rtp(3, 2, true, &p)).is_none(), "hole → waiting");
+		assert!(!NEED_IDR.load(std::sync::atomic::Ordering::Relaxed), "not at once");
+		// Past the unproven wait, well inside the full timeout.
+		let w = rfi_unproven_wait(rtt());
+		d.awaiting_recovery = Some((Instant::now() - w, Instant::now()));
+		assert!(d.push(&rtp(4, 3, true, &p)).is_none());
+		assert!(NEED_IDR.load(std::sync::atomic::Ordering::Relaxed), "keyframe requested early");
+		NEED_IDR.store(false, std::sync::atomic::Ordering::Relaxed);
+		// A recovery frame still ends the keyframe wait — and proves the stream heals.
+		assert!(d.push(&rtp(5, 4, false, &rfi_tag_h264())).is_none());
+		assert!(d.push(&rtp(6, 4, true, &p)).is_some(), "whole recovery frame resumes");
+		assert!(d.rfi_proven);
+		// From now on a hole waits the full timeout.
+		assert!(d.push(&rtp(8, 6, true, &p)).is_none(), "hole → waiting");
+		d.awaiting_recovery = Some((Instant::now() - w, Instant::now()));
+		assert!(d.push(&rtp(9, 7, true, &p)).is_none());
+		assert!(!NEED_IDR.load(std::sync::atomic::Ordering::Relaxed), "proven: still waiting for the recovery frame");
+		assert!(d.awaiting_recovery.is_some());
+		// An encoder restart (fresh RTP base) may bring an encoder without RFI.
+		let _ = d.push(&rtp(9u16.wrapping_sub(5000), 0, true, &idr));
+		assert!(!d.rfi_proven, "an encoder restart resets it");
+		RFI_MODE.store(false, std::sync::atomic::Ordering::Relaxed);
+		NEED_IDR.store(false, std::sync::atomic::Ordering::Relaxed);
+	}
+
+	#[test]
+	fn the_unproven_wait_covers_the_round_trip_up_to_the_full_timeout() {
+		assert_eq!(rfi_unproven_wait(None), RFI_UNPROVEN_WAIT);
+		assert_eq!(rfi_unproven_wait(Some(Duration::from_millis(5))), RFI_UNPROVEN_WAIT);
+		assert_eq!(rfi_unproven_wait(Some(Duration::from_millis(80))), Duration::from_millis(80));
+		assert!(rfi_unproven_wait(Some(Duration::from_millis(80))) < rfi_timeout(Some(Duration::from_millis(80))));
+		assert_eq!(rfi_unproven_wait(Some(Duration::from_secs(5))), RFI_GIVE_UP);
 	}
 
 	fn rfi_tag_h264() -> Vec<u8> {
@@ -1893,6 +1988,8 @@ mod tests {
 		let idr = [0x65u8, 1, 2];
 		let p = [0x41u8, 9, 9];
 		assert!(d.push(&rtp(1, 0, true, &idr)).is_some());
+		// A stream whose encoder has healed a hole before (the unproven wait is short, see below).
+		d.rfi_proven = true;
 		assert!(d.push(&rtp(3, 2, true, &p)).is_none(), "hole → waiting");
 		assert!(d.waiting(), "a mid-stream recovery wait shows as waiting");
 		// The first hole is older than the timeout, but a new hole just happened.

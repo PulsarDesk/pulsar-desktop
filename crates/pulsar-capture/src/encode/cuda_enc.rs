@@ -324,6 +324,12 @@ impl NvencCuda {
 		self.rfi
 	}
 
+	/// The session rolls an intra-refresh wave instead of scheduled IDRs (built that way; it
+	/// cannot change live).
+	pub fn intra_refresh_enabled(&self) -> bool {
+		self.intra_refresh
+	}
+
 	/// (losses healed by invalidation, losses declined) since the encoder was built.
 	pub fn rfi_counts(&self) -> (u32, u32) {
 		(self.rfi_ok, self.rfi_no)

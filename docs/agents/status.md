@@ -68,8 +68,10 @@ needs a mac C toolchain); the crate can.
 **Linux host RFI (2026-11-14, LOCAL, unpushed, untested on Linux hardware):** an NVIDIA
 Linux host (X11 and Wayland) encodes with the NVENC SDK on CUDA and heals a client-reported
 loss with reference-frame invalidation like the Windows host — see
-[host-encode.md](host-encode.md) "Linux NVENC SDK". Open: the Linux client does not ask for
-RFI yet (`play.rs` `cfg!(windows)`); VA-API / QSV / AMF hosts have no equivalent (keyframe).
+[host-encode.md](host-encode.md) "Linux NVENC SDK". VA-API / QSV / AMF hosts have no
+equivalent (keyframe). **RFI clients on every OS (2026-11-15, fix/rfi-clients, LOCAL, unpushed,
+untested in a real Linux / macOS session):** Linux and macOS clients ask for RFI too — see
+[client-video.md](client-video.md) "Loss recovery — reference-frame invalidation".
 
 **Linux AMD / Intel host, in-process VA-API / QSV (2026-11-15, LOCAL, untested on Linux
 hardware, not compiled for Linux here):** X11 hosts on `*_vaapi` / `*_qsv` run inside the app

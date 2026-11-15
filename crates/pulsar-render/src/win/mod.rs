@@ -2635,6 +2635,9 @@ unsafe fn event_loop(
 					stream::framelog(format_args!("a {} {}", au.pts_90k, au.key as u8));
 					g.push_back(au);
 				},
+				// A lost range for the host's reference-frame invalidation, from this thread the
+				// moment the reorder buffer raises it (the host can only reach a recent frame).
+				stream::rtp::report_rfi,
 				&stop2,
 			);
 		});
@@ -2772,13 +2775,8 @@ unsafe fn event_loop(
 			let _ = TranslateMessage(&msg);
 			DispatchMessageW(&msg);
 		}
-		// A lost packet range for the host's reference-frame invalidation (stream/rtp.rs
-		// `RFI_MODE`) — sent at once: the host can only reach a recent frame.
-		if let Some((first, last)) = crate::stream::rtp::take_rfi_request() {
-			use std::io::Write as _;
-			println!("vidsink-rfi {first} {last}");
-			let _ = std::io::stdout().flush();
-		}
+		// (A lost packet range for the host's reference-frame invalidation is reported from the
+		// RTP receive thread, `stream::rtp::report_rfi`.)
 		// The depacketizer lost the reference picture mid-stream: ask the app for an IDR now
 		// (≤ 2/s) instead of waiting out the host's periodic keyframe.
 		if last_needidr.elapsed() >= std::time::Duration::from_millis(500)

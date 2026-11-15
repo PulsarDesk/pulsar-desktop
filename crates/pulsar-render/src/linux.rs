@@ -607,6 +607,13 @@ pub fn run() {
 						// the stale GPU texture — otherwise host-A's pointer bitmap stays
 						// uploaded and is drawn over host-B's video on the resident-reuse path.
 						CURSOR_IMG_GEN.fetch_add(1, Ordering::SeqCst);
+						// The reopened stream starts in the safe wait-for-keyframe mode, like a
+						// fresh renderer (Windows / macOS respawn one): the app sends its `ir` /
+						// `rfi` with the next stats window. A resident renderer reused for another
+						// host (no RFI) or a codec switch to AV1 (no recovery tag) must not keep
+						// waiting for a recovery tag that never comes.
+						video::set_ir_mode(false);
+						video::set_rfi_mode(false);
 						video::request_reopen(p);
 					}
 				}

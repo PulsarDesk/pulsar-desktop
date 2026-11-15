@@ -363,9 +363,29 @@ GPU runs the **same NVENC SDK session as Windows**:
 - **Untested on hardware**: no Linux machine with an NVIDIA GPU was available; only type
   checks, unit tests (the no-driver path of `NvencCuda::new`, plane-size rules, the gst handoff
   plumbing with `videotestsrc`) and the libav end-to-end x264 test ran.
-- Which clients use it: the Windows client asks for RFI (`play.rs` `host_rfi` is
-  `cfg!(windows)`). The Linux renderer already reports `vidsink-rfi` and resumes at the tag, but
-  the Linux client does not ask yet.
+- Which clients use it: every desktop client on pulsar-render (Windows, macOS, Linux on its
+  Rust RTP path; `play.rs` `rfi_client`), see client-video.md.
+- **Recovery flip absorbed** (2026-11-15): the client's loss flip no longer forces an IDR
+  every 0.5 s on top of an SDK encoder that heals that mode itself, decided from what the BUILT
+  encoder does (`libav::EncoderHeals`: NVENC turns RFI off without the GPU caps, for AV1 and
+  under intra refresh), per mode (`EncoderHeals::absorbs`): the short GOP is absorbed with RFI
+  or the intra wave, an intra-refresh flip only with the wave (the client sends `rfi 0` under
+  intra refresh, so an RFI-only encoder needs the cadence). X11: `libav::recovery_cadence`;
+  Wayland: `nvenc_frames::short_gop`, fed by the raw-frame factory (`BuiltHeals`). The Windows
+  native path always absorbed it (`live_change`).
+- A stream whose encoder has no RFI (libavcodec fallback, a Wayland window cast, a non-NVENC
+  pick) ignores `MediaRfi` while the host still advertises `rfi`: no keyframe answer, since a
+  hole the client's NACK repair fills must cost nothing; the client renderer asks for the
+  keyframe early until the stream has shown a recovery frame (client-video.md).
+- The FEAT_RFI probe (`host.rs` `linux_nvenc_sdk`) honours the encoders' own
+  `PULSAR_NVENC_SDK` switch (`0` / `false` / `off`, `libav::sdk_enabled`): `off` used to keep
+  advertising RFI with the SDK encoder disabled.
+- Reviewed against the Windows encoder (2026-11-15): `NvencCuda` matches `Encoder` /
+  `submit.rs` in the RFI DPB / `numRefL0` config (shared `nvsession::configure`), the
+  `RefTracker` record / plan / `invalidate_failed` calls, the IDR detection, the keyframe
+  policy and the recovery-SEI prefix. Difference kept: the Wayland path stamps the RTP time at
+  encode, not at capture (`RawFrame` carries no capture time) — a few ms of the GStreamer
+  convert, constant per frame.
 - **VA-API / Intel / AMD**: no equivalent through the encoders we use. libavcodec's
   `*_vaapi`/`*_qsv` and GStreamer's `va*`/`vaapi*` encoders expose no reference invalidation.
   Possible only with an encoder of our own: raw VA-API (the app owns the DPB and the

@@ -162,7 +162,12 @@ fn media_features() -> Vec<String> {
 	#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 	v.push(pulsar_core::service::media::FEAT_PINCH.to_string());
 	// Reference-frame invalidation: the native NVENC path heals a client-reported loss without
-	// a keyframe (other paths answer MediaRfi with a keyframe).
+	// a keyframe. Advertised for the whole host, not per stream: a stream whose encoder cannot
+	// (another encoder pick, a fallback encoder, a Wayland window cast) ignores the report —
+	// `on_rfi` below never answers it with a keyframe, since a hole the client's NACK repair
+	// fills must cost nothing. The client's renderer asks for the keyframe itself once its
+	// repair gave up: at once until this stream has shown a recovery frame, later after its
+	// recovery wait (pulsar-render `stream/rtp.rs` `Depacketizer::rfi_proven`).
 	#[cfg(windows)]
 	v.push(pulsar_core::service::media::FEAT_RFI.to_string());
 	// Linux: the x11grab host's NVENC SDK encoder (pulsar_capture::NvencCuda) — advertised once
@@ -229,7 +234,9 @@ fn linux_nvenc_sdk() -> bool {
 	static STATE: AtomicU8 = AtomicU8::new(0);
 	if STATE.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
 		let spawned = std::thread::Builder::new().name("nvenc-sdk-probe".into()).spawn(|| {
-			let ok = pulsar_capture::nvenc_supported() && std::env::var("PULSAR_NVENC_SDK").map(|v| v != "0").unwrap_or(true);
+			// The encoders' own switch (`0` / `false` / `off`): a host whose SDK encoder is off must
+			// not advertise RFI — its clients would wait out every recovery tag that never comes.
+			let ok = pulsar_capture::nvenc_supported() && libav::sdk_enabled(std::env::var("PULSAR_NVENC_SDK").ok().as_deref());
 			tracing::info!(codecs = ?pulsar_capture::nvenc_codecs(), ok, "Linux NVENC SDK (CUDA) probe");
 			STATE.store(if ok { 3 } else { 2 }, Ordering::SeqCst);
 		});

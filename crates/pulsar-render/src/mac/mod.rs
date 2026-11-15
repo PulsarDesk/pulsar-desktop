@@ -1160,6 +1160,11 @@ struct Renderer {
 	bytes: u64,
 	dec_ms_acc: f32,
 	dec_n: u32,
+	// Mid-stream decoder stall watch (`stream::recovery::DecodeStall`, as on Windows) and its ms
+	// clock: VideoToolbox drops a picture whose reference is missing without an error
+	// (`kVTDecodeInfo_FrameDropped`), and on an RFI / intra-refresh stream no IDR comes by itself.
+	dec_stall: crate::stream::recovery::DecodeStall,
+	dec_clock: std::time::Instant,
 	// The decoder announced to the app (`vidsink-dec`), and whether it ran in hardware.
 	dec_announced: Option<bool>,
 	revealed: bool,
@@ -1203,6 +1208,8 @@ impl Renderer {
 			bytes: 0,
 			dec_ms_acc: 0.0,
 			dec_n: 0,
+			dec_stall: Default::default(),
+			dec_clock: std::time::Instant::now(),
 			dec_announced: None,
 			revealed: false,
 			last_vrect: (-1.0, -1.0, -1.0, -1.0),
@@ -1497,6 +1504,12 @@ impl Renderer {
 		}
 		self.dec_ms_acc += t0.elapsed().as_secs_f32() * 1000.0;
 		self.dec_n += 1;
+		// A decoder that keeps taking access units without a picture has stalled: ask for a
+		// keyframe (the decode is synchronous, so an AU's picture is out by now).
+		if self.dec_stall.on_decode(self.dec_clock.elapsed().as_millis() as u64, !frames.is_empty()) {
+			eprintln!("pulsar-render(mac): decoder stalled (access units in, no picture out) — asking for a keyframe");
+			stream::rtp::NEED_IDR.store(true, Ordering::Relaxed);
+		}
 		if !show {
 			if let Some(f) = frames.into_iter().last() {
 				self.held_back = Some(f);
@@ -1760,6 +1773,10 @@ fn event_loop(mtm: MainThreadMarker, parent: u32, port: u16, codec: Codec, mode:
 					}
 					g.push_back(au);
 				},
+				// A lost range for the host's reference-frame invalidation, from this thread the
+				// moment the reorder buffer raises it — not after the render loop's next decode +
+				// present (the host can only reach a recent frame).
+				stream::rtp::report_rfi,
 				&stop2,
 			);
 		});
@@ -1919,10 +1936,7 @@ fn event_loop(mtm: MainThreadMarker, parent: u32, port: u16, codec: Codec, mode:
 				r.repaint_idle(&win);
 			}
 
-			// ---- Requests to the app.
-			if let Some((first, last)) = stream::rtp::take_rfi_request() {
-				out_line(&format!("vidsink-rfi {first} {last}"));
-			}
+			// ---- Requests to the app (RFI holes go out from the RTP thread, `rtp::report_rfi`).
 			if last_needidr.elapsed() >= std::time::Duration::from_millis(500) && stream::rtp::NEED_IDR.swap(false, Ordering::Relaxed) {
 				last_needidr = std::time::Instant::now();
 				out_line("vidsink-needidr");
