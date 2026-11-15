@@ -536,7 +536,8 @@ fn dxva_nv12_profiles_bounded(timeout: std::time::Duration) -> Vec<GUID> {
 
 static DXVA_QUERY_ABANDONED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Did the probe leave a DXVA query thread blocked in the driver? Then a normal exit could
+/// Did the probe leave a worker blocked in the driver (the DXVA query, or the 10-bit HDR10
+/// decode check past `TEN_BIT_PROBE_BUDGET`)? Then a normal exit could
 /// hang in DLL detach (the thread may hold the loader lock), so `main` ends the process
 /// with `TerminateProcess` once the JSON is flushed.
 pub fn probe_abandoned_worker() -> bool {
