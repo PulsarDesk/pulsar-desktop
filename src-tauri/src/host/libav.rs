@@ -659,6 +659,11 @@ unsafe fn run(p: &Params, rx: Receiver<Cmd>, ready: Sender<Result<(), String>>) 
 	let frame = ff::av_frame_alloc();
 	let filt = ff::av_frame_alloc();
 	let mut pts: i64 = 0;
+	// The RTP timestamp of each packet = its frame's capture instant, not `pts` (a frame
+	// counter): see `capture_clock.rs`. The SDK path already stamps the capture time.
+	let mut clock = super::capture_clock::CaptureClock::default();
+	let frame_us = 1_000_000 / p.fps.max(1) as i64;
+	let mut last_ts = i64::MIN;
 	let mut force_key = true; // the first frame is an IDR
 	let mut recovery = p.recovery;
 	let mut frames_since_key: u32 = 0;
@@ -729,6 +734,7 @@ unsafe fn run(p: &Params, rx: Receiver<Cmd>, ready: Sender<Result<(), String>>) 
 			}
 			while ff::av_buffersink_get_frame(cx.sink, filt) == 0 {
 				(*filt).pts = pts;
+				clock.capture(pts, cap_at.saturating_duration_since(t_start).as_micros() as i64);
 				pts += 1;
 				// Keyframe on request, or on the recovery cadence (~0.5 s).
 				let cadence = if recovery.is_active() { (p.fps / 2).max(1) } else { u32::MAX };
@@ -782,7 +788,15 @@ unsafe fn run(p: &Params, rx: Receiver<Cmd>, ready: Sender<Result<(), String>>) 
 				}
 				while ff::avcodec_receive_packet(cx.enc, pkt) == 0 {
 					(*pkt).stream_index = 0;
-					ff::av_packet_rescale_ts(pkt, enc_tb, ost_tb);
+					// Capture time on the muxer's clock (90 kHz for RTP); no B-frames, so
+					// dts = pts.
+					let at_us = clock.packet((*pkt).pts, frame_us);
+					let ts = ff::av_rescale_q(at_us, ff::AVRational { num: 1, den: 1_000_000 }, ost_tb)
+						.max(last_ts.saturating_add(1));
+					last_ts = ts;
+					(*pkt).pts = ts;
+					(*pkt).dts = ts;
+					(*pkt).duration = ff::av_rescale_q((*pkt).duration, enc_tb, ost_tb);
 					stats_bytes += (*pkt).size.max(0) as u64;
 					let w = ff::av_interleaved_write_frame(cx.octx, pkt);
 					ff::av_packet_unref(pkt);
