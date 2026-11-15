@@ -378,28 +378,167 @@ unsafe fn create_decoder_mft(subtype: GUID, allow_async: bool) -> Result<IMFTran
 /// exists: `ok` requires a SYNCHRONOUS MFT (the drive model is ProcessInput→ProcessOutput;
 /// an async-only MFT accepts input forever and never emits a frame — the black-screen
 /// trap). JSON schema matches the Linux probe so the app's caps parser needs no changes.
+///
+/// `hw` / `tier` are the REAL state, not a blanket claim: the synchronous MFTs this probe
+/// picks are the inbox / Store decoders (msmpeg2vdec, the HEVC / AV1 Video Extensions),
+/// which decode on the GPU through DXVA only when they are D3D11-aware (`MF_SA_D3D11_AWARE`)
+/// AND the GPU the renderer opens (the default hardware adapter, as in `win::mod`) exposes a
+/// DXVA decoder profile for the codec that outputs NV12. Otherwise the same MFT decodes on
+/// the CPU, which is `hw:false, tier:"software"` (still `ok`: it plays, just slower).
 pub fn probe_json() -> String {
 	unsafe {
 		MF_INIT.call_once(|| {
 			let _ = MFStartup(MF_VERSION, MFSTARTUP_FULL);
 		});
 	}
+	let dxva = unsafe { dxva_nv12_profiles() };
 	let mut entries = Vec::new();
 	for (name, subtype) in [
 		("h264", MFVideoFormat_H264),
 		("h265", MFVideoFormat_HEVC),
 		("av1", MFVideoFormat_AV1),
 	] {
-		let sync_ok = unsafe { create_decoder_mft(subtype, false).is_ok() };
-		entries.push(format!(
-			concat!(
-				"{{\"codec\":\"{}\",\"ok\":{},\"decoder\":\"mediafoundation\",",
-				"\"hw\":true,\"tier\":\"hwaccel\",\"incompatible_with\":[]}}"
-			),
-			name, sync_ok
-		));
+		let mft = unsafe { create_decoder_mft(subtype, false) };
+		let ok = mft.is_ok();
+		let hw = match &mft {
+			Ok(t) => unsafe { is_d3d11_aware(t) && gpu_decodes(subtype, &dxva) },
+			Err(_) => false,
+		};
+		entries.push(probe_entry(name, ok, hw));
 	}
 	format!("[{}]", entries.join(","))
+}
+
+/// One probe JSON entry (same keys as the Linux / macOS probes).
+fn probe_entry(codec: &str, ok: bool, hw: bool) -> String {
+	format!(
+		concat!(
+			"{{\"codec\":\"{}\",\"ok\":{},\"decoder\":\"mediafoundation\",",
+			"\"hw\":{},\"tier\":\"{}\",\"incompatible_with\":[]}}"
+		),
+		codec,
+		ok,
+		hw && ok,
+		if hw && ok { "hwaccel" } else { "software" }
+	)
+}
+
+/// The DXVA (D3D11 video) decoder profiles of one codec subtype, 8-bit 4:2:0 — what the
+/// stream is unless HDR is on (HEVC Main10 is not needed for the SDR stream).
+fn dxva_profiles_for(subtype: GUID) -> &'static [GUID] {
+	use windows::Win32::Graphics::Direct3D11::{
+		D3D11_DECODER_PROFILE_AV1_VLD_PROFILE0, D3D11_DECODER_PROFILE_H264_VLD_NOFGT,
+		D3D11_DECODER_PROFILE_HEVC_VLD_MAIN,
+	};
+	const H264: [GUID; 1] = [D3D11_DECODER_PROFILE_H264_VLD_NOFGT];
+	const HEVC: [GUID; 1] = [D3D11_DECODER_PROFILE_HEVC_VLD_MAIN];
+	const AV1: [GUID; 1] = [D3D11_DECODER_PROFILE_AV1_VLD_PROFILE0];
+	if subtype == MFVideoFormat_H264 {
+		&H264
+	} else if subtype == MFVideoFormat_HEVC {
+		&HEVC
+	} else if subtype == MFVideoFormat_AV1 {
+		&AV1
+	} else {
+		&[]
+	}
+}
+
+/// Does the GPU (its NV12-output DXVA profiles in `dxva`) decode this codec subtype?
+fn gpu_decodes(subtype: GUID, dxva: &[GUID]) -> bool {
+	dxva_profiles_for(subtype).iter().any(|p| dxva.contains(p))
+}
+
+/// The DXVA decoder profiles of the default hardware adapter (the one the renderer's
+/// `D3D11CreateDevice(None, HARDWARE, …, VIDEO_SUPPORT)` opens) that can output NV12.
+/// Empty when there is no D3D11 video device (WARP / basic display driver / no GPU).
+unsafe fn dxva_nv12_profiles() -> Vec<GUID> {
+	use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0};
+	use windows::Win32::Graphics::Direct3D11::{
+		D3D11CreateDevice, ID3D11VideoDevice, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION,
+	};
+	let mut device: Option<ID3D11Device> = None;
+	if D3D11CreateDevice(
+		None,
+		D3D_DRIVER_TYPE_HARDWARE,
+		Default::default(),
+		D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+		Some(&[D3D_FEATURE_LEVEL_11_0]),
+		D3D11_SDK_VERSION,
+		Some(&mut device),
+		None,
+		None,
+	)
+	.is_err()
+	{
+		return Vec::new();
+	}
+	let Some(video) = device.and_then(|d| d.cast::<ID3D11VideoDevice>().ok()) else {
+		return Vec::new();
+	};
+	let mut out = Vec::new();
+	for i in 0..video.GetVideoDecoderProfileCount() {
+		let Ok(p) = video.GetVideoDecoderProfile(i) else {
+			continue;
+		};
+		if video.CheckVideoDecoderFormat(&p, DXGI_FORMAT_NV12).is_ok_and(|b| b.as_bool()) {
+			out.push(p);
+		}
+	}
+	out
+}
+
+/// Is this MFT D3D11-aware (`MF_SA_D3D11_AWARE`)? Only such an MFT decodes through DXVA on
+/// the device manager `Decoder::new_ex` hands it; any other decodes on the CPU.
+unsafe fn is_d3d11_aware(t: &IMFTransform) -> bool {
+	t.GetAttributes()
+		.and_then(|a| a.GetUINT32(&windows::Win32::Media::MediaFoundation::MF_SA_D3D11_AWARE))
+		.map(|v| v != 0)
+		.unwrap_or(false)
+}
+
+#[cfg(test)]
+mod probe_tests {
+	use super::*;
+
+	#[test]
+	fn entry_reports_the_real_tier() {
+		let hw = probe_entry("h264", true, true);
+		assert!(hw.contains("\"hw\":true") && hw.contains("\"tier\":\"hwaccel\""), "{hw}");
+		let sw = probe_entry("h265", true, false);
+		assert!(sw.contains("\"hw\":false") && sw.contains("\"tier\":\"software\""), "{sw}");
+		// No decoder at all is never "hardware".
+		let none = probe_entry("av1", false, true);
+		assert!(none.contains("\"ok\":false") && none.contains("\"hw\":false"), "{none}");
+		for e in [hw, sw, none] {
+			let v: serde_json::Value = serde_json::from_str(&e).expect("valid JSON");
+			assert!(v["incompatible_with"].is_array());
+		}
+	}
+
+	#[test]
+	fn gpu_profile_match_is_per_codec() {
+		use windows::Win32::Graphics::Direct3D11::D3D11_DECODER_PROFILE_H264_VLD_NOFGT;
+		let only_h264 = [D3D11_DECODER_PROFILE_H264_VLD_NOFGT];
+		assert!(gpu_decodes(MFVideoFormat_H264, &only_h264));
+		assert!(!gpu_decodes(MFVideoFormat_HEVC, &only_h264));
+		assert!(!gpu_decodes(MFVideoFormat_AV1, &only_h264));
+		assert!(!gpu_decodes(MFVideoFormat_H264, &[]));
+	}
+
+	/// The real probe on this machine: valid JSON, three codecs, `hw` only where `ok`.
+	#[test]
+	fn probe_json_is_well_formed() {
+		let v: serde_json::Value = serde_json::from_str(&probe_json()).expect("valid JSON");
+		let arr = v.as_array().expect("array");
+		assert_eq!(arr.len(), 3);
+		for e in arr {
+			if e["hw"].as_bool() == Some(true) {
+				assert_eq!(e["ok"].as_bool(), Some(true));
+				assert_eq!(e["tier"].as_str(), Some("hwaccel"));
+			}
+		}
+	}
 }
 
 /// True if an activated MFT is asynchronous. All hardware MFTs are async; they must be unlocked
