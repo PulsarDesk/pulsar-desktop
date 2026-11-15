@@ -157,7 +157,9 @@ The id on the wire is an opaque `i64` whose meaning is the HOST's (table in puls
   streams the screen, as Windows does. macOS: the block only sizes the window
   (`window_src::window_size` → `encode_size`); its source starts after the native decision —
   the native capture when taken, else `serve_for` — so one ScreenCaptureKit stream runs per
-  window, and `window_src::began` registers it only once one of them started. A native window
+  window, and `window_src::began` registers it only once one of them started. A native start
+  that failed on the Screen Recording permission or a ScreenCaptureKit timeout skips `serve_for`
+  (it would only repeat the same query for up to ~10 s more) and streams the screen at once. A native window
   stream ignores display switches (no display to switch), and a window that closed ends its
   capture thread at once (no rebuild retries); the watcher below restarts on the screen.
 - **Input (X11 / macOS):** while a session streams a window, the client's 0..1 absolute pointer
@@ -170,9 +172,16 @@ The id on the wire is an opaque `i64` whose meaning is the HOST's (table in puls
   go to the focused window (no PostMessage-style per-window routing off Windows: X11 / macOS
   inject at the desktop, so two co-op panes on two windows of ONE host share one focus).
 - **Size changes:** a host watcher (`host.rs`, 1 s, debounced over two looks) re-issues the
-  last StreamReq when the streamed window settles at a new size or is closed / its
-  ScreenCaptureKit stream stopped (x11grab keeps the size it opened with; a closed window then
-  streams the screen).
+  window stream's request when the streamed window settles at a new size or is closed / its
+  ScreenCaptureKit stream stopped (x11grab keeps the size it opened with, SCK scales the window
+  into its old frame; a closed window then streams the screen). The request is the one
+  `window_src` recorded when the window source started (`began(sid, id, req)`, kept current by
+  `note_request` for steps applied live), NOT `last_req_store`: that store is empty while a
+  native capture runs (else a keyframe request would restart it), and a macOS window streams
+  natively. The re-issue is a forced restart (the per-session `force_restart` flag, the same one
+  failover.rs sets on Windows): the request is unchanged, so without it the native / libav live
+  fast paths or the ffmpeg "bitrate step absorbed" check would swallow it. Before 2026-11-15
+  that absorb swallowed the watcher on macOS (and the libav fast path on X11) entirely.
 - **Fit to the pane** (`StreamReq::adapt` with a window pick): `display_mode::fit_window` ->
   `pulsar_core::window_capture::fit` on X11 (unmaximize, `_NET_MOVERESIZE_WINDOW` on the
   window's RandR monitor clipped to `_NET_WORKAREA`, restored on teardown incl. the maximized

@@ -15,7 +15,9 @@ use crate::{CaptureConfig, CaptureHandle, Codec, DisplayDesc, DisplayRect, LiveS
 
 /// `LiveStats::source` id of this path: "sck" (a display) / "sck-window" (one window).
 const SOURCE_SCK: u32 = 5;
-const SOURCE_SCK_WINDOW: u32 = 6;
+/// 8, not 6: ids 6 / 7 are the Windows Media Foundation sources ("wgc-mf" / "wgc-window-mf",
+/// branch feat/native-encode). The id table lives in `LiveStats::snapshot` (lib.rs).
+const SOURCE_SCK_WINDOW: u32 = 8;
 /// How long `start_capture_encode` waits for the first build (SCK's content query + start).
 const INIT_TIMEOUT: Duration = Duration::from_secs(8);
 /// A stream SCK stopped on its own (display gone, sleep, permission revoked) is rebuilt at

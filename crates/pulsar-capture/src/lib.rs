@@ -154,13 +154,15 @@ impl LiveStats {
 	pub fn snapshot(&self) -> CaptureStats {
 		use std::sync::atomic::Ordering::Relaxed;
 		CaptureStats {
+			// Source ids, one per writer: 1-4 Windows (dxgi/, wgc/), 5 and 8 macOS (mac/),
+			// 6 and 7 reserved for the Windows Media Foundation WGC sources (feat/native-encode).
 			source: match self.source.load(Relaxed) {
 				1 => "dxgi",
 				2 => "wgc",
 				3 => "wgc-window",
 				4 => "dxgi-mf",
 				5 => "sck",
-				6 => "sck-window",
+				8 => "sck-window",
 				_ => "",
 			},
 			latency_p50_us: self.lat_p50.load(Relaxed),

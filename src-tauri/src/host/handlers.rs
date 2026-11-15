@@ -2050,10 +2050,12 @@ pub(super) fn make_on_stream(
 	// restart capture at the new geometry.  On Windows this is only populated when
 	// native_started=false (ffmpeg fallback); native DXGI sessions self-heal via ACCESS_LOST.
 	last_req_store: Arc<Mutex<Option<StreamReq>>>,
-	// Set by failover.rs right before it re-issues a request through the restream channel: the
-	// next request is a restart the host ordered (this session's native capture stalled, or
-	// NVENC is back for a session on a fallback encoder) and is carried out in full.
-	#[cfg(windows)] force_restart: Arc<std::sync::atomic::AtomicBool>,
+	// Set right before the host itself re-issues a request through the restream channel: the
+	// next request is a restart the host ordered and is carried out in full. Windows:
+	// failover.rs (this session's native capture stalled, or NVENC is back for a session on a
+	// fallback encoder). Off Windows: the window watcher (the streamed window was resized or
+	// closed; its request is unchanged, so a fast path would otherwise absorb it).
+	force_restart: Arc<std::sync::atomic::AtomicBool>,
 	// Whether the caps this session's client was sent listed NVENC (true until it asks). A
 	// client drops the codecs its decoder cannot take from the encoder families it was told
 	// (an RK3588's rkmpp and native-NVENC HEVC), so a stream is never put on NVENC when it was
@@ -2139,12 +2141,13 @@ pub(super) fn make_on_stream(
 		// entirely. The mode change is intentionally allowed to trip the host display-mode watcher
 		// / native encoder rebuild downstream — that's how the capture picks up the new geometry.
 		apply_screen_adaptation(&req, &adapt_state);
-		// A restart the host itself ordered (failover.rs): no live fast path and no "unchanged
-		// bitrate step" absorb may swallow it.
-		#[cfg(windows)]
+		// A restart the host itself ordered (failover.rs, the window watcher): no live fast path
+		// and no "unchanged bitrate step" absorb may swallow it.
 		let forced = force_restart.swap(false, std::sync::atomic::Ordering::SeqCst);
-		#[cfg(not(any(windows, target_os = "linux")))]
-		let forced = false;
+		// A window stream keeps its newest request for the window watcher (a step applied live
+		// below returns before the window source is registered again).
+		#[cfg(not(windows))]
+		super::window_src::note_request(sid, &req);
 		// last_req_store is updated below (after native_started is resolved) so the
 		// display-mode watcher only fires for ffmpeg-path sessions on Windows.
 		// WAYLAND BITRATE-ONLY FAST PATH — the client's ABR re-sends the full StreamReq just to
@@ -2160,7 +2163,7 @@ pub(super) fn make_on_stream(
 		#[cfg(target_os = "linux")]
 		{
 			let slot = libav_slot.lock().unwrap();
-			if let (Some(engine), Some(prev)) = (slot.as_ref(), last_libav_req.as_ref()) {
+			if let (Some(engine), Some(prev)) = (slot.as_ref().filter(|_| !forced), last_libav_req.as_ref()) {
 				let mut probe = prev.clone();
 				probe.bitrate_kbps = req.bitrate_kbps;
 				probe.loss_recovery = req.loss_recovery;
@@ -2185,7 +2188,7 @@ pub(super) fn make_on_stream(
 		#[cfg(target_os = "linux")]
 		if (pulsar_core::capture::is_wayland() && !super::mock_capture()) {
 			let slot = cap_slot.lock().unwrap();
-			if let (Some(cap), Some(prev)) = (slot.as_ref(), last_wl_req.as_ref()) {
+			if let (Some(cap), Some(prev)) = (slot.as_ref().filter(|_| !forced), last_wl_req.as_ref()) {
 				let mut probe = prev.clone();
 				probe.bitrate_kbps = req.bitrate_kbps;
 				probe.loss_recovery = req.loss_recovery;
@@ -2259,6 +2262,9 @@ pub(super) fn make_on_stream(
 					}
 					native_watch.reset();
 					last_native_req = None;
+					// The retired stream's request is also `last_ff_req` (the "unchanged
+					// request" check below): a retire must restart, never be absorbed.
+					last_ff_req = None;
 				}
 			}
 		}
@@ -2329,12 +2335,15 @@ pub(super) fn make_on_stream(
 					);
 					native_watch.reset();
 					last_native_req = None;
+					// `last_ff_req` holds the retired stream's request too (it doubles as the
+					// "unchanged request" check): this request must restart, never be absorbed.
+					last_ff_req = None;
 				}
 			}
 		}
 		#[cfg(target_os = "macos")]
 		if let Some((disp, bitrate)) =
-			last_native_req.as_ref().and_then(|prev| live_change(prev, &req))
+			last_native_req.as_ref().filter(|_| !forced).and_then(|prev| live_change(prev, &req))
 		{
 			let handled = {
 				let slot = native_slot.lock().unwrap();
@@ -2364,6 +2373,10 @@ pub(super) fn make_on_stream(
 		// once per 6 s; anything else keeps the running encode at its rate. A deferred step is not
 		// lost — the client keeps adapting, and a later request compares against what ffmpeg is
 		// actually streaming. A recovery-mode flip still restarts (short GOP needs a new encoder).
+		// `last_ff_req` is set on every full restart, native ones included: for a native stream it
+		// is what keeps the client's periodic, unchanged re-request from restarting it (the live
+		// fast path above returns only on a change). So a host-ordered restart (`forced`) skips
+		// this, and retiring a native thread clears it.
 		#[cfg(not(target_os = "linux"))]
 		if let Some((prev, at)) = last_ff_req.as_ref().filter(|_| !forced) {
 			let mut probe = prev.clone();
@@ -2996,7 +3009,7 @@ pub(super) fn make_on_stream(
 				};
 				// macOS registers the window once its source has started (below).
 				if let Some((Target::X11(id), _)) = picked {
-					ws::began(sid, id);
+					ws::began(sid, id, req.clone());
 				}
 				picked
 			})
@@ -3670,6 +3683,11 @@ pub(super) fn make_on_stream(
 		// stays the fallback (macOS < 12.3, no Screen Recording permission, a codec VideoToolbox
 		// refuses, HDR / 4:4:4 — a window then goes through the loopback frame server).
 		// PULSAR_FFMPEG_CAPTURE=1 forces ffmpeg. Untested on macOS hardware.
+		// Set when the native start failed in a way the ffmpeg window source would only repeat
+		// (no Screen Recording permission, ScreenCaptureKit not answering): a window then
+		// streams the screen at once instead of waiting through a second SCK query + start.
+		#[cfg(target_os = "macos")]
+		let mut mac_sck_unusable = false;
 		#[cfg(target_os = "macos")]
 		let native_started = if encoder == HwEncoder::VideoToolbox
 			&& capture == CaptureMethod::AvFoundation
@@ -3711,7 +3729,7 @@ pub(super) fn make_on_stream(
 					native_stats = Some(h.stats_arc());
 					*native_slot.lock().unwrap() = Some(h);
 					if let Some(id) = mac_window {
-						super::window_src::blocking(|| super::window_src::began(sid, id));
+						super::window_src::blocking(|| super::window_src::began(sid, id, req.clone()));
 					}
 					true
 				}
@@ -3723,6 +3741,8 @@ pub(super) fn make_on_stream(
 					if e.kind() == std::io::ErrorKind::PermissionDenied {
 						notify_screen_permission(&app_h, &stats_out);
 					}
+					mac_sck_unusable =
+						matches!(e.kind(), std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::TimedOut);
 					false
 				}
 			}
@@ -3734,12 +3754,19 @@ pub(super) fn make_on_stream(
 		// macOS window without the native path: serve the window's frames on loopback for the
 		// ffmpeg chain (raw NV12 → VideoToolbox CLI), sized by its own ScreenCaptureKit query.
 		// A start that fails streams the screen at the requested box (not the window's shape).
+		// Only for what the native path does not take (HDR, 4:4:4, AV1, PULSAR_FFMPEG_CAPTURE)
+		// or a VideoToolbox refusal: after a permission / timeout failure it would run the same
+		// SCK query again for up to ~10 s more (`mac_sck_unusable`).
 		#[cfg(target_os = "macos")]
 		let mac_window_src: Option<(String, (u32, u32))> = match mac_window {
+			Some(id) if !native_started && mac_sck_unusable => {
+				tracing::warn!(id, "ScreenCaptureKit unusable (permission / no answer), streaming the screen");
+				None
+			}
 			Some(id) if !native_started => super::window_src::blocking(|| {
 				match pulsar_core::window_capture::serve_for(sid, id, window_box, eff_fps) {
 					Ok(src) => {
-						super::window_src::began(sid, id);
+						super::window_src::began(sid, id, req.clone());
 						Some(src)
 					}
 					Err(e) => {
@@ -3829,7 +3856,10 @@ pub(super) fn make_on_stream(
 		// fire for them (it would restart ffmpeg on top of a running native capture). Clearing
 		// to None here ensures the watcher stays inert for the duration of a native session even
 		// if a prior ffmpeg session on this same connection left a stale entry.
-		// On non-Windows: native_started is always false so we always store.
+		// Linux: native_started is always false, so the request is always stored. macOS: the
+		// native ScreenCaptureKit -> VideoToolbox path (display or window) clears it like Windows
+		// does (a keyframe request is served by request_idr, not a restart). The window watcher
+		// does not read this store: a window stream's request lives in `window_src` (`began`).
 		if !native_started {
 			*last_req_store.lock().unwrap() = Some(req.clone());
 		} else {
