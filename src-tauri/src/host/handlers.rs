@@ -2438,10 +2438,10 @@ pub(super) fn make_on_stream(
 			}
 		}
 		// FFMPEG BITRATE-ONLY: ffmpeg can't change its bitrate live, so a step it can live with is
-		// absorbed (`cli_bitrate_absorbs`: a down-step beyond the small band always restarts — the
-		// link is the limit, latency first — an up-step at most once per 6 s). A deferred up-step
-		// is not lost: the client keeps re-sending, and each request compares against what ffmpeg
-		// is actually streaming. The pacer keeps that real rate. A recovery-mode flip still
+		// absorbed (`cli_bitrate_absorbs`: a deep down-step always restarts — the link is the
+		// limit, latency first — a small one at most once per 3 s, an up-step once per 6 s). A
+		// deferred step is not lost: the client keeps re-sending, and each request compares
+		// against what ffmpeg is actually streaming. The pacer keeps that real rate. A recovery-mode flip still
 		// restarts (short GOP needs a new encoder). Every OS: Linux X11 hosts on the CLI chain
 		// (AMD/Intel VA-API / QSV when the in-process engine could not start, kmsgrab) restarted
 		// ffmpeg on every ABR step before 2026-11-15 (a stream on an in-process engine, Wayland or
@@ -4479,9 +4479,13 @@ fn vcodec_label(c: pipeline::VCodec) -> &'static str {
 /// which can change its bitrate — streaming at `running_kbps` instead of restarting it (a
 /// visible gap plus a keyframe, and the gap itself reads as congestion to the client's ABR):
 /// - the same rate (the client's periodic re-send, `0` = auto included): keep it;
-/// - a DOWN-step beyond a 10 % band: never absorbed, at any time — the client stepped down
-///   because the link can't carry the rate; holding it means sustained queueing / loss on the
-///   latency-critical path, so latency wins over the gap;
+/// - a deep DOWN-step (25 %+ cut): never absorbed, at any time — the link can't carry the rate;
+///   holding it means sustained queueing / loss on the latency-critical path, so latency wins
+///   over the gap;
+/// - a small DOWN-step (10-25 %, one ABR cut is ~15 %): absorbed for 3 s after the encoder
+///   started, restarts after. Restarting on every cut gave a restart (gap + IDR on an already
+///   congested link) up to every 1.5 s under congestion (2026-11-16 review); the pacer holds
+///   the real rate meanwhile and two quick cuts add up to a deep one;
 /// - an UP-step beyond 10 %: at most once per 6 s since the encoder started (a deferred one
 ///   isn't lost: the client keeps re-sending and each request compares against what really
 ///   runs);
@@ -4494,8 +4498,11 @@ fn cli_bitrate_absorbs(running_kbps: u32, new_kbps: u32, since_start: std::time:
 		return false;
 	}
 	let ratio = new_kbps as f32 / running_kbps as f32;
-	if ratio < 0.9 {
+	if ratio < 0.75 {
 		return false;
+	}
+	if ratio < 0.9 {
+		return since_start < std::time::Duration::from_secs(3);
 	}
 	ratio <= 1.1 || since_start < std::time::Duration::from_secs(6)
 }
@@ -4527,8 +4534,11 @@ mod cli_bitrate_absorb_tests {
 		// A real down-step restarts at once, however soon after the start (the 2026-11-15
 		// review: 20 → 8 Mbit/s within 6 s used to keep sending 20).
 		assert!(!cli_bitrate_absorbs(20_000, 8_000, early));
-		assert!(!cli_bitrate_absorbs(20_000, 15_000, late));
-		assert!(!cli_bitrate_absorbs(20_000, 17_000, Duration::ZERO));
+		assert!(!cli_bitrate_absorbs(20_000, 14_000, Duration::ZERO));
+		// A single ~15 % ABR cut waits 3 s after a restart (no restart storm), then restarts.
+		assert!(cli_bitrate_absorbs(20_000, 17_000, early));
+		assert!(!cli_bitrate_absorbs(20_000, 17_000, late));
+		assert!(!cli_bitrate_absorbs(20_000, 15_500, late));
 		// An up-step: deferred within 6 s of the start, taken after.
 		assert!(cli_bitrate_absorbs(20_000, 27_000, early));
 		assert!(!cli_bitrate_absorbs(20_000, 27_000, late));
