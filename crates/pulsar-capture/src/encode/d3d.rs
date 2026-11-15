@@ -9,14 +9,15 @@ use windows::Win32::Graphics::Direct3D::{
 	D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
 };
 use windows::Win32::Graphics::Direct3D11::{
-	D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, ID3D11VideoDevice,
-	ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator, D3D11_BIND_RENDER_TARGET,
+	D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, ID3D11VideoContext,
+	ID3D11VideoContext1, ID3D11VideoDevice, ID3D11VideoProcessor, D3D11_VIDEO_PROCESSOR_COLOR_SPACE, ID3D11VideoProcessorEnumerator, D3D11_BIND_RENDER_TARGET,
 	D3D11_BIND_SHADER_RESOURCE, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
 	D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
 	D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
 	D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
+	DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709, DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709,
 	DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_RATIONAL, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
@@ -61,7 +62,8 @@ pub(super) unsafe fn create_nv12_texture(
 }
 
 /// Create an ID3D11VideoProcessor (+ its enumerator) configured for a BGRA→NV12
-/// playback conversion at WxH. Colour-space defaults are fine for SDR.
+/// playback conversion at WxH. The colour spaces are set by `set_sdr_colour_spaces` (the
+/// processor's defaults convert with the BT.601 matrix).
 pub(super) unsafe fn build_video_processor(
 	vdevice: &ID3D11VideoDevice,
 	in_w: u32,
@@ -95,6 +97,189 @@ pub(super) unsafe fn build_video_processor(
 		.CreateVideoProcessor(&vp_enum, 0)
 		.map_err(|e| format!("CreateVideoProcessor: {e}"))?;
 	Ok((vp_enum, vproc))
+}
+
+/// Pin the BGRA→NV12 conversion to Pulsar's SDR rule: full-range sRGB-ish (G22 / BT.709
+/// primaries) in, **BT.709 limited range** out — the colour description every encoder writes
+/// into the stream (NVENC VUI, MF media type) and every client decodes with. Without it the
+/// processor uses its defaults, which convert with the BT.601 matrix, while Linux / macOS
+/// clients decode BT.709: skin tones and reds / greens shifted.
+///
+/// `ID3D11VideoContext1` (Windows 8.1+) takes the DXGI colour-space enums; the older
+/// `ID3D11VideoContext` call (YCbCr matrix 709 + 16–235 nominal range) covers a context
+/// without it. Never fails: a driver that ignores both keeps its default.
+pub(super) unsafe fn set_sdr_colour_spaces(vctx: &ID3D11VideoContext, vproc: &ID3D11VideoProcessor) {
+	if let Ok(vctx1) = vctx.cast::<ID3D11VideoContext1>() {
+		vctx1.VideoProcessorSetStreamColorSpace1(vproc, 0, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+		vctx1.VideoProcessorSetOutputColorSpace1(vproc, DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709);
+		return;
+	}
+	let (input, output) = legacy_sdr_colour_spaces();
+	vctx.VideoProcessorSetStreamColorSpace(vproc, 0, &input);
+	vctx.VideoProcessorSetOutputColorSpace(vproc, &output);
+}
+
+/// The pre-8.1 colour-space words (bitfield: Usage:1, RGB_Range:1, YCbCr_Matrix:1,
+/// YCbCr_xvYCC:1, Nominal_Range:2): input = full-range RGB (RGB_Range 0); output = BT.709
+/// matrix (bit 2) with the 16–235 nominal range (`D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235`
+/// = 1 at bits 4..5).
+fn legacy_sdr_colour_spaces() -> (D3D11_VIDEO_PROCESSOR_COLOR_SPACE, D3D11_VIDEO_PROCESSOR_COLOR_SPACE) {
+	let input = D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: 0 };
+	let output = D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: (1 << 2) | (1 << 4) };
+	(input, output)
+}
+
+#[cfg(test)]
+mod tests {
+	#[test]
+	fn legacy_output_is_bt709_limited() {
+		let (i, o) = super::legacy_sdr_colour_spaces();
+		assert_eq!(i._bitfield, 0);
+		// YCbCr_Matrix = 1 (BT.709), Nominal_Range = 1 (16–235), RGB_Range / Usage = 0.
+		assert_eq!((o._bitfield >> 2) & 1, 1);
+		assert_eq!((o._bitfield >> 4) & 3, 1);
+		assert_eq!(o._bitfield & 0b11, 0);
+	}
+
+	/// Colour bars through the host's real BGRA → NV12 VideoProcessor (the one the NVENC and
+	/// Media Foundation paths use), read back: red / green / blue / white / black must land on
+	/// their BT.709 limited-range code values. The processor's default (BT.601 on most drivers)
+	/// would put red at Y = 81. Skips without a D3D11 video device.
+	#[test]
+	fn bgra_to_nv12_is_bt709_limited() {
+		use super::*;
+		use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+		use windows::Win32::Graphics::Direct3D11::{
+			D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SUBRESOURCE_DATA, D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV,
+			D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0,
+			D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0,
+			D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D,
+		};
+		// (R, G, B) → BT.709 limited (Y, Cb, Cr).
+		let bars: [([u8; 3], [u8; 3]); 5] = [
+			([255, 0, 0], [63, 102, 240]),
+			([0, 255, 0], [173, 42, 26]),
+			([0, 0, 255], [32, 240, 118]),
+			([255, 255, 255], [235, 128, 128]),
+			([0, 0, 0], [16, 128, 128]),
+		];
+		let (bw, h) = (32u32, 32u32);
+		let w = bw * bars.len() as u32;
+		// SAFETY: D3D11 calls on a device owned by this test; buffers outlive the calls.
+		unsafe {
+			let mut dev = None;
+			let mut ctx = None;
+			if D3D11CreateDevice(
+				None,
+				D3D_DRIVER_TYPE_HARDWARE,
+				HMODULE::default(),
+				D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+				Some(&[D3D_FEATURE_LEVEL_11_0]),
+				D3D11_SDK_VERSION,
+				Some(&mut dev),
+				None,
+				Some(&mut ctx),
+			)
+			.is_err()
+			{
+				eprintln!("no D3D11 video device: skipped");
+				return;
+			}
+			let (dev, ctx): (ID3D11Device, ID3D11DeviceContext) = (dev.unwrap(), ctx.unwrap());
+			let Ok(vdev) = dev.cast::<ID3D11VideoDevice>() else { return };
+			let vctx: ID3D11VideoContext = ctx.cast().unwrap();
+			// The BGRA source, one bar per colour.
+			let mut px = Vec::with_capacity((w * h * 4) as usize);
+			for _ in 0..h {
+				for (rgb, _) in bars {
+					for _ in 0..bw {
+						px.extend_from_slice(&[rgb[2], rgb[1], rgb[0], 255]);
+					}
+				}
+			}
+			let desc = D3D11_TEXTURE2D_DESC {
+				Width: w,
+				Height: h,
+				MipLevels: 1,
+				ArraySize: 1,
+				Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+				SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+				Usage: D3D11_USAGE_DEFAULT,
+				BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+				CPUAccessFlags: 0,
+				MiscFlags: 0,
+			};
+			let init = D3D11_SUBRESOURCE_DATA { pSysMem: px.as_ptr().cast(), SysMemPitch: w * 4, SysMemSlicePitch: 0 };
+			let mut src = None;
+			dev.CreateTexture2D(&desc, Some(&init), Some(&mut src)).unwrap();
+			let src = src.unwrap();
+			let nv12 = create_nv12_texture(&dev, w, h).unwrap();
+			let (vp_enum, vproc) = build_video_processor(&vdev, w, h, w, h).unwrap();
+			let ovd = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
+				ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
+				Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 { Texture2D: D3D11_TEX2D_VPOV { MipSlice: 0 } },
+			};
+			let mut ov = None;
+			vdev.CreateVideoProcessorOutputView(&nv12, &vp_enum, &ovd, Some(&mut ov)).unwrap();
+			let ov = ov.unwrap();
+			let ivd = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
+				FourCC: 0,
+				ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
+				Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 { Texture2D: D3D11_TEX2D_VPIV { MipSlice: 0, ArraySlice: 0 } },
+			};
+			let mut iv = None;
+			vdev.CreateVideoProcessorInputView(&src, &vp_enum, &ivd, Some(&mut iv)).unwrap();
+			let sd = D3D11_TEXTURE2D_DESC {
+				Format: DXGI_FORMAT_NV12,
+				Usage: D3D11_USAGE_STAGING,
+				BindFlags: 0,
+				CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+				..desc
+			};
+			let mut staging = None;
+			dev.CreateTexture2D(&sd, None, Some(&mut staging)).unwrap();
+			let staging = staging.unwrap();
+			// One Blt, then the (Y, Cb, Cr) at each bar's centre.
+			let convert = || -> Vec<[u8; 3]> {
+				let mut stream = D3D11_VIDEO_PROCESSOR_STREAM {
+					Enable: true.into(),
+					pInputSurface: std::mem::ManuallyDrop::new(iv.clone()),
+					..Default::default()
+				};
+				let r = vctx.VideoProcessorBlt(&vproc, &ov, 0, std::slice::from_ref(&stream));
+				std::mem::ManuallyDrop::drop(&mut stream.pInputSurface);
+				r.unwrap();
+				ctx.CopyResource(&staging, &nv12);
+				let mut m = D3D11_MAPPED_SUBRESOURCE::default();
+				ctx.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut m)).unwrap();
+				let p = m.pData as *const u8;
+				let pitch = m.RowPitch as usize;
+				let got = (0..bars.len())
+					.map(|i| {
+						let x = i * bw as usize + bw as usize / 2;
+						let y = *p.add(pitch * (h as usize / 2) + x);
+						let uv = p.add(pitch * h as usize + pitch * (h as usize / 4) + (x & !1));
+						[y, *uv, *uv.add(1)]
+					})
+					.collect();
+				ctx.Unmap(&staging, 0);
+				got
+			};
+			// The setter is honoured by this driver: BT.601 out puts red at Y = 81 …
+			if let Ok(v1) = vctx.cast::<ID3D11VideoContext1>() {
+				use windows::Win32::Graphics::Dxgi::Common::DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P601;
+				v1.VideoProcessorSetStreamColorSpace1(&vproc, 0, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+				v1.VideoProcessorSetOutputColorSpace1(&vproc, DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P601);
+				let red601 = convert()[0][0];
+				assert!(red601.abs_diff(81) <= 2, "BT.601 red Y = {red601}");
+			}
+			// … and Pulsar's SDR rule puts every bar on its BT.709 limited code values.
+			set_sdr_colour_spaces(&vctx, &vproc);
+			for (g, (_, want)) in convert().into_iter().zip(bars) {
+				assert!(g.iter().zip(want).all(|(a, b)| a.abs_diff(b) <= 2), "NV12 {g:?}, BT.709 limited {want:?}");
+			}
+		}
+	}
 }
 
 // ===========================================================================

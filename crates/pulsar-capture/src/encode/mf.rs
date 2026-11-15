@@ -147,6 +147,7 @@ impl MfEncoder {
 		// H.264 Main / HEVC Main (8-bit 4:2:0) — what every client decodes.
 		let profile = if p.codec == Codec::H264 { 77 } else { 1 };
 		let _ = out.SetUINT32(&MF_MT_MPEG2_PROFILE, profile);
+		set_sdr_colour(&out);
 		transform.SetOutputType(0, &out, 0).map_err(|e| format!("SetOutputType: {e}"))?;
 		let inp = MFCreateMediaType().map_err(|e| e.to_string())?;
 		inp.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video).map_err(|e| e.to_string())?;
@@ -154,6 +155,7 @@ impl MfEncoder {
 		inp.SetUINT64(&MF_MT_FRAME_SIZE, pack(w, h)).map_err(|e| e.to_string())?;
 		inp.SetUINT64(&MF_MT_FRAME_RATE, pack(fps, 1)).map_err(|e| e.to_string())?;
 		inp.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32).map_err(|e| e.to_string())?;
+		set_sdr_colour(&inp);
 		transform.SetInputType(0, &inp, 0).map_err(|e| format!("SetInputType: {e}"))?;
 		// Again with the types set: some encoders (AMD's HEVC one) reset the rate control when
 		// the output type lands and otherwise run at their own default rate (measured: 60 Mbit
@@ -170,6 +172,7 @@ impl MfEncoder {
 		let vdevice: ID3D11VideoDevice = device.cast().map_err(|e| format!("mf: no video device ({e}) — capture device lacks VIDEO_SUPPORT"))?;
 		let vctx: ID3D11VideoContext = context.cast().map_err(|e| format!("mf: no video context: {e}"))?;
 		let (vp_enum, vproc) = super::d3d::build_video_processor(&vdevice, cap_w, cap_h, w, h)?;
+		super::d3d::set_sdr_colour_spaces(&vctx, &vproc); // BT.709 limited, as the media type says
 		let nv12 = nv12_texture(device, w, h)?;
 
 		let bitrate_kbps = Arc::new(AtomicU32::new(p.bitrate_kbps.max(1)));
@@ -432,6 +435,17 @@ impl Drop for MfEncoder {
 
 /// Low-latency CBR: mean = peak = `bps`, a one-frame buffer (no frame may burst past the
 /// link's per-frame budget), no B-frames, `gop`-frame keyframe period.
+/// Pulsar's SDR colour rule on a media type: BT.709 matrix, primaries and transfer, limited
+/// (16–235) range — what the VideoProcessor writes into the NV12 (`d3d::set_sdr_colour_spaces`)
+/// and what the encoder then signals in the VUI. Best effort: an encoder that rejects an
+/// attribute keeps its default.
+unsafe fn set_sdr_colour(t: &IMFMediaType) {
+	let _ = t.SetUINT32(&MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709.0 as u32);
+	let _ = t.SetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235.0 as u32);
+	let _ = t.SetUINT32(&MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709.0 as u32);
+	let _ = t.SetUINT32(&MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709.0 as u32);
+}
+
 unsafe fn set_rate_control(api: &ICodecAPI, bps: u32, fps: u32, gop: u32) {
 	let _ = api.SetValue(&CODECAPI_AVEncCommonRateControlMode, &var_u32(eAVEncCommonRateControlMode_CBR.0 as u32));
 	let _ = api.SetValue(&CODECAPI_AVEncCommonMeanBitRate, &var_u32(bps));
