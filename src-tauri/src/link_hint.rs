@@ -56,9 +56,54 @@ fn hints() -> Vec<&'static str> {
 	out
 }
 
-#[cfg(not(windows))]
+/// Linux: the client runs under XWayland on a Wayland session (`main.rs` forces
+/// `GDK_BACKEND=x11` for the renderer's X11 embed). Always logged; the hint only when the
+/// stream is likely blurred: GNOME with fractional scaling (`scale-monitor-framebuffer`) and
+/// without `xwayland-native-scaling` (mutter 47+), where mutter upscales X11 windows. KDE's
+/// default (X11 apps scale themselves) stays sharp. Untested on Linux hardware.
+#[cfg(target_os = "linux")]
+fn hints() -> Vec<&'static str> {
+	let mut out = Vec::new();
+	if std::env::var("PULSAR_FORCED_X11").as_deref() != Ok("1") {
+		return out;
+	}
+	let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+	let features = desktop
+		.to_ascii_lowercase()
+		.contains("gnome")
+		.then(|| {
+			std::process::Command::new("gsettings")
+				.args(["get", "org.gnome.mutter", "experimental-features"])
+				.output()
+				.ok()
+				.filter(|o| o.status.success())
+				.map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+		})
+		.flatten();
+	let blur = features.as_deref().is_some_and(mutter_upscales_xwayland);
+	tracing::info!(
+		%desktop,
+		mutter_features = features.as_deref().map(str::trim).unwrap_or("-"),
+		blur_likely = blur,
+		"client runs under XWayland (GDK_BACKEND=x11 forced on a Wayland session)"
+	);
+	if blur {
+		out.push("hint.xwaylandScale");
+	}
+	out
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 fn hints() -> Vec<&'static str> {
 	Vec::new()
+}
+
+/// Does mutter upscale XWayland windows with these `experimental-features` (gsettings
+/// output, e.g. `['scale-monitor-framebuffer', 'xwayland-native-scaling']`)? Fractional
+/// scaling on, native XWayland scaling off.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn mutter_upscales_xwayland(features: &str) -> bool {
+	features.contains("'scale-monitor-framebuffer'") && !features.contains("'xwayland-native-scaling'")
 }
 
 #[cfg(windows)]
@@ -107,6 +152,13 @@ fn dc_index(powercfg: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn mutter_blurs_xwayland_only_with_fractional_and_no_native_scaling() {
+		assert!(mutter_upscales_xwayland("['scale-monitor-framebuffer']\n"));
+		assert!(!mutter_upscales_xwayland("['scale-monitor-framebuffer', 'xwayland-native-scaling']"));
+		assert!(!mutter_upscales_xwayland("@as []"));
+	}
 
 	#[test]
 	fn parses_band_in_any_locale() {

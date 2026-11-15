@@ -66,7 +66,8 @@ A second Opus/RTP stream parallel to video. Implementation lives in
   / 960 B packets, ~1.6 Mb/s) from the in-process encoder; hosts that can send
   Raw advertise `audio_raw`, ffmpeg paths send High instead. The client's
   "Otomatik" (`play.rs` `auto_audio_quality`) picks Raw on a LAN the probe
-  measured at ≥15 Mbit/s, High at ≥3 Mbit/s, else Standard; the pick is
+  measured at ≥15 Mbit/s (and not when this client's route to the host is Wi-Fi:
+  `mobile_link::wifi`), High at ≥3 Mbit/s, else Standard; the pick is
   Settings → Görüntü / the session menu's Ses view (a re-stream). The host's
   audio forwarder passes PT 97 and 98 only.
 - **macOS system mix (2026-11-14, LOCAL, untested on macOS hardware)** — ScreenCaptureKit audio
@@ -82,8 +83,24 @@ A second Opus/RTP stream parallel to video. Implementation lives in
   follows the wall clock (frames owed since the idle stretch began minus frames written). A
   `system` / `loopback` / `wasapi` sentinel is never passed to ffmpeg as a device name:
   `audio_input()` maps it to the OS default.
+- **Linux (2026-11-15, LOCAL, untested on Linux hardware):** the pulse source (default
+  `@DEFAULT_MONITOR@`, the host-silent null sink's `.monitor`, or a named source) is read by
+  `parec --raw --format=float32le --rate=48000 --channels=2 --latency-msec=10` into the same
+  in-process Opus / L16 encoder (`spawn_pulse_audio_linux`), so Linux hosts advertise
+  `audio_raw` too. ffmpeg `-f pulse` stays the fallback (surround, no `parec` /
+  pulseaudio-utils, `PULSAR_LINUX_PAREC=0`, or a `parec` that ends without data — its reader
+  thread starts the fallback itself) and now reads 10 ms fragments (`-fragment_size 1920
+  -fflags nobuffer`; the server-sized ~50 ms ones delayed every packet). Whether a capture
+  of `@DEFAULT_MONITOR@` follows a default-output change mid-stream is not verified (it is
+  resolved when the stream connects; a re-stream picks the new default).
 - **dshow / Pulse `.monitor` / AVFoundation** on Linux/macOS, or when the user
   names a device (`Config::audio_input` non-empty → `audio_loopback()` false).
+- **Audio parity (2026-11-15, LOCAL, untested in a real session):** a client that sends
+  `StreamReq::audio_fec` (media-over-session) gets Reed-Solomon parity next to the audio
+  (`TAG_AUDIO_FEC`, pulsar-core `media::AudioFecEncoder`, built in the host's audio forwarder
+  from the RTP stream whatever encoded it): RS(2+1) over 10 ms Opus, RS(4+2) over 5 ms L16 —
+  ~20 ms per block, 50 % parity (+64 kbit/s on Standard). Every desktop host advertises
+  `audio_fec`. The mobile host (Kotlin encoder, no forwarder parity) does not send it.
 
 ## Client playback (every desktop platform)
 
@@ -94,9 +111,16 @@ Native and in-process, Moonlight's model: `src-tauri/src/native_audio.rs`.
 - The player decodes with **libopus** (`opus` crate → `opusic-sys`, built from
   source with CMake like SDL3). It conceals up to 5 lost packets (PLC) and
   restarts the decoder on a longer gap or a new stream.
+- **Repair before decode** (pulsar-core `audio::AudioRepair`, shared with mobile): packets
+  are put back in sequence order and rebuilt from the host's audio parity. A hole is held open
+  for what the SDL queue covers minus 5 ms (at most 40 ms; nothing while prebuffering) — a
+  reordered packet or its parity fills it in order; past that it is concealed. Before, a
+  packet one step late was concealed AND then dropped as late. Stats line: `late`,
+  `recovered`.
 - Output is an **SDL3** audio stream (10 ms device buffer requested). The queue
   is a sawtooth; its LOW point is held at a margin (`PULSAR_AUDIO_TARGETMS`,
-  default 15 ms; +10 ms per dry queue, eases back) by slowly nudging the rate
+  default 15 ms; +10 ms per dry burst — dry queues within 200 ms count once — up to
+  120 ms, 60 ms on a LAN path; −5 ms after each 4 s without one) by slowly nudging the rate
   (max ±2 %). Prebuffers before playing; flushes far past the target. The device
   opens on the first packet. `audio: player stats` every 5 s (in_hz, dry,
   flushes, gap_max_ms, q_ms, ratio).

@@ -9,8 +9,8 @@ use super::*;
 mod pacer;
 
 /// In-process Opus/RTP encoder for the system-mix audio (Windows process loopback, macOS
-/// ScreenCaptureKit) — no ffmpeg in the audio path.
-#[cfg(any(windows, target_os = "macos"))]
+/// ScreenCaptureKit, Linux `parec`) — no ffmpeg in the audio path.
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 mod opus_rtp;
 
 /// DualSense-aware capture: the default endpoint's loopback while a virtual pad is plugged, so
@@ -404,6 +404,124 @@ pub(super) fn spawn_system_audio_mac(
 	};
 	tracing::info!(encoder, "audio: system mix via ScreenCaptureKit (all apps but Pulsar)");
 	true
+}
+
+/// Linux: the PulseAudio / PipeWire-pulse source `input` (the default monitor, the host-silent
+/// null sink's `.monitor`, or a user-named source) read by `parec` as raw 48 kHz stereo f32 in
+/// 10 ms fragments and encoded by the same in-process Opus / L16 encoder as Windows and macOS
+/// (hidden-gaps 1.11c). ffmpeg's `-f pulse` input took the server's own fragment size (~50 ms)
+/// and could only send Opus; this path also carries `AudioQuality::Raw`.
+///
+/// `false` (the caller then runs ffmpeg `-f pulse`): a surround request (stereo capture only),
+/// no `parec` on the box (pulseaudio-utils), `PULSAR_LINUX_PAREC=0`. When `parec` starts but
+/// ends without delivering a byte (no such source, no pulse server), its thread starts that
+/// same ffmpeg fallback itself, unless the stream generation moved on meanwhile.
+/// Untested on Linux hardware (written on Windows, 2026-11-15).
+#[cfg(target_os = "linux")]
+fn spawn_pulse_audio_linux(
+	procs: &Arc<Mutex<Vec<Child>>>,
+	ffmpeg: &str,
+	input: &pulsar_core::audio::AudioInput,
+	dest: &str,
+	layout: pulsar_core::audio::ChannelLayout,
+	quality: pulsar_core::audio::AudioQuality,
+	epoch: &crate::process::ProcEpoch,
+) -> bool {
+	use std::io::{Read, Write};
+	use std::process::Stdio;
+	let pulsar_core::audio::AudioInput::Pulse(src) = input else { return false };
+	if layout.channels() > 2 || std::env::var("PULSAR_LINUX_PAREC").as_deref() == Ok("0") {
+		return false;
+	}
+	let Some(addr) = opus_rtp::rtp_dest(dest) else { return false };
+	let codec = opus_rtp::Codec::for_quality(quality);
+	let mut sink = match opus_rtp::RtpAudioSink::new(addr, codec, epoch.clone()) {
+		Ok(s) => s,
+		Err(e) => {
+			tracing::warn!("audio: in-process encoder unavailable ({e}) — using ffmpeg -f pulse");
+			return false;
+		}
+	};
+	let mut cmd = std::process::Command::new("parec");
+	cmd.args(parec_args(src)).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+	let mut child = match cmd.spawn() {
+		Ok(c) => c,
+		Err(e) => {
+			tracing::info!("audio: parec unavailable ({e}) — using ffmpeg -f pulse");
+			return false;
+		}
+	};
+	let Some(mut out) = child.stdout.take() else {
+		let _ = child.kill();
+		let _ = child.wait();
+		return false;
+	};
+	procs.lock().unwrap().push(child);
+	let (_, fallback) = pulsar_core::audio::audio_command_quality(input, dest, layout, quality);
+	let procs = procs.clone();
+	let ffmpeg = ffmpeg.to_string();
+	let encoder = match codec {
+		opus_rtp::Codec::Opus { .. } => "in-process Opus",
+		opus_rtp::Codec::L16 => "in-process raw PCM (L16)",
+	};
+	tracing::info!(encoder, source = %src, "audio: pulse source via parec (10 ms fragments)");
+	let spawned = std::thread::Builder::new().name("audio-parec".into()).spawn(move || {
+		let born = std::time::Instant::now();
+		// 10 ms of f32 stereo; parec's own fragments are this size too.
+		let mut buf = vec![0u8; 3840];
+		let mut total = 0u64;
+		loop {
+			match out.read(&mut buf) {
+				Ok(0) => break,
+				Ok(n) => {
+					total += n as u64;
+					// Fails once the stream generation moved on (re-stream / teardown).
+					if sink.write_all(&buf[..n]).is_err() {
+						break;
+					}
+				}
+				Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+				Err(_) => break,
+			}
+		}
+		drop(out);
+		if total == 0 && born.elapsed() < std::time::Duration::from_secs(3) {
+			// parec could not record at all. A teardown also ends it (its child is killed with
+			// the session's processes): give the epoch bump a moment to show before deciding.
+			std::thread::sleep(std::time::Duration::from_millis(250));
+			if !sink.retired() {
+				tracing::warn!("audio: parec delivered nothing — falling back to ffmpeg -f pulse");
+				let _ = spawn_tracked(&procs, &ffmpeg, &fallback);
+				return;
+			}
+		}
+		tracing::info!(packets = sink.packets, "audio: parec capture ended");
+	});
+	if let Err(e) = spawned {
+		tracing::warn!("audio: parec reader thread failed to start: {e}");
+	}
+	true
+}
+
+/// `parec` arguments for pulse source `src`: raw 48 kHz stereo f32le, 10 ms latency (its
+/// record fragment). "default" / empty = the server's default source (no `--device`).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parec_args(src: &str) -> Vec<String> {
+	let mut a: Vec<String> = [
+		"--raw",
+		"--format=float32le",
+		"--rate=48000",
+		"--channels=2",
+		"--latency-msec=10",
+	]
+	.iter()
+	.map(|s| s.to_string())
+	.collect();
+	let src = src.trim();
+	if !src.is_empty() && src != "default" {
+		a.push(format!("--device={src}"));
+	}
+	a
 }
 
 /// Run the ScreenCaptureKit system-audio capture into `sink` on its own thread until the sink
@@ -1291,7 +1409,7 @@ fn start_audio_and_mute(
 	#[cfg_attr(not(windows), allow(unused_variables))] target_pid: Option<u32>,
 	// The session's stream generation: an in-process audio encoder stops when it moves on
 	// (re-stream / teardown), as an ffmpeg encoder dies with the `procs` drain.
-	#[cfg_attr(not(any(windows, target_os = "macos")), allow(unused_variables))] epoch: &crate::process::ProcEpoch,
+	#[cfg_attr(not(any(windows, target_os = "macos", target_os = "linux")), allow(unused_variables))] epoch: &crate::process::ProcEpoch,
 ) {
 	// Audio: a second ffmpeg streams Opus/RTP to `audio_dest` — the client's audio
 	// port directly (legacy), or the local media-over-session intake (the forwarder
@@ -1431,7 +1549,19 @@ fn start_audio_and_mute(
 			&& neg_layout.channels() <= 2
 			&& pulsar_core::audio::system_audio_supported()
 			&& spawn_system_audio_mac(procs, ffmpeg, &dest, neg_layout, req.audio_quality, epoch);
-		#[cfg(not(any(windows, target_os = "macos")))]
+		// Linux: the pulse source through `parec` into the in-process encoder (10 ms
+		// fragments, Raw-capable); ffmpeg `-f pulse` below when it can't start.
+		#[cfg(target_os = "linux")]
+		let started_audio = spawn_pulse_audio_linux(
+			procs,
+			ffmpeg,
+			&effective_audio_input(acfg.audio_input()),
+			&dest,
+			neg_layout,
+			req.audio_quality,
+			epoch,
+		);
+		#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 		let started_audio = false;
 		if !started_audio {
 			// Direct-capture (dshow / pulse `.monitor` / avfoundation) fallback. Honor the
@@ -1528,6 +1658,9 @@ fn spawn_media_forwarders(
 	// Per-session send counters (first copies / parity / retransmits) the host's FEC policy
 	// rebuilds pre-repair loss from; bumped when a datagram actually leaves the pacer.
 	sent: Arc<pulsar_core::service::media::MediaSendStats>,
+	// The client rebuilds audio from Reed-Solomon parity (`StreamReq::audio_fec`): the audio
+	// forwarder sends `TAG_AUDIO_FEC` shards behind each ~20 ms block (hidden-gaps 1.11a).
+	audio_fec: bool,
 ) -> Option<(u16, u16)> {
 	use pulsar_core::service::media;
 	let bind = || -> Option<(tokio::net::UdpSocket, u16)> {
@@ -1790,6 +1923,7 @@ fn spawn_media_forwarders(
 	let atx = media_tx.clone();
 	let ah = tokio::spawn(async move {
 		let mut buf = vec![0u8; 4096];
+		let mut afec = audio_fec.then(media::AudioFecEncoder::new);
 		loop {
 			// recv Err (e.g. WSAEMSGSIZE from an oversized rogue datagram on Windows)
 			// must NOT kill the forwarder — skip and keep serving. (Brief sleep so a
@@ -1820,6 +1954,13 @@ fn spawn_media_forwarders(
 				// A transient socket error must not end the audio for good (same as video);
 				// teardown aborts this task when the session really ends.
 				continue;
+			}
+			// Parity for the block this packet closes (ffmpeg's and the in-process encoder's
+			// streams alike: it only needs the RTP header). Already framed with its tag.
+			if let Some(enc) = afec.as_mut() {
+				for parity in enc.push(&buf[..n]) {
+					let _ = atx.send(&parity).await;
+				}
 			}
 		}
 	});
@@ -2412,6 +2553,7 @@ pub(super) fn make_on_stream(
 				pace_target_kbps.clone(),
 				pace_loss.clone(),
 				media_sent.clone(),
+				req.audio_fec,
 			) {
 				Some((vp, ap)) => (
 					SocketAddr::new(lo, vp),
@@ -4685,5 +4827,22 @@ pub(super) fn make_on_audio() -> impl FnMut(DataMsg) + Send + 'static {
 			player = None; // PlayerGuard::drop kills + reaps
 		}
 		_ => {}
+	}
+}
+
+#[cfg(test)]
+mod parec_tests {
+	use super::parec_args;
+
+	#[test]
+	fn parec_reads_raw_stereo_f32_in_10ms_fragments() {
+		let a = parec_args("@DEFAULT_MONITOR@");
+		for want in ["--raw", "--format=float32le", "--rate=48000", "--channels=2", "--latency-msec=10"] {
+			assert!(a.iter().any(|x| x == want), "{want} in {a:?}");
+		}
+		assert_eq!(a.last().unwrap(), "--device=@DEFAULT_MONITOR@");
+		// The server default needs no device argument.
+		assert!(!parec_args("default").iter().any(|x| x.starts_with("--device")));
+		assert!(!parec_args(" ").iter().any(|x| x.starts_with("--device")));
 	}
 }

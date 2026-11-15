@@ -51,15 +51,20 @@ pub(crate) struct ResidentRender {
 /// speak of) only on a LAN the probe measured with plenty of room and a host that can send it;
 /// High Opus (320 kb/s) once the probe saw a few Mbit/s â€” or on a LAN without a probe (older
 /// host); Standard (128 kb/s) otherwise.
+///
+/// Never Raw when this client reaches the host over Wi-Fi (`wifi`): L16 has no codec
+/// concealment, and Wi-Fi loses and reorders in bursts (hidden-gaps 1.11a). The user can still
+/// pick "raw" by hand.
 pub(crate) fn auto_audio_quality(
 	probe_kbps: Option<u32>,
 	path: crate::adapt_memory::PathClass,
 	host_raw: bool,
+	wifi: bool,
 ) -> pulsar_core::audio::AudioQuality {
 	use crate::adapt_memory::PathClass;
 	use pulsar_core::audio::AudioQuality;
 	match probe_kbps {
-		Some(k) if host_raw && path == PathClass::Lan && k >= 15_000 => AudioQuality::Raw,
+		Some(k) if host_raw && !wifi && path == PathClass::Lan && k >= 15_000 => AudioQuality::Raw,
 		Some(k) if k >= 3_000 => AudioQuality::High,
 		None if path == PathClass::Lan => AudioQuality::High,
 		_ => AudioQuality::Standard,
@@ -1185,9 +1190,17 @@ pub(crate) async fn start_remote_play(
 	// Audio quality: the user's pick, or for "auto" the highest this path carries.
 	let host_audio_raw =
 		host_caps.features.iter().any(|f| f == pulsar_core::service::media::FEAT_AUDIO_RAW);
-	let auto_audio = auto_audio_quality(probe.as_ref().map(|e| e.kbps), path_class, host_audio_raw);
+	// Only asked when Raw is in reach (it spawns `networksetup` on macOS).
+	let client_wifi = if host_audio_raw && path_class == crate::adapt_memory::PathClass::Lan {
+		let peer_ip = sess.peer_addr().await.map(|a| a.ip());
+		tokio::task::spawn_blocking(move || crate::mobile_link::wifi(peer_ip)).await.ok().flatten() == Some(true)
+	} else {
+		false
+	};
+	let auto_audio =
+		auto_audio_quality(probe.as_ref().map(|e| e.kbps), path_class, host_audio_raw, client_wifi);
 	let audio_quality = audio_quality_for(&aq_pref, auto_audio, host_audio_raw);
-	tracing::info!(pref = %aq_pref, auto = ?auto_audio, quality = ?audio_quality, "audio quality");
+	tracing::info!(pref = %aq_pref, auto = ?auto_audio, quality = ?audio_quality, client_wifi, "audio quality");
 	let mut acfg = pulsar_core::adapt::Config::new(pulsar_core::adapt::codec_from_wire(&codec_h), cap_for_ctl);
 	acfg.native = native_dims;
 	// No memory of this path â†’ 0: the controller starts cautiously (min(cap, ~4 Mbit)) and
@@ -1402,6 +1415,8 @@ pub(crate) async fn start_remote_play(
 		fec_rs: mos,
 		rfi: rfi_req,
 		audio_quality,
+		// Audio parity rides the session too; a host without it ignores the field.
+		audio_fec: mos,
 	};
 	if let Err(e) = request_stream(&mut sess, &req).await {
 		// Park ANY live pulsar-render child instead of killing it â€” regardless of whether
@@ -1457,7 +1472,11 @@ pub(crate) async fn start_remote_play(
 	// The host's Opus/RTP audio plays natively on every platform (libopus + SDL3,
 	// Moonlight's model â€” see native_audio.rs). Started even when transmit is off, so a live
 	// toggle on just works; the SDL device only opens when the first packet arrives.
-	let audio_native = (audio_port > 0).then(|| crate::native_audio::start(view.audio_packets(), id));
+	let audio_native = (audio_port > 0).then(|| crate::native_audio::start(
+		view.audio_packets(),
+		id,
+		path_class == crate::adapt_memory::PathClass::Lan,
+	));
 
 	// Register this play session (one per connected-host tab). `id` was allocated above.
 	let running = Arc::new(AtomicBool::new(true));
@@ -2568,15 +2587,17 @@ mod audio_quality_tests {
 
 	#[test]
 	fn auto_takes_the_highest_the_path_carries() {
-		assert_eq!(auto_audio_quality(Some(18_920), PathClass::Lan, true), Raw);
+		assert_eq!(auto_audio_quality(Some(18_920), PathClass::Lan, true, false), Raw);
+		// The same LAN over this client's Wi-Fi: High Opus, never L16.
+		assert_eq!(auto_audio_quality(Some(18_920), PathClass::Lan, true, true), High);
 		// No raw-capable host, or not a LAN, or a thin LAN: Opus.
-		assert_eq!(auto_audio_quality(Some(18_920), PathClass::Lan, false), High);
-		assert_eq!(auto_audio_quality(Some(18_920), PathClass::Wan, true), High);
-		assert_eq!(auto_audio_quality(Some(9_000), PathClass::Lan, true), High);
-		assert_eq!(auto_audio_quality(Some(2_000), PathClass::Relay, true), Standard);
+		assert_eq!(auto_audio_quality(Some(18_920), PathClass::Lan, false, false), High);
+		assert_eq!(auto_audio_quality(Some(18_920), PathClass::Wan, true, false), High);
+		assert_eq!(auto_audio_quality(Some(9_000), PathClass::Lan, true, false), High);
+		assert_eq!(auto_audio_quality(Some(2_000), PathClass::Relay, true, false), Standard);
 		// An older host has no probe: a LAN still gets High, anything else Standard.
-		assert_eq!(auto_audio_quality(None, PathClass::Lan, false), High);
-		assert_eq!(auto_audio_quality(None, PathClass::Relay, false), Standard);
+		assert_eq!(auto_audio_quality(None, PathClass::Lan, false, false), High);
+		assert_eq!(auto_audio_quality(None, PathClass::Relay, false, false), Standard);
 	}
 
 	#[test]

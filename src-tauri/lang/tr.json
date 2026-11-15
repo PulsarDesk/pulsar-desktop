@@ -53,6 +53,7 @@
 	"ds5.headset.player": "Oyuncu",
 	"hint.wifi24": "Wi-Fi 2,4 GHz bandında: gecikme artabilir ve Bluetooth kolu etkilenir. Mümkünse 5/6 GHz ağa bağlan",
 	"hint.wlanPowerSave": "Pilde Wi-Fi güç tasarrufu açık: yayında takılmalar olabilir. Şarja tak ya da güç planında kablosuz bağdaştırıcıyı \"En yüksek performans\" yap",
+	"hint.xwaylandScale": "Wayland oturumunda Pulsar XWayland üzerinden çalışıyor ve GNOME kesirli ölçeklemesi açık: görüntü bulanık olabilir. Keskin görüntü için ölçeği %100/%200 yap ya da \"xwayland-native-scaling\" deneysel özelliğini aç",
 	"display.builtin": "Dahili ekran",
 	"display.numbered": "Ekran {n}",
 	"pad.client.title": "Oyuncu {n} kolu karşı tarafta çalışmıyor",

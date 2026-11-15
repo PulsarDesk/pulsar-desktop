@@ -78,6 +78,16 @@ Part of the pulsar-desktop agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
   plugins); leaky queue bounds latency. **Input injection is uinput**
   (`DesktopInput`), NOT the RemoteDesktop portal (its `Start` hangs on this KDE);
   needs the user in the `input` group.
+  **Colour conversion (2026-11-15, hidden-gaps 1.10, untested on hardware):** `videoconvert` /
+  `videoscale` run with `n-threads=0` (one slice per core; the element default was ONE thread)
+  on every gst path (Wayland, raw frames, X11). With a `va` encoder (`vah26Xenc`) the
+  in-process pipeline first tries `vapostproc ! video/x-raw(memory:VAMemory),format=NV12`: GPU
+  conversion, and zero-copy when PipeWire + GStreamer negotiate DMA-BUF (caps left open; SHM
+  frames are uploaded otherwise). That attempt must get a frame to the encoder within 3 s or
+  the CPU convert runs on the same portal session (`PULSAR_WAYLAND_CPU_CONVERT=1` skips it;
+  log line `wayland capture colour conversion`). Not done: NVENC/x264/gstreamer-vaapi keep the
+  CPU convert (NVENC's ARGB input and `cudaconvert` would belong to the encoder work); the
+  X11 libav path still scales on the CPU.
   **AppImage:** the binary links libgstreamer, so linuxdeploy bundles Ubuntu 22.04's
   1.20 core — a distro's newer plugins can't load into it (no elements → black screen on
   every non-Debian Wayland host). `release.yml` therefore bundles the pipeline's plugins
@@ -213,7 +223,7 @@ GPU runs the **same NVENC SDK session as Windows**:
   API < 12.2 = driver < 550, no free session) logs a warning and opens libavcodec as before.
 - **Wayland** (pulsar-core `capture::start_with_frames` / `start_full`, `capture/frames.rs`; screen casts
   only — a Wayland WINDOW cast keeps the gst pipeline): the portal's
-  PipeWire stream → `videoconvert` → NV12 → `fakesink` handoff → the app's `FrameEncoder`
+  PipeWire stream → `videoconvert n-threads=0` → NV12 → `fakesink` handoff → the app's `FrameEncoder`
   (`src-tauri/src/host/nvenc_frames.rs`, the SDK encoder). Built on the first frame at the
   cast's size, rebuilt on a size change. If it cannot be built or no frame arrives in 4 s,
   the gst-encoder pipeline runs on the SAME portal session (no second share dialog). Chosen

@@ -939,6 +939,7 @@ pub(super) async fn hold_session(
 				fec: mos,
 				fec_rs: mos,
 				rfi: host_rfi && cur_codec != "av1",
+				audio_fec: mos,
 			}
 		};
 	}
@@ -1014,6 +1015,16 @@ pub(super) async fn hold_session(
 						// the stream request): nothing to do with it — and it must not reach the
 						// audio forward below.
 						if tag == media::TAG_PROBE {
+							continue;
+						}
+						// Audio parity: the native player rebuilds lost audio from it
+						// (`pulsar_core::audio::AudioRepair`). Forwarded WITH its tag byte, which
+						// can't be the first byte of an RTP v2 datagram, so the player tells the
+						// two apart on the one audio port.
+						if tag == media::TAG_AUDIO_FEC {
+							if let Some(s) = fwd_sock.as_ref() {
+								let _ = s.send_to(&bytes, a_dest).await;
+							}
 							continue;
 						}
 						if tag == media::TAG_FEC_RS {

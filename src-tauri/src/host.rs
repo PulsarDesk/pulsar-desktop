@@ -145,13 +145,16 @@ fn hosting_priority(on: bool) {
 }
 
 fn media_features() -> Vec<String> {
-	use pulsar_core::service::media::{FEAT_FEC, FEAT_FEC_RS, FEAT_MOS, FEAT_NACK};
+	use pulsar_core::service::media::{FEAT_AUDIO_FEC, FEAT_FEC, FEAT_FEC_RS, FEAT_MOS, FEAT_NACK};
 	#[allow(unused_mut)]
 	let mut v = vec![
 		FEAT_MOS.to_string(),
 		FEAT_NACK.to_string(),
 		FEAT_FEC.to_string(),
 		FEAT_FEC_RS.to_string(),
+		// Audio parity for a client that asks (`StreamReq::audio_fec`), every OS: the
+		// session's audio forwarder builds it from the RTP stream, whatever encoded it.
+		FEAT_AUDIO_FEC.to_string(),
 	];
 	// Real pinch gestures: Windows = two-finger touch injection, Linux = a virtual uinput
 	// touchpad pinch (libinput gesture), macOS = a trackpad magnify gesture (pulsar-core
@@ -198,9 +201,11 @@ fn media_features() -> Vec<String> {
 	if crate::ds5::host::available() {
 		v.push(pulsar_core::input::ds5::wire::FEAT_DS5.to_string());
 	}
-	// Uncompressed audio (RTP L16) from the in-process encoder — the Windows process-loopback
-	// path. A host that ends up on an ffmpeg path sends High Opus instead.
-	#[cfg(windows)]
+	// Uncompressed audio (RTP L16) from the in-process encoder: Windows process / endpoint
+	// loopback, macOS ScreenCaptureKit (`spawn_system_audio_mac`), Linux `parec`
+	// (`spawn_pulse_audio_linux`). A host that ends up on an ffmpeg path (surround, a failed
+	// start, no `parec`) sends High Opus instead.
+	#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 	v.push(pulsar_core::service::media::FEAT_AUDIO_RAW.to_string());
 	v
 }

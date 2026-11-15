@@ -68,6 +68,18 @@ reaches the webview. Don't resurrect a webview video path.
   (`src-tauri/src/pkg_update.rs`: pkexec + apt-get/dnf, one password prompt from the
   modal, never silently) — see [status.md](status.md) "Platform parity".
 
+## Linux client on a Wayland session = XWayland (hidden-gaps 1.16)
+
+`src-tauri/src/main.rs` forces `GDK_BACKEND=x11` (the renderer embeds as an X11 child window
+via `--wid`; a native Wayland surface has no XID). On a Wayland session the whole client then
+runs under XWayland. KDE's default (X11 apps scale themselves) stays sharp; GNOME with
+fractional scaling (`scale-monitor-framebuffer`) and without mutter 47's
+`xwayland-native-scaling` upscales the X11 surface, so the stream looks soft. `main.rs` sets
+`PULSAR_FORCED_X11=1` when it forced X11 with `WAYLAND_DISPLAY` set; `link_hint.rs` logs
+`client runs under XWayland` at the first session and, when `gsettings get org.gnome.mutter
+experimental-features` shows that blur case, shows the one-time hint `hint.xwaylandScale`
+(tr/en). Untested on Linux hardware. The real fix, a native `wl_surface` renderer, is not done.
+
 ## Linux desktop GPUs — zero-copy needs the decoder on the DISPLAY GPU
 
 `crates/pulsar-render/src/gpu.rs` asks EGL (`EGL_EXT_device_query`) which render node
