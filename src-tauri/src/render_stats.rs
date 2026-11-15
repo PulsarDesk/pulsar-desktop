@@ -434,11 +434,18 @@ pub(crate) fn start_render_reader(
 					// right here, as on a video click (`ov engage`) — the webview round trip can
 					// lag while the video occludes it. The other platforms take control the way
 					// their video click does, in the session screen (`overlay-control`).
+					// Only for someone who was in control when the menu opened: closing it by
+					// clicking beside it must not grab the keyboard/mouse of a user who was not
+					// (maintainer, 2026-11-15). The other ways of closing never take control.
 					(Some("ov"), Some("control")) => {
-						tracing::info!(id = cur_id, "the click that closed the overlay takes control");
-						#[cfg(windows)]
-						crate::kbdhook::engage(&app);
-						let _ = app.emit("overlay-control", cur_id);
+						if crate::session_cmds::engaged_at_open(cur_id) {
+							tracing::info!(id = cur_id, "the click that closed the overlay takes control");
+							#[cfg(windows)]
+							crate::kbdhook::engage(&app);
+							let _ = app.emit("overlay-control", cur_id);
+						} else {
+							tracing::info!(id = cur_id, "overlay closed by a click beside it — not in control before, stays out");
+						}
 					}
 					// The renderer's own overlay-open button was clicked (platforms where
 					// the closed-state renderer receives pointer events).

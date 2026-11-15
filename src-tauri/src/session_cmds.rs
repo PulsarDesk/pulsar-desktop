@@ -1323,6 +1323,20 @@ pub(crate) async fn render_banner(
 /// + the decoder/socket warm); closing re-grabs and resumes. Idempotent and no-op-safe
 /// when there's no IPC socket (Windows ffplay / single-surface — the overlay floats over
 /// live video there).
+/// Per session: was control engaged when its overlay last opened.
+static ENGAGED_AT_OPEN: std::sync::Mutex<Vec<(u64, bool)>> = std::sync::Mutex::new(Vec::new());
+
+fn set_engaged_at_open(id: u64, engaged: bool) {
+	let mut v = ENGAGED_AT_OPEN.lock().unwrap();
+	v.retain(|(i, _)| *i != id);
+	v.push((id, engaged));
+}
+
+/// The overlay of session id was opened while the user was in control (false = unknown / not).
+pub(crate) fn engaged_at_open(id: u64) -> bool {
+	ENGAGED_AT_OPEN.lock().unwrap().iter().any(|(i, e)| *i == id && *e)
+}
+
 #[tauri::command]
 pub(crate) async fn set_overlay(
 	app: AppHandle,
@@ -1350,6 +1364,9 @@ pub(crate) async fn set_overlay(
 	// out of focus mode — the renderer prompts the click-to-control step — instead of
 	// silently re-grabbing their keyboard/mouse.
 	if open {
+		// Remember whether the user was in control: a click beside the menu that closes it only
+		// takes control back for someone who had it (ov control, render_stats.rs).
+		set_engaged_at_open(id, kbdhook::is_engaged());
 		kbdhook::release(&app);
 	}
 	// Linux: the native overlay (`pulsar-render`, an override-redirect ARGB window over the
