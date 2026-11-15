@@ -168,6 +168,10 @@ async function findFile(dir, re) {
   return null;
 }
 
+// (Client VIDEO decode never goes through this binary: it is pulsar-render, plus on generic
+//  linux-arm64 bundles the rkmpp variant built by scripts/rkmpp/build-rkmpp-render.sh. This
+//  ffmpeg is the host capture/encode fallback.)
+//
 // On Linux arm64 (Orange Pi / RK3588 appliances) the BtbN static build is the
 // wrong choice for the CLIENT AUDIO path: those builds are fully static and link
 // NO libpulse, so `ffmpeg -f pulse default` (spawn_native_audio) fails and the

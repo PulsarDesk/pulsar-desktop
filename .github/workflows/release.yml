@@ -157,6 +157,34 @@ jobs:
           mkdir -p src-tauri/resources
           cp "$BIN" "src-tauri/resources/pulsar-render${EXT}"
 
+      # linux-arm64 only: the Rockchip renderer variant. The generic arm64 bundles link Ubuntu's
+      # libavcodec58 (no rkmpp), so an RK3588 board decoded in software unless it ran the opi5
+      # .deb. scripts/rkmpp/build-rkmpp-render.sh builds Rockchip MPP + a minimal
+      # ffmpeg-rockchip (pinned SHAs) into a private prefix, builds pulsar-render against it
+      # (own target dir) and stages resources/pulsar-render-rkmpp + resources/pulsar-rkmpp/*.
+      # The app runs it only where an MPP device exists and its probe decodes on rkmpp
+      # (process.rs `rkmpp_render_bin`); everywhere else nothing changes. Best effort: if any
+      # of it fails, `args` stays empty, the bundles are built exactly as before, and the
+      # release is not held back. The overlay appends to tauri.linux.conf.json's resources
+      # (a --config array REPLACES the earlier one, so it lists them all).
+      - name: Build Rockchip renderer variant (pulsar-render-rkmpp, best effort)
+        id: rkmpp
+        if: matrix.name == 'linux-arm64'
+        continue-on-error: true
+        shell: bash
+        run: |
+          # Sources + prefix outside target/, so rust-cache never caches the MPP/ffmpeg objects.
+          RKMPP_WORK="$RUNNER_TEMP/rkmpp-build" INSTALL_DEPS=1 bash scripts/rkmpp/build-rkmpp-render.sh
+          node -e '
+            const fs = require("fs");
+            const base = JSON.parse(fs.readFileSync("src-tauri/tauri.linux.conf.json")).bundle.resources;
+            const resources = [...base, "resources/pulsar-render-rkmpp", "resources/pulsar-rkmpp/*"];
+            const out = process.env.RUNNER_TEMP + "/rkmpp.conf.json";
+            fs.writeFileSync(out, JSON.stringify({ bundle: { resources } }));
+            console.log(out, "->", resources);
+          '
+          echo "args=--config $RUNNER_TEMP/rkmpp.conf.json" >> "$GITHUB_OUTPUT"
+
       # The branded "Pulsar is updating" window (pulsar-setup --updating, NO payload): the
       # in-app updater runs the NSIS installer quietly and shows this instead of the wizard.
       # Bundled as resources/pulsar-update.exe (tauri.windows.conf.json).
@@ -280,7 +308,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: .
-          args: ${{ matrix.args }} ${{ startsWith(matrix.os, 'ubuntu') && format('--config {0}/appimage.conf.json', runner.temp) || '' }} ${{ steps.macsign.outputs.args }}
+          args: ${{ matrix.args }} ${{ startsWith(matrix.os, 'ubuntu') && format('--config {0}/appimage.conf.json', runner.temp) || '' }} ${{ steps.macsign.outputs.args }} ${{ steps.rkmpp.outputs.args }}
 
       # The AppImage must start and stream on distros other than the 22.04 it was built on:
       # run its `--selftest` (bundled gst encode, pulsar-render libs, ffmpeg) in clean
