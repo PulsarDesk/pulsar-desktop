@@ -71,8 +71,9 @@ impl Drop for NativeAudio {
 }
 
 /// Play every RTP/Opus datagram that arrives on `rx` (and rebuild lost ones from the audio
-/// parity that arrives there too). `lan`: the session runs over a LAN path — the jitter target
-/// stops at `LAN_MAX_TARGET_MS`. Must be called inside the tokio runtime (a task bridges the
+/// parity that arrives there too). `lan`: the session runs over a wired LAN path (not a Wi-Fi
+/// client, whose power-save and scan stalls can run past 60 ms): the jitter target stops at
+/// `LAN_MAX_TARGET_MS`. Must be called inside the tokio runtime (a task bridges the
 /// broadcast to the player thread).
 pub fn start(mut rx: tokio::sync::broadcast::Receiver<Vec<u8>>, play_id: u64, lan: bool) -> NativeAudio {
 	let stop = Arc::new(AtomicBool::new(false));
@@ -454,15 +455,18 @@ fn run(packets: mpsc::Receiver<Vec<u8>>, stop: Arc<AtomicBool>, play_id: u64, la
 const IDLE_WAIT: Duration = Duration::from_millis(100);
 /// Most a hole is held open (a reordered packet or its parity can still fill it).
 const MAX_HOLD_MS: f32 = 40.0;
-/// Queue kept in reserve while a hole is held (ms).
+/// Queue kept in reserve while a hole is held, on top of one device pull (ms).
 const HOLD_RESERVE_MS: f32 = 5.0;
 
-/// How long a sequence hole may wait (see `run`): what the device queue covers beyond a small
-/// reserve, at most [`MAX_HOLD_MS`]; nothing while the device is paused, prebuffering or
-/// closed (a loss then is concealed at once, as before).
+/// How long a sequence hole may wait (see `run`): what the device queue covers beyond one
+/// device pull (the device takes `device_ms` at a time, so anything less is already a dry pull
+/// in waiting) and a small reserve, at most [`MAX_HOLD_MS`]; nothing while the device is
+/// paused, prebuffering or closed (a loss then is concealed at once, as before). Recomputed on
+/// every wake from the current queue and counted from the hole's start, so the release comes
+/// before the queue is down to one pull plus the reserve.
 fn hold_for(out: Option<&SdlOut>) -> Duration {
 	let ms = match out {
-		Some(s) if s.playing => hold_ms(s.queued_ms()),
+		Some(s) if s.playing => hold_ms(s.queued_ms(), s.device_ms),
 		_ => 0.0,
 	};
 	Duration::from_secs_f32(ms / 1000.0)
@@ -474,8 +478,17 @@ fn next_target(target_ms: f32, max_ms: f32, since_step: Duration) -> Option<f32>
 	(since_step >= DRY_DEBOUNCE).then(|| (target_ms + DRY_STEP_MS).min(max_ms))
 }
 
-fn hold_ms(queued_ms: f32) -> f32 {
-	(queued_ms - HOLD_RESERVE_MS).clamp(0.0, MAX_HOLD_MS)
+fn hold_ms(queued_ms: f32, device_ms: f32) -> f32 {
+	(queued_ms - device_ms - HOLD_RESERVE_MS).clamp(0.0, MAX_HOLD_MS)
+}
+
+/// The eased target after `quiet` without a dry queue and `since_ease` after the last step, or
+/// `None` (no step now). The first step waits for `EASE_QUIET` of quiet, so a raise survives
+/// stalls that repeat every few seconds (Wi-Fi scans, power save, mesh roams); after that
+/// it steps every `EASE_STEP` while the quiet lasts.
+fn eased_target(target_ms: f32, base_ms: f32, quiet: Duration, since_ease: Duration) -> Option<f32> {
+	(target_ms > base_ms && quiet >= EASE_QUIET && since_ease >= EASE_STEP)
+		.then(|| (target_ms - EASE_STEP_MS).max(base_ms))
 }
 
 /// Per-window player counters, logged every [`STATS_EVERY`]. `dry` = the queue ran empty and
@@ -511,17 +524,20 @@ const MAX_RATE_ADJ: f32 = 0.02;
 const DEADBAND_MS: f32 = 3.0;
 /// Rate change per ms of smoothed queue error past the deadband: 10 ms over → +0.5 %.
 const GAIN_PER_MS: f32 = 0.0005;
-/// Target growth on a dry queue, its ceiling, and how long without one before it eases back
-/// (by 5 ms, then again every `EASE_AFTER`). Dry queues closer together than `DRY_DEBOUNCE`
-/// are one event: one late burst used to run the queue dry on several packets in a row and
-/// add 10 ms for each, and the target then took 20 s per 5 ms to come back — ~7 minutes from
-/// the 120 ms ceiling (hidden-gaps 1.11b). Now ~1.5 minutes, and a LAN session never goes
-/// past `LAN_MAX_TARGET_MS`.
+/// Target growth on a dry queue, its ceiling, and how it eases back: nothing until
+/// `EASE_QUIET` without a dry queue, then 5 ms every `EASE_STEP`. Dry queues closer together
+/// than `DRY_DEBOUNCE` are one event: one late burst used to run the queue dry on several
+/// packets in a row and add 10 ms for each, and the target then took 20 s per 5 ms to come
+/// back, ~7 minutes from the 120 ms ceiling (hidden-gaps 1.11b). Now ~100 s, while stalls that
+/// repeat inside `EASE_QUIET` keep the raise. A wired LAN session never goes past
+/// `LAN_MAX_TARGET_MS` (a Wi-Fi client keeps `MAX_TARGET_MS`, see `start`).
 const DRY_STEP_MS: f32 = 10.0;
 const DRY_DEBOUNCE: Duration = Duration::from_millis(200);
 const MAX_TARGET_MS: f32 = 120.0;
 const LAN_MAX_TARGET_MS: f32 = 60.0;
-const EASE_AFTER: Duration = Duration::from_secs(4);
+const EASE_QUIET: Duration = Duration::from_secs(20);
+const EASE_STEP: Duration = Duration::from_secs(4);
+const EASE_STEP_MS: f32 = 5.0;
 
 /// Device buffer asked of SDL (10 ms). A device that pulls big chunks needs that much queued
 /// at every pull; the laptop this was measured on pulled ~100 ms at a time by default.
@@ -551,6 +567,8 @@ struct SdlOut {
 	/// The last dry queue, and the last one that raised the target (debounce).
 	last_dry: std::time::Instant,
 	last_dry_step: std::time::Instant,
+	/// The last ease step.
+	last_ease: std::time::Instant,
 	stats: Stats,
 	stats_at: std::time::Instant,
 	/// Queue level right after the last push (ms; 0 after a clear).
@@ -639,9 +657,11 @@ impl SdlOut {
 				win_pushes: 0,
 				ratio: 1.0,
 				playing: false,
-				max_target_ms,
+				// A PULSAR_AUDIO_TARGETMS above the ceiling raises the ceiling with it.
+				max_target_ms: max_target_ms.max(target_ms),
 				last_dry: now,
 				last_dry_step: now - DRY_DEBOUNCE,
+				last_ease: now,
 				stats: Stats::default(),
 				stats_at: now,
 				last_after_ms: 0.0,
@@ -734,9 +754,14 @@ impl SdlOut {
 				self.last_dry_step = now;
 			}
 			self.last_dry = now;
-		} else if self.target_ms > self.base_target_ms && now.duration_since(self.last_dry) > EASE_AFTER {
-			self.target_ms = (self.target_ms - 5.0).max(self.base_target_ms);
-			self.last_dry = now;
+		} else if let Some(t) = eased_target(
+			self.target_ms,
+			self.base_target_ms,
+			now.duration_since(self.last_dry),
+			now.duration_since(self.last_ease),
+		) {
+			self.target_ms = t;
+			self.last_ease = now;
 		}
 		// SAFETY: as in queued_ms; SDL copies the buffer.
 		unsafe {
@@ -916,10 +941,62 @@ mod tests {
 
 	#[test]
 	fn a_hole_waits_only_for_what_the_queue_covers() {
-		assert_eq!(hold_ms(0.0), 0.0);
-		assert_eq!(hold_ms(4.0), 0.0);
-		assert_eq!(hold_ms(25.0), 20.0);
-		assert_eq!(hold_ms(200.0), MAX_HOLD_MS);
+		assert_eq!(hold_ms(0.0, 10.0), 0.0);
+		assert_eq!(hold_ms(14.0, 10.0), 0.0);
+		// Right after a push at the sawtooth's top (15 ms target + one 10 ms pull): the pull
+		// due within 10 ms must still find a full device buffer.
+		assert!(hold_ms(25.0, 10.0) <= 10.0);
+		assert_eq!(hold_ms(25.0, 10.0), 10.0);
+		// A device that pulls 100 ms at a time holds its own pull back too.
+		assert_eq!(hold_ms(115.0, 100.0), 10.0);
+		assert_eq!(hold_ms(300.0, 10.0), MAX_HOLD_MS);
+	}
+
+	/// Steps the target over `secs` seconds (1 s ticks) with a dry queue at each `dry` second.
+	fn simulate(secs: u64, dry: impl Fn(u64) -> bool) -> Vec<f32> {
+		let (base, mut target) = (15.0f32, 15.0f32);
+		let (mut last_dry, mut last_step, mut last_ease) = (0u64, None::<u64>, 0u64);
+		let mut out = Vec::new();
+		for t in 1..=secs {
+			if dry(t) {
+				let since = last_step.map_or(Duration::MAX, |s| Duration::from_secs(t - s));
+				if let Some(n) = next_target(target, MAX_TARGET_MS, since) {
+					target = n;
+					last_step = Some(t);
+				}
+				last_dry = t;
+			} else if let Some(n) = eased_target(
+				target,
+				base,
+				Duration::from_secs(t - last_dry),
+				Duration::from_secs(t - last_ease),
+			) {
+				target = n;
+				last_ease = t;
+			}
+			out.push(target);
+		}
+		out
+	}
+
+	#[test]
+	fn a_stall_every_10s_keeps_the_target_raised() {
+		let t = simulate(120, |s| s % 10 == 0);
+		// Every stall raises once; nothing eases between them, so the raises accumulate up to
+		// the ceiling instead of crackling at the same level again and again.
+		assert!(t[9..].iter().all(|&x| x >= 25.0), "{t:?}");
+		assert_eq!(*t.last().unwrap(), MAX_TARGET_MS);
+	}
+
+	#[test]
+	fn the_target_eases_from_the_ceiling_in_about_100s() {
+		let t = simulate(240, |s| s <= 120 && s % 10 == 0);
+		assert_eq!(t[119], MAX_TARGET_MS);
+		// Quiet from 120 s: first step at 140 s, then every 4 s, down to the base by ~220 s.
+		assert_eq!(t[138], MAX_TARGET_MS);
+		assert_eq!(t[139], MAX_TARGET_MS - EASE_STEP_MS);
+		let back = t.iter().rposition(|&x| x > 15.0).unwrap() + 2;
+		assert!((215..=230).contains(&back), "back at the base after {back} s");
 	}
 
 	#[test]

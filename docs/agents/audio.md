@@ -88,8 +88,10 @@ A second Opus/RTP stream parallel to video. Implementation lives in
   `parec --raw --format=float32le --rate=48000 --channels=2 --latency-msec=10` into the same
   in-process Opus / L16 encoder (`spawn_pulse_audio_linux`), so Linux hosts advertise
   `audio_raw` too. ffmpeg `-f pulse` stays the fallback (surround, no `parec` /
-  pulseaudio-utils, `PULSAR_LINUX_PAREC=0`, or a `parec` that ends without data — its reader
-  thread starts the fallback itself) and now reads 10 ms fragments (`-fragment_size 1920
+  pulseaudio-utils, `PULSAR_LINUX_PAREC=0`, or a `parec` that ends without data or delivers
+  none in 3 s (then killed) — its reader thread starts the fallback itself, under the `procs`
+  lock and only for the same stream generation, `process::spawn_tracked_current`; `parec` dies
+  with Pulsar like every tracked child) and now reads 10 ms fragments (`-fragment_size 1920
   -fflags nobuffer`; the server-sized ~50 ms ones delayed every packet). Whether a capture
   of `@DEFAULT_MONITOR@` follows a default-output change mid-stream is not verified (it is
   resolved when the stream connects; a re-stream picks the new default).
@@ -113,14 +115,18 @@ Native and in-process, Moonlight's model: `src-tauri/src/native_audio.rs`.
   restarts the decoder on a longer gap or a new stream.
 - **Repair before decode** (pulsar-core `audio::AudioRepair`, shared with mobile): packets
   are put back in sequence order and rebuilt from the host's audio parity. A hole is held open
-  for what the SDL queue covers minus 5 ms (at most 40 ms; nothing while prebuffering) — a
-  reordered packet or its parity fills it in order; past that it is concealed. Before, a
+  for what the SDL queue covers minus one device pull and 5 ms (at most 40 ms; nothing while
+  prebuffering), so the device never pulls a short buffer while it waits — a reordered packet
+  or its parity fills it in order; past that it is concealed. Before, a
   packet one step late was concealed AND then dropped as late. Stats line: `late`,
   `recovered`.
 - Output is an **SDL3** audio stream (10 ms device buffer requested). The queue
   is a sawtooth; its LOW point is held at a margin (`PULSAR_AUDIO_TARGETMS`,
   default 15 ms; +10 ms per dry burst — dry queues within 200 ms count once — up to
-  120 ms, 60 ms on a LAN path; −5 ms after each 4 s without one) by slowly nudging the rate
+  120 ms, 60 ms on a wired LAN path (a Wi-Fi client keeps 120 ms for power-save / scan /
+  mesh stalls; `client_wifi` is asked on every LAN path, `mobile_link::wifi`, which on Linux
+  follows the route to the peer); back down only after 20 s without one, then −5 ms every 4 s,
+  ~100 s from 120 ms, while stalls repeating inside 20 s keep the raise) by slowly nudging the rate
   (max ±2 %). Prebuffers before playing; flushes far past the target. The device
   opens on the first packet. `audio: player stats` every 5 s (in_hz, dry,
   flushes, gap_max_ms, q_ms, ratio).

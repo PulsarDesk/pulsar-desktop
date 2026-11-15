@@ -1190,8 +1190,10 @@ pub(crate) async fn start_remote_play(
 	// Audio quality: the user's pick, or for "auto" the highest this path carries.
 	let host_audio_raw =
 		host_caps.features.iter().any(|f| f == pulsar_core::service::media::FEAT_AUDIO_RAW);
-	// Only asked when Raw is in reach (it spawns `networksetup` on macOS).
-	let client_wifi = if host_audio_raw && path_class == crate::adapt_memory::PathClass::Lan {
+	// Asked on every LAN path (off the session loop: it spawns `networksetup` on macOS): it
+	// picks the Raw audio quality AND the native player's jitter ceiling (a Wi-Fi client keeps
+	// the full one for its power-save / scan stalls).
+	let client_wifi = if path_class == crate::adapt_memory::PathClass::Lan {
 		let peer_ip = sess.peer_addr().await.map(|a| a.ip());
 		tokio::task::spawn_blocking(move || crate::mobile_link::wifi(peer_ip)).await.ok().flatten() == Some(true)
 	} else {
@@ -1475,7 +1477,7 @@ pub(crate) async fn start_remote_play(
 	let audio_native = (audio_port > 0).then(|| crate::native_audio::start(
 		view.audio_packets(),
 		id,
-		path_class == crate::adapt_memory::PathClass::Lan,
+		path_class == crate::adapt_memory::PathClass::Lan && !client_wifi,
 	));
 
 	// Register this play session (one per connected-host tab). `id` was allocated above.

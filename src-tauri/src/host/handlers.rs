@@ -414,8 +414,10 @@ pub(super) fn spawn_system_audio_mac(
 ///
 /// `false` (the caller then runs ffmpeg `-f pulse`): a surround request (stereo capture only),
 /// no `parec` on the box (pulseaudio-utils), `PULSAR_LINUX_PAREC=0`. When `parec` starts but
-/// ends without delivering a byte (no such source, no pulse server), its thread starts that
-/// same ffmpeg fallback itself, unless the stream generation moved on meanwhile.
+/// ends without delivering a byte (no such source, no pulse server), or delivers nothing for
+/// `PAREC_FIRST_DATA` (a hung server connection: it is killed then), its thread starts that
+/// same ffmpeg fallback itself, under the `procs` lock and only while the stream generation
+/// is still the one it was started for.
 /// Untested on Linux hardware (written on Windows, 2026-11-15).
 #[cfg(target_os = "linux")]
 fn spawn_pulse_audio_linux(
@@ -442,8 +444,11 @@ fn spawn_pulse_audio_linux(
 			return false;
 		}
 	};
+	let epoch_at_spawn = epoch.load(std::sync::atomic::Ordering::SeqCst);
 	let mut cmd = std::process::Command::new("parec");
 	cmd.args(parec_args(src)).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+	// Dies with Pulsar, like every spawn_tracked child: a crashed host must not keep recording.
+	crate::process::die_with_parent(&mut cmd);
 	let mut child = match cmd.spawn() {
 		Ok(c) => c,
 		Err(e) => {
@@ -456,17 +461,40 @@ fn spawn_pulse_audio_linux(
 		let _ = child.wait();
 		return false;
 	};
+	let parec_pid = child.id();
 	procs.lock().unwrap().push(child);
 	let (_, fallback) = pulsar_core::audio::audio_command_quality(input, dest, layout, quality);
 	let procs = procs.clone();
+	let epoch = epoch.clone();
 	let ffmpeg = ffmpeg.to_string();
+	// First-data watchdog: a parec stuck on a hung server connection never ends on its own.
+	// Killing it (still tracked, so its pid is still ours) ends the reader below, which then
+	// falls back. Nothing to do once a byte arrived or the stream generation moved on.
+	let got_data = Arc::new(std::sync::atomic::AtomicBool::new(false));
+	{
+		let (procs, epoch, got_data) = (procs.clone(), epoch.clone(), got_data.clone());
+		let _ = std::thread::Builder::new().name("audio-parec-watch".into()).spawn(move || {
+			std::thread::sleep(PAREC_FIRST_DATA);
+			let mut g = procs.lock().unwrap();
+			if got_data.load(std::sync::atomic::Ordering::SeqCst)
+				|| epoch.load(std::sync::atomic::Ordering::SeqCst) != epoch_at_spawn
+			{
+				return;
+			}
+			if let Some(c) = g.iter_mut().find(|c| c.id() == parec_pid) {
+				if matches!(c.try_wait(), Ok(None)) {
+					tracing::warn!("audio: parec delivered nothing in {PAREC_FIRST_DATA:?}, stopping it");
+					let _ = c.kill();
+				}
+			}
+		});
+	}
 	let encoder = match codec {
 		opus_rtp::Codec::Opus { .. } => "in-process Opus",
 		opus_rtp::Codec::L16 => "in-process raw PCM (L16)",
 	};
 	tracing::info!(encoder, source = %src, "audio: pulse source via parec (10 ms fragments)");
 	let spawned = std::thread::Builder::new().name("audio-parec".into()).spawn(move || {
-		let born = std::time::Instant::now();
 		// 10 ms of f32 stereo; parec's own fragments are this size too.
 		let mut buf = vec![0u8; 3840];
 		let mut total = 0u64;
@@ -474,6 +502,9 @@ fn spawn_pulse_audio_linux(
 			match out.read(&mut buf) {
 				Ok(0) => break,
 				Ok(n) => {
+					if total == 0 {
+						got_data.store(true, std::sync::atomic::Ordering::SeqCst);
+					}
 					total += n as u64;
 					// Fails once the stream generation moved on (re-stream / teardown).
 					if sink.write_all(&buf[..n]).is_err() {
@@ -485,14 +516,17 @@ fn spawn_pulse_audio_linux(
 			}
 		}
 		drop(out);
-		if total == 0 && born.elapsed() < std::time::Duration::from_secs(3) {
+		if total == 0 {
 			// parec could not record at all. A teardown also ends it (its child is killed with
-			// the session's processes): give the epoch bump a moment to show before deciding.
-			std::thread::sleep(std::time::Duration::from_millis(250));
-			if !sink.retired() {
-				tracing::warn!("audio: parec delivered nothing — falling back to ffmpeg -f pulse");
-				let _ = spawn_tracked(&procs, &ffmpeg, &fallback);
-				return;
+			// the session's processes, and the epoch moves on under the same lock the fallback
+			// is spawned under, so it never outlives that teardown).
+			match crate::process::spawn_tracked_current(&procs, &epoch, epoch_at_spawn, &ffmpeg, &fallback) {
+				Ok(true) => {
+					tracing::warn!("audio: parec delivered nothing — fell back to ffmpeg -f pulse");
+					return;
+				}
+				Ok(false) => {}
+				Err(e) => tracing::warn!("audio: ffmpeg -f pulse fallback failed: {e}"),
 			}
 		}
 		tracing::info!(packets = sink.packets, "audio: parec capture ended");
@@ -502,6 +536,11 @@ fn spawn_pulse_audio_linux(
 	}
 	true
 }
+
+/// How long `parec` gets to deliver its first bytes before it counts as hung (a pulse source
+/// delivers silence too, so a working one is far inside this).
+#[cfg(target_os = "linux")]
+const PAREC_FIRST_DATA: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// `parec` arguments for pulse source `src`: raw 48 kHz stereo f32le, 10 ms latency (its
 /// record fragment). "default" / empty = the server's default source (no `--device`).

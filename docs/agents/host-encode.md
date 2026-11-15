@@ -85,7 +85,9 @@ Part of the pulsar-desktop agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
   conversion, and zero-copy when PipeWire + GStreamer negotiate DMA-BUF (caps left open; SHM
   frames are uploaded otherwise). That attempt must get a frame to the encoder within 3 s or
   the CPU convert runs on the same portal session (`PULSAR_WAYLAND_CPU_CONVERT=1` skips it;
-  log line `wayland capture colour conversion`). Not done: NVENC/x264/gstreamer-vaapi keep the
+  log line `wayland capture colour conversion`). A start-race failure (not PLAYING) retries
+  the GPU path in the next slot; a broken one (parse error, no frame) is remembered for the
+  process, so re-streams and reconnects don't pay the 3 s again. Not done: NVENC/x264/gstreamer-vaapi keep the
   CPU convert (NVENC's ARGB input and `cudaconvert` would belong to the encoder work); the
   X11 libav path still scales on the CPU.
   **AppImage:** the binary links libgstreamer, so linuxdeploy bundles Ubuntu 22.04's
