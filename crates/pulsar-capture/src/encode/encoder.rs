@@ -33,24 +33,27 @@ pub struct Encoder {
 	pub(super) fns: Box<nvenc::NV_ENCODE_API_FUNCTION_LIST>, // fn-pointer table (keep _lib alive!)
 	pub(super) _lib: libloading::Library,                    // nvEncodeAPI64.dll — must outlive fns
 	pub(super) enc: *mut c_void,                             // session handle (NV_ENC opaque encoder)
-	pub(super) registered: *mut c_void,                      // registeredResource for nv12_tex
+	pub(super) registered: *mut c_void,                      // registeredResource for input_tex
 	pub(super) bitstream: *mut c_void,                       // output bitstream buffer
 
-	// --- OUR own NV12 target (DEFAULT, BIND_RENDER_TARGET) registered with NVENC.
-	//     HYBRID: allocated on the NVIDIA device (NV12 stays private to NVIDIA). ---
-	pub(super) nv12_tex: ID3D11Texture2D,
+	// --- OUR own NVENC input surface (DEFAULT, BIND_RENDER_TARGET) registered with NVENC:
+	//     NV12, or for a 4:4:4 stream the BGRA itself (NVENC converts — see `InputFormat`).
+	//     HYBRID: allocated on the NVIDIA device (it stays private to NVIDIA). ---
+	pub(super) input_tex: ID3D11Texture2D,
+	/// What `input_tex` holds (and NVENC was configured for): `Nv12` = 4:2:0, else 4:4:4.
+	pub(super) input: super::d3d::InputFormat,
 
 	// --- D3D11 BGRA→NV12 colour converter (ID3D11VideoProcessor) on the NVENC device ---
 	pub(super) vctx: ID3D11VideoContext,
 	pub(super) vproc: ID3D11VideoProcessor,
 	pub(super) vp_enum: ID3D11VideoProcessorEnumerator,
 	// --- B3: cached VideoProcessor views + one-shot rotation. The views were rebuilt EVERY
-	//     frame (a driver call + alloc per tick); the output view (over the fixed `nv12_tex`)
+	//     frame (a driver call + alloc per tick); the output view (over the fixed `input_tex`)
 	//     and the stream rotation never change for an encoder's life, and the input view only
 	//     changes when the SOURCE texture changes (the DXGI path alternates present/pool, and a
 	//     same-res reinit swaps the pool texture). So cache the output view once, the input view
 	//     keyed by its source-texture pointer, and set the rotation once (see `blt_bgra_to_nv12`).
-	/// Cached BGRA→NV12 output view over `nv12_tex` (built once; reused every frame).
+	/// Cached BGRA→NV12 output view over `input_tex` (built once; reused every frame).
 	pub(super) cached_output_view: Option<ID3D11VideoProcessorOutputView>,
 	/// Cached input view over the current source texture, valid while `cached_input_src` matches
 	/// the frame's source pointer; rebuilt (releasing the old) when the source texture changes.
@@ -145,6 +148,11 @@ pub struct Encoder {
 unsafe impl Send for Encoder {}
 
 impl Encoder {
+	/// The stream is 4:4:4 (`EncParams::yuv444` asked for it and this GPU encodes it).
+	pub fn yuv444(&self) -> bool {
+		self.input != super::d3d::InputFormat::Nv12
+	}
+
 	/// Request that the NEXT submitted frame be a forced IDR (+ in-band SPS/PPS). One-shot,
 	/// consumed in `submit`. Cheap (a flag) — the capture loop calls it after a same-resolution
 	/// reinit so a client mid-GOP re-syncs immediately rather than waiting the safety interval.
@@ -326,7 +334,7 @@ impl Encoder {
 
 		// FINALLY drop our AddRef'd interface clones (balances our AddRef in `new`).
 		// These MUST drop AFTER nvEncDestroyEncoder so NVENC isn't using a released
-		// device. nv12_tex / vproc / vp_enum / vctx (windows-rs handles) Release on
+		// device. input_tex / vproc / vp_enum / vctx (windows-rs handles) Release on
 		// struct drop — fine after the NVENC objects are gone. Drop the NVIDIA video
 		// ctx/device first, then the NVIDIA device/context (the ones NVENC held a raw
 		// pointer to) LAST among NVENC-touched objects, then the AMD capture clones.

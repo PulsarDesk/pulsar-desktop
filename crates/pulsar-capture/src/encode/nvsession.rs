@@ -87,6 +87,9 @@ pub(super) struct SessionParams {
 	pub(super) low_latency: bool,
 	pub(super) intra_refresh: bool,
 	pub(super) rfi: bool,
+	/// 4:4:4 asked for (the client decodes it). Honored for H.264 / HEVC when the GPU's NVENC
+	/// says it encodes 4:4:4 (`NV_ENC_CAPS_SUPPORT_YUV444_ENCODE`); AV1 stays 4:2:0.
+	pub(super) yuv444: bool,
 }
 
 /// An initialised encoder's retained config and the choices `configure` made.
@@ -97,6 +100,9 @@ pub(super) struct Configured {
 	pub(super) enc_config: Box<nvenc::NV_ENC_CONFIG>,
 	/// RFI is on (asked for, not intra refresh, not AV1, and the driver's caps allow it).
 	pub(super) rfi: bool,
+	/// The stream is 4:4:4 (asked for, H.264 / HEVC, and the GPU encodes it): the input surface
+	/// must then be RGB (`InputFormat::Argb`), never NV12.
+	pub(super) yuv444: bool,
 	pub(super) intra_refresh: bool,
 	/// Reference-buffer depth (`policy::rfi_dpb` with RFI, else 1).
 	pub(super) dpb: u32,
@@ -106,6 +112,17 @@ pub(super) struct Configured {
 	pub(super) thin_budget: bool,
 	pub(super) two_pass: bool,
 	pub(super) preset_kf_scale: u8,
+}
+
+/// The colour description of a 4:4:4 stream: full-range BT.709. Its input is RGB that NVENC
+/// converts itself (`d3d::InputFormat::Argb`), and NVENC's conversion follows these VUI fields:
+/// without them it writes limited range, while the 4:2:0 path's VideoProcessor writes full-range
+/// BT.709 (both measured on an RTX 3080 Laptop, driver 621.14). With them the 4:4:4 picture
+/// carries the same YUV values as the 4:2:0 one — every client shows it the same way — and the
+/// bitstream says what it is.
+fn vui_444(vui: &mut [u32; 28]) {
+	const BT709: u32 = 1; // H.273 colour primaries / transfer / matrix code
+	nvenc::set_vui_colour(vui, true, BT709, BT709, BT709);
 }
 
 /// Build the stream's NVENC config on the open session `enc` and initialise the encoder.
@@ -142,8 +159,9 @@ pub(super) unsafe fn configure(
 		nvenc::NV_ENC_TUNING_INFO_LOW_LATENCY
 	};
 	// Codec GUID + matching profile GUID for the requested codec. H.264 keeps its exact
-	// previous values (byte-for-byte unchanged); HEVC/AV1 use their Main profile.
-	let (codec_guid, profile_guid) = match p.codec {
+	// previous values (byte-for-byte unchanged); HEVC/AV1 use their Main profile. A 4:4:4
+	// stream switches the profile below (High 4:4:4 / RExt).
+	let (codec_guid, mut profile_guid) = match p.codec {
 		Codec::H264 => (
 			nvenc::NV_ENC_CODEC_H264_GUID,
 			nvenc::NV_ENC_H264_PROFILE_HIGH_GUID,
@@ -170,6 +188,20 @@ pub(super) unsafe fn configure(
 	};
 	let rfi_caps = query_cap(nvenc::NV_ENC_CAPS_SUPPORT_REF_PIC_INVALIDATION) != Some(0)
 		&& query_cap(nvenc::NV_ENC_CAPS_SUPPORT_MULTIPLE_REF_FRAMES) != Some(0);
+	// 4:4:4 only on a driver that says yes (an unanswered query keeps 4:2:0 — the client can
+	// always show that). NVENC has no AV1 4:4:4. Any other answer streams 4:2:0 on the same
+	// native path: 4:4:4 is never a reason to leave it.
+	let yuv444_caps = query_cap(nvenc::NV_ENC_CAPS_SUPPORT_YUV444_ENCODE).is_some_and(|v| v > 0);
+	let yuv444 = p.yuv444 && p.codec != Codec::Av1 && yuv444_caps;
+	if p.yuv444 && !yuv444 {
+		cap_dbg(&format!("nvenc: 4:4:4 asked for but not available for {:?} (caps {yuv444_caps}) — 4:2:0", p.codec));
+	}
+	if yuv444 {
+		profile_guid = match p.codec {
+			Codec::H264 => nvenc::NV_ENC_H264_PROFILE_HIGH_444_GUID,
+			_ => nvenc::NV_ENC_HEVC_PROFILE_FREXT_GUID,
+		};
+	}
 
 	let mut preset: nvenc::NV_ENC_PRESET_CONFIG = std::mem::zeroed();
 	preset.version = nvenc::NV_ENC_PRESET_CONFIG_VER;
@@ -292,7 +324,8 @@ pub(super) unsafe fn configure(
 	// Codec-specific config (in the encodeCodecConfig union). Branch on the codec;
 	// each path sets up the same low-latency story as H.264: in-band parameter sets on
 	// every IDR (so a late-joining RTP client always has them), a finite IDR period =
-	// gop, single ref, 4:2:0 8-bit. The union member written MUST match the encodeGUID.
+	// gop, single ref, 4:2:0 8-bit (4:4:4 8-bit for a `yuv444` stream). The union member
+	// written MUST match the encodeGUID.
 	match p.codec {
 		Codec::H264 => {
 			let h264 = &mut cfg.encodeCodecConfig.h264Config;
@@ -309,20 +342,28 @@ pub(super) unsafe fn configure(
 			h264.set_entropyCodingMode(nvenc::NV_ENC_H264_ENTROPY_CODING_MODE_CABAC);
 			h264.maxNumRefFrames = dpb;
 			h264.set_numRefL0(nvenc::NV_ENC_NUM_REF_FRAMES_1);
-			h264.set_chromaFormatIDC(1); // 4:2:0
+			h264.set_chromaFormatIDC(if yuv444 { 3 } else { 1 }); // 4:4:4 / 4:2:0
+			if yuv444 {
+				vui_444(h264.vui_mut());
+			}
 		}
 		Codec::H265 => {
 			// NV_ENC_CONFIG_HEVC: repeatSPSPPS re-emits VPS/SPS/PPS in-band on each IDR
 			// (the HEVC analog of H.264 repeatSPSPPS) so a mid-stream join has parameter
-			// sets; chromaFormatIDC=1 → 4:2:0 8-bit (same NV12 input as H.264). Output is
+			// sets; chromaFormatIDC=1 → 4:2:0 8-bit (same NV12 input as H.264; 3 → 4:4:4 RExt
+			// from the RGB input NVENC converts). Output is
 			// Annex-B (00 00 00 01 start codes — identical to H.264; the RTP packetizer on
 			// the client is its own Phase-2 concern). level/tier left AUTOSELECT (0).
 			let hevc = &mut cfg.encodeCodecConfig.hevcConfig;
 			hevc.set_flags(
-				nvenc::NV_ENC_HEVC_FLAG_REPEAT_SPSPPS | nvenc::NV_ENC_HEVC_CHROMA_420,
+				nvenc::NV_ENC_HEVC_FLAG_REPEAT_SPSPPS
+					| if yuv444 { nvenc::NV_ENC_HEVC_CHROMA_444 } else { nvenc::NV_ENC_HEVC_CHROMA_420 },
 			);
 			hevc.idrPeriod = gop;
 			hevc.maxNumRefFramesInDPB = dpb;
+			if yuv444 {
+				vui_444(hevc.vui_mut());
+			}
 			if rfi {
 				// Predict from ONE reference: the deep buffer is only the fallback an RFI
 				// recovery frame reaches into (autoselect could search several = slower).
@@ -382,7 +423,7 @@ pub(super) unsafe fn configure(
 	let init_params = ip; // retained on the Encoder for live bitrate reconfigure
 	cap_dbg(&format!(
 		"nvenc rc {w}x{h}@{fps} {} kbps: bpp={:.3} preset=P{preset_n} low_budget={low_budget} \
-		 two_pass={two_pass} rfi={rfi} (caps {rfi_caps}) dpb={dpb}",
+		 two_pass={two_pass} rfi={rfi} (caps {rfi_caps}) dpb={dpb} yuv444={yuv444}",
 		br / 1000,
 		policy::bits_per_pixel(br, w, h, fps),
 	));
@@ -391,6 +432,7 @@ pub(super) unsafe fn configure(
 		init_params,
 		enc_config,
 		rfi,
+		yuv444,
 		intra_refresh,
 		dpb,
 		gop,

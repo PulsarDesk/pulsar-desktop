@@ -229,10 +229,25 @@ impl Decoder {
 	}
 
 	fn make_session(&mut self) -> Result<(), String> {
-		let Some(format) = self.format.as_ref() else { return Err("no format".into()) };
+		// A 4:4:4 stream (its SPS says so) asks for a 4:4:4 picture; a VideoToolbox that cannot
+		// make one gets the 4:2:0 formats (it subsamples: blurrier chroma, still a picture).
+		let yuv444 = matches!(self.codec, Codec::H264 | Codec::H265)
+			&& self.sps.as_ref().and_then(|s| crate::stream::chroma::sps_chroma_format(self.codec, s)) == Some(3);
+		if yuv444 {
+			match self.make_session_for(&[PIX_444F, PIX_444V]) {
+				Ok(()) => return Ok(()),
+				Err(e) => eprintln!("pulsar-render(mac): no 4:4:4 decoder output ({e}) — 4:2:0"),
+			}
+		}
 		// Any of the 4:2:0 bi-planar formats, Metal-compatible, IOSurface-backed (zero-copy into
 		// the CVMetalTextureCache). 8-bit first: a 10-bit stream still comes out as P010.
-		let fmts: Vec<Cf> = [PIX_420V, PIX_420F, PIX_X420, PIX_XF20].iter().map(|f| cf_i32(*f as i32)).collect();
+		self.make_session_for(&[PIX_420V, PIX_420F, PIX_X420, PIX_XF20])
+	}
+
+	/// Create the session with `pixel_formats` as the decoder's output choices.
+	fn make_session_for(&mut self, pixel_formats: &[u32]) -> Result<(), String> {
+		let Some(format) = self.format.as_ref() else { return Err("no format".into()) };
+		let fmts: Vec<Cf> = pixel_formats.iter().map(|f| cf_i32(*f as i32)).collect();
 		let fmt_arr = cf_array(&fmts.iter().collect::<Vec<_>>());
 		let iosurf = cf_dict(&[]);
 		// SAFETY: the statics are framework CFStrings; values are live CF objects.
@@ -427,7 +442,8 @@ fn obu_payload(obu: &[u8]) -> Option<(usize, usize)> {
 
 /// Headless capability probe (main.rs `--probe`), the same JSON as the Windows / Linux
 /// probes: H.264 / HEVC decode everywhere (hardware or Apple's software decoder), AV1 only
-/// where VideoToolbox decodes it in hardware.
+/// where VideoToolbox decodes it in hardware. `yuv444`: the canned 4:4:4 keyframe really
+/// decoded into a 4:4:4 picture — the app asks a host for 4:4:4 only then.
 pub fn probe_json() -> String {
 	register_av1();
 	let mut entries = Vec::new();
@@ -435,10 +451,27 @@ pub fn probe_json() -> String {
 		// SAFETY: plain query.
 		let hw = unsafe { VTIsHardwareDecodeSupported(codec_type(c)) } != 0;
 		let ok = hw || c != Codec::Av1;
+		let yuv444 = ok && decodes_444(c);
 		entries.push(format!(
-			"{{\"codec\":\"{name}\",\"ok\":{ok},\"decoder\":\"videotoolbox\",\"hw\":{hw},\"tier\":\"{}\",\"incompatible_with\":[]}}",
+			"{{\"codec\":\"{name}\",\"ok\":{ok},\"decoder\":\"videotoolbox\",\"hw\":{hw},\"tier\":\"{}\",\"yuv444\":{yuv444},\"incompatible_with\":[]}}",
 			if hw { "hwaccel" } else { "software" }
 		));
 	}
 	format!("[{}]", entries.join(","))
+}
+
+/// Decode the canned 4:4:4 keyframe (`testdata/test-444.*`) and check a 4:4:4 picture came out
+/// (not one VideoToolbox subsampled to 4:2:0). AV1: no fixture, never.
+fn decodes_444(c: Codec) -> bool {
+	let fixture: &[u8] = match c {
+		Codec::H264 => include_bytes!("../../testdata/test-444.h264"),
+		Codec::H265 => include_bytes!("../../testdata/test-444.h265"),
+		Codec::Av1 => return false,
+	};
+	let mut dec = Decoder::new(c);
+	let au = AccessUnit { data: fixture.to_vec(), pts_90k: 0, key: true, conceal: false };
+	match dec.decode(&au) {
+		Ok(frames) => frames.iter().any(|f| matches!(f.pixel_format(), PIX_444V | PIX_444F)),
+		Err(_) => false,
+	}
 }

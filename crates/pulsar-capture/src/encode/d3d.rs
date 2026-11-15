@@ -17,7 +17,7 @@ use windows::Win32::Graphics::Direct3D11::{
 	D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
-	DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_RATIONAL, DXGI_SAMPLE_DESC,
+	DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_RATIONAL, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
 	CreateDXGIFactory1, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_ERROR_NOT_FOUND,
@@ -28,20 +28,49 @@ use super::{cap_dbg, VENDOR_NVIDIA};
 // The NVENC helpers that need no D3D11 live in `nvsession` (shared with the Linux encoder).
 pub(super) use super::nvsession::{chk, parse_rtp_dest, SessionGuard};
 
-/// Create OUR own NV12 `ID3D11Texture2D` (DEFAULT usage, BIND_RENDER_TARGET only —
-/// the VideoProcessor output view + NVENC input register both accept that). One
+/// The NVENC input surface the VideoProcessor writes every frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InputFormat {
+	/// 4:2:0: the VideoProcessor converts BGRA → NV12 (every stream before 4:4:4).
+	Nv12,
+	/// 4:4:4: the VideoProcessor only scales / rotates into a BGRA surface, and NVENC converts
+	/// the RGB to YUV 4:4:4 itself. The NVIDIA VideoProcessor cannot write a 4:4:4 YUV format
+	/// (no AYUV output, RTX 3080 Laptop / 621.14); NVENC's conversion costs ~0.35 ms more than
+	/// the VideoProcessor's NV12 at 1280×720 (measured, `new.rs` test). A shader writing AYUV
+	/// would win that back.
+	Argb,
+}
+
+impl InputFormat {
+	pub(super) fn dxgi(self) -> DXGI_FORMAT {
+		match self {
+			InputFormat::Nv12 => DXGI_FORMAT_NV12,
+			InputFormat::Argb => DXGI_FORMAT_B8G8R8A8_UNORM,
+		}
+	}
+	pub(super) fn nvenc(self) -> u32 {
+		match self {
+			InputFormat::Nv12 => super::nvenc::NV_ENC_BUFFER_FORMAT_NV12,
+			InputFormat::Argb => super::nvenc::NV_ENC_BUFFER_FORMAT_ARGB,
+		}
+	}
+}
+
+/// Create OUR own NVENC input `ID3D11Texture2D` in `format` (DEFAULT usage, BIND_RENDER_TARGET
+/// only — the VideoProcessor output view + NVENC input register both accept that). One
 /// non-array, single-mip texture; the encoder Blt's into it every frame.
-pub(super) unsafe fn create_nv12_texture(
+pub(super) unsafe fn create_input_texture(
 	device: &ID3D11Device,
 	w: u32,
 	h: u32,
+	format: InputFormat,
 ) -> Result<ID3D11Texture2D, String> {
 	let desc = D3D11_TEXTURE2D_DESC {
 		Width: w,
 		Height: h,
 		MipLevels: 1,
 		ArraySize: 1,
-		Format: DXGI_FORMAT_NV12,
+		Format: format.dxgi(),
 		SampleDesc: DXGI_SAMPLE_DESC {
 			Count: 1,
 			Quality: 0,
@@ -56,8 +85,8 @@ pub(super) unsafe fn create_nv12_texture(
 	let mut tex: Option<ID3D11Texture2D> = None;
 	device
 		.CreateTexture2D(&desc, None, Some(&mut tex))
-		.map_err(|e| format!("CreateTexture2D(NV12): {e}"))?;
-	tex.ok_or_else(|| "CreateTexture2D(NV12) returned null".to_string())
+		.map_err(|e| format!("CreateTexture2D({format:?}): {e}"))?;
+	tex.ok_or_else(|| format!("CreateTexture2D({format:?}) returned null"))
 }
 
 /// Create an ID3D11VideoProcessor (+ its enumerator) configured for a BGRA→NV12

@@ -218,7 +218,7 @@ impl Encoder {
 	///
 	/// B3: the input/output views + the stream rotation are CACHED across frames (they were
 	/// rebuilt every tick = a driver call + alloc per frame). The output view (over the fixed
-	/// `nv12_tex`) and the rotation are constant for the encoder's life; the input view only
+	/// `input_tex`) and the rotation are constant for the encoder's life; the input view only
 	/// changes when the SOURCE texture changes (the DXGI path alternates present/pool; a same-res
 	/// reinit swaps the pool texture), so we key it by the source-texture COM pointer and rebuild
 	/// only on a change. A rebuilt encoder (resolution/rotation change) starts with empty caches,
@@ -238,7 +238,7 @@ impl Encoder {
 					Texture2D: D3D11_TEX2D_VPOV { MipSlice: 0 },
 				},
 			};
-			let nv12 = self.nv12_tex.clone();
+			let nv12 = self.input_tex.clone();
 			let mut output_view: Option<ID3D11VideoProcessorOutputView> = None;
 			vdevice
 				.CreateVideoProcessorOutputView(&nv12, &vp_enum, &out_desc, Some(&mut output_view))

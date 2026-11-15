@@ -979,6 +979,27 @@ unsafe fn decode_once(sdp: &CString) {
 						seen_key = true;
 						SWITCHING.store(false, Ordering::Relaxed); // new stream live
 						SWITCH_DEADLINE_MS.store(0, Ordering::Relaxed); // switch completed
+						// A 4:4:4 stream (its SPS rides in-band on this keyframe): only the software
+						// decoder shows it (`decode::select_yuv444`) — switch to it before the first
+						// picture instead of letting a hardware decoder produce frames nothing can
+						// present until the zero-output fallback gives up on it.
+						if sel.tier != crate::decode::Tier::Software && keyframe_is_444(codec_id, pkt) {
+							if let Some(p) = crate::decode::select_yuv444(codec_id) {
+								let ndc = open_decoder(par, codec_id, &p.sel);
+								if !ndc.is_null() {
+									eprintln!("pulsar-render: 4:4:4 stream — decoding in software ({})", p.sel.name);
+									ff::avcodec_free_context(&mut dc);
+									dc = ndc;
+									sel = p.sel;
+									announce_decoder(&sel);
+									force_readback = !sel.zero_copy;
+									gen = DEC_GEN.fetch_add(1, Ordering::Relaxed) + 1;
+									map_failed = false;
+									au_since_open = 0;
+									frames_since_open = 0;
+								}
+							}
+						}
 					} else {
 						ff::av_packet_unref(pkt);
 						continue;
@@ -1229,6 +1250,20 @@ unsafe fn decode_once(sdp: &CString) {
 /// drain+free (`stop_decode`) must be done from the main thread after the render loop ends, where
 /// MBX is not held — calling stop_decode() from the signal handler can deadlock on the MBX mutex
 /// the main thread holds every frame in `Presenter::draw`.
+/// The keyframe in `pkt` carries an SPS that says 4:4:4 (H.264 / HEVC Annex-B).
+unsafe fn keyframe_is_444(codec_id: ff::AVCodecID, pkt: *const ff::AVPacket) -> bool {
+	let codec = match codec_id {
+		ff::AVCodecID::AV_CODEC_ID_H264 => crate::stream::Codec::H264,
+		ff::AVCodecID::AV_CODEC_ID_HEVC => crate::stream::Codec::H265,
+		_ => return false,
+	};
+	if (*pkt).data.is_null() || (*pkt).size <= 0 {
+		return false;
+	}
+	let data = std::slice::from_raw_parts((*pkt).data, (*pkt).size as usize);
+	crate::stream::chroma::au_is_444(codec, data)
+}
+
 /// Allocate + open a codec context for `sel` on the stream parameters `par` (the decoder the
 /// tier walk picked). Null on failure (the failure is already logged). Shared by the initial
 /// open and the runtime zero-output fallback so both configure the context identically.

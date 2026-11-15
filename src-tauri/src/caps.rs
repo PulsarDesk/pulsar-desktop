@@ -37,6 +37,10 @@ pub(crate) struct DecoderCap {
 	/// RK3588). The negotiator drops a host-encoder × this-decoder combo that lands here.
 	#[serde(default)]
 	pub incompatible_with: Vec<String>,
+	/// The renderer really decoded AND presented a 4:4:4 keyframe of this codec (its probe's
+	/// `yuv444`): only then may a session ask a host for 4:4:4 in it (`StreamReq::decode_yuv444`).
+	#[serde(default)]
+	pub yuv444: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -196,6 +200,7 @@ fn probe_unavailable(platform: &str) -> Vec<DecoderCap> {
 				hw: false,
 				tier: "software".into(),
 				incompatible_with: Vec::new(),
+				yuv444: false,
 			})
 			.collect();
 	}
@@ -209,6 +214,7 @@ fn probe_unavailable(platform: &str) -> Vec<DecoderCap> {
 		hw: true,
 		tier: "hwaccel".into(),
 		incompatible_with: Vec::new(),
+		yuv444: false,
 	}]
 }
 
@@ -267,6 +273,7 @@ fn probe_decoders(app: &AppHandle, platform: &str) -> Vec<DecoderCap> {
 										.collect()
 								})
 								.unwrap_or_default(),
+							yuv444: e.get("yuv444").and_then(|v| v.as_bool()).unwrap_or(false),
 						})
 					})
 					.collect()

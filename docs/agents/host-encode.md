@@ -25,7 +25,8 @@ Part of the pulsar-desktop agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
     Holding it to the slot deadline cost ~4 ms at 120 fps.
   - `examples/capbench.rs` measures paint → encoded latency per source (see its doc);
     `PULSAR_CAPTURE=dxgi|wgc|dxgi-mf`, `PULSAR_CAPTURE_REPROBE=1` and `PULSAR_EMIT_ON_ARRIVAL=0`
-    are the knobs.
+    are the knobs (`--444` for a 4:4:4 stream).
+  - **4:4:4 stays native** (2026-11-15) — see "4:4:4 chroma" below.
 - **macOS (2026-11-14, LOCAL, untested on macOS hardware)** — `crates/pulsar-capture/src/mac/`:
   ScreenCaptureKit (pulsar-core `macos_capture::ScStream`: one display, NV12 video range, the
   client's fps as `minimumFrameInterval`, cursor composited, queue depth 5) → VideoToolbox
@@ -39,7 +40,8 @@ Part of the pulsar-desktop agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
   row), a still screen re-encodes the last frame once per fps slot, `LiveStats.source = "sck"`,
   display kept awake (`IOPMAssertion`). Not possible with VideoToolbox: reference-frame
   invalidation (declined, counted as `rfi_declined`) and periodic intra refresh (keyframes
-  instead). Entered when the resolved encoder is VideoToolbox, codec ≠ AV1, no HDR/4:4:4;
+  instead). Entered when the resolved encoder is VideoToolbox, codec ≠ AV1, no HDR (a 4:4:4
+  request streams 4:2:0 here — see "4:4:4 chroma");
   `PULSAR_FFMPEG_CAPTURE=1` forces ffmpeg. Falls back to the ffmpeg avfoundation CLI on macOS <
   12.3 (ScreenCaptureKit is dlopen'ed, never linked — the app still starts on older macOS), a
   missing **Screen Recording permission** (the host's home screen shows a notice with "İzin
@@ -105,6 +107,52 @@ Part of the pulsar-desktop agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
 
 All paths emit **RTP/H.264(+HEVC/AV1) over UDP**.
 
+## 4:4:4 chroma (2026-11-15, LOCAL, not tested in a real session)
+
+Opt-in (`PULSAR_YUV444=1` on the client); 4:2:0 stays the default. Three gates, so a 4:4:4
+stream only ever reaches a client that shows it:
+
+1. **Client probe.** `pulsar-render --probe` decodes a canned 4:4:4 keyframe per codec
+   (`crates/pulsar-render/testdata/test-444.{h264,h265}`) and reports `"yuv444"`; `caps.rs`
+   keeps it in `DecoderCap::yuv444`. Per OS: **Windows** — the Media Foundation decoder on the
+   renderer's own D3D11 device must output AYUV and the present VideoProcessor must Blt it
+   (`win/decode.rs::probe_yuv444`). Measured: HEVC yes on an NVIDIA device (RTX 3080 Laptop),
+   no on AMD Vega and Snapdragon X (Adreno); H.264 4:4:4 nowhere (the Microsoft H.264 decoder
+   has no 4:4:4: `CopyDecodedFrame failed`). A hybrid laptop's renderer uses the default
+   (iGPU) adapter, so it reports no 4:4:4. **macOS** — VideoToolbox must decode the fixture
+   into `444f`/`444v` (`mac/decode.rs::decodes_444`; untested on a Mac). **Linux** — libavcodec
+   in software decodes it to yuv444p for the planar GL upload (`decode.rs::select_yuv444`).
+   AV1 4:4:4 is never claimed (no fixture; no host encoder we drive makes AV1 High).
+2. **Client request.** `play.rs::yuv444_request`: asked for, and the codec in the probe's 4:4:4
+   list; the list travels as `StreamReq::decode_yuv444` (pulsar-core) on every (re-)request.
+3. **Host.** `StreamReq::wants_yuv444(codec)` with the codec it finally streams (after its own
+   fallbacks) → `StreamPlan::yuv444` / `CaptureConfig::yuv444`. An old client (no list) gets 4:2:0.
+
+Encode per OS:
+
+- **Windows NVENC (native path, kept):** H.264 High 4:4:4 Predictive / HEVC RExt
+  (`nvsession.rs`) when `NV_ENC_CAPS_SUPPORT_YUV444_ENCODE` says so; otherwise (or AV1) 4:2:0 on
+  the same path. The input is the scaled/rotated BGRA itself (`d3d::InputFormat::Argb`, NVENC
+  converts): the NVIDIA VideoProcessor cannot write AYUV. NVENC's RGB→YUV follows the VUI, so a
+  4:4:4 stream carries full-range BT.709 (`vui_444`) — the same YUV values the 4:2:0
+  VideoProcessor path writes (measured on colour bars; without the VUI NVENC writes limited
+  range). The hybrid Media Foundation candidate is skipped and nothing is measured/cached
+  (`path::Plan::nvenc_only`). Cost, RTX 3080 Laptop, 1280×720 (`encode/new.rs` ignored test):
+  submit ~0.95 ms 4:2:0 → ~1.7–1.9 ms 4:4:4 (~0.35 ms NVENC's RGB conversion, the rest the
+  4:4:4 encode); a shader writing AYUV would win the conversion back. The host's stats label
+  then reads `H.265 4:4:4 · …` (`CaptureStats::yuv444`).
+- **Windows ffmpeg fallback / AMF / software:** the ffmpeg chain's existing `-pix_fmt yuv444p`
+  + `high444p`/`rext` (NVENC/QSV/MF `ddagrab` clamp to 4:2:0 — `effective_hdr_yuv444`).
+- **macOS host:** the native ScreenCaptureKit + VideoToolbox path stays and streams 4:2:0 (no
+  4:4:4 VideoToolbox encoder yet; leaving the native path for the ffmpeg CLI would cost latency
+  for an unverified 4:4:4).
+- **Linux host:** the in-process libav path and the CUDA NVENC SDK encoder take NV12 only, so a
+  4:4:4 stream runs on the ffmpeg CLI (x11grab → `-pix_fmt yuv444p`), as before.
+
+Known, not changed here: the 4:2:0 native NVENC stream is full-range BT.709 data **without** a
+VUI (decoders read it as limited range); the Linux presenter assumes limited BT.709 for every
+stream.
+
 ## Host monitor picker + live display-change watch (per OS, 2026-11-14, untested on macOS / Wayland hardware)
 
 `process::host_displays()` fills `StreamCaps::displays`; the index travels back in
@@ -140,7 +188,7 @@ The id on the wire is an opaque `i64` whose meaning is the HOST's (table in puls
 
 | Host | Picker | Capture | Status |
 | --- | --- | --- | --- |
-| Windows | `pulsar_capture::list_capture_windows` (HWND) | WGC → NVENC (native path); a non-NVENC/HDR/4:4:4 stream falls back to the monitor | shipped |
+| Windows | `pulsar_capture::list_capture_windows` (HWND) | WGC → NVENC (native path, 4:4:4 too); a non-NVENC/HDR stream falls back to the monitor | shipped |
 | Linux X11 | `_NET_CLIENT_LIST` via pure-Rust `x11rb` (X window id) | libav `x11grab window_id` (`host/libav.rs` `Source::X11Window`), ffmpeg CLI `-window_id` + `scale`, or gst `ximagesrc xid=` (`gst::x11_window_pipeline`, MPP hosts; never KMS) | untested on hardware |
 | Linux Wayland | one entry `WindowInfo::PORTAL_PICK` ("Pencereyi bu bilgisayarda seç") | ScreenCast portal with source type WINDOW only (`capture::start_with(.., Source::Window)`): the person AT THE HOST picks the window in the compositor's dialog; frames scaled into the requested box (`wayland_pipeline_sized`) | untested on hardware |
 | macOS | ScreenCaptureKit `SCShareableContent` (`CGWindowID`) | `SCContentFilter(desktopIndependentWindow:)` → NV12 → loopback TCP → ffmpeg `-f rawvideo` → VideoToolbox (`pulsar_core::window_capture::serve_for`) | untested on hardware |

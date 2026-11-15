@@ -211,6 +211,7 @@ impl NvencCuda {
 			init_params,
 			enc_config,
 			rfi,
+			yuv444: _,
 			intra_refresh,
 			dpb,
 			gop,
@@ -230,6 +231,9 @@ impl NvencCuda {
 				low_latency: p.low_latency,
 				intra_refresh: p.intra_refresh,
 				rfi: p.rfi,
+				// The Linux CUDA encoder takes NV12 frames from libavfilter: 4:2:0 only (a 4:4:4
+				// request takes the host's ffmpeg path, which feeds yuv444p).
+				yuv444: false,
 			},
 		)?;
 

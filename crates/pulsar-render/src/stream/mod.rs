@@ -6,6 +6,7 @@
 
 #![allow(dead_code)]
 
+pub mod chroma; // the stream's chroma format (4:4:4 or not) from its SPS
 pub mod hevc; // HEVC intra-refresh loss concealment (stand-ins for skipped pictures)
 pub mod recovery; // loss hold + AU backlog bound (Linux renderer policy, pure)
 pub mod rtp; // RTP receive + depacketize (→ Annex-B / OBU access units)

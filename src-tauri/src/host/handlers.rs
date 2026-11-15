@@ -3498,6 +3498,17 @@ pub(super) fn make_on_stream(
 		};
 		#[cfg(not(windows))]
 		let ffmpeg_display_idx: u32 = 0;
+		// 4:4:4 only when the client asked AND decodes it in the codec actually streamed (its
+		// renderer's probe really decoded a 4:4:4 keyframe — `StreamReq::decode_yuv444`). Every
+		// other client gets 4:2:0: a 4:4:4 stream on a 4:2:0-only decoder was a black screen.
+		let yuv444 = req.wants_yuv444(match codec {
+			pipeline::VCodec::H264 => "h264",
+			pipeline::VCodec::H265 => "h265",
+			pipeline::VCodec::Av1 => "av1",
+		});
+		if req.yuv444 && !yuv444 {
+			tracing::info!(?codec, decode_yuv444 = ?req.decode_yuv444, "4:4:4 asked for, but the client cannot show it in this codec: 4:2:0");
+		}
 		let plan = StreamPlan {
 			encoder,
 			codec,
@@ -3519,7 +3530,7 @@ pub(super) fn make_on_stream(
 			gpu_zerocopy,
 			output_idx: ffmpeg_display_idx,
 			hdr: req.hdr,
-			yuv444: req.yuv444,
+			yuv444,
 			loss_recovery: req.loss_recovery,
 			// Off Windows: the window picked above (Windows' own window capture is WGC on the
 			// native path below; its ffmpeg fallback streams the monitor).
@@ -3565,13 +3576,14 @@ pub(super) fn make_on_stream(
 		#[cfg(windows)]
 		// The native (NVENC) path runs for the normal display capture (ddagrab) OR whenever a
 		// per-window WGC target is set — WGC is a separate capture SOURCE that does not need the
-		// ddagrab display-capture method, just NVENC. HDR / 4:4:4 still force the ffmpeg path (the
-		// native pipeline doesn't do them yet); a window target with HDR/444 falls back to ffmpeg
-		// (whole-monitor) for now — documented limit. PULSAR_FFMPEG_CAPTURE still forces ffmpeg.
+		// ddagrab display-capture method, just NVENC. 4:4:4 stays on it (NVENC H.264 High 4:4:4 /
+		// HEVC RExt where the GPU encodes it, else 4:2:0 — `CaptureConfig::yuv444`). HDR still
+		// forces the ffmpeg path (the native pipeline doesn't do it yet); a window target with HDR
+		// falls back to ffmpeg (whole-monitor) for now — documented limit. PULSAR_FFMPEG_CAPTURE
+		// still forces ffmpeg.
 		let native_started = if encoder == HwEncoder::Nvenc
 			&& (capture == CaptureMethod::Ddagrab || target_hwnd.is_some())
 			&& !req.hdr
-			&& !req.yuv444
 			&& std::env::var_os("PULSAR_FFMPEG_CAPTURE").is_none()
 		{
 			let ncodec = match codec {
@@ -3611,6 +3623,8 @@ pub(super) fn make_on_stream(
 				intra_refresh: req.loss_recovery == pulsar_core::service::LossRecovery::IntraRefresh,
 				// Reference-frame invalidation for a client that resumes at the recovery tag.
 				rfi: req.rfi,
+				// 4:4:4 for a client that shows it (see `yuv444` above).
+				yuv444,
 				draw_mouse: true,
 				// Phase 2b co-op: when the session targets a specific WINDOW (client-picked via
 				// `req.window_hwnd`, or the game this session launched in game mode), capture that
@@ -3667,7 +3681,10 @@ pub(super) fn make_on_stream(
 		// live bitrate, keyframe on request, live display switch — what the ffmpeg CLI cannot do.
 		// Taken when the resolved encoder is VideoToolbox; the ffmpeg avfoundation chain below
 		// stays the fallback (macOS < 12.3, no Screen Recording permission, a codec VideoToolbox
-		// refuses, HDR / 4:4:4). PULSAR_FFMPEG_CAPTURE=1 forces ffmpeg. Untested on macOS hardware.
+		// refuses, HDR). A 4:4:4 request stays here too and streams 4:2:0: the native encoder
+		// has no 4:4:4 yet, and leaving the low-latency path for the ffmpeg CLI (whose
+		// VideoToolbox 4:4:4 is unverified) would trade latency for a maybe.
+		// PULSAR_FFMPEG_CAPTURE=1 forces ffmpeg. Untested on macOS hardware.
 		#[cfg(target_os = "macos")]
 		let native_started = if encoder == HwEncoder::VideoToolbox
 			&& capture == CaptureMethod::AvFoundation
@@ -3675,7 +3692,6 @@ pub(super) fn make_on_stream(
 			&& plan.window.is_none()
 			&& codec != pipeline::VCodec::Av1
 			&& !req.hdr
-			&& !req.yuv444
 			&& std::env::var_os("PULSAR_FFMPEG_CAPTURE").is_none()
 		{
 			let display_count = pulsar_capture::list_displays().len() as u32;
@@ -3701,6 +3717,8 @@ pub(super) fn make_on_stream(
 				// on request heal a loss instead.
 				intra_refresh: false,
 				rfi: req.rfi,
+				// The native VideoToolbox encoder is 4:2:0 only (see above).
+				yuv444: false,
 				draw_mouse: true,
 				window_hwnd: None,
 			}) {
@@ -3820,9 +3838,16 @@ pub(super) fn make_on_stream(
 		} else {
 			format!("{}p", eff_h)
 		};
+		// "H.265 4:4:4" when the ffmpeg chain encodes 4:4:4; the native path tells what its
+		// encoder really got (`CaptureStats::yuv444`) in the reporter below.
+		let codec_part = if !native_started && plan.effective_hdr_yuv444().1 {
+			format!("{} 4:4:4", vcodec_label(codec))
+		} else {
+			vcodec_label(codec).to_string()
+		};
 		let base_label = format!(
 			"{} · {} · {} · {} · {} {}",
-			vcodec_label(codec),
+			codec_part,
 			encoder.label(),
 			res_part,
 			fps_part,
@@ -3966,6 +3991,13 @@ pub(super) fn make_on_stream(
 						label_enc.replacen(HwEncoder::Nvenc.label(), HwEncoder::MediaFoundation.label(), 1)
 					} else {
 						label_enc.clone()
+					};
+					// The codec leads the label ("H.265 · …"): mark a stream NVENC encodes in 4:4:4.
+					#[cfg(windows)]
+					let label_now = if cap_stats.as_ref().is_some_and(|c| c.snapshot().yuv444) {
+						label_now.replacen(" · ", " 4:4:4 · ", 1)
+					} else {
+						label_now
 					};
 					#[cfg(not(windows))]
 					let label_now = label_enc.clone();

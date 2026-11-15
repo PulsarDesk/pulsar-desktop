@@ -571,6 +571,9 @@ pub(super) async fn hold_session(
 	codec_h: String,
 	game_mode: bool,
 	decode_codecs: Vec<String>,
+	// Codecs the renderer decodes in 4:4:4 (`play::yuv444_request`): a re-request with another
+	// codec re-decides 4:4:4 for it.
+	decode_yuv444: Vec<String>,
 	render_stdin: std::sync::Arc<std::sync::Mutex<Option<std::process::ChildStdin>>>,
 	mos: bool,
 	host_nack: bool,
@@ -926,7 +929,8 @@ pub(super) async fn hold_session(
 				bitrate_kbps: cur_bitrate,
 				quality: cur_quality,
 				hdr: cur_hdr,
-				yuv444: std::env::var_os("PULSAR_YUV444").is_some(),
+				yuv444: super::yuv444_request(&cur_codec, &decode_yuv444),
+				decode_yuv444: decode_yuv444.clone(),
 				decode_codecs: decode_codecs.clone(),
 				media_over_session: mos,
 				cursor_external,

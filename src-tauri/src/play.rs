@@ -96,6 +96,18 @@ fn cursor_external_enabled() -> bool {
 	)
 }
 
+/// Ask the host for 4:4:4 chroma in `codec`? Opt-in (`PULSAR_YUV444`; 4:2:0 stays the default)
+/// and only for a codec this client's renderer really decodes and presents in 4:4:4
+/// (`decode_yuv444`, from its startup probe) — asking regardless was a black screen on every
+/// client whose decoder is 4:2:0-only (the Windows one before the AYUV path).
+pub(crate) fn yuv444_request(codec: &str, decode_yuv444: &[String]) -> bool {
+	yuv444_for(std::env::var_os("PULSAR_YUV444").is_some(), codec, decode_yuv444)
+}
+
+fn yuv444_for(wanted: bool, codec: &str, decode_yuv444: &[String]) -> bool {
+	wanted && decode_yuv444.iter().any(|c| c == codec)
+}
+
 /// Format the host's monitors for the renderer's `caps` line `displays=` field, as
 /// `idx:name:w:h:primary` comma-joined â€” NO spaces (the caps line is whitespace-tokenized,
 /// and session_cmds patches it token-wise, so a spaced value would corrupt both). The
@@ -377,6 +389,16 @@ pub(crate) async fn start_remote_play(
 		.collect();
 	let codec = resolve_codec(&codec, &allowed);
 	tracing::info!(%codec, ?allowed, "stream codec resolved");
+	// Codecs this renderer decodes AND presents in 4:4:4 (startup probe), within the negotiated
+	// set; travels in every request so the host encodes 4:4:4 only in one of them.
+	let decode_yuv444: Vec<String> = probed_decoders
+		.iter()
+		.filter(|d| d.ok && d.yuv444 && allowed.contains(&d.codec))
+		.map(|d| d.codec.clone())
+		.collect();
+	if std::env::var_os("PULSAR_YUV444").is_some() && !yuv444_request(&codec, &decode_yuv444) {
+		tracing::info!(%codec, ?decode_yuv444, "4:4:4 asked for (PULSAR_YUV444) but this client cannot show it in this codec — 4:2:0");
+	}
 
 	// Same machine? (loopback P2P) â†’ control would feed back, so flag it.
 	let local = matches!(sess.transport(), Transport::Direct)
@@ -1336,6 +1358,7 @@ pub(crate) async fn start_remote_play(
 		"adaptive controller seeded"
 	);
 	let rfi_req = host_rfi && codec != "av1";
+	let req_yuv444 = yuv444_request(&codec, &decode_yuv444);
 	let req = StreamReq {
 		port: video_port,
 		codec,
@@ -1358,7 +1381,8 @@ pub(crate) async fn start_remote_play(
 		bitrate_kbps: req_kbps,
 		quality: req_quality,
 		hdr: req_hdr,
-		yuv444: std::env::var_os("PULSAR_YUV444").is_some(),
+		yuv444: req_yuv444,
+		decode_yuv444: decode_yuv444.clone(),
 		// PRUNED set (host-encoder-aware), not raw `client_codecs`: the host clamps its
 		// auto-degraded codec to this, so it can never land on a codec the client dropped
 		// because its decoder is incompatible with the host's encoder family (e.g. the Pi's
@@ -2155,6 +2179,7 @@ pub(crate) async fn start_remote_play(
 		// as `decode_codecs`, so the host's clamp keeps excluding host-encoder-incompatible
 		// codecs across the whole session, not just the first request (see `allowed` above).
 		allowed.clone(),
+		decode_yuv444,
 		overlay_stdin.clone(),
 		mos,
 		host_nack,
@@ -2521,6 +2546,18 @@ mod tests {
 
 	fn set(v: &[&str]) -> Vec<String> {
 		v.iter().map(|s| s.to_string()).collect()
+	}
+
+	#[test]
+	fn yuv444_only_in_a_codec_the_renderer_shows_in_444() {
+		use super::yuv444_for;
+		// Not opted in: never (4:2:0 stays the default).
+		assert!(!yuv444_for(false, "h265", &set(&["h265"])));
+		assert!(yuv444_for(true, "h265", &set(&["h265"])));
+		// The renderer cannot show 4:4:4 at all (e.g. a Windows GPU without HEVC RExt decode).
+		assert!(!yuv444_for(true, "h265", &[]));
+		// Another codec than the one it decodes in 4:4:4.
+		assert!(!yuv444_for(true, "h264", &set(&["h265"])));
 	}
 
 	#[test]

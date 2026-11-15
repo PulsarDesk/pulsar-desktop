@@ -54,6 +54,12 @@ pub struct CaptureConfig {
 	/// Reference-frame invalidation (`StreamReq::rfi`): a deeper reference buffer, and a loss
 	/// the client reports (`CaptureHandle::request_rfi`) is healed without a keyframe.
 	pub rfi: bool,
+	/// 4:4:4 chroma (`StreamReq::wants_yuv444`: asked for AND the client decodes it). Windows
+	/// NVENC: H.264 High 4:4:4 / HEVC RExt where the GPU encodes it (`CaptureStats::yuv444`
+	/// says what it got), else 4:2:0 — on the same native path either way. The hybrid
+	/// "display GPU's Media Foundation encoder" candidate is skipped (NV12 only). macOS
+	/// (VideoToolbox) streams 4:2:0.
+	pub yuv444: bool,
 	/// Composite the cursor (v1: parsed but no-op unless `cursor.rs` landed).
 	pub draw_mouse: bool,
 	/// PER-WINDOW capture (Phase 2b): when `Some(hwnd)`, the native path captures that single
@@ -100,6 +106,8 @@ pub struct CaptureStats {
 	/// Access units encoded for the capture's life (wraps). 0 a few seconds into a stream =
 	/// the source never delivered a frame (see the no-frame watchdog in `start`).
 	pub encoded: u32,
+	/// The current encoder streams 4:4:4 (see `CaptureConfig::yuv444`).
+	pub yuv444: bool,
 }
 
 /// The atomics behind [`CaptureStats`], written by the capture thread.
@@ -117,6 +125,7 @@ pub struct LiveStats {
 	/// thread re-encodes the last surface on a static screen, so this keeps rising on a healthy
 	/// pipeline; a flat count means the thread is stuck (see [`ProgressWatch`]).
 	pub(crate) encoded: std::sync::atomic::AtomicU32,
+	pub(crate) yuv444: std::sync::atomic::AtomicBool,
 }
 
 /// Tells how long a monotonic counter has been flat. The host feeds it the capture thread's
@@ -167,6 +176,7 @@ impl LiveStats {
 			rfi_recovered: self.rfi_ok.load(Relaxed),
 			rfi_declined: self.rfi_no.load(Relaxed),
 			encoded: self.encoded.load(Relaxed),
+			yuv444: self.yuv444.load(Relaxed),
 		}
 	}
 }
@@ -581,6 +591,13 @@ impl AnyEncoder {
 			AnyEncoder::Mf(e) => e.flush_and_close(),
 		}
 	}
+	/// The stream is 4:4:4 (Media Foundation encodes 4:2:0 only).
+	fn yuv444(&self) -> bool {
+		match self {
+			AnyEncoder::Nv(e) => e.yuv444(),
+			AnyEncoder::Mf(_) => false,
+		}
+	}
 }
 
 /// Spawn the dedicated capture+encode thread.
@@ -683,10 +700,17 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 			// that picks it (path.rs). A window capture always uses WGC on its window.
 			let forced_source = path::forced_source();
 			let plan_for = |idx: u32| {
-				if cfg.window_hwnd.is_some() {
+				let plan = if cfg.window_hwnd.is_some() {
 					path::Plan::none()
 				} else {
 					path::plan(idx, cfg.fps, forced_source)
+				};
+				// 4:4:4 only NVENC encodes: no Media Foundation candidate, and no measurement
+				// (a 4:4:4 encode would skew the cached verdict the 4:2:0 streams use).
+				if cfg.yuv444 {
+					plan.nvenc_only()
+				} else {
+					plan
 				}
 			};
 			let mut plan = plan_for(output_idx);
@@ -823,6 +847,7 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 					intra_refresh: cfg.intra_refresh,
 					rotation,
 					rfi: cfg.rfi,
+					yuv444: cfg.yuv444,
 				};
 				let mf_path = cfg.window_hwnd.is_none() && source.is_mf();
 				let built = if mf_path {
@@ -868,6 +893,7 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 					break;
 				}
 				prev_good_output = output_idx;
+				stats_t.yuv444.store(enc.yuv444(), Ordering::Relaxed);
 				stats_t.source.store(
 					if cfg.window_hwnd.is_some() { 3 } else { source.code() },
 					Ordering::Relaxed,

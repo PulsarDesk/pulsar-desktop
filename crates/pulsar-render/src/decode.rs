@@ -43,6 +43,11 @@ const TEST_NVENC_H264: &[u8] = include_bytes!("../testdata/test-nvenc.h264");
 const TEST_NVENC_H265: &[u8] = include_bytes!("../testdata/test-nvenc.h265");
 const TEST_NVENC_AV1: &[u8] = include_bytes!("../testdata/test-nvenc.av1.ivf");
 
+// Canned 4:4:4 keyframes (H.264 High 4:4:4 / HEVC RExt, same 320×180 testsrc2; see
+// testdata/README.md): `select_yuv444` decodes them before the app may ask a host for 4:4:4.
+const TEST_444_H264: &[u8] = include_bytes!("../testdata/test-444.h264");
+const TEST_444_H265: &[u8] = include_bytes!("../testdata/test-444.h265");
+
 /// One probe sample: the encoder family it represents and the raw bitstream. `family`
 /// is empty for the baseline/conformant fixture (a generic correctness check) and an
 /// encoder wire-id (`nvenc`) for a family-specific real-world sample.
@@ -612,6 +617,43 @@ pub fn select_skipping(codec_id: ff::AVCodecID, skip: &[String]) -> Option<Probe
 	None
 }
 
+/// The decoder for a **4:4:4** stream of `codec_id`: libavcodec in software, validated on the
+/// canned 4:4:4 keyframe. Its yuv444p goes through the planar GL upload (`video.rs`) like any
+/// software frame. The hardware tiers are left out on purpose: VAAPI hands 4:4:4 over as
+/// packed VUYX/XV30 surfaces the dmabuf import and the NV12 readback cannot show, and the
+/// CUDA↔GL interop copies NV12 only — a 4:4:4 stream there was a black screen until the
+/// zero-output fallback walked down to software. `None`: no 4:4:4 fixture for this codec (AV1)
+/// or no software decoder in this libavcodec. Only H.264 / HEVC.
+pub fn select_yuv444(codec_id: ff::AVCodecID) -> Option<Probed> {
+	let bytes = match codec_id {
+		ff::AVCodecID::AV_CODEC_ID_H264 => TEST_444_H264,
+		ff::AVCodecID::AV_CODEC_ID_HEVC => TEST_444_H265,
+		_ => return None,
+	};
+	let ext = if codec_id == ff::AVCodecID::AV_CODEC_ID_H264 { "h264" } else { "h265" };
+	let path = write_fixture(&Fixture { family: "444", bytes, ext })?;
+	unsafe {
+		for cand in candidates(codec_id).into_iter().filter(|c| c.tier == Tier::Software) {
+			if !validate(&cand, &path) {
+				eprintln!("pulsar-render: decoder {} failed the 4:4:4 validation", cand.name);
+				continue;
+			}
+			return Some(Probed {
+				sel: Selected {
+					name: cand.name,
+					tier: cand.tier,
+					hwdev: cand.hwdev,
+					hw_fmt: cand.hw_fmt,
+					node: cand.node,
+					zero_copy: cand.zero_copy,
+				},
+				incompatible_with: Vec::new(),
+			});
+		}
+	}
+	None
+}
+
 /// Resolve a Selected back to its AVCodec for opening the real stream context.
 /// (Pointers aren't carried in `Selected` so it stays Send/Sync-trivial.)
 pub(crate) unsafe fn find_decoder(sel: &Selected, codec_id: ff::AVCodecID) -> *const ff::AVCodec {
@@ -640,6 +682,9 @@ pub fn probe_json() -> String {
 		("h265", ff::AVCodecID::AV_CODEC_ID_HEVC),
 		("av1", ff::AVCodecID::AV_CODEC_ID_AV1),
 	] {
+		// `yuv444` (additive): a 4:4:4 stream of this codec decodes AND presents here
+		// (`select_yuv444`) — the app asks a host for 4:4:4 only then.
+		let yuv444 = select_yuv444(id).is_some();
 		match select(id) {
 			Some(p) => {
 				// Back-compat: `incompatible_with` is an additive array (older consumers
@@ -653,11 +698,12 @@ pub fn probe_json() -> String {
 					.collect::<Vec<_>>()
 					.join(",");
 				entries.push(format!(
-					r#"{{"codec":"{label}","ok":true,"decoder":"{}","tier":"{}","hw":{},"zero_copy":{},"incompatible_with":[{}]}}"#,
+					r#"{{"codec":"{label}","ok":true,"decoder":"{}","tier":"{}","hw":{},"zero_copy":{},"yuv444":{},"incompatible_with":[{}]}}"#,
 					p.sel.name,
 					p.sel.tier.as_str(),
 					p.sel.tier != Tier::Software,
 					p.sel.zero_copy,
+					yuv444,
 					incompat
 				));
 			}

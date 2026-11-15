@@ -11,6 +11,29 @@ VideoToolbox+Metal zero-copy (mpv only as a fallback — see "macOS renderer" be
 too (`src-tauri/src/native_audio.rs`, libopus + SDL3; see audio.md), so no media
 reaches the webview. Don't resurrect a webview video path.
 
+## 4:4:4 streams (2026-11-15, LOCAL, not tested in a real session)
+
+A host encodes 4:4:4 only in a codec this renderer's probe really decoded in 4:4:4 (`"yuv444"`
+in `--probe`; the gates are in host-encode.md, "4:4:4 chroma"). Per renderer:
+
+- **Windows** (`win/decode.rs`): the Media Foundation decoder offers no NV12 for a 4:4:4
+  stream; `set_output` then takes AYUV and the present VideoProcessor Blts it like NV12. HEVC
+  only (the Microsoft H.264 decoder has no 4:4:4), and only where the renderer's D3D11 device
+  has HEVC RExt DXVA: yes on NVIDIA (RTX 3080 Laptop), no on AMD Vega / Snapdragon X Adreno —
+  a hybrid laptop renders on its iGPU, so it does not ask. No software fallback (the renderer
+  links no libavcodec on Windows).
+- **macOS** (`mac/decode.rs`): a session whose SPS says 4:4:4 asks VideoToolbox for
+  `444f`/`444v` (Metal samples the full-size CbCr plane like NV12's), else falls back to the
+  4:2:0 formats; the probe decodes the fixture first. Untested on a Mac.
+- **Linux** (`video.rs`): the first keyframe's SPS (`stream::chroma`) says 4:4:4 → the decoder
+  switches to libavcodec in software (`decode::select_yuv444`; slice threads only) and its
+  yuv444p goes through the planar GL upload. VAAPI / CUDA stay out for 4:4:4: their packed
+  4:4:4 surfaces and the NV12 interop/readback have no presenter. With
+  `PULSAR_LINUX_DEMUX=ffmpeg` the SPS may sit in the SDP instead of in-band — then nothing
+  switches, and a hardware decoder that accepts 4:4:4 hands out frames no presenter shows (one
+  that refuses it falls back to software inside libavcodec). Not compiled on Windows: CI / the
+  Pi check it.
+
 ## Linux / RK3588 (Orange Pi 5) renderer — the reality (IMPORTANT)
 
 - **VSync (Linux renderer, `linux.rs`):** the swap interval follows the compositor.

@@ -145,6 +145,10 @@ pub const PIX_420V: u32 = fourcc(b"420v");
 pub const PIX_420F: u32 = fourcc(b"420f");
 pub const PIX_X420: u32 = fourcc(b"x420");
 pub const PIX_XF20: u32 = fourcc(b"xf20");
+/// 8-bit 4:4:4 bi-planar (Y + full-size interleaved CbCr) video range / full range — the
+/// output of a 4:4:4 stream; Metal samples it exactly like NV12.
+pub const PIX_444V: u32 = fourcc(b"444v");
+pub const PIX_444F: u32 = fourcc(b"444f");
 
 pub const kCMBlockBufferAssureMemoryNowFlag: u32 = 1;
 pub const kVTInvalidSessionErr: OSStatus = -12903;

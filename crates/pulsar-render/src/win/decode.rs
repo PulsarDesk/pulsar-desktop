@@ -1,5 +1,7 @@
 //! Media Foundation DXVA decode: Annex-B access units → NV12 `ID3D11Texture2D` on our D3D11
-//! device (zero-copy, no GPU→CPU download).
+//! device (zero-copy, no GPU→CPU download). A 4:4:4 stream (HEVC RExt, asked for only when the
+//! probe below really decoded the 4:4:4 fixture here) comes out as AYUV instead: the decoder
+//! offers no NV12 for it, and the present VideoProcessor takes AYUV the same way.
 //!
 //! Call sequence (the canonical MF async/hardware decoder dance, kept synchronous here):
 //!   MFStartup (once, guarded by Once)
@@ -9,7 +11,7 @@
 //!     ID3D11Multithread::SetMultithreadProtected(true) on the immediate context)
 //!   IMFTransform::ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, manager)         (zero-copy bind)
 //!   SetInputType(MFVideoFormat_{H264,HEVC,AV1} + frame size/rate/progressive)
-//!   GetOutputAvailableType loop → pick MFVideoFormat_NV12 → SetOutputType
+//!   GetOutputAvailableType loop → pick MFVideoFormat_NV12 (else AYUV for 4:4:4) → SetOutputType
 //!   ProcessMessage(NOTIFY_BEGIN_STREAMING) + ProcessMessage(NOTIFY_START_OF_STREAM)
 //!   per AU: MFCreateSample(MFCreateMemoryBuffer(copy bytes)) → ProcessInput
 //!           → ProcessOutput loop:
@@ -29,12 +31,13 @@ use windows::Win32::Graphics::Direct3D11::{
 	D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_TEXTURE2D_DESC,
 	D3D11_USAGE_DEFAULT,
 };
-use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_NV12;
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_AYUV, DXGI_FORMAT_NV12};
 use windows::Win32::Media::MediaFoundation::{
 	IMFActivate, IMFDXGIBuffer, IMFDXGIDeviceManager, IMFSample, IMFTransform,
 	MFCreateDXGIDeviceManager, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
 	MFMediaType_Video, MFStartup, MFTEnumEx, MFVideoFormat_AV1, MFVideoFormat_H264,
-	MFVideoFormat_HEVC, MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFSTARTUP_FULL,
+	MFVideoFormat_AYUV, MFVideoFormat_HEVC, MFVideoFormat_NV12, MFVideoInterlace_Progressive,
+	MFSTARTUP_FULL,
 	MFT_CATEGORY_VIDEO_DECODER, MFT_ENUM_FLAG_ASYNCMFT, MFT_ENUM_FLAG_HARDWARE,
 	MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
 	MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
@@ -44,6 +47,12 @@ use windows::Win32::Media::MediaFoundation::{
 };
 
 static MF_INIT: Once = Once::new();
+
+// Canned 4:4:4 keyframes (320×180 testsrc2, the same fixtures the Linux / macOS probes decode;
+// see `testdata/README.md`). The probe decodes them for real before this client says it can
+// show a 4:4:4 stream.
+const TEST_444_H264: &[u8] = include_bytes!("../../testdata/test-444.h264");
+const TEST_444_H265: &[u8] = include_bytes!("../../testdata/test-444.h265");
 
 /// Pack two u32 into the hi/lo halves of a u64 the way MF stores 2D attributes
 /// (`MF_MT_FRAME_SIZE` = width<<32|height, `MF_MT_FRAME_RATE` = num<<32|den).
@@ -140,8 +149,8 @@ impl Decoder {
 			input.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
 			transform.SetInputType(0, &input, 0)?;
 
-			// 4b. Output type: walk the available output types and pick NV12.
-			set_nv12_output(&transform)?;
+			// 4b. Output type: walk the available output types and pick NV12 (AYUV for 4:4:4).
+			set_output(&transform)?;
 
 			// 5. Begin streaming.
 			transform.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)?;
@@ -214,8 +223,9 @@ impl Decoder {
 					break;
 				}
 				Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
-					// The decoder discovered the real stream geometry; renegotiate NV12 and retry.
-					set_nv12_output(&self.transform)?;
+					// The decoder discovered the real stream geometry (and chroma format);
+					// renegotiate the output type and retry.
+					set_output(&self.transform)?;
 					self.visible = visible_size(&self.transform);
 					continue;
 				}
@@ -225,9 +235,9 @@ impl Decoder {
 		Ok(out)
 	}
 
-	/// Extract the D3D11 NV12 texture from an output sample (zero-copy via IMFDXGIBuffer) and
-	/// CopyResource the correct array slice into a fresh single-slice NV12 texture the
-	/// downstream VideoProcessor can bind as a shader/render resource.
+	/// Extract the D3D11 NV12 (or AYUV, 4:4:4) texture from an output sample (zero-copy via
+	/// IMFDXGIBuffer) and CopyResource the correct array slice into a fresh single-slice texture
+	/// of the same format the downstream VideoProcessor can bind as a shader/render resource.
 	unsafe fn sample_to_texture(&self, sample: &IMFSample) -> Result<ID3D11Texture2D> {
 		let buffer = sample.GetBufferByIndex(0)?;
 		let dxgi: IMFDXGIBuffer = buffer.cast()?;
@@ -238,12 +248,16 @@ impl Decoder {
 		let src = src.unwrap();
 		let slice = dxgi.GetSubresourceIndex()?;
 
-		// Describe a single-slice copy with NV12 + SHADER_RESOURCE|RENDER_TARGET bind flags.
+		// Describe a single-slice copy with SHADER_RESOURCE|RENDER_TARGET bind flags, in the
+		// decoder's own format (NV12; AYUV for a 4:4:4 stream — anything else stays NV12, the
+		// format this path always used).
 		let mut desc = D3D11_TEXTURE2D_DESC::default();
 		src.GetDesc(&mut desc);
 		desc.ArraySize = 1;
 		desc.MipLevels = 1;
-		desc.Format = DXGI_FORMAT_NV12;
+		if desc.Format != DXGI_FORMAT_AYUV {
+			desc.Format = DXGI_FORMAT_NV12;
+		}
 		desc.Usage = D3D11_USAGE_DEFAULT;
 		desc.BindFlags = (D3D11_BIND_SHADER_RESOURCE.0 | D3D11_BIND_RENDER_TARGET.0) as u32;
 		desc.CPUAccessFlags = 0;
@@ -391,15 +405,101 @@ pub fn probe_json() -> String {
 		("av1", MFVideoFormat_AV1),
 	] {
 		let sync_ok = unsafe { create_decoder_mft(subtype, false).is_ok() };
+		// `yuv444` (additive; older apps ignore it): this machine REALLY decoded the codec's
+		// 4:4:4 fixture and presented it. Only then may the app ask a host for 4:4:4.
+		let yuv444 = sync_ok
+			&& match name {
+				"h264" => unsafe { probe_yuv444(Codec::H264) },
+				"h265" => unsafe { probe_yuv444(Codec::H265) },
+				// No AV1 4:4:4 fixture: no host encoder we drive makes AV1 High (4:4:4).
+				_ => false,
+			};
 		entries.push(format!(
 			concat!(
 				"{{\"codec\":\"{}\",\"ok\":{},\"decoder\":\"mediafoundation\",",
-				"\"hw\":true,\"tier\":\"hwaccel\",\"incompatible_with\":[]}}"
+				"\"hw\":true,\"tier\":\"hwaccel\",\"yuv444\":{},\"incompatible_with\":[]}}"
 			),
-			name, sync_ok
+			name, sync_ok, yuv444
 		));
 	}
 	format!("[{}]", entries.join(","))
+}
+
+/// Can this machine show a 4:4:4 `codec` stream? Decodes the canned 4:4:4 keyframe with the
+/// same decoder the session uses (a synchronous MFT on a hardware D3D11 device), wants an AYUV
+/// picture out (the Microsoft H.264 decoder has no 4:4:4 at all; HEVC RExt depends on the
+/// GPU's DXVA profiles), and presents it once through the same VideoProcessor the session
+/// presents with. Any failure → `false`, and the app never asks for 4:4:4.
+unsafe fn probe_yuv444(codec: Codec) -> bool {
+	use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0};
+	use windows::Win32::Graphics::Direct3D11::{
+		D3D11CreateDevice, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+		D3D11_SDK_VERSION,
+	};
+	use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+	use windows::Win32::Media::MediaFoundation::MFT_MESSAGE_COMMAND_DRAIN;
+	let fixture = match codec {
+		Codec::H264 => TEST_444_H264,
+		Codec::H265 => TEST_444_H265,
+		Codec::Av1 => return false,
+	};
+	let mut device: Option<ID3D11Device> = None;
+	if D3D11CreateDevice(
+		None,
+		D3D_DRIVER_TYPE_HARDWARE,
+		Default::default(),
+		D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+		Some(&[D3D_FEATURE_LEVEL_11_0]),
+		D3D11_SDK_VERSION,
+		Some(&mut device),
+		None,
+		None,
+	)
+	.is_err()
+	{
+		return false;
+	}
+	let Some(device) = device else { return false };
+	let Ok(mut dec) = Decoder::new_ex(&device, codec, 320, 180, 30, false) else {
+		return false;
+	};
+	let au = AccessUnit { data: fixture.to_vec(), pts_90k: 0, key: true, conceal: false };
+	let mut frames = dec.decode(&au).unwrap_or_default();
+	if frames.is_empty() {
+		// A single keyframe may sit in the decoder until the stream is drained.
+		if dec.transform.ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0).is_ok() {
+			frames = dec.drain().unwrap_or_default();
+		}
+	}
+	let Some(tex) = frames.into_iter().next() else { return false };
+	let mut td = D3D11_TEXTURE2D_DESC::default();
+	tex.GetDesc(&mut td);
+	if td.Format != DXGI_FORMAT_AYUV {
+		// A decoder that turned 4:4:4 into NV12 would stream sharp text only to blur it here.
+		return false;
+	}
+	// Present it once, like a session does (VideoProcessor AYUV → BGRA).
+	let Ok(present) = super::present::Present::new(&device, td.Width, td.Height, td.Width, td.Height) else {
+		return false;
+	};
+	let desc = D3D11_TEXTURE2D_DESC {
+		Width: td.Width,
+		Height: td.Height,
+		MipLevels: 1,
+		ArraySize: 1,
+		Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+		SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+		Usage: D3D11_USAGE_DEFAULT,
+		BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+		CPUAccessFlags: 0,
+		MiscFlags: 0,
+	};
+	let mut back: Option<ID3D11Texture2D> = None;
+	if device.CreateTexture2D(&desc, None, Some(&mut back)).is_err() {
+		return false;
+	}
+	let Some(back) = back else { return false };
+	present.blt(&tex, &back).is_ok()
 }
 
 /// True if an activated MFT is asynchronous. All hardware MFTs are async; they must be unlocked
@@ -419,9 +519,12 @@ unsafe fn unlock_async_mft(t: &IMFTransform) {
 	}
 }
 
-/// Enumerate the MFT's available output types and `SetOutputType` to the first NV12 one.
-unsafe fn set_nv12_output(transform: &IMFTransform) -> Result<()> {
+/// Enumerate the MFT's available output types and `SetOutputType` to the first NV12 one. A
+/// 4:4:4 stream offers no NV12 (the decoder does not subsample): then take its 8-bit 4:4:4
+/// AYUV, which the present VideoProcessor reads like NV12.
+unsafe fn set_output(transform: &IMFTransform) -> Result<()> {
 	let mut i = 0u32;
+	let mut ayuv = None;
 	loop {
 		match transform.GetOutputAvailableType(0, i) {
 			Ok(t) => {
@@ -430,10 +533,16 @@ unsafe fn set_nv12_output(transform: &IMFTransform) -> Result<()> {
 					transform.SetOutputType(0, &t, 0)?;
 					return Ok(());
 				}
+				if ayuv.is_none() && matches!(sub, Ok(s) if s == MFVideoFormat_AYUV) {
+					ayuv = Some(t);
+				}
 				i += 1;
 			}
 			Err(_) => break, // ran out of available types
 		}
+	}
+	if let Some(t) = ayuv {
+		return transform.SetOutputType(0, &t, 0);
 	}
 
 	// Fallback: explicitly request NV12 (some MFTs accept a constructed type even if they don't

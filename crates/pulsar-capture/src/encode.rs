@@ -33,7 +33,8 @@
 //!   nvidia_bgra BGRA (plain, MiscFlags:0)                [NVIDIA device]
 //!        │  ID3D11VideoProcessorBlt  (BGRA → NV12, one GPU call; scales if needed)
 //!        ▼
-//!   nv12_tex NV12 (DEFAULT, BIND_RENDER_TARGET)          [NVIDIA device]
+//!   input_tex NV12 (DEFAULT, BIND_RENDER_TARGET)         [NVIDIA device]
+//!            (a 4:4:4 stream: BGRA that NVENC converts — d3d::InputFormat)
 //!        │  nvEncMapInputResource → nvEncEncodePicture (SYNC, no B-frames)
 //!        ▼
 //!   NVENC H.264 (preset P1 / tune ULL / CBR, repeatSPSPPS) → bitstream buffer
@@ -271,6 +272,9 @@ pub struct EncParams {
 	/// Reference-frame invalidation (the client asked, `StreamReq::rfi`): keep a deep reference
 	/// buffer (`policy::rfi_dpb`) so a lost one can be skipped (`Encoder::invalidate_lost`).
 	pub rfi: bool,
+	/// 4:4:4 chroma (the client decodes it): NVENC H.264 High 4:4:4 / HEVC RExt where the GPU
+	/// encodes it, else 4:2:0 on the same path. The Media Foundation encoder is 4:2:0 only.
+	pub yuv444: bool,
 }
 
 /// The SEI NAL that tags an RFI recovery frame (user_data_unregistered with
