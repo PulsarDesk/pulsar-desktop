@@ -299,6 +299,40 @@ showed ~600 ms head-of-line holds, "stream stopped" over a live session and a lo
   `adapt_memory.rs` keys the per-peer hint by path class `lan`/`wan`/`relay` (100.64/10 = wan;
   old peer-only entries dropped) — a LAN rate seeding the mobile session started the collapse.
 
+## Bad-link stability (2026-11-15, LOCAL, unpushed, untested on the field link)
+
+Evidence: a game session over a phone USB tether (stalls to 0.8–1.8 s RTT, ~20 % reordering,
+5 % loss bursts) collapsed 14 → 0.33 Mbit and re-flooded the link with keyframes. Controller
+side (stall vs congestion, mobile start, adaptive off): pulsar-core `docs/adaptive-streaming.md`.
+
+- **Route detection** (`src-tauri/src/mobile_link.rs`, once per session start): the adapter the
+  route to the peer leaves on (behind ZeroTier / a VPN: the default route's) — Windows
+  `GetBestInterfaceEx` + `GetAdaptersAddresses` (IfType 243/244, "Remote NDIS", "Apple Mobile
+  Device Ethernet", "Mobile Broadband"), macOS `route -n get` + `networksetup` hardware port
+  ("iPhone USB"), Linux the default route's driver (`rndis_host`, `ipheth`, `qmi_wwan`,
+  `cdc_mbim`) / `DEVTYPE=wwan`; everywhere a 172.20.10.1 gateway (iPhone hotspot). Mobile →
+  `adapt::Config::mobile` (start ≤ 6 Mbit, gentler climb). Log: `adaptive controller seeded …
+  path=wan/mobile link=mobile link_why=…`. `PULSAR_MOBILE=0|1` overrides.
+- **Intra refresh on a bad link** (`play.rs` `ir_bad_link`): a Windows game session over WAN /
+  mobile / start RTT ≥ 30 ms to a host advertising `FEAT_IR` (NVENC SDK) starts in
+  `LossRecovery::IntraRefresh` — the wave heals a loss, no keyframe; the renderer gets `ir 1`
+  and `rfi 0` (NVENC turns RFI off under IR anyway). LAN keeps RFI. `PULSAR_IR=0|1` overrides.
+  The 2026-11-08 IR overflow (`stream/rtp.rs` `IR_MODE`) came from the reorder burst — the fast
+  drop below keeps that burst away; re-measure on the field link.
+- **Fast drop** (`hold.rs` `fast_drop_on` / `fast_drop_wait_ms`): game mode, median RTT ≥ 35 ms
+  (off < 25), RFI or IR → the renderer's `maxdelay` is the reorder / FEC wait + one frame + 10 ms
+  (30–80 ms) instead of the RTT-based repair window, the sweep writes holes off at the same
+  time, and no NACK is sent (`nack_on`) — Moonlight-like: the hole's frame is dropped, RFI / IR
+  heals it, later frames are not held for a repair that needs ≥ 1 RTT. Remote desktop keeps the
+  repair window. Log: `game mode, high RTT: holes dropped fast …`.
+- **"Otomatik ayar"** (Settings → Görüntü + native menu Yayın row after the bitrate,
+  `ui.autoAdjust`, `start_remote_play` `auto_adjust`, `set_play_auto_adjust` →
+  `Restream::AutoAdjust`, renderer `autoadj 0|1` / `ov set autoadj on|off`): off = the picks
+  stay fixed (`stream_point` = the top rung; bitrate = the pick, or `fixed_rate_kbps()` — the
+  proven / last good rate — on "Otomatik", shown as "Otomatik · N Mbit" on the bitrate row);
+  FEC / NACK / RFI / IR keep working, the recovery flip too. Back on: `set_adaptive(true)` +
+  `set_target(current)` + the pins re-applied.
+
 ## Pen and touch on the Windows renderer (2026-11-14, untested on pen / touch hardware)
 
 The video child window covers the webview, so a stylus or a finger on the video reaches

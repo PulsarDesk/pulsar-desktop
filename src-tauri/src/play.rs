@@ -203,7 +203,12 @@ pub(crate) async fn start_remote_play(
 	// The audio-quality preference (`auto`/`standard`/`high`/`raw`, Settings / session menu);
 	// None = auto. Resolved after the bandwidth probe (`audio_quality_for`).
 	audio_quality: Option<String>,
+	// "Otomatik ayar" (Settings → Görüntü / the session menu): false = no adaptive bitrate /
+	// resolution / fps — the picks (or the measured good rate for an automatic bitrate) stay
+	// fixed, Moonlight-like. None = on.
+	auto_adjust: Option<bool>,
 ) -> Result<PlayInfo, String> {
+	let auto_adjust = auto_adjust.unwrap_or(true);
 	let aq_pref = match audio_quality.as_deref() {
 		Some(v @ ("standard" | "high" | "raw")) => v.to_string(),
 		_ => "auto".to_string(),
@@ -1099,6 +1104,19 @@ pub(crate) async fn start_remote_play(
 	// that opened with 40 % loss; they now start like any other session.)
 	let hint = crate::adapt_memory::hint(&app, &peer_key, path_class)
 		.map(|k| (k * 3 / 5).max(2_000).clamp(pulsar_core::adapt::FLOOR_KBPS, cap_for_ctl));
+	// Does this client's route run over a phone (USB / Wi-Fi tether, a cellular modem)? Such a
+	// link reads its burst in the 1 s probe and stalls on handovers: the controller starts it
+	// lower and climbs gently. `PULSAR_MOBILE=0|1` overrides the detection (A/B, field tests).
+	let link = {
+		let peer_ip = sess.peer_addr().await.map(|a| a.ip());
+		match std::env::var("PULSAR_MOBILE").as_deref() {
+			Ok("1") => crate::mobile_link::LinkKind::Mobile("PULSAR_MOBILE=1".into()),
+			Ok("0") => crate::mobile_link::LinkKind::Fixed,
+			_ => tokio::task::spawn_blocking(move || crate::mobile_link::detect(peer_ip))
+				.await
+				.unwrap_or(crate::mobile_link::LinkKind::Unknown),
+		}
+	};
 	// Session-start bandwidth probe (pulsar-core `adapt::probe`): ~1 s of packet trains at
 	// rising rates, measured before the stream starts, so the first picture already comes at
 	// the rate the path holds instead of after an 8-10 s climb from a cautious 4 Mbit (which
@@ -1187,6 +1205,30 @@ pub(crate) async fn start_remote_play(
 	// (`host_rfi`; the 2026-11-08 IR attempt there overflowed the AU queue â€” see stream/rtp.rs
 	// IR_MODE), macOS waits for an IDR and gets a short GOP.
 	acfg.ir_capable = cfg!(target_os = "linux");
+	// A game session over a WAN / phone link: loss there is a given, and on Windows each one the
+	// host's RFI can't reach (a handover stall is seconds long) became a keyframe — 5-10× a frame,
+	// re-flooding the weak link (2026-11-15 tether). An intra-refresh stream heals within its
+	// wave instead, with no keyframe at all; the renderer drops a hole fast in game mode on a
+	// high-RTT path (hold.rs `fast_drop`), so the burst that overflowed its AU queue in the
+	// 2026-11-08 IR attempt (stream/rtp.rs IR_MODE) no longer happens. Only from hosts whose
+	// encoder really refreshes (`FEAT_IR`), and the session STARTS in it (no mid-session encoder
+	// rebuild for the flip). LAN keeps RFI. `PULSAR_IR=0` keeps RFI everywhere, `=1` forces IR.
+	let host_ir = host_caps.features.iter().any(|f| f == pulsar_core::service::media::FEAT_IR);
+	let start_rtt_ms = match sess.path_latency().await {
+		Some((d, r)) => d.or(r).unwrap_or(0.0),
+		None => 0.0,
+	};
+	let wan_like = link.is_mobile() || path_class != crate::adapt_memory::PathClass::Lan || start_rtt_ms >= 30.0;
+	let ir_bad_link = match std::env::var("PULSAR_IR").as_deref() {
+		Ok("0") => false,
+		Ok("1") => mos,
+		_ => cfg!(windows) && game_mode && mos && host_ir && wan_like && codec_h != "av1",
+	};
+	if ir_bad_link {
+		acfg.ir_capable = true;
+		acfg.initial_recovery = pulsar_core::service::LossRecovery::IntraRefresh;
+	}
+	acfg.mobile = link.is_mobile();
 	// The resolution/fps ladder is ON: when the budget (or a host that can't keep up) no
 	// longer buys a clean picture at the current point, the controller steps to a lighter
 	// one instead of starving the encoder. A resolution or fps picked in the session menu
@@ -1231,13 +1273,22 @@ pub(crate) async fn start_remote_play(
 	if pin_res.is_some() || pin_fps.is_some() {
 		ctl.set_pins(pin_res, pin_fps);
 	}
+	// "Otomatik ayar" off: a fixed stream (Moonlight-like). The picked bitrate — or, on
+	// "Otomatik", the controller's start estimate (the probe / per-path memory) — at the top
+	// rung (the picks, else the native size); the controller only measures from here on.
+	let fixed_kbps = (!auto_adjust).then(|| {
+		ctl.set_adaptive(false);
+		init_bitrate_kbps.filter(|&k| k > 0).map_or_else(|| ctl.fixed_rate_kbps(), |k| k.min(ctl.cap()))
+	});
 	// A low start rate (the per-peer hint, or the cautious no-memory start) starts on a lower
 	// rung: request that point, not the native size the rate can't buy. The top rung keeps the
 	// original request (0 = host default). The saved picks are a preferred MAXIMUM: the
 	// controller's point already honours them, and a lighter one means the start rate can't
 	// carry the pick yet (it climbs back when the link allows).
 	let (req_w, req_h, req_fps) = match ctl.points().first() {
-		Some(top) if *top != ctl.point() => {
+		// Fixed: the top rung — the picks (fitted to the monitor) or the configured / native size.
+		Some(top) if fixed_kbps.is_some() && (pin_res.is_some() || pin_fps.is_some()) => (top.width, top.height, top.fps),
+		Some(top) if fixed_kbps.is_none() && *top != ctl.point() => {
 			let p = ctl.point();
 			(p.width, p.height, p.fps)
 		}
@@ -1254,13 +1305,24 @@ pub(crate) async fn start_remote_play(
 	}
 	// Media-over-session carries the per-packet measurements the controller runs on; the
 	// first request already uses its start rate (the per-peer memory hint, or the cap).
-	let req_kbps = if mos { ctl.encoder_kbps() } else { req_kbps };
+	let req_kbps = match fixed_kbps {
+		Some(k) => k,
+		None if mos => ctl.encoder_kbps(),
+		None => req_kbps,
+	};
+	// The path class, plus "/mobile" when the route runs over a phone (see `link`).
+	let path_label = if link.is_mobile() { format!("{}/mobile", path_class.as_str()) } else { path_class.as_str().to_string() };
 	tracing::info!(
 		native = ?native_dims,
 		cap = cap_for_ctl,
 		start = ctl.target_kbps(),
 		hint = ?hint,
-		path = path_class.as_str(),
+		path = %path_label,
+		link = link.label(),
+		link_why = link.why(),
+		recovery = ?ctl.recovery(),
+		auto_adjust,
+		fixed_kbps = ?fixed_kbps,
 		point = %ctl.point().label(),
 		ladder = ?ctl.points().iter().map(|p| format!("{}:{}", p.label(), p.min_kbps)).collect::<Vec<_>>(),
 		req_w, req_h, req_fps, req_kbps,
@@ -1324,7 +1386,9 @@ pub(crate) async fn start_remote_play(
 		audio_layout: pulsar_core::audio::ChannelLayout::Stereo,
 		// Every session starts with the normal GOP; the hold-loop's controller flips this
 		// on the first sustained loss (adaptive streaming Phase 0).
-		loss_recovery: pulsar_core::service::LossRecovery::Normal,
+		// Normal (flipped on the first sustained loss), or intra refresh from the start on a game
+		// session over a bad link (see `ir_bad_link`).
+		loss_recovery: ctl.recovery(),
 		// Ask for FEC parity (Phase 2.1) â€” the host sends it only once we report loss;
 		// Reed-Solomon (several losses per frame) preferred, XOR for older hosts.
 		fec: mos,
@@ -2111,6 +2175,7 @@ pub(crate) async fn start_remote_play(
 		direct_cap_kbps,
 		host_pen,
 		host_touch,
+		fixed_kbps,
 	));
 
 	state.plays.lock().unwrap().insert(

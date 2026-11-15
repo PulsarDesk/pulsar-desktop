@@ -19,6 +19,12 @@ overlay content, the look, and the encode profile**:
 Established with the maintainer: **entering game streaming makes the whole app
 gaming-focused; remote desktop makes it general remote-control-focused.**
 
+**"Otomatik ayar"** (both modes; Settings → Görüntü and the in-session menu's Yayın row,
+persisted as `ui.autoAdjust`, applied live): on = the adaptive controller moves bitrate /
+resolution / fps with the link (the picks are a preferred maximum); off = the picks stay fixed
+like Moonlight (an automatic bitrate = the rate measured to work), loss recovery keeps working.
+See `client-video.md` "Bad-link stability".
+
 ## CLI / headless start (kiosk / appliance — esp. Orange Pi)
 
 `pulsar --connect <id|ip> [--connect-pw <pw>] [--mode game]` auto-connects on

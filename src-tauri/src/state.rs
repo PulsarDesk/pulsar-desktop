@@ -268,6 +268,9 @@ pub(crate) enum Restream {
 	/// New audio-quality preference (`auto`/`standard`/`high`/`raw`); the hold loop resolves
 	/// `auto` (and `raw` on a host that can't send it) to a concrete `AudioQuality`.
 	AudioQuality(String),
+	/// "Otomatik ayar": `true` = the adaptive controller runs (bitrate / resolution / fps follow
+	/// the link), `false` = the picks stay fixed (Moonlight-like; FEC / NACK / recovery go on).
+	AutoAdjust(bool),
 }
 
 /// Stdin-only renderer state re-pushed after a codec-switch renderer respawn: a

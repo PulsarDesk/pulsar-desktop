@@ -428,6 +428,20 @@ pub fn ptr_free() -> bool {
 	PTR_FREE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// "Otomatik ayar" (the Yayın section; `autoadj 0|1` from the app, which owns it): on = the
+/// adaptive controller moves the bitrate / resolution / fps with the link; off = the picks stay
+/// fixed (an automatic bitrate = the measured good rate, shown on the bitrate row). The row flips
+/// it optimistically and emits `ov set autoadj on|off`, which the app saves and applies.
+static AUTO_ADJ: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_auto_adj(on: bool) {
+	AUTO_ADJ.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn auto_adj() -> bool {
+	AUTO_ADJ.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Host pointer marker (issue #7, remote mode): while the person AT the host uses their own
 /// mouse the app sends `hostptr 1 <x> <y>` (normalized over the host screen; negative = the
 /// position is unknown) and `hostptr 0` when it goes idle; `hostname <name>` labels it. The
@@ -1799,7 +1813,8 @@ fn draw_section_header(ui: &mut egui::Ui, st: &OverlayState, us: &mut UiState) {
 	});
 }
 
-/// Stream section: codec / encoder / resolution / fps / bitrate limit / quality / pacing.
+/// Stream section: codec / encoder / resolution / fps / bitrate limit / automatic adjustment /
+/// quality / pacing.
 fn draw_stream(
 	ui: &mut egui::Ui,
 	st: &OverlayState,
@@ -1872,7 +1887,7 @@ fn draw_stream(
 
 	// Remote mode adds the "show my pointer on the host" row (game sessions never label it).
 	let remote = st.mode == Mode::Remote;
-	let mut rows = Rows::new(if remote { 8 } else { 7 }, input);
+	let mut rows = Rows::new(if remote { 9 } else { 8 }, input);
 	ui.spacing_mut().item_spacing.y = ROW_GAP;
 	if let Some(v) = rows.choice(ui, 0, "Codec", codec_cur, &codecs, None) {
 		cmds.push(OverlayCmd::Set("codec", v));
@@ -1886,19 +1901,27 @@ fn draw_stream(
 	if let Some(v) = rows.choice(ui, 3, "FPS", fps_cur, &fps, None) {
 		cmds.push(OverlayCmd::Set("fps", v));
 	}
-	// The bitrate LIMIT (the adaptive controller's ceiling; it still goes lower on a weak link).
-	if let Some(v) = rows.choice(ui, 4, t("bwlimit"), &st.bitrate, &br, Some(t("info.bitrate"))) {
+	// The bitrate LIMIT (the adaptive controller's ceiling; it still goes lower on a weak link) —
+	// or, with "Otomatik ayar" off, the fixed rate ("Otomatik · N Mbit" = the measured one).
+	let br_info = if auto_adj() { t("info.bitrate") } else { t("info.bitrate.fixed") };
+	if let Some(v) = rows.choice(ui, 4, t("bwlimit"), &st.bitrate, &br, Some(br_info)) {
 		cmds.push(OverlayCmd::Set("bitrate", v));
 	}
-	if let Some(v) = rows.choice(ui, 5, t("quality"), staged(deferred, "quality", &st.quality), &quality, None) {
+	// "Otomatik ayar": the adaptive controller on / off (applied live, no stream restart of its own).
+	let adj_cur = if auto_adj() { "on" } else { "off" };
+	if let Some(v) = rows.choice(ui, 5, t("autoadj"), adj_cur, &onoff, Some(t("info.autoadj"))) {
+		set_auto_adj(v == "on");
+		cmds.push(OverlayCmd::Set("autoadj", v));
+	}
+	if let Some(v) = rows.choice(ui, 6, t("quality"), staged(deferred, "quality", &st.quality), &quality, None) {
 		cmds.push(OverlayCmd::Set("quality", v));
 	}
-	if let Some(v) = rows.choice(ui, 6, t("pacing"), pace_cur, &onoff, Some(t("info.pacing"))) {
+	if let Some(v) = rows.choice(ui, 7, t("pacing"), pace_cur, &onoff, Some(t("info.pacing"))) {
 		cmds.push(OverlayCmd::Set("pace", v));
 	}
 	if remote {
 		let cur = if st.cur_label { "on" } else { "off" };
-		if let Some(v) = rows.choice(ui, 7, t("curlabel"), cur, &onoff, Some(t("info.curlabel"))) {
+		if let Some(v) = rows.choice(ui, 8, t("curlabel"), cur, &onoff, Some(t("info.curlabel"))) {
 			cmds.push(OverlayCmd::Set("curlabel", v));
 		}
 	}
@@ -4207,6 +4230,22 @@ mod rows_tests {
 
 	fn open_state() -> OverlayState {
 		OverlayState { open: true, ..OverlayState::default() }
+	}
+
+	/// The Stream section's "Otomatik ayar" row (after the bitrate) flips the controller off and on.
+	#[test]
+	fn the_automatic_adjustment_row_flips() {
+		let st = open_state();
+		let (ctx, mut ui) = opened(View::Stream, &st);
+		for _ in 0..5 {
+			press(&ctx, &st, &mut ui, egui::Key::ArrowDown);
+		}
+		assert_eq!(ui.sub_sel, 5);
+		set_auto_adj(true);
+		assert_eq!(press(&ctx, &st, &mut ui, egui::Key::Enter), vec![("autoadj", "off".to_string())]);
+		assert!(!auto_adj(), "optimistic: the row shows it at once");
+		assert_eq!(press(&ctx, &st, &mut ui, egui::Key::Enter), vec![("autoadj", "on".to_string())]);
+		assert!(auto_adj());
 	}
 
 	#[test]

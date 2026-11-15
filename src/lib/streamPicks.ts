@@ -21,13 +21,21 @@ export function resToWh(v: string): [number, number] {
 	}
 }
 
-/** The saved picks as connect arguments; 0 = automatic for each. */
-export function savedStreamPicks(): { width: number; height: number; fps: number; bitrateKbps: number } {
+/** The saved picks as connect arguments; 0 = automatic for each. `autoAdjust` = "Otomatik
+ *  ayar" (false: the picks stay fixed for the whole session). */
+export function savedStreamPicks(): {
+	width: number;
+	height: number;
+	fps: number;
+	bitrateKbps: number;
+	autoAdjust: boolean;
+} {
 	const [width, height] = resToWh(ui.streamRes ?? 'auto');
 	return {
 		width,
 		height,
 		fps: ui.streamFps > 0 ? ui.streamFps : 0,
-		bitrateKbps: ui.bitrate > 0 ? ui.bitrate * 1000 : 0
+		bitrateKbps: ui.bitrate > 0 ? ui.bitrate * 1000 : 0,
+		autoAdjust: ui.autoAdjust !== false
 	};
 }

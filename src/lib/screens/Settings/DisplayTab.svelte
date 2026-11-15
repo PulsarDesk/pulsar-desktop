@@ -138,6 +138,10 @@
 	</div>
 </div>
 <div class="srow">
+	<div class="st"><b>{t('settings.autoAdjust')}</b><span>{t('settings.autoAdjustDesc')}</span></div>
+	<button class="toggle" aria-label={t('settings.autoAdjust')} class:on={ui.autoAdjust !== false} aria-pressed={ui.autoAdjust !== false} onclick={() => { ui.autoAdjust = ui.autoAdjust === false; saveUi(); }}><span class="knob"></span></button>
+</div>
+<div class="srow">
 	<div class="st"><b>{t('settings.hdr')}</b><span>{t('settings.hdrDesc')}</span></div>
 	<button class="toggle" aria-label={t('settings.hdr')} class:on={ui.hdr} aria-pressed={ui.hdr} onclick={() => { ui.hdr = !ui.hdr; saveUi(); }}><span class="knob"></span></button>
 </div>

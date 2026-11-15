@@ -517,6 +517,9 @@ fn stdin_control() {
 			}
 		} else if let Some(rest) = l.strip_prefix("msens ") {
 			crate::overlay::set_mouse_sens(rest);
+		} else if let Some(rest) = l.strip_prefix("autoadj ") {
+			// "Otomatik ayar" state from the app (every stats window + on a change).
+			crate::overlay::set_auto_adj(rest.trim() == "1");
 		} else if let Some(rest) = l.strip_prefix("ptrfree ") {
 			crate::overlay::set_ptr_free(rest.trim() == "1");
 		} else if let Some(rest) = l.strip_prefix("hostptr ") {
@@ -2724,6 +2727,7 @@ fn apply_ov_cmd(ostate: &mut crate::overlay::OverlayState, c: crate::overlay::Ov
 				"fit" => present::set_fit(&val),
 				"msens" => crate::overlay::set_mouse_sens(&val),
 				"ptrfree" => crate::overlay::set_ptr_free(val == "on"),
+				"autoadj" => crate::overlay::set_auto_adj(val == "on"),
 				"hostptr" => crate::overlay::set_host_ptr_show(val == "on"),
 				// Upscaling picked in the menu: applied now, forwarded for the app to save.
 				"upscale" => present::set_upscale(&val),

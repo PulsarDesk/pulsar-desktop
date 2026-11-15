@@ -118,6 +118,9 @@ windows-sys = { version = "0.61", features = [
 	"Win32_UI_HiDpi", # dpi_watch: GetDpiForWindow (the window's real DPI after a display change)
 	"Win32_System_Pipes", # seat: GetNamedPipeServerProcessId (verify the Pulsar Split service end of the seat pipe)
 	"Win32_System_Console", # headless_host: Ctrl+C / console close handler, attach to the parent console
+	"Win32_NetworkManagement_IpHelper", # mobile_link: GetBestInterfaceEx + GetAdaptersAddresses (is the route a phone tether?)
+	"Win32_NetworkManagement_Ndis", # (IP_ADAPTER_ADDRESSES_LH needs it)
+	"Win32_Networking_WinSock", # (SOCKADDR_IN for GetBestInterfaceEx)
 ] }
 # dpi_watch.rs: re-sync WebView2's RasterizationScale after a display change (same versions
 # wry already pulls in — no new crates).

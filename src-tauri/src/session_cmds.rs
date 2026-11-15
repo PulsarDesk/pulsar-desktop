@@ -568,6 +568,30 @@ pub(crate) async fn set_play_bitrate(
 	Ok(())
 }
 
+/// Client: "Otomatik ayar" on/off for an active session (Settings → Görüntü / the native menu's
+/// Yayın row). Off = the bitrate / resolution / fps stay as picked (an automatic bitrate uses the
+/// rate the link proved); on = the adaptive controller resumes from the current rate. The hold
+/// loop applies it and mirrors it to the renderer (`autoadj 0|1`).
+#[tauri::command]
+pub(crate) async fn set_play_auto_adjust(
+	state: State<'_, AppState>,
+	id: u64,
+	on: bool,
+) -> Result<(), String> {
+	let tx = state
+		.plays
+		.lock()
+		.unwrap()
+		.get(&id)
+		.map(|p| p.restream_tx.clone());
+	if let Some(tx) = tx {
+		tx.send(Restream::AutoAdjust(on))
+			.await
+			.map_err(|e| e.to_string())?;
+	}
+	Ok(())
+}
+
 /// Client: change the quality/perf bias of an active session on the fly. Parses
 /// "latency" / "balanced" / "quality" → [`QualityPref`] (unknown → `Balanced`) and
 /// re-requests the stream. The UI exposes only latency | quality.

@@ -255,7 +255,7 @@ export const api = {
 		 * monitor. Wins over `displayIdx` on the host when set; null = monitor capture. */
 		windowHwnd?: number,
 		/** The user's saved stream picks (`savedStreamPicks()`); 0 = automatic for each. */
-		picks?: { width: number; height: number; fps: number; bitrateKbps: number },
+		picks?: { width: number; height: number; fps: number; bitrateKbps: number; autoAdjust?: boolean },
 		/** 'auto' | 'standard' | 'high' | 'raw' (Settings / session menu). */
 		audioQuality?: string
 	) =>
@@ -275,7 +275,8 @@ export const api = {
 			initHeight: picks?.height || null,
 			initFps: picks?.fps || null,
 			initBitrateKbps: picks?.bitrateKbps || null,
-			audioQuality: audioQuality ?? null
+			audioQuality: audioQuality ?? null,
+			autoAdjust: picks?.autoAdjust ?? null
 		}),
 	/** CLI `--host-only`: the UI offers hosting only. */
 	hostOnly: () => invoke<boolean>('host_only'),
@@ -323,6 +324,8 @@ export const api = {
 		invoke<void>('set_play_adapt', { id, w, h, on }),
 	/** Change the target bitrate live in kbps (0 = host default; UI converts Mbit→kbps). */
 	setPlayBitrate: (id: number, kbps: number) => invoke<void>('set_play_bitrate', { id, kbps }),
+	/** "Otomatik ayar" on/off for a live session (off = the picks stay fixed). */
+	setPlayAutoAdjust: (id: number, on: boolean) => invoke<void>('set_play_auto_adjust', { id, on }),
 	/** Switch the encode quality/perf profile live (the host restarts ffmpeg with it). */
 	setPlayQuality: (id: number, quality: 'latency' | 'quality') =>
 		invoke<void>('set_play_quality', { id, quality }),

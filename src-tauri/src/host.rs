@@ -169,6 +169,18 @@ fn media_features() -> Vec<String> {
 	if linux_nvenc_sdk() {
 		v.push(pulsar_core::service::media::FEAT_RFI.to_string());
 	}
+	// Intra refresh that really happens: the NVENC SDK paths (Windows native, Linux CUDA) roll an
+	// intra wave when the client asks (`LossRecovery::IntraRefresh`). Media Foundation / AMF and
+	// the Wayland pipeline don't — a client that asked would only get a short GOP — so a client
+	// asks for it only from hosts that say so (a game session over a WAN / phone link).
+	#[cfg(windows)]
+	if pulsar_capture::nvenc_supported() {
+		v.push(pulsar_core::service::media::FEAT_IR.to_string());
+	}
+	#[cfg(target_os = "linux")]
+	if linux_nvenc_sdk() {
+		v.push(pulsar_core::service::media::FEAT_IR.to_string());
+	}
 	// Pen + multi-touch: real injection on Windows (synthetic pointer devices) and Linux
 	// (uinput tablet + multitouch screen); on macOS the pen is a CGEvent tablet and touch is
 	// mapped to mouse + scroll (no public touch injection). Clients send the mouse fallback

@@ -92,6 +92,10 @@ export interface UiSettings {
 	/** Video bitrate limit in Mbit (0 = automatic). The adaptive controller's ceiling: it
 	 *  still lowers the rate on a weak link. Picked in the session menu, applied on connect. */
 	bitrate: number;
+	/** "Otomatik ayar": true = the adaptive controller adapts bitrate / resolution / fps to the
+	 *  link; false = the picks stay fixed (Moonlight-like; an automatic bitrate = the measured
+	 *  good rate). Settings → Görüntü and the session menu; applied live and on connect. */
+	autoAdjust: boolean;
 	/** Stream resolution picked in the session menu ('auto', a preset like '1080p', or 'WxH'),
 	 *  applied on the next connect. */
 	streamRes: string;
@@ -265,6 +269,7 @@ const DEFAULTS: UiSettings = {
 	res: '1440p',
 	fps: 60,
 	bitrate: 0,
+	autoAdjust: true,
 	streamRes: 'auto',
 	streamFps: 0,
 	codec: 'auto',

@@ -329,6 +329,8 @@
 	"settings.upscaleAi": "AI (NVIDIA/Intel)",
 	"settings.hostCursor": "Show the other side's cursor",
 	"settings.hostCursorDesc": "While the person at the host uses their own mouse, their pointer is marked «Host» and yours shows separately. Remote desktop only.",
+	"settings.autoAdjust": "Automatic adjustment",
+	"settings.autoAdjustDesc": "On: bitrate, resolution and frame rate follow the connection. Off: your session-menu picks stay fixed (like Moonlight); with bitrate on Auto the rate measured to work is used. Loss recovery works either way.",
 	"settings.framePacing": "Frame pacing (Moonlight)",
 	"settings.framePacingDesc": "Buffers 1-2 frames and shows them evenly; less judder, a bit more latency. Linux.",
 	"settings.preOptimize": "Optimize the stream before showing it",

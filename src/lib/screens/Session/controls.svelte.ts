@@ -41,6 +41,9 @@ export class SessionControls {
 	);
 	// Live bitrate switch in Mbit (0 = auto / host default). Persisted via ui.bitrate.
 	streamBitrate = $state<number>(ui.bitrate);
+	// "Otomatik ayar" (adaptive bitrate / resolution / fps) — persisted via ui.autoAdjust; the
+	// session started with the saved value (start_remote_play), later flips apply live.
+	autoAdjust = $state<boolean>(ui.autoAdjust !== false);
 	// Live quality/perf profile. Two-tier (latency|quality); ephemeral (default latency in
 	// game mode for lowest latency, quality in remote). The host maps it to its encode flag.
 	streamQuality: 'latency' | 'quality';
@@ -80,6 +83,16 @@ export class SessionControls {
 
 		// The saved bitrate / resolution / fps picks are applied by start_remote_play itself
 		// (see sessions.svelte.ts → `savedStreamPicks`), so the first request already carries them.
+
+		// "Otomatik ayar" changed elsewhere (Settings → Görüntü while this session runs): apply it
+		// here too. The session started with the saved value, so only a change is sent.
+		$effect(() => {
+			const on = ui.autoAdjust !== false;
+			if (on === this.autoAdjust) return;
+			this.autoAdjust = on;
+			const playId = inputs.playId();
+			if (playId >= 0) api.setPlayAutoAdjust(playId, on).catch(() => {});
+		});
 	}
 
 	// Accepts a preset ('auto'/'720p'/'1080p'/'1440p'/'4K') OR an explicit "WxH" string (the overlay's
@@ -133,6 +146,15 @@ export class SessionControls {
 		saveUi();
 		const playId = this.#in.playId();
 		if (playId >= 0) api.setPlayBitrate(playId, v * 1000).catch(() => {}); // Mbit → kbps
+	};
+	// "Otomatik ayar" from the session menu: saved (Settings shows the same switch) and applied
+	// to this session at once — the stream keeps its current picks, only who moves them changes.
+	setAutoAdjust = (on: boolean) => {
+		this.autoAdjust = on;
+		ui.autoAdjust = on;
+		saveUi();
+		const playId = this.#in.playId();
+		if (playId >= 0) api.setPlayAutoAdjust(playId, on).catch(() => {});
 	};
 	setQuality = (v: 'latency' | 'quality') => {
 		this.streamQuality = v;

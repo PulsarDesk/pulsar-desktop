@@ -72,6 +72,7 @@ mod seat;
 mod shared_mode;
 mod pad_wake;
 mod link_hint;
+mod mobile_link;
 mod pinch;
 mod play;
 mod pad_notice;
@@ -140,7 +141,7 @@ use play::{start_remote_play, stop_stream};
 use session_cmds::{
 	fs_get, fs_list, host_window_list, render_banner, render_chat, render_fs, render_hint,
 	render_chat_open, render_kin, render_nav, render_toast, reverse_play, set_cursor_label, set_frame_pacing, set_overlay,
-	set_overlay_button, set_overlay_button_pos, set_mouse_sensitivity, set_touchpad_gestures, set_pointer_free, set_host_cursor, set_ds4_headset, set_play_adapt, set_play_audio, set_play_audio_quality, set_play_bitrate,
+	set_overlay_button, set_overlay_button_pos, set_mouse_sensitivity, set_touchpad_gestures, set_pointer_free, set_host_cursor, set_ds4_headset, set_play_adapt, set_play_audio, set_play_audio_quality, set_play_bitrate, set_play_auto_adjust,
 	set_play_codec, set_play_encoder, set_play_fps, set_play_monitor, set_play_quality,
 	set_play_resolution, set_play_window, set_stats_hud, upscale_modes,
 };
@@ -855,6 +856,7 @@ pub fn run() {
 			set_play_codec,
 			set_play_fps,
 			set_play_bitrate,
+			set_play_auto_adjust,
 			set_play_quality,
 			set_play_monitor,
 			set_play_window,

@@ -55,6 +55,60 @@ const REPAIR_SLACK_MS: f32 = 20.0;
 /// arms it once per loss episode, so a run of losses can't chain holds into a long freeze.
 const HOLD_MS: u32 = 300;
 
+/// Game mode on a high-RTT path (median RTT at or over `FAST_DROP_RTT_ON_MS`; off again under
+/// `FAST_DROP_RTT_OFF_MS`) with a recovery that needs no keyframe (RFI / intra refresh): a hole
+/// is dropped fast instead of holding every later frame for a NACK repair that needs ≥ 1 RTT —
+/// Moonlight-like (moonlight-common-c drops an incomplete frame as soon as the next one's
+/// packets arrive and asks for RFI / IDR, no NACK at all). The renderer's reorder wait shrinks
+/// to the reorder / FEC wait plus a frame (`fast_drop_wait_ms`) and no NACK is sent (its
+/// answer would land after the renderer gave up). Remote-desktop sessions keep the
+/// repair-friendly wait: a held frame there is text that arrives whole, not a stutter.
+const FAST_DROP_RTT_ON_MS: f32 = 35.0;
+const FAST_DROP_RTT_OFF_MS: f32 = 25.0;
+/// Bounds of the fast-drop wait (ms): at least a couple of frames of reordering, at most what
+/// a mobile link's reordering / FEC wait needs — never the 250 ms repair cap.
+const FAST_DROP_MIN_MS: f32 = 30.0;
+const FAST_DROP_MAX_MS: f32 = 80.0;
+
+/// Whether the fast drop is on (`prev` = its last state; hysteresis on the median RTT).
+fn fast_drop_on(prev: bool, game_mode: bool, keyframe_free: bool, rtt_med_ms: f32) -> bool {
+	if !game_mode || !keyframe_free || !(rtt_med_ms > 0.0) {
+		return false;
+	}
+	if prev {
+		rtt_med_ms >= FAST_DROP_RTT_OFF_MS
+	} else {
+		rtt_med_ms >= FAST_DROP_RTT_ON_MS
+	}
+}
+
+/// The fast-drop wait (ms): the gap's reorder / FEC wait (`nack_hold_ms`, see `nack_wait_ms`)
+/// plus one frame interval and a little slack, bounded by `FAST_DROP_MIN_MS..=FAST_DROP_MAX_MS`.
+fn fast_drop_wait_ms(nack_hold_ms: f32, fps: u32) -> f32 {
+	let frame = 1000.0 / if fps == 0 { 60 } else { fps } as f32;
+	(nack_hold_ms.max(0.0) + frame + 10.0).clamp(FAST_DROP_MIN_MS, FAST_DROP_MAX_MS)
+}
+
+/// The point a stream runs at: the controller's while it adapts; with "Otomatik ayar" off the
+/// top rung — the picks (fitted to the monitor), else the native size.
+fn stream_point(ctl: &Controller, auto: bool) -> pulsar_core::adapt::Point {
+	if auto {
+		ctl.point()
+	} else {
+		ctl.points().first().copied().unwrap_or_else(|| ctl.point())
+	}
+}
+
+/// The fixed rate with "Otomatik ayar" off (kbit/s): the user's bitrate pick (`user_cap`, under
+/// the transport's cap), else what the controller measured as good (`fixed_rate_kbps`).
+fn fixed_rate(ctl: &Controller) -> u32 {
+	if ctl.user_cap() > 0 {
+		ctl.user_cap().min(ctl.cap())
+	} else {
+		ctl.fixed_rate_kbps()
+	}
+}
+
 /// The renderer hold after an unrepaired loss in this recovery mode (ms), None = none.
 /// Intra refresh: none. No keyframe is coming to end it early, and the decoder conceals the loss
 /// while the rolling wave heals the picture within its period — a hold only froze a third of
@@ -575,6 +629,8 @@ pub(super) async fn hold_session(
 	// mouse events (pulsar-core `pen_touch::client`).
 	host_pen: bool,
 	host_touch: bool,
+	// "Otomatik ayar" off at the start: the fixed rate play.rs requested (None = adaptive).
+	fixed_kbps: Option<u32>,
 ) {
 	// A relayed session keeps punching in the background (core `punch_in_background`) and may
 	// upgrade to a direct path mid-stream; the adaptive rate then starts over on it.
@@ -652,8 +708,14 @@ pub(super) async fn hold_session(
 	let mut cur_recovery = match std::env::var("PULSAR_RECOVERY").as_deref() {
 		Ok("ir") => LossRecovery::IntraRefresh,
 		Ok("shortgop") => LossRecovery::ShortGop,
-		_ => LossRecovery::Normal,
+		// What the session started in (intra refresh from the start on a game session over a
+		// bad link — play.rs `ir_bad_link`; else Normal until the first sustained loss).
+		_ => ctl.recovery(),
 	};
+	// Game mode over a high-RTT path: drop a hole fast (see `FAST_DROP_RTT_ON_MS`); NACKs only
+	// while it is off (their answer would come after the renderer gave up).
+	let mut fast_drop = false;
+	let mut nack_on = host_nack;
 	// FEC (Phase 2.1): the host sends XOR parity over the video packets once we report loss;
 	// the decoder keeps the recent packets and rebuilds a group's single missing one.
 	let mut fec_dec = media::FecDecoder::default();
@@ -789,6 +851,10 @@ pub(super) async fn hold_session(
 	// picking "Otomatik" (0) re-enables it.
 	// The controller needs the media path's seq/timestamps → media-over-session only.
 	let adapt_enabled = mos;
+	// "Otomatik ayar": the controller adapts the rate / point (true), or the stream stays fixed
+	// at the picks (false; Moonlight-like — the controller only measures, FEC / NACK / recovery
+	// frames go on). Flipped live by `Restream::AutoAdjust`.
+	let mut auto_on = fixed_kbps.is_none();
 	let _ = (base_kbps, cap_kbps);
 	// Quality bias: seeded from the Settings → Display 'Varsayılan kalite' control
 	// (already resolved in play.rs: "hq"→Quality, "fast"→Latency, "auto"→mode default).
@@ -969,7 +1035,7 @@ pub(super) async fn hold_session(
 							if let Some((base, k, m, idx)) = block {
 								if fec_block_gave_up(missing_in(&missing, base, k), m, idx) {
 									let nacks = take_block_nacks(&mut missing, base, k, std::time::Instant::now());
-									if host_nack && !nacks.is_empty() {
+									if nack_on && !nacks.is_empty() {
 										win_nack_sent += nacks.len() as u32;
 										let _ = send_data(&sess, &DataMsg::MediaNack(nacks)).await;
 									}
@@ -996,7 +1062,7 @@ pub(super) async fn hold_session(
 							// One parity per XOR group: what it didn't rebuild, it never will.
 							if let Some((base, n)) = group {
 								let nacks = take_block_nacks(&mut missing, base, n, std::time::Instant::now());
-								if host_nack && !nacks.is_empty() {
+								if nack_on && !nacks.is_empty() {
 									win_nack_sent += nacks.len() as u32;
 									let _ = send_data(&sess, &DataMsg::MediaNack(nacks)).await;
 								}
@@ -1145,7 +1211,7 @@ pub(super) async fn hold_session(
 												}
 												win_lost += 1;
 											}
-											if host_nack && !nacks.is_empty() {
+											if nack_on && !nacks.is_empty() {
 												win_nack_sent += nacks.len() as u32;
 												let _ = send_data(&sess, &DataMsg::MediaNack(nacks)).await;
 											}
@@ -1204,7 +1270,7 @@ pub(super) async fn hold_session(
 									let fec_on = fec_active(last_parity_at.map(|t| t.elapsed()));
 									let wait = std::time::Duration::from_secs_f32(nack_wait_ms(fec_on, cur_fps, reorder_peak_ms) / 1000.0);
 									let nacks = take_due_fec_nacks(&mut fec_pending, &mut missing, wait, std::time::Instant::now());
-									if host_nack && !nacks.is_empty() {
+									if nack_on && !nacks.is_empty() {
 										win_nack_sent += nacks.len() as u32;
 										let _ = send_data(&sess, &DataMsg::MediaNack(nacks)).await;
 									}
@@ -1252,9 +1318,31 @@ pub(super) async fn hold_session(
 								// The renderer waits one repair sweep LONGER than we do, so our
 								// `hold` (sent when the sweep writes the repair off) reaches it
 								// before its demuxer flushes past the hole and decodes the smear.
-								let fec_hold_ms =
-									if fec_active(last_parity_at.map(|t| t.elapsed())) { fec_wait_ms(cur_fps) } else { 0.0 };
-								let want = repair_window_ms(&rtt_recent, fec_hold_ms) + REPAIR_SWEEP_MS as f32;
+								// The controller sees a far sample at once (a stall: the fast reflex holds off).
+								ctl.on_rtt(rtt as f32, mono_ms());
+								let fec_on = fec_active(last_parity_at.map(|t| t.elapsed()));
+								let fec_hold_ms = if fec_on { fec_wait_ms(cur_fps) } else { 0.0 };
+								// Game mode on a high-RTT path with a keyframe-free recovery: drop a
+								// hole fast instead of holding the frames behind it (`fast_drop_on`).
+								let keyframe_free =
+									cur_recovery == LossRecovery::IntraRefresh || rfi_reach(host_rfi, &cur_codec);
+								let rtt_med = median_ms(&rtt_recent, rtt as f32);
+								let fd = fast_drop_on(fast_drop, game_mode, keyframe_free, rtt_med);
+								if fd != fast_drop {
+									fast_drop = fd;
+									nack_on = host_nack && !fd;
+									tracing::info!(
+										on = fd,
+										rtt_med,
+										wait_ms = fast_drop_wait_ms(nack_wait_ms(fec_on, cur_fps, reorder_peak_ms), cur_fps),
+										"game mode, high RTT: holes dropped fast (RFI / intra refresh heals them, no NACK)"
+									);
+								}
+								let want = if fast_drop {
+									fast_drop_wait_ms(nack_wait_ms(fec_on, cur_fps, reorder_peak_ms), cur_fps)
+								} else {
+									repair_window_ms(&rtt_recent, fec_hold_ms) + REPAIR_SWEEP_MS as f32
+								};
 								let changed = (want - sent_repair_ms).abs() > sent_repair_ms * 0.15 + 5.0;
 								if let Some(si) = render_stdin.lock().unwrap().as_mut() {
 									let _ = writeln!(si, "rtt {rtt:.1} {jitter:.1}");
@@ -1773,7 +1861,10 @@ pub(super) async fn hold_session(
 					let nack_hold_ms = nack_wait_ms(fec_hold, cur_fps, reorder_peak_ms);
 					let wait = std::time::Duration::from_secs_f32(nack_hold_ms / 1000.0);
 					let mut renack = take_due_fec_nacks(&mut fec_pending, &mut missing, wait, now);
-					let window = std::time::Duration::from_secs_f32(repair_window_ms(&rtt_recent, nack_hold_ms) / 1000.0);
+					// Fast drop: written off when the renderer gives up on it (no repair is coming).
+					let window_ms =
+						if fast_drop { fast_drop_wait_ms(nack_hold_ms, cur_fps) } else { repair_window_ms(&rtt_recent, nack_hold_ms) };
+					let window = std::time::Duration::from_secs_f32(window_ms / 1000.0);
 					let rtt_med = median_ms(&rtt_recent, rtt_ema);
 					let renack_after = std::time::Duration::from_secs_f32((rtt_med * 1.2 + 20.0).max(40.0) / 1000.0);
 					let mut expired = 0u32;
@@ -1792,7 +1883,7 @@ pub(super) async fn hold_session(
 							true
 						}
 					});
-					if host_nack && !renack.is_empty() {
+					if nack_on && !renack.is_empty() {
 						win_nack_sent += renack.len() as u32;
 						let _ = send_data(&sess, &DataMsg::MediaNack(renack)).await;
 					}
@@ -1903,8 +1994,9 @@ pub(super) async fn hold_session(
 					);
 					// Onto the relay: a rate above its cap is dropped there from the next packet —
 					// come under it now, not at the window's decision.
-					if adapt_enabled && on_relay && ctl.encoder_kbps() < cur_bitrate {
-						cur_bitrate = ctl.encoder_kbps();
+					let under = if auto_on { ctl.encoder_kbps() } else { fixed_rate(&ctl) };
+					if adapt_enabled && on_relay && under < cur_bitrate {
+						cur_bitrate = under;
 						if request_stream(&mut sess, &make_req!()).await.is_err() {
 							break;
 						}
@@ -1992,7 +2084,7 @@ pub(super) async fn hold_session(
 					let mut d = ctl.tick(&sample);
 					// Windows: the client's own decoder is the limit when it can't decode the
 					// current fps in real time — step the fps down instead of freezing.
-					if cfg!(windows) && d.point.is_none() {
+					if cfg!(windows) && d.point.is_none() && auto_on {
 						use std::sync::atomic::Ordering::Relaxed;
 						let dec_ms = f32::from_bits(crate::render_stats::DECODE_MS_BITS.load(Relaxed));
 						let decoded = f32::from_bits(crate::render_stats::DECODED_FPS_BITS.load(Relaxed));
@@ -2082,7 +2174,7 @@ pub(super) async fn hold_session(
 					// The saved picks are a preferred maximum: when the link can't carry them and
 					// the controller runs a lighter point, tell the user once (renderer toast; the
 					// webview gets a `play-notice` when there is no native renderer).
-					let shortfall = ctl.pick_shortfall();
+					let shortfall = if auto_on { ctl.pick_shortfall() } else { None };
 					let shortfall_key = shortfall.map(|(a, b)| (point_key(&a), point_key(&b)));
 					if shortfall_due(shortfall_told, shortfall_told_at.map(|t| t.elapsed()), shortfall_key) {
 						if let Some((picked, current)) = shortfall {
@@ -2118,7 +2210,7 @@ pub(super) async fn hold_session(
 						// The controller's point even under user picks (a pick is a preferred
 						// maximum it goes under when the link can't carry it): the host sizes its
 						// FEC from the point's fps.
-						point: ctl.point().label(),
+						point: stream_point(&ctl, auto_on).label(),
 					};
 					let _ = send_data(&sess, &DataMsg::Stats(stats.to_json())).await;
 					// Keep the renderer's resume mode in step with the stream's recovery mode
@@ -2130,7 +2222,11 @@ pub(super) async fn hold_session(
 							// The stream was asked with `rfi` (deep reference buffer, see make_req!).
 							// The host decides per hole whether its reference buffer still reaches
 							// the lost frame, and sends a keyframe itself when it doesn't.
-							let _ = writeln!(si, "rfi {}", u8::from(rfi_reach(host_rfi, &cur_codec)));
+							// (Off on an intra-refreshed stream: the wave heals it, the host declines RFI.)
+							let rfi = rfi_reach(host_rfi, &cur_codec) && cur_recovery != LossRecovery::IntraRefresh;
+							let _ = writeln!(si, "rfi {}", u8::from(rfi));
+							// The "Otomatik ayar" row (a respawned renderer starts from its default).
+							let _ = writeln!(si, "autoadj {}", u8::from(auto_on));
 						}
 					}
 					if rerequest {
@@ -2169,7 +2265,7 @@ pub(super) async fn hold_session(
 							// With the controller running, a pick is a preferred maximum: stream its
 							// point (lighter than the pick while the link can't carry it), as its
 							// own decisions do.
-							let p = ctl.point();
+							let p = stream_point(&ctl, auto_on);
 							if adapt_enabled || !manual_res {
 								cur_w = p.width;
 								cur_h = p.height;
@@ -2192,7 +2288,7 @@ pub(super) async fn hold_session(
 							// The ladder keeps adapting the size (and the rate) under a pinned fps.
 							ctl.set_pins(manual_res.then_some((cur_w, cur_h)), manual_fps.then_some(cur_fps));
 							// A preferred maximum under the controller (see Resolution above).
-							let p = ctl.point();
+							let p = stream_point(&ctl, auto_on);
 							if adapt_enabled || !manual_fps {
 								cur_fps = p.fps;
 							}
@@ -2208,9 +2304,10 @@ pub(super) async fn hold_session(
 						// session's per-session cap still bounds it (the controller's own cap).
 						Restream::Bitrate(b) => {
 							ctl.set_user_cap(b);
-							cur_bitrate = ctl.encoder_kbps();
+							// Fixed ("Otomatik ayar" off): the pick itself, or the measured good rate.
+							cur_bitrate = if auto_on { ctl.encoder_kbps() } else { fixed_rate(&ctl) };
 							// Picks are a preferred maximum under the controller (see Resolution).
-							let p = ctl.point();
+							let p = stream_point(&ctl, auto_on);
 							if adapt_enabled || !manual_res {
 								cur_w = p.width;
 								cur_h = p.height;
@@ -2240,7 +2337,7 @@ pub(super) async fn hold_session(
 								let fps = if hz > 1 { client_fps.min(crate::util::nearest_fps(hz)) } else { client_fps };
 								ctl.set_native(w, h, fps);
 								// Picks are a preferred maximum under the controller (see Resolution).
-								let p = ctl.point();
+								let p = stream_point(&ctl, auto_on);
 								if adapt_enabled || !manual_res {
 									cur_w = p.width;
 									cur_h = p.height;
@@ -2254,6 +2351,33 @@ pub(super) async fn hold_session(
 							// mutually exclusive (the host ignores display_idx when window_hwnd
 							// is Some), so a Display switch means "go back to whole-monitor".
 							cur_window = None;
+						}
+						Restream::AutoAdjust(on) => {
+							if on != auto_on && adapt_enabled {
+								auto_on = on;
+								if on {
+									// Back on: the controller resumes from the rate streamed now, under
+									// the same picks (rebuilt so the point fits that rate).
+									ctl.set_adaptive(true);
+									ctl.set_target(cur_bitrate);
+									let (pr, pf) = ctl.pins();
+									ctl.set_pins(pr, pf);
+									cur_bitrate = ctl.encoder_kbps();
+								} else {
+									ctl.set_adaptive(false);
+									cur_bitrate = fixed_rate(&ctl);
+								}
+								let p = stream_point(&ctl, auto_on);
+								cur_w = p.width;
+								cur_h = p.height;
+								cur_fps = p.fps;
+								tracing::info!(on, kbps = cur_bitrate, point = %p.label(), "automatic adjustment (Otomatik ayar) toggled");
+								use std::io::Write as _;
+								if let Some(si) = render_stdin.lock().unwrap().as_mut() {
+									let _ = writeln!(si, "autoadj {}", u8::from(auto_on));
+									let _ = si.flush();
+								}
+							}
 						}
 						Restream::Window(w) => {
 							tracing::info!(hwnd = ?w, "per-window capture target requested");
@@ -2278,7 +2402,7 @@ pub(super) async fn hold_session(
 							}
 							if let Some((w, h)) = native {
 								ctl.set_native(w, h, fps);
-								let p = ctl.point();
+								let p = stream_point(&ctl, auto_on);
 								if adapt_enabled || !manual_res {
 									cur_w = p.width;
 									cur_h = p.height;
@@ -2491,6 +2615,35 @@ mod kf_tests {
 		assert_eq!(repair_window_ms(&rtts(&[2.0, 3.0, 2.0]), 0.0), REPAIR_MIN_MS);
 		// NACKs held for FEC add their wait.
 		assert_eq!(repair_window_ms(&rtts(&[50.0; 4]), 25.0), 50.0 + REPAIR_SLACK_MS + 25.0);
+	}
+
+	/// Game mode on a high-RTT path with RFI / intra refresh: holes are dropped fast (with
+	/// hysteresis); remote desktop, a keyframe-only recovery, or a LAN keep the repair wait.
+	#[test]
+	fn fast_drop_only_in_game_mode_on_a_high_rtt_path_with_keyframe_free_recovery() {
+		assert!(fast_drop_on(false, true, true, 45.0));
+		assert!(!fast_drop_on(false, true, true, 4.0), "LAN");
+		assert!(!fast_drop_on(false, false, true, 45.0), "remote desktop keeps the repair wait");
+		assert!(!fast_drop_on(false, true, false, 45.0), "a keyframe recovery would re-flood the link");
+		// Hysteresis: on at 35, off under 25.
+		assert!(!fast_drop_on(false, true, true, 30.0));
+		assert!(fast_drop_on(true, true, true, 30.0));
+		assert!(!fast_drop_on(true, true, true, 20.0));
+		assert!(!fast_drop_on(true, true, true, 0.0), "no RTT yet");
+	}
+
+	#[test]
+	fn fast_drop_wait_covers_reordering_and_fec_but_never_an_rtt() {
+		// Reorder wait 3 ms at 60 fps: a frame plus slack, at least the floor.
+		assert_eq!(fast_drop_wait_ms(3.0, 60), 30.0);
+		// The ~20 % reordering of a phone tether (25 ms wait) under FEC's go (two frames + 8 ms at
+		// 60 fps = 41 ms) + a frame + slack: ~68 ms.
+		let w = fast_drop_wait_ms(fec_wait_ms(60).max(reorder_wait_ms(40.0)), 60);
+		assert!((60.0..=75.0).contains(&w), "{w}");
+		// Never more than the cap, whatever the waits.
+		assert_eq!(fast_drop_wait_ms(500.0, 30), FAST_DROP_MAX_MS);
+		// Far under the normal repair window on a 45 ms path.
+		assert!(fast_drop_wait_ms(25.0, 120) < repair_window_ms(&rtts(&[45.0, 46.0, 44.0]), 0.0) + REPAIR_SWEEP_MS as f32);
 	}
 
 	#[test]

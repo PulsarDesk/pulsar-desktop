@@ -622,6 +622,8 @@ pub fn run() {
 					}
 				}
 				Some("ptrfree") => crate::overlay::set_ptr_free(it.next() == Some("1")),
+				// "Otomatik ayar" state from the app (every stats window + on a change).
+				Some("autoadj") => crate::overlay::set_auto_adj(it.next() == Some("1")),
 				// Host pointer marker (issue #7): `hostptr 1 x y` / `hostptr 0`, the label name,
 				// and the user's switch.
 				Some("hostptr") => crate::overlay::host_ptr_line(&it.collect::<Vec<_>>().join(" ")),
@@ -2466,6 +2468,7 @@ fn emit_cmd(state: &mut OverlayState, c: OverlayCmd) {
 				"fit" => video::set_fit(&val),
 				"msens" => crate::overlay::set_mouse_sens(&val),
 				"ptrfree" => crate::overlay::set_ptr_free(val == "on"),
+				"autoadj" => crate::overlay::set_auto_adj(val == "on"),
 				"hostptr" => crate::overlay::set_host_ptr_show(val == "on"),
 				"upscale" => crate::gl_fsr::set_upscale(&val),
 				// Audio toggles apply optimistically; the app's `audio …` line

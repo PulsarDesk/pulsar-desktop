@@ -7,6 +7,7 @@ describe('saved stream picks', () => {
 		ui.streamRes = 'auto';
 		ui.streamFps = 0;
 		ui.bitrate = 0;
+		ui.autoAdjust = true;
 	});
 
 	it('maps presets and explicit modes to pixels, auto to 0×0', () => {
@@ -17,13 +18,18 @@ describe('saved stream picks', () => {
 	});
 
 	it('is all-automatic by default', () => {
-		expect(savedStreamPicks()).toEqual({ width: 0, height: 0, fps: 0, bitrateKbps: 0 });
+		expect(savedStreamPicks()).toEqual({ width: 0, height: 0, fps: 0, bitrateKbps: 0, autoAdjust: true });
 	});
 
 	it('carries a 1080p · 120 fps · 15 Mbit pick as connect arguments', () => {
 		ui.streamRes = '1080p';
 		ui.streamFps = 120;
 		ui.bitrate = 15;
-		expect(savedStreamPicks()).toEqual({ width: 1920, height: 1080, fps: 120, bitrateKbps: 15000 });
+		expect(savedStreamPicks()).toEqual({ width: 1920, height: 1080, fps: 120, bitrateKbps: 15000, autoAdjust: true });
+	});
+
+	it('carries "Otomatik ayar" off', () => {
+		ui.autoAdjust = false;
+		expect(savedStreamPicks().autoAdjust).toBe(false);
 	});
 });
