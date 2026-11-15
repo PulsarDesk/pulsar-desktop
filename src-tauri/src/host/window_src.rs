@@ -7,7 +7,7 @@
 //! | --- | --- | --- | --- |
 //! | Linux X11 | `_NET_CLIENT_LIST` windows (id = X window id) | `x11grab -window_id` (libav / ffmpeg CLI) or gst `ximagesrc xid=` | uinput region = the window's rect in the root |
 //! | Linux Wayland | one entry, [`WindowInfo::PORTAL_PICK`] | ScreenCast portal, windows only — the person at the host picks | whole desktop (Wayland tells no program where a window is) |
-//! | macOS | ScreenCaptureKit windows (id = `CGWindowID`) | ScreenCaptureKit window → raw NV12 on loopback → ffmpeg | `CGEvent` points inside the window's frame |
+//! | macOS | ScreenCaptureKit windows (id = `CGWindowID`) | ScreenCaptureKit window → VideoToolbox in-process (`pulsar-capture` native path; live bitrate, keyframe on request), else → raw NV12 on loopback → ffmpeg | `CGEvent` points inside the window's frame |
 //!
 //! The listing / capture code lives in `pulsar_core::window_capture`. Untested on Linux and
 //! macOS hardware.
@@ -17,7 +17,7 @@ use std::sync::Mutex;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::time::{Duration, Instant};
 
-use pulsar_core::service::WindowInfo;
+use pulsar_core::service::{StreamReq, WindowInfo};
 use pulsar_core::window_capture::{self as wc, Backend};
 
 /// Run `f`, a blocking call (an X11 round trip, a ScreenCaptureKit query that can wait
@@ -119,6 +119,11 @@ struct Streamed {
 	id: u64,
 	/// Its size when the stream started (X11: pixels; macOS: points), for the watcher.
 	started: Option<(u32, u32)>,
+	/// The request this window stream runs (kept fresh by [`note_request`]): what the window
+	/// watcher re-issues on a resize / close. Kept here, not in the session's `last_req_store`:
+	/// that store is empty on purpose while a NATIVE capture runs (a keyframe request would
+	/// otherwise restart the native stream), and a macOS window now streams natively.
+	req: StreamReq,
 	#[cfg(any(target_os = "linux", target_os = "macos"))]
 	area: Option<(Instant, Option<InputArea>)>,
 }
@@ -133,16 +138,17 @@ fn rounded_size(r: wc::WindowRect) -> (u32, u32) {
 	(r.w.round().max(0.0) as u32, r.h.round().max(0.0) as u32)
 }
 
-/// Session `sid` now streams window `id`: map its input there, watch its geometry, and
-/// bring it to the front (and give it the keyboard focus) if this session didn't already.
-/// Blocking (an X11 / window-server round trip).
-pub(super) fn began(sid: u64, id: u64) {
+/// Session `sid` now streams window `id` for `req`: map its input there, watch its
+/// geometry, and bring it to the front (and give it the keyboard focus) if this session
+/// didn't already. Blocking (an X11 / window-server round trip).
+pub(super) fn began(sid: u64, id: u64, req: StreamReq) {
 	let started = wc::rect(id).map(rounded_size);
 	STREAMED.lock().unwrap().get_or_insert_with(HashMap::new).insert(
 		sid,
 		Streamed {
 			id,
 			started,
+			req,
 			#[cfg(any(target_os = "linux", target_os = "macos"))]
 			area: None,
 		},
@@ -151,6 +157,21 @@ pub(super) fn began(sid: u64, id: u64) {
 	if fresh {
 		wc::raise(id);
 	}
+}
+
+/// The session's latest request while it streams a window: a re-stream applied live (a
+/// bitrate step on the native encoder, a monitor switch) keeps the window's request current,
+/// so a watcher restart does not fall back to an old rate. No-op while no window is streamed.
+pub(super) fn note_request(sid: u64, req: &StreamReq) {
+	if let Some(s) = STREAMED.lock().unwrap().as_mut().and_then(|m| m.get_mut(&sid)) {
+		s.req = req.clone();
+	}
+}
+
+/// The request to re-issue when session `sid`'s streamed window changed (`None` = no window
+/// streamed).
+pub(super) fn restart_request(sid: u64) -> Option<StreamReq> {
+	STREAMED.lock().unwrap().as_ref()?.get(&sid).map(|s| s.req.clone())
 }
 
 /// Session `sid` streams no window (the screen, or a re-stream is starting).
@@ -258,6 +279,15 @@ pub(super) fn end(sid: u64) {
 mod tests {
 	use super::*;
 
+	/// A request with every optional field at its wire default.
+	fn sreq(window: i64, kbps: u32) -> StreamReq {
+		serde_json::from_value(serde_json::json!({
+			"port": 5000, "codec": "h264", "encoder": "", "width": 1920, "height": 1080,
+			"bitrate_kbps": kbps, "window_hwnd": window,
+		}))
+		.expect("a minimal StreamReq")
+	}
+
 	fn hw(id: u64, title: &str) -> wc::HostWindow {
 		wc::HostWindow { id, title: title.into(), pid: 1, width: 800, height: 600 }
 	}
@@ -326,11 +356,39 @@ mod tests {
 
 	#[test]
 	fn sessions_track_their_window() {
-		// No window streamed: nothing to check, no input area.
+		// No window streamed: nothing to check, no input area, nothing to re-issue.
 		assert_eq!(check(9_999_001), None);
+		assert!(restart_request(9_999_001).is_none());
+		note_request(9_999_001, &sreq(77, 5_000));
+		assert!(restart_request(9_999_001).is_none());
 		#[cfg(any(target_os = "linux", target_os = "macos"))]
 		assert!(input_area(9_999_001).is_none());
 		end(9_999_001);
 		assert!(STREAMED.lock().unwrap().as_ref().is_none_or(|m| !m.contains_key(&9_999_001)));
+	}
+
+	#[test]
+	fn the_watcher_reissues_the_window_streams_latest_request() {
+		// A window stream registered without touching the window server (`began` asks it).
+		let sid = 9_999_002;
+		let req = sreq(77, 20_000);
+		STREAMED.lock().unwrap().get_or_insert_with(HashMap::new).insert(
+			sid,
+			Streamed {
+				id: 77,
+				started: Some((800, 600)),
+				req: req.clone(),
+				#[cfg(any(target_os = "linux", target_os = "macos"))]
+				area: None,
+			},
+		);
+		assert_eq!(restart_request(sid), Some(req.clone()));
+		// A bitrate step applied live keeps the request current.
+		let stepped = StreamReq { bitrate_kbps: 12_000, ..req };
+		note_request(sid, &stepped);
+		assert_eq!(restart_request(sid), Some(stepped));
+		// The re-stream that follows forgets it until the new stream registers.
+		ended(sid);
+		assert!(restart_request(sid).is_none());
 	}
 }

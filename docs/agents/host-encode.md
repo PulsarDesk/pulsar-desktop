@@ -56,10 +56,14 @@ Part of the pulsar-desktop agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
   absolute pointer onto that display's bounds (main display when none / gone). The ffmpeg
   fallback captures the picked display too (`"Capture screen N"`, N = place in CoreGraphics'
   active list — a bare index would count the cameras first). A 7 s no-frame notice on macOS uses
-  `host.captureNoFramesMac` (no GPU wording). Open (possible, not done): per-window capture
-  (`window_hwnd` → `SCContentFilter initWithDesktopIndependentWindow:` + a macOS window list for
-  the client's picker + window-relative pointer mapping); the client's labelled ghost pointer
-  region (`ghost_region`) is still None on macOS. The streamed display is process-wide: two
+  `host.captureNoFramesMac` (no GPU wording). Per-window capture goes through this native path
+  too (2026-11-15, see "Per-window capture" below). **Colour:** every ScreenCaptureKit video
+  stream (display, native window, the ffmpeg window source) asks for sRGB (`colorSpaceName`)
+  with the BT.709 matrix (`colorMatrix`); left to SCK the buffers may carry the display's own
+  colour space (Display P3 on Apple panels) while clients decode BT.709 / sRGB. VideoToolbox's
+  colour properties stay unset on purpose: it copies the buffer attachments into the VUI and
+  never converts. The client's labelled ghost pointer region (`ghost_region`) is still None on
+  macOS. The streamed display is process-wide: two
   sessions streaming different displays map the pointer onto the one published last.
 - **Linux X11** — the ffmpeg **libraries in-process** (`src-tauri/src/host/libav.rs`:
   x11grab → libavfilter → libavcodec x264/x265/SVT-AV1/NVENC/VA-API/QSV → libavformat RTP;
@@ -335,14 +339,21 @@ The id on the wire is an opaque `i64` whose meaning is the HOST's (table in puls
 | Windows | `pulsar_capture::list_capture_windows` (HWND) | WGC → NVENC (native path; HDR10 when the window's monitor is in HDR mode; 4:4:4 too); a non-NVENC stream falls back to the monitor | shipped |
 | Linux X11 | `_NET_CLIENT_LIST` via pure-Rust `x11rb` (X window id) | libav `x11grab window_id` (`host/libav.rs` `Source::X11Window`), ffmpeg CLI `-window_id` + `scale`, or gst `ximagesrc xid=` (`gst::x11_window_pipeline`, MPP hosts; never KMS) | untested on hardware |
 | Linux Wayland | one entry `WindowInfo::PORTAL_PICK` ("Pencereyi bu bilgisayarda seç") | ScreenCast portal with source type WINDOW only (`capture::start_with(.., Source::Window)`): the person AT THE HOST picks the window in the compositor's dialog; frames scaled into the requested box (`wayland_pipeline_sized`) | untested on hardware |
-| macOS | ScreenCaptureKit `SCShareableContent` (`CGWindowID`) | `SCContentFilter(desktopIndependentWindow:)` → NV12 → loopback TCP → ffmpeg `-f rawvideo` → VideoToolbox (`pulsar_core::window_capture::serve_for`) | untested on hardware |
+| macOS | ScreenCaptureKit `SCShareableContent` (`CGWindowID`) | **native** (2026-11-15): `SCContentFilter(desktopIndependentWindow:)` → NV12 `CVPixelBuffer` → the same VideoToolbox encoder as the display (`pulsar-capture` `mac/`, `CaptureConfig::window_hwnd` = the `CGWindowID`): live bitrate, keyframe on request, `LiveStats.source = "sck-window"`. Fallback (HDR / 4:4:4 / AV1 / a native start that fails / `PULSAR_FFMPEG_CAPTURE=1`): NV12 → loopback TCP → ffmpeg `-f rawvideo` → VideoToolbox (`pulsar_core::window_capture::serve_for`) | untested on hardware |
 
 - Desktop glue: `src-tauri/src/host/window_src.rs` (picker entries, target per backend, encode
   size = the window's aspect fitted into the requested box, never upscaled, and the window
   each session streams now) and the `host_window` block in `host/handlers.rs::make_on_stream`
   (run under `block_in_place`: the macOS ScreenCaptureKit query + start can wait ~10 s behind
   the Screen Recording prompt). A window that is gone (or a ScreenCaptureKit start that fails)
-  streams the screen, as Windows does.
+  streams the screen, as Windows does. macOS: the block only sizes the window
+  (`window_src::window_size` → `encode_size`); its source starts after the native decision —
+  the native capture when taken, else `serve_for` — so one ScreenCaptureKit stream runs per
+  window, and `window_src::began` registers it only once one of them started. A native start
+  that failed on the Screen Recording permission or a ScreenCaptureKit timeout skips `serve_for`
+  (it would only repeat the same query for up to ~10 s more) and streams the screen at once. A native window
+  stream ignores display switches (no display to switch), and a window that closed ends its
+  capture thread at once (no rebuild retries); the watcher below restarts on the screen.
 - **Input (X11 / macOS):** while a session streams a window, the client's 0..1 absolute pointer
   maps onto THAT window, refreshed every 250 ms while it moves (`window_src::input_area`): X11 =
   the window's rect in the root (`translate_coordinates` + `get_geometry`) as the uinput
@@ -353,9 +364,16 @@ The id on the wire is an opaque `i64` whose meaning is the HOST's (table in puls
   go to the focused window (no PostMessage-style per-window routing off Windows: X11 / macOS
   inject at the desktop, so two co-op panes on two windows of ONE host share one focus).
 - **Size changes:** a host watcher (`host.rs`, 1 s, debounced over two looks) re-issues the
-  last StreamReq when the streamed window settles at a new size or is closed / its
-  ScreenCaptureKit stream stopped (x11grab keeps the size it opened with; a closed window then
-  streams the screen).
+  window stream's request when the streamed window settles at a new size or is closed / its
+  ScreenCaptureKit stream stopped (x11grab keeps the size it opened with, SCK scales the window
+  into its old frame; a closed window then streams the screen). The request is the one
+  `window_src` recorded when the window source started (`began(sid, id, req)`, kept current by
+  `note_request` for steps applied live), NOT `last_req_store`: that store is empty while a
+  native capture runs (else a keyframe request would restart it), and a macOS window streams
+  natively. The re-issue is a forced restart (the per-session `force_restart` flag, the same one
+  failover.rs sets on Windows): the request is unchanged, so without it the native / libav live
+  fast paths or the ffmpeg "bitrate step absorbed" check would swallow it. Before 2026-11-15
+  that absorb swallowed the watcher on macOS (and the libav fast path on X11) entirely.
 - **Fit to the pane** (`StreamReq::adapt` with a window pick): `display_mode::fit_window` ->
   `pulsar_core::window_capture::fit` on X11 (unmaximize, `_NET_MOVERESIZE_WINDOW` on the
   window's RandR monitor clipped to `_NET_WORKAREA`, restored on teardown incl. the maximized

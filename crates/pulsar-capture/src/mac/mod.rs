@@ -1,7 +1,9 @@
 //! macOS native host path: ScreenCaptureKit (pulsar-core `macos_capture`) → VideoToolbox
 //! (`vt.rs`) → the shared RTP packetizer (`rtp.rs`), behind the same [`crate::CaptureHandle`]
 //! contract as the Windows DXGI/WGC → NVENC path: live bitrate, keyframe on request, live
-//! display switch, liveness + progress counters, capture stats.
+//! display switch, liveness + progress counters, capture stats. The source is one display or
+//! ONE window (`CaptureConfig::window_hwnd` = a `CGWindowID`: ScreenCaptureKit's
+//! desktop-independent window filter, the same encoder and RTP path; no display switch then).
 //!
 //! What it does not do (VideoToolbox has no API for them): reference-frame invalidation (a
 //! reported loss is declined, so the client's NACK repair or keyframe request heals it) and

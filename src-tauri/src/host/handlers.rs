@@ -2159,9 +2159,8 @@ pub(super) fn make_on_stream(
 		// entirely. The mode change is intentionally allowed to trip the host display-mode watcher
 		// / native encoder rebuild downstream — that's how the capture picks up the new geometry.
 		apply_screen_adaptation(&req, &adapt_state);
-		// A restart the host itself ordered (failover.rs): no live fast path and no "unchanged
-		// bitrate step" absorb may swallow it.
-		#[cfg(windows)]
+		// A restart the host itself ordered (failover.rs, the window watcher): no live fast path
+		// and no "unchanged bitrate step" absorb may swallow it.
 		let forced = force_restart.swap(false, std::sync::atomic::Ordering::SeqCst);
 		#[cfg(not(windows))]
 		let forced = false;
@@ -2170,6 +2169,10 @@ pub(super) fn make_on_stream(
 		// restart on an encoder with no live keyframe hook) — no "unchanged" fast path or bitrate
 		// absorb may take it. The Wayland portal capture follows size changes itself and ignores it.
 		let host_ordered = host_restart.swap(false, std::sync::atomic::Ordering::SeqCst);
+		// A window stream keeps its newest request for the window watcher (a step applied live
+		// below returns before the window source is registered again).
+		#[cfg(not(windows))]
+		super::window_src::note_request(sid, &req);
 		// last_req_store is updated below (after native_started is resolved) so the
 		// display-mode watcher only fires for ffmpeg-path sessions on Windows.
 		// WAYLAND BITRATE-ONLY FAST PATH — the client's ABR re-sends the full StreamReq just to
@@ -2248,7 +2251,7 @@ pub(super) fn make_on_stream(
 		#[cfg(target_os = "linux")]
 		if (pulsar_core::capture::is_wayland() && !super::mock_capture()) {
 			let slot = cap_slot.lock().unwrap();
-			if let (Some(cap), Some(prev)) = (slot.as_ref(), last_wl_req.as_ref()) {
+			if let (Some(cap), Some(prev)) = (slot.as_ref().filter(|_| !forced), last_wl_req.as_ref()) {
 				let mut probe = prev.clone();
 				probe.bitrate_kbps = req.bitrate_kbps;
 				probe.loss_recovery = req.loss_recovery;
@@ -2325,6 +2328,9 @@ pub(super) fn make_on_stream(
 					}
 					native_watch.reset();
 					last_native_req = None;
+					// The retired stream's request is also `last_ff_req` (the "unchanged
+					// request" check below): a retire must restart, never be absorbed.
+					last_ff_req = None;
 				}
 			}
 		}
@@ -2395,12 +2401,15 @@ pub(super) fn make_on_stream(
 					);
 					native_watch.reset();
 					last_native_req = None;
+					// `last_ff_req` holds the retired stream's request too (it doubles as the
+					// "unchanged request" check): this request must restart, never be absorbed.
+					last_ff_req = None;
 				}
 			}
 		}
 		#[cfg(target_os = "macos")]
 		if let Some((disp, bitrate)) =
-			last_native_req.as_ref().and_then(|prev| live_change(prev, &req))
+			last_native_req.as_ref().filter(|_| !forced && !host_ordered).and_then(|prev| live_change(prev, &req))
 		{
 			let handled = {
 				let slot = native_slot.lock().unwrap();
@@ -2438,7 +2447,10 @@ pub(super) fn make_on_stream(
 		// ffmpeg on every ABR step before 2026-11-15 (a stream on an in-process engine, Wayland or
 		// X11 gst clears `last_ff_req`). Never for a restart the host ordered itself (`forced` /
 		// `host_ordered`): that request is identical to the running one ON PURPOSE (new geometry,
-		// or a keyframe the CLI can only give by restarting).
+		// or a keyframe the CLI can only give by restarting). `last_ff_req` is set on every full
+		// restart, native ones included: for a native stream it is what keeps the client's
+		// periodic, unchanged re-request from restarting it (the live fast path above returns only
+		// on a change); retiring a native thread clears it.
 		if let Some((prev, at)) = last_ff_req.as_ref().filter(|_| !forced && !host_ordered) {
 			let mut probe = prev.clone();
 			probe.bitrate_kbps = req.bitrate_kbps;
@@ -3047,48 +3059,50 @@ pub(super) fn make_on_stream(
 		let (eff_w, eff_h) = clamp_dims(eff_w, eff_h);
 		// PER-WINDOW capture off Windows (Windows resolves its WGC target further down): the
 		// client's window pick (`req.window_hwnd`), else the window of the game this session
-		// launched. Linux X11 grabs the X window by id; macOS starts a ScreenCaptureKit window
-		// source now and serves its frames to ffmpeg on loopback. The stream is the window's
-		// own aspect fitted into the requested box (never upscaled). A window that is gone (or
-		// a ScreenCaptureKit start that fails) streams the screen instead — as Windows does
+		// launched. Linux X11 grabs the X window by id. macOS captures it through
+		// ScreenCaptureKit: the NATIVE path below (SCK window → VideoToolbox in-process: live
+		// bitrate, keyframe on request) when it is taken, else a loopback frame server for
+		// ffmpeg (`window_capture::serve_for`, started after the native decision so ONE
+		// ScreenCaptureKit stream runs per window). The stream is the window's own aspect
+		// fitted into the requested box (never upscaled). A window that is gone (or a
+		// ScreenCaptureKit start that fails) streams the screen instead — as Windows does
 		// when its window capture can't start. A window stream also maps the session's
 		// pointer onto the window and brings it to the front (`window_src::began`); the
 		// host's window watcher restarts the stream when it is resized or closed. Run off
-		// the async workers (`blocking`): the ScreenCaptureKit query + start can wait ~10 s
-		// behind the Screen Recording prompt. Untested on Linux X11 / macOS hardware.
+		// the async workers (`blocking`): the ScreenCaptureKit query can wait ~5 s behind the
+		// Screen Recording prompt. Untested on Linux X11 / macOS hardware.
+		#[cfg(target_os = "macos")]
+		let window_box = (eff_w, eff_h);
 		#[cfg(not(windows))]
-		let host_window: Option<(super::window_src::Target, (u32, u32), Option<String>)> = {
+		let host_window: Option<(super::window_src::Target, (u32, u32))> = {
 			use super::window_src::{self as ws, Target};
 			let want = req.window_hwnd.or_else(|| *launched_hwnd.lock().unwrap());
 			ws::blocking(|| {
 				let picked = match ws::current_target(want) {
-					Some(t @ Target::X11(id)) => match ws::window_size(id) {
-						Some(size) => Some((t, ws::encode_size(size, (eff_w, eff_h)), None)),
+					Some(t @ (Target::X11(id) | Target::Mac(id))) => match ws::window_size(id) {
+						Some(size) => Some((t, ws::encode_size(size, (eff_w, eff_h)))),
 						None => {
 							tracing::warn!(id, "the chosen window is gone, streaming the screen");
 							None
 						}
 					},
-					// One ScreenCaptureKit query gives the window, its size and the stream.
-					Some(t @ Target::Mac(id)) => {
-						match pulsar_core::window_capture::serve_for(sid, id, (eff_w, eff_h), eff_fps) {
-							Ok((url, size)) => Some((t, size, Some(url))),
-							Err(e) => {
-								tracing::warn!(id, "window capture failed to start, streaming the screen: {e}");
-								None
-							}
-						}
-					}
 					_ => None,
 				};
-				if let Some((Target::X11(id) | Target::Mac(id), ..)) = picked {
-					ws::began(sid, id);
+				// macOS registers the window once its source has started (below).
+				if let Some((Target::X11(id), _)) = picked {
+					ws::began(sid, id, req.clone());
 				}
 				picked
 			})
 		};
 		#[cfg(not(windows))]
-		let (eff_w, eff_h) = host_window.as_ref().map_or((eff_w, eff_h), |(_, s, _)| *s);
+		let (eff_w, eff_h) = host_window.as_ref().map_or((eff_w, eff_h), |(_, s)| *s);
+		// The macOS window this stream should show (`None` = the screen).
+		#[cfg(target_os = "macos")]
+		let mac_window: Option<u64> = match host_window {
+			Some((super::window_src::Target::Mac(id), _)) => Some(id),
+			_ => None,
+		};
 		// The X window this stream grabs (gst `ximagesrc xid=` / x11grab `-window_id`).
 		#[cfg(target_os = "linux")]
 		let win_xid: Option<u64> = match host_window {
@@ -3635,13 +3649,11 @@ pub(super) fn make_on_stream(
 			yuv444: false,
 			loss_recovery: req.loss_recovery,
 			// Off Windows: the window picked above (Windows' own window capture is WGC on the
-			// native path below; its ffmpeg fallback streams the monitor).
+			// native path below; its ffmpeg fallback streams the monitor). A macOS window is
+			// filled in after the native attempt (`mac_window_src`).
 			#[cfg(not(windows))]
 			window: match &host_window {
-				Some((super::window_src::Target::X11(id), ..)) => Some(pipeline::WindowInput::X11 { id: *id }),
-				Some((super::window_src::Target::Mac(_), _, Some(url))) => {
-					Some(pipeline::WindowInput::RawNv12 { url: url.clone() })
-				}
+				Some((super::window_src::Target::X11(id), _)) => Some(pipeline::WindowInput::X11 { id: *id }),
 				_ => None,
 			},
 			#[cfg(windows)]
@@ -3786,18 +3798,23 @@ pub(super) fn make_on_stream(
 		};
 		// NATIVE macOS path: ScreenCaptureKit + VideoToolbox in-process (pulsar-capture `mac/`):
 		// live bitrate, keyframe on request, live display switch — what the ffmpeg CLI cannot do.
-		// Taken when the resolved encoder is VideoToolbox; the ffmpeg avfoundation chain below
+		// Taken when the resolved encoder is VideoToolbox, for a display or ONE window
+		// (`mac_window`: SCK desktop-independent window, same encoder). The ffmpeg chain below
 		// stays the fallback (macOS < 12.3, no Screen Recording permission, a codec VideoToolbox
 		// refuses). An HDR request is streamed SDR here like on the ffmpeg path (neither
 		// captures HDR on macOS yet), so it no longer forces ffmpeg. A 4:4:4 request stays here
 		// too and streams 4:2:0: the native encoder has no 4:4:4 yet, and leaving the low-latency
 		// path for the ffmpeg CLI (whose VideoToolbox 4:4:4 is unverified) would trade latency
-		// for a maybe. PULSAR_FFMPEG_CAPTURE=1 forces ffmpeg. Untested on macOS hardware.
+		// for a maybe. A window this path does not take goes through the loopback frame server.
+		// PULSAR_FFMPEG_CAPTURE=1 forces ffmpeg. Untested on macOS hardware.
+		// Set when the native start failed in a way the ffmpeg window source would only repeat
+		// (no Screen Recording permission, ScreenCaptureKit not answering): a window then
+		// streams the screen at once instead of waiting through a second SCK query + start.
+		#[cfg(target_os = "macos")]
+		let mut mac_sck_unusable = false;
 		#[cfg(target_os = "macos")]
 		let native_started = if encoder == HwEncoder::VideoToolbox
 			&& capture == CaptureMethod::AvFoundation
-			// A window pick streams through the ScreenCaptureKit window source + ffmpeg below.
-			&& plan.window.is_none()
 			&& codec != pipeline::VCodec::Av1
 			&& std::env::var_os("PULSAR_FFMPEG_CAPTURE").is_none()
 		{
@@ -3827,7 +3844,9 @@ pub(super) fn make_on_stream(
 				// The native VideoToolbox encoder is 4:2:0 only (see above).
 				yuv444: false,
 				draw_mouse: true,
-				window_hwnd: None,
+				// A `CGWindowID`: SCK captures that window; `eff_w × eff_h` already has its
+				// aspect (fitted above).
+				window_hwnd: mac_window.and_then(|id| isize::try_from(id).ok()),
 				// macOS host: ScreenCaptureKit here is set up for 8-bit NV12, so the stream is SDR
 				// (no HDR capture on macOS yet — docs/agents/host-encode.md).
 				hdr: false,
@@ -3836,6 +3855,9 @@ pub(super) fn make_on_stream(
 					native_enc_us = Some(h.encode_us_arc());
 					native_stats = Some(h.stats_arc());
 					*native_slot.lock().unwrap() = Some(h);
+					if let Some(id) = mac_window {
+						super::window_src::blocking(|| super::window_src::began(sid, id, req.clone()));
+					}
 					true
 				}
 				Err(e) => {
@@ -3846,6 +3868,8 @@ pub(super) fn make_on_stream(
 					if e.kind() == std::io::ErrorKind::PermissionDenied {
 						notify_screen_permission(&app_h, &stats_out);
 					}
+					mac_sck_unusable =
+						matches!(e.kind(), std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::TimedOut);
 					false
 				}
 			}
@@ -3854,6 +3878,45 @@ pub(super) fn make_on_stream(
 		};
 		#[cfg(not(any(windows, target_os = "macos")))]
 		let native_started = false;
+		// macOS window without the native path: serve the window's frames on loopback for the
+		// ffmpeg chain (raw NV12 → VideoToolbox CLI), sized by its own ScreenCaptureKit query.
+		// A start that fails streams the screen at the requested box (not the window's shape).
+		// Only for what the native path does not take (AV1, PULSAR_FFMPEG_CAPTURE)
+		// or a VideoToolbox refusal: after a permission / timeout failure it would run the same
+		// SCK query again for up to ~10 s more (`mac_sck_unusable`).
+		#[cfg(target_os = "macos")]
+		let mac_window_src: Option<(String, (u32, u32))> = match mac_window {
+			Some(id) if !native_started && mac_sck_unusable => {
+				tracing::warn!(id, "ScreenCaptureKit unusable (permission / no answer), streaming the screen");
+				None
+			}
+			Some(id) if !native_started => super::window_src::blocking(|| {
+				match pulsar_core::window_capture::serve_for(sid, id, window_box, eff_fps) {
+					Ok(src) => {
+						super::window_src::began(sid, id, req.clone());
+						Some(src)
+					}
+					Err(e) => {
+						tracing::warn!(id, "window capture failed to start, streaming the screen: {e}");
+						None
+					}
+				}
+			}),
+			_ => None,
+		};
+		#[cfg(target_os = "macos")]
+		let plan = match (mac_window, native_started, &mac_window_src) {
+			(Some(_), false, Some((url, (w, h)))) => StreamPlan {
+				width: *w,
+				height: *h,
+				window: Some(pipeline::WindowInput::RawNv12 { url: url.clone() }),
+				..plan
+			},
+			(Some(_), false, None) => StreamPlan { width: window_box.0, height: window_box.1, window: None, ..plan },
+			_ => plan,
+		};
+		#[cfg(target_os = "macos")]
+		let eff_h = plan.height;
 
 		// Publish the per-window capture state for the input path (Bug 0): the current stream routes
 		// kb/mouse to WindowInput ONLY when it ACTUALLY WGC-captured a specific window — i.e. the
@@ -3868,15 +3931,18 @@ pub(super) fn make_on_stream(
 			crate::coop::set_capture(sid, if native_started { target_hwnd } else { None });
 		}
 		// Linux X11 / macOS: the window `host_window` resolved above is what this stream shows
-		// (X11: x11grab -window_id / libav / gst ximagesrc xid=; macOS: the ScreenCaptureKit
-		// window source over rawvideo — the native display path never takes a window plan), so
-		// its id is the input target: `WindowInput` (X11 SendEvent / XTest when in front, macOS
+		// (X11: x11grab -window_id / libav / gst ximagesrc xid=; macOS: the native SCK window →
+		// VideoToolbox path, or the SCK window source over rawvideo for ffmpeg), so its id is
+		// the input target: `WindowInput` (X11 SendEvent / XTest when in front, macOS
 		// CGEventPostToPid). A screen stream (Wayland window casts included: no id) clears it.
 		#[cfg(not(windows))]
 		{
 			let w = match &host_window {
-				Some((super::window_src::Target::X11(id), ..)) => i64::try_from(*id).ok(),
-				Some((super::window_src::Target::Mac(id), _, Some(_))) => Some(*id as i64),
+				Some((super::window_src::Target::X11(id), _)) => i64::try_from(*id).ok(),
+				#[cfg(target_os = "macos")]
+				Some((super::window_src::Target::Mac(id), _)) if native_started || mac_window_src.is_some() => {
+					i64::try_from(*id).ok()
+				}
 				_ => None,
 			};
 			*win_capture_hwnd.lock().unwrap() = w;
@@ -3917,7 +3983,10 @@ pub(super) fn make_on_stream(
 		// fire for them (it would restart ffmpeg on top of a running native capture). Clearing
 		// to None here ensures the watcher stays inert for the duration of a native session even
 		// if a prior ffmpeg session on this same connection left a stale entry.
-		// On non-Windows: native_started is always false so we always store.
+		// Linux: native_started is always false, so the request is always stored. macOS: the
+		// native ScreenCaptureKit -> VideoToolbox path (display or window) clears it like Windows
+		// does (a keyframe request is served by request_idr, not a restart). The window watcher
+		// does not read this store: a window stream's request lives in `window_src` (`began`).
 		if !native_started {
 			*last_req_store.lock().unwrap() = Some(req.clone());
 		} else {

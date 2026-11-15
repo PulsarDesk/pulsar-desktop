@@ -67,7 +67,10 @@ pub struct CaptureConfig {
 	/// whole monitor via DXGI — letting two panes share one monitor / target two app windows
 	/// (the same-monitor co-op case). `None` (default) ⇒ the existing full-monitor DXGI source.
 	/// The HWND is a raw window handle (`HWND.0 as isize`); the entire encode/RTP path is
-	/// identical either way. Has no effect on non-Windows (the native path is Windows-only).
+	/// identical either way. **macOS:** a `CGWindowID` — the native path captures that window
+	/// through ScreenCaptureKit (`SCContentFilter initWithDesktopIndependentWindow:`) into the
+	/// same VideoToolbox encoder; `width × height` should then already have the window's aspect
+	/// (the host fits it, `window_src::encode_size`). Linux has no native path.
 	pub window_hwnd: Option<isize>,
 	/// The client asked for HDR (`StreamReq::hdr`). Windows NVENC: a monitor in HDR mode is
 	/// captured as FP16 scRGB and streamed as HDR10 (P010 → HEVC Main10 / AV1 10-bit, BT.2020 /
@@ -95,7 +98,7 @@ pub struct CaptureStats {
 	/// `"dxgi"` (Desktop Duplication), `"wgc"` (whole monitor via Windows Graphics Capture),
 	/// `"wgc-window"` (one window) — all NVENC — or `"dxgi-mf"` (Desktop Duplication + the
 	/// display GPU's own encoder through Media Foundation); `"sck"` on macOS (ScreenCaptureKit +
-	/// VideoToolbox); `""` before the first build.
+	/// VideoToolbox), `"sck-window"` (one window, same encoder); `""` before the first build.
 	pub source: &'static str,
 	/// A fresh frame composed → its access unit handed to RTP (capture wait + any cross-GPU
 	/// hop + colour convert + encode): median / 90th percentile in µs. 0 on a static screen.
@@ -177,12 +180,15 @@ impl LiveStats {
 	pub fn snapshot(&self) -> CaptureStats {
 		use std::sync::atomic::Ordering::Relaxed;
 		CaptureStats {
+			// Source ids, one per writer: 1-4 Windows (dxgi/, wgc/), 5 and 8 macOS (mac/),
+			// 6 and 7 reserved for the Windows Media Foundation WGC sources (feat/native-encode).
 			source: match self.source.load(Relaxed) {
 				1 => "dxgi",
 				2 => "wgc",
 				3 => "wgc-window",
 				4 => "dxgi-mf",
 				5 => "sck",
+				8 => "sck-window",
 				_ => "",
 			},
 			latency_p50_us: self.lat_p50.load(Relaxed),

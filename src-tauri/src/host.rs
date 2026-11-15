@@ -1325,13 +1325,16 @@ pub(crate) async fn bring_online(
 					failover::register(sid, restream_tx.clone(), last_req_store.clone(), nvenc_told.clone());
 				// Per-window capture off Windows: x11grab keeps the size it opened with and a
 				// ScreenCaptureKit stream scales the window into its old frame, so when the
-				// streamed window settles at a new size — or is closed — re-issue the stored
-				// StreamReq once (the restart re-reads the size, or streams the screen when the
-				// window is gone). Inert while no window is streamed. Exits with the session.
-				// Untested on Linux X11 / macOS hardware.
+				// streamed window settles at a new size — or is closed — re-issue the window
+				// stream's request once, as a host-ordered restart (`host_restart`: no live fast
+				// path in on_stream may absorb it as unchanged; the restart re-reads the size, or
+				// streams the screen when the window is gone). The request comes from
+				// `window_src` (recorded when the window source started, native or ffmpeg), not
+				// from `last_req_store`: that one is empty while a native capture runs (the macOS
+				// SCK window -> VideoToolbox path). Inert while no window is streamed. Exits with
+				// the session. Untested on Linux X11 / macOS hardware.
 				#[cfg(not(windows))]
 				{
-					let last_req_store = last_req_store.clone();
 					let restream_tx = restream_tx.clone();
 					let host_restart = host_restart.clone();
 					tokio::spawn(async move {
@@ -1346,10 +1349,12 @@ pub(crate) async fn bring_online(
 								.ok()
 								.flatten();
 							let Some(change) = debounce.feed(seen) else { continue };
-							let Some(req) = last_req_store.lock().unwrap().clone() else { continue };
+							let Some(req) = window_src::restart_request(sid) else { continue };
 							tracing::info!(sid, ?change, "streamed window changed -> restarting capture");
 							// Don't fire again before the restart registers the window anew.
 							window_src::ended(sid);
+							// The request is unchanged: without the flag a live fast path (native
+							// encoder, libav) or the ffmpeg bitrate-step absorb would swallow it.
 							if let Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) =
 								send_host_restart(&restream_tx, &host_restart, req)
 							{
