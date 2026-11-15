@@ -140,12 +140,20 @@ pub fn main(args: &[String]) -> Option<i32> {
 fn run(cli: Cli) -> i32 {
 	match cli {
 		Cli::Stop => stop_signal(),
-		Cli::Headless => run_headless(),
+		Cli::Headless => {
+			// The app's runtime with the session-priority hooks (crates/pulsar-prio), before
+			// the host touches `tauri::async_runtime`.
+			crate::install_runtime();
+			run_headless()
+		}
 		Cli::Seat {
 			seat_id,
 			data_dir,
 			log,
-		} => run_seat(&seat_id, data_dir, &log),
+		} => {
+			crate::install_runtime();
+			run_seat(&seat_id, data_dir, &log)
+		}
 	}
 }
 

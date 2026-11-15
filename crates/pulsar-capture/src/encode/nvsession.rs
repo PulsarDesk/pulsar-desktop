@@ -353,6 +353,9 @@ pub(super) unsafe fn configure(
 			h264.maxNumRefFrames = dpb;
 			h264.set_numRefL0(nvenc::NV_ENC_NUM_REF_FRAMES_1);
 			h264.set_chromaFormatIDC(if yuv444 { 3 } else { 1 }); // 4:4:4 / 4:2:0
+			// SDR = BT.709 limited range, said in the VUI (the input NV12 is converted so); a
+			// 4:4:4 stream (NVENC converts the ARGB itself) says full range instead.
+			h264.set_sdr_bt709();
 			if yuv444 {
 				vui_444(h264.vui_mut());
 			}
@@ -371,6 +374,7 @@ pub(super) unsafe fn configure(
 			);
 			hevc.idrPeriod = gop;
 			hevc.maxNumRefFramesInDPB = dpb;
+			hevc.set_sdr_bt709(); // SDR = BT.709 limited range in the VUI (HDR10 overrides below)
 			if yuv444 {
 				vui_444(hevc.vui_mut());
 			}
@@ -398,6 +402,7 @@ pub(super) unsafe fn configure(
 			// but nvEncInitializeEncoder below returns an Err → host falls back to ffmpeg.
 			let av1 = &mut cfg.encodeCodecConfig.av1Config;
 			av1.set_flags(nvenc::NV_ENC_AV1_FLAG_REPEAT_SEQ_HDR | nvenc::NV_ENC_AV1_CHROMA_420);
+			av1.set_sdr_bt709(); // SDR = BT.709 studio range in the sequence header
 			av1.idrPeriod = gop;
 			av1.maxNumRefFramesInDPB = 1;
 			if p.hdr {

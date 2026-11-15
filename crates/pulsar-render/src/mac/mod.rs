@@ -1748,6 +1748,8 @@ fn event_loop(mtm: MainThreadMarker, parent: u32, port: u16, codec: Codec, mode:
 		let stop2 = stop.clone();
 		let mut overflow_log = OverflowLog::default();
 		std::thread::spawn(move || {
+			// RTP intake at QoS user-interactive (default QoS otherwise): see main.rs boost_process.
+			let _prio = pulsar_prio::boost_current_thread(pulsar_prio::Role::Network);
 			stream::rtp::recv_loop(
 				port,
 				codec,

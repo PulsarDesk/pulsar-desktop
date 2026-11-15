@@ -23,11 +23,10 @@ use windows_sys::Win32::System::Pipes::{
 	GetNamedPipeServerProcessId, GetNamedPipeServerSessionId, WaitNamedPipeW,
 };
 
-use crate::geom::{absolute_move, button_flag, MonitorRect, ScrollAcc, WHEEL_DELTA};
+use crate::geom::{absolute_move, button_flag, MonitorRect, ScrollAcc};
 use crate::proto::{
 	self, DesktopKind, PointerContact, Reply, Request, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
-	MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE,
-	MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
+	MOUSEEVENTF_HWHEEL, MOUSEEVENTF_MOVE, MOUSEEVENTF_WHEEL,
 };
 use crate::win;
 
@@ -374,21 +373,30 @@ impl SysInput {
 	}
 
 	pub fn button(&mut self, button: u8, down: bool) -> Result<()> {
+		let Some(flag) = button_flag(button, down) else {
+			return Ok(()); // unknown / side button: the helper cannot inject it
+		};
 		if down {
 			self.held_buttons.insert(button);
 		} else {
 			self.held_buttons.remove(&button);
 		}
-		self.mouse(0, 0, 0, button_flag(button, down))
+		self.mouse(0, 0, 0, flag)
+	}
+
+	/// Whole-notch wheel output for a game session / relative pointer (see
+	/// [`ScrollAcc::set_whole_notches`]); hi-res `mouseData` otherwise.
+	pub fn set_whole_notch_wheel(&mut self, on: bool) {
+		self.scroll.set_whole_notches(on);
 	}
 
 	pub fn scroll(&mut self, dx: f64, dy: f64) -> Result<()> {
 		let (v, h) = self.scroll.push(dx, dy);
 		if v != 0 {
-			self.mouse(0, 0, v.saturating_mul(WHEEL_DELTA), MOUSEEVENTF_WHEEL)?;
+			self.mouse(0, 0, v, MOUSEEVENTF_WHEEL)?;
 		}
 		if h != 0 {
-			self.mouse(0, 0, h.saturating_mul(WHEEL_DELTA), MOUSEEVENTF_HWHEEL)?;
+			self.mouse(0, 0, h, MOUSEEVENTF_HWHEEL)?;
 		}
 		Ok(())
 	}
@@ -446,12 +454,9 @@ impl SysInput {
 			}));
 		}
 		for b in std::mem::take(&mut self.held_buttons) {
-			let up = match b {
-				1 => MOUSEEVENTF_RIGHTUP,
-				2 => MOUSEEVENTF_MIDDLEUP,
-				_ => MOUSEEVENTF_LEFTUP,
-			};
-			res = res.and(self.mouse(0, 0, 0, up));
+			if let Some(up) = button_flag(b, false) {
+				res = res.and(self.mouse(0, 0, 0, up));
+			}
 		}
 		for (vk, (scan, ext)) in std::mem::take(&mut self.held_keys) {
 			let flags = KEYEVENTF_KEYUP | if ext { KEYEVENTF_EXTENDEDKEY } else { 0 };

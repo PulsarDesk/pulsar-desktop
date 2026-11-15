@@ -151,6 +151,7 @@ impl Encoder {
 		// -- 1. ID3D11VideoProcessor for BGRA→NV12 (one GPU Blt/frame) on the NVENC device.
 		//    (Built for HDR too — unused there, but it keeps the struct one shape.)
 		let (vp_enum, vproc) = build_video_processor(&vdevice, cap_w, cap_h, w, h)?;
+		super::d3d::set_sdr_colour_spaces(&vcontext, &vproc); // BT.709 limited (the VUI's)
 
 		// -- 2. OUR own input texture (Sunshine single-texture model) is allocated on the NVENC
 		//    device at step 9, once `configure` has said whether this stream is 4:4:4 (its

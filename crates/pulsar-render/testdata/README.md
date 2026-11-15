@@ -73,3 +73,16 @@ and its tests check the decoder hands out P010 flagged PQ. Regenerate with:
 ffmpeg -f lavfi -i testsrc2=size=64x64:rate=30 -frames:v 1 -c:v libx265 -pix_fmt yuv420p10le -x265-params "keyint=1:repeat-headers=1:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc" -f hevc test-hdr10.h265
 ffmpeg -f lavfi -i testsrc2=size=64x64:rate=30 -frames:v 1 -c:v libaom-av1 -cpu-used 8 -pix_fmt yuv420p10le -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc -f obu test-hdr10.av1.obu
 ```
+
+## Colour-bar fixtures — `colour-{bt709,untagged,bt601}.h264`
+
+Two frames of red / green / blue / white bars (256×128, 64 px each) for the Windows decode +
+present harness (`src/win/colour_bars.rs`). Made with the bundled ffmpeg (7.1+):
+
+```
+SRC="color=c=red:s=64x128:r=30[a];color=c=lime:s=64x128:r=30[b];color=c=blue:s=64x128:r=30[c];color=c=white:s=64x128:r=30[d];[a][b][c][d]hstack=4,format=bgr0"
+X="-c:v libx264 -profile:v high -pix_fmt yuv420p -bf 0 -g 30 -preset veryslow -crf 10"
+ffmpeg -filter_complex "$SRC,setparams=color_primaries=bt709:color_trc=bt709" -frames:v 2 $X -colorspace bt709 -color_range tv -f h264 colour-bt709.h264
+ffmpeg -filter_complex "$SRC,setparams=color_primaries=smpte170m:color_trc=smpte170m" -frames:v 2 $X -colorspace smpte170m -color_range tv -f h264 colour-bt601.h264
+ffmpeg -filter_complex "$SRC,scale=out_color_matrix=bt709:out_range=tv,format=yuv420p,setparams=colorspace=unknown:range=unknown" -frames:v 2 $X -f h264 colour-untagged.h264
+```

@@ -90,12 +90,11 @@ of both chains on a real client, QSV `low_power` on pre-Ice-Lake iGPUs, the runt
 (an encoder that stops: log `using the ffmpeg CLI chain from now on`), the multi-GPU node
 probe (log `confirmed by an encode probe`), QSV on an Intel iGPU + AMD screen hybrid.
 
-**Known colour mismatch (not fixed):** the ffmpeg CLI host chains and the in-process
-software / NVENC chain convert RGB → YUV with swscale's default BT.601 matrix and leave the
-stream untagged, while every client decodes untagged video as BT.709 (pulsar-render
-`video.rs`, macOS `decode.rs`) — a slight hue shift on reds / greens. The in-process VA-API /
-QSV chains convert with BT.709 and tag it. Fixing the others changes shipped paths on every
-OS (CLI args in pulsar-core) and needs a look on hardware first.
+**Colour (wip/all merge):** the mismatch noted here before (ffmpeg CLI chains and the
+in-process software / NVENC libav chain converting with swscale's BT.601 default, untagged) is
+closed by the colour work: every SDR host path converts BT.709 limited and tags it, the libav
+CPU chain included (`cpu_graph_desc` → `bt709_scale`, `tag_bt709` on every encoder) — see
+host-encode.md "Colour space". Still to check on hardware (colour bars on a real client).
 
 **macOS host virtual gamepad (2026-11-14, untested on macOS hardware):** pulsar-core
 `input/mac_hid.rs` creates an `IOHIDUserDevice` virtual HID pad (Xbox target = Xbox Wireless
@@ -109,6 +108,45 @@ create a pad (Mac without the entitlement, Windows without ViGEmBus, Linux witho
 tarafta çalışmıyor: …" in-session (`pad_notice.rs` → `play_notice`), the host a `pad-off`
 toast. Whether GameController / SDL accept a virtual (non-USB/BT) device with these VID/PIDs
 is unverified.
+
+**Remote input permission notices (2026-11-15, untested on real hosts):** a host whose input
+cannot reach its desktop used to fail silently on every OS. pulsar-core
+`input::permission::preflight()` checks Linux `/dev/uinput` (writable) and macOS Accessibility
+(`AXIsProcessTrusted`); on Windows (skipped while the SYSTEM helper injects)
+`foreground_window_blocked()` (keys) / `pointer_target_blocked()` (clicks, scroll, pen, touch:
+the top-level window under the cursor — UIPI judges pointer input by that window) spot an
+elevated target of a non-elevated host (UIPI drops `SendInput` while it reports success), and
+the secure desktop (UAC prompt, lock screen → `win_secure_desktop`). The host sends
+`DataMsg::InputUnavailable { reason }` (an `InputFailure` token) from the session's input
+path, never at accept time (the client is then still in its caps / probe exchange, which
+drops other messages; metadata-only connections got it too): the preflight on the first
+input that goes to the desktop injector with control granted (again every 60 s while it
+fails), a failed injector open (retried every 5 s, so a fixed rule heals the running
+session), and a click / key into a newly blocked window (once per window, again after 60 s).
+The same cause reaches the client at most once a minute. The client shows "Fare ve klavyen
+karşı tarafa ulaşmıyor: …" in-session (`input_notice.rs` → `play_notice`; mobile:
+`input-unavailable` event → toast). The host shows an `input-off` toast (once per cause per
+10 min; at host start only with unattended access on, once per process — every Pulsar goes
+online as a host). A click asks for the Accessibility grant on macOS; on Linux it installs the
+uinput rule through pkexec, re-checks and toasts the result (`input-on` "fixed", or "rule
+installed but no local seat: add the user to the input group"; a host whose rule is already
+there gets that text instead of "click to install"). No elevation flow on Windows. Gap: a
+Linux X11 window-capture session routes the pointer through XTest, so its notice (keys /
+pen / touch in front still need uinput) says "mouse and keyboard" too broadly.
+`--selftest` prints a `remote-input` line. An Android host sends `android_control_off` (the
+control AccessibilityService is off) or `android_control_missing` (the build has none: the
+default release APK) on a press, checked at most every 5 s, told at most once a minute.
+
+**Linux uinput rule:** `/dev/uinput` is root-only on stock distros (Steam's `steam-devices`
+package is what usually opens it). The .deb / .rpm now ship
+`/usr/lib/udev/rules.d/70-pulsar-uinput.rules` (`KERNEL=="uinput", SUBSYSTEM=="misc",
+OPTIONS+="static_node=uinput", TAG+="uaccess"` — Steam's rule: the user logged in at the seat
+gets the node's ACL) plus `uinput` in `/usr/lib/modules-load.d/pulsar.conf`; postinst loads the
+module and re-triggers udev so it applies without a re-login. The AppImage installs nothing:
+its host toast's click runs one pkexec prompt that writes the same rule to
+`/etc/udev/rules.d/70-pulsar-uinput.rules` (+ `/etc/modules-load.d/pulsar-uinput.conf`) and
+re-triggers udev (skipped when a rule is already there). Headless hosts (only SSH, no seat
+login) do not get `uaccess`: the rule file's comment says how to grant a group instead.
 
 **Scaffolded / known gaps:** the Wayland/gst path encodes in hardware (`pick_gst`: MPP →
 VA-API → NVIDIA → x264) but has no AV1 and has not run on hardware since the hardware families

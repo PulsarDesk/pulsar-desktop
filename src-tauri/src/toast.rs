@@ -29,8 +29,10 @@ const LIFETIME: Duration = Duration::from_secs(7);
 
 /// One notice. `kind` picks the title/icon in the UI: `file-in` (a file arrived), `kbd-perm`
 /// (macOS: the input capture needs the Accessibility permission), `pad-off` (a client
-/// controller got no virtual pad here — `name` holds the cause); the file manager has no remote
-/// delete/rename yet, so `file-del` / `file-mod` are reserved.
+/// controller got no virtual pad here — `name` holds the cause), `input-off` (the client's
+/// mouse / keyboard cannot reach this host — `name` holds the cause, a click fixes what can be
+/// fixed: input_notice::fix), `input-on` (that fix worked); the file manager has no remote delete/rename yet, so
+/// `file-del` / `file-mod` are reserved.
 #[derive(Clone, Serialize)]
 pub(crate) struct Toast {
 	id: u64,
@@ -44,6 +46,9 @@ pub(crate) struct Toast {
 	/// `chat-in`: the sender's peer key, so a click opens that client's chat.
 	#[serde(skip)]
 	chat_peer: Option<String>,
+	/// `input-off`: the cause, for the click's fix.
+	#[serde(skip)]
+	input: Option<pulsar_core::input::InputFailure>,
 }
 
 static TOASTS: Mutex<Vec<Toast>> = Mutex::new(Vec::new());
@@ -88,6 +93,19 @@ pub(crate) fn pad_unavailable(app: &AppHandle, text: String) {
 	push(app, "pad-off", text, String::new(), None);
 }
 
+/// The client's mouse / keyboard cannot reach this host (`f`); `text` is the localized cause
+/// (crate::input_notice::host_text). A click runs crate::input_notice::fix.
+pub(crate) fn input_unavailable(app: &AppHandle, f: pulsar_core::input::InputFailure, text: String) {
+	push_full(app, "input-off", text, String::new(), None, None, Some(f));
+}
+
+/// A remote-input note without a fix behind its click: `input-on` (the fix worked) or an
+/// `input-off` that nothing here can fix (e.g. the uinput rule is there but no local seat).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn input_note(app: &AppHandle, ok: bool, text: String) {
+	push(app, if ok { "input-on" } else { "input-off" }, text, String::new(), None);
+}
+
 fn push(app: &AppHandle, kind: &'static str, name: String, peer: String, path: Option<PathBuf>) {
 	push_with(app, kind, name, peer, path, None);
 }
@@ -100,6 +118,18 @@ fn push_with(
 	path: Option<PathBuf>,
 	chat_peer: Option<String>,
 ) {
+	push_full(app, kind, name, peer, path, chat_peer, None);
+}
+
+fn push_full(
+	app: &AppHandle,
+	kind: &'static str,
+	name: String,
+	peer: String,
+	path: Option<PathBuf>,
+	chat_peer: Option<String>,
+	input: Option<pulsar_core::input::InputFailure>,
+) {
 	let id = NEXT.fetch_add(1, Ordering::Relaxed);
 	{
 		let mut g = TOASTS.lock().unwrap_or_else(|e| e.into_inner());
@@ -110,6 +140,7 @@ fn push_with(
 			peer,
 			path: path.map(|p| p.to_string_lossy().into_owned()),
 			chat_peer,
+			input,
 		});
 		let over = g.len().saturating_sub(MAX_VISIBLE);
 		g.drain(..over);
@@ -213,15 +244,18 @@ pub(crate) fn toast_close(app: AppHandle, id: u64) {
 /// permission notice the permission's settings; any notice is then dismissed.
 #[tauri::command]
 pub(crate) fn toast_open(app: AppHandle, id: u64) {
-	let (kind, path, chat_peer) = TOASTS
+	let (kind, path, chat_peer, input) = TOASTS
 		.lock()
 		.unwrap_or_else(|e| e.into_inner())
 		.iter()
 		.find(|t| t.id == id)
-		.map(|t| (t.kind, t.path.clone(), t.chat_peer.clone()))
-		.unwrap_or(("", None, None));
+		.map(|t| (t.kind, t.path.clone(), t.chat_peer.clone(), t.input))
+		.unwrap_or(("", None, None, None));
 	if kind == "kbd-perm" {
 		crate::kbdhook::request_permission();
+	}
+	if let Some(f) = input {
+		crate::input_notice::fix(&app, f);
 	}
 	if kind == "chat-in" {
 		crate::connections::open_chat(&app, chat_peer);
@@ -269,7 +303,11 @@ pub(crate) fn reveal_in_folder(path: &Path) {
 			.unwrap_or(false);
 		if !shown {
 			if let Some(dir) = path.parent() {
-				let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+				let mut c = std::process::Command::new("xdg-open");
+				c.arg(dir);
+				// A file manager must not keep a session boost (pulsar-prio).
+				pulsar_prio::unboost_command(&mut c);
+				let _ = c.spawn();
 			}
 		}
 	}

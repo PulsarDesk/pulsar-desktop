@@ -135,6 +135,9 @@ see a virtual one:
 
 - Pick the virtual pad per controller in the Controllers panel; *Automatic* uses DualShock 4 for PlayStation pads.
 - The Windows installer adds the drivers (ViGEmBus, usbip-win2); Linux uses the kernel's `uinput` and `vhci-hcd`.
+- Linux host: remote mouse, keyboard and controllers need write access to `/dev/uinput`. The .deb / .rpm install a
+  udev rule for it (`70-pulsar-uinput.rules`); with the AppImage, click Pulsar's notice to install it (one password
+  prompt).
   macOS hosts have no virtual controllers yet.
 - Not tested yet: the DualSense mic, a USB-cabled DualSense on the connecting side, and the experimental DS4
   headset jack.

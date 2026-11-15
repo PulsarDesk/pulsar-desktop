@@ -171,8 +171,8 @@ pulsar-macinput`). Same surface and rules as the Windows hook (`imp.rs`):
   Remote mode: absolute, normalized to the video rect, the move passes locally; an overshoot
   is re-located and `CGWarpMouseCursorPosition`ed to the edge (the confine), re-checked every
   100 ms (window moves). Free cursor ("Serbest imlec"): no confine, leaving the video
-  releases, hovering it engages, same rules as Windows. Buttons 0-2 are forwarded;
-  back/forward are swallowed (no host injector knows them). Wheel: point deltas (trackpad)
+  releases, hovering it engages, same rules as Windows. Buttons 0-4 are forwarded
+  (3 = back, 4 = forward; see "Keys and mouse buttons on the wire"); higher ones are swallowed. Wheel: point deltas (trackpad)
   or lines x 100 (notched wheel), browser-pixel units like every other client. macOS's
   "natural scrolling" setting is already applied to those deltas and is **kept on purpose**:
   the remote content moves the way the Mac's own content does for this user (the webview
@@ -221,6 +221,72 @@ pulsar-macinput`). Same surface and rules as the Windows hook (`imp.rs`):
   compiles (`pulsar-tauri` cannot be type-checked for macOS from Windows).
 
 
+## Keys and mouse buttons on the wire (2026-11-15, untested on hardware)
+
+- **Game mode = positional keys only, on every client.** The Windows hook / Interception and
+  the macOS tap only ever send `Key`; the webview and the Linux evdev grab send a printable key
+  as `Char` (the client's own layout, WYSIWYG) in REMOTE mode only (`SESSION_REMOTE`). Games
+  read DirectInput / RawInput / scancodes, which never see a Unicode insert, so a `Char` WASD
+  or digit never moved and could not be held.
+- **Key tables are symmetric.** pulsar-core `input::keytables::CLIENT_KEYS` lists every evdev
+  code a client may send (ISO `<>|` 86, JIS Ro / Yen / Henkan / Muhenkan / Kana, Lang1/2,
+  Print Screen 99, Pause 119, keypad = and comma, F13-F24). Tests check the Windows host table,
+  the macOS host table (`keytables::mac_vk`, ISO section/grave swap from `KBGetLayoutType`),
+  the Windows client VK + Interception tables (`kbdhook/imp/keymap.rs`) and the webview
+  `keymap.ts` against it (the webview has no code for the JIS keypad comma 95: it arrives as
+  `NumpadComma` = 121). The Windows LL hook maps by VK, then by scancode + LLKHF_EXTENDED
+  (Numpad Enter 96, JIS Yen 124 / Ro 89, and VKs without a US meaning: VK_OEM_8 = TR-Q `*?\`,
+  VK_CLEAR = Numpad 5, Ctrl+Break); engaged, a key neither maps is swallowed instead of acting
+  locally, except the volume / media / browser keys (stay local). Pause via Interception is its
+  E1 1D 45 pair; Korean Hangul / Hanja (make-only 0xF2 / 0xF1) never reach Interception.
+- **Side-button releases are paired.** The webview releases back / forward on blur / stop only
+  when it pressed them, and every host drops a side-button up it never pressed (a stray
+  WM_XBUTTONUP is a browser Back / Forward on Windows).
+- **`Char` on a Linux host** is typed with the HOST layout's key and level
+  (pulsar-core `input/host_keymap_linux.rs`: the compositor's `wl_keyboard` keymap on
+  Wayland, `_XKB_RULES_NAMES` on X11, else `XKB_DEFAULT_*` / `00-keyboard.conf` /
+  `/etc/default/keyboard`). Not on the layout: X11 borrows a free keycode (as `xdotool type`);
+  GNOME / IBus get Ctrl+Shift+U + hex + Space; other Wayland desktops drop it (logged once).
+  Limits: first layout group only; host Caps Lock tracked only for keys Pulsar injected.
+- **Mouse side buttons**: `PointerButton` 3 = back (X1), 4 = forward (X2), from every client
+  (webview, Windows LL hook + Interception, Linux `BTN_SIDE`/`BTN_EXTRA`/`BTN_BACK`/
+  `BTN_FORWARD`, macOS other-button 3/4). Hosts advertise `FEAT_MOUSE_X` (Windows XBUTTON,
+  Linux uinput, macOS other-mouse 3/4, and the per-window injectors); `play/hold.rs` drops 3/4
+  for hosts without it, because older hosts turned an unknown button into a LEFT click. Every
+  host now ignores ids it does not know. The Windows secure-desktop helper (pulsar-sysagent) and
+  the Android host ignore the side buttons.
+
+## Mouse motion batching + hi-res scroll (all desktop clients / hosts, 2026-11-15, untested on hardware)
+
+- **Wire scroll unit** (`InputEvent::Scroll`): browser wheel px, 100 per notch, +y down, +x
+  right, fractions kept. Clients: Windows LL hook `WM_MOUSE(H)WHEEL` raw×100/120; Interception
+  `rolling`×100/120 on the WHEEL (0x400) **and** HWHEEL (0x800) bit (it used to send raw 120s =
+  1.2× too far, and dropped the horizontal wheel); Linux evdev `REL_(H)WHEEL_HI_RES`×100/120 on a
+  device that has the axis (its legacy notch is then ignored), else `REL_(H)WHEEL`×100, one
+  `Scroll` per evdev batch; macOS tap point deltas / lines×100; webview `WheelEvent` px.
+- **Hosts** (pulsar-core `input::wheel`): Windows `mouseData` in 1/120 notch for a desktop
+  session (desktop injector + the system agent), but **whole notches ×120 in a game session or
+  while the client's last pointer motion was relative** (`host.rs` sets
+  `HostInput::set_whole_notch_wheel` per scroll event): many games read Raw Input /
+  `WM_MOUSEWHEEL` and do `delta / 120` as an integer, so a hi-res 1/8-notch step is a dead
+  wheel there (why mouse drivers keep hi-res off by default on Windows). Linux
+  `REL_WHEEL_HI_RES` + the legacy notch at the halfway point (like the kernel), macOS one scale
+  (LINE events; finer deltas carry fractional lines in the fixed-point fields). Whole notches
+  always: the Windows per-window injector (a launched game), X11 per-window (core button 4-7
+  events) and same-host co-op raw-input injection (`coop.rs`). The **Android host** (mobile
+  repo) turns each scroll call into one swipe, so it accumulates to whole 100 px notches first.
+- **Motion batching** (`play/hold.rs`, pulsar-core `input::coalesce`): pointer-relative /
+  absolute / scroll per kind through a 2-deep token bucket refilled every 0.8 ms — a 1 kHz mouse
+  with jitter is never held, a sustained >1.25 kHz stream is merged (deltas add) and the tail
+  sent when the next token is due; a button / key flushes first. The input arm drains what is
+  already queued (≤ 64) and sends it merged but unheld (`push_backlog`): it is late already.
+  The client holds the 1 ms Windows timer (`timer_res`) while a session runs so the tail is not
+  late. The Windows hook and macOS tap forwarders (`util::input_forwarder_loop`) merge motion on
+  a full session channel instead of dropping it; Interception motion goes through the same
+  ordered forwarder as its buttons now. The Linux evdev reader stays non-blocking (it holds the
+  grab): a batch's motion / scroll refused by a full channel is kept (`MotionCarry`) and added
+  to the next batch for that channel; edges keep the plain `try_send`.
+
 ## Ctrl+Shift+M toggles the Pulsar menu — the second press has to arrive too
 
 Opening the menu releases control, so the press that closes it comes in on the *disengaged*
@@ -261,11 +327,13 @@ out of Modern Standby — and keeps the host encoding (a laptop left connected s
 dark screen all night). So when the machine that VIEWS goes into a sleep-like state, its
 sessions end, and they come back by themselves afterwards:
 
-- **Sleep-like** = the system suspends, or its display turns off (on a Modern Standby machine
-  that is its sleep; no suspend event comes while audio plays). An automatic resume with the
-  display still off does not count as awake.
+- **Sleep-like** = the system suspends, its display turns off (on a Modern Standby machine
+  that is its sleep; no suspend event comes while audio plays), or the session locks (unlock =
+  wake). An automatic resume with the display still off does not count as awake.
 - `src-tauri/src/power_watch.rs` (Windows: `PowerRegisterSuspendResumeNotification` +
-  `PowerSettingRegisterNotification(GUID_CONSOLE_DISPLAY_STATE)`, callbacks, no window) emits
+  `PowerSettingRegisterNotification(GUID_CONSOLE_DISPLAY_STATE)`, callbacks, no window, plus
+  the WTS session lock state polled every 2 s; macOS: NSWorkspace sleep / screens-sleep and the
+  `com.apple.screenIsLocked` / `screenIsUnlocked` distributed notifications) emits
   `system-sleep`, then stops every play itself — the webview may be throttled with the
   display off, so the UI is not trusted to do it — and emits `system-wake` on the way back.
 - `SessionManager.systemSleep` remembers each remote session (target, mode, game, monitor,
@@ -276,6 +344,27 @@ sessions end, and they come back by themselves afterwards:
   (password / approval prompt again where the host asks for one). Split panes come back as
   tabs.
 - The HOST's own sleep is not handled here (its clients see it go silent).
+- **Keep-awake** (`src-tauri/src/keep_awake.rs`, one refcounted OS request per process): the
+  host holds display + system awake from a session's first stream request to its end on every
+  capture path; the client holds it while a session is viewed, Pulsar is the focused app (or
+  "Arka planda kol girdisi" is on), the session is not locked, and until a set time after its
+  last real input (Settings → Genel → "Ekranı uyanık tut": 30 min default / 2 h / always / off;
+  `PULSAR_CLIENT_AWAKE_MIN` overrides it, 0 = off; pads count only on a button / trigger change,
+  a real stick move or a DualSense touchpad touch / move — their 1 Hz keepalive and a
+  DualSense's sensor stream do not). So a pad-only session no longer hits the display timeout,
+  a watch-only one does only after that time without input (30 min by default), and a
+  forgotten one still does. The hold also holds back the screen saver and an idle screen LOCK
+  (e.g. a 5 min policy lock): pick "Kapalı" where the machine must lock on time. Only idle
+  sleep is held: lid / power button / lock still end the sessions as above — on Windows and
+  macOS the lock is watched directly, because both keep the lock screen lit while a display
+  request is held (no display-off edge would come). The ANDROID client has no equivalent yet:
+  it keeps `FLAG_KEEP_SCREEN_ON` for the whole stream and does not end it on screen-off, so a
+  phone left connected keeps the host awake (pulsar-mobile `docs/agents/layout.md`).
+  Windows `PowerCreateRequest` + `PowerSetRequest(Display, System)`; macOS `IOPMAssertion`
+  `PreventUserIdleDisplaySleep`; Linux `org.freedesktop.ScreenSaver.Inhibit` (GNOME Session idle
+  inhibitor as fallback), `org.freedesktop.PowerManagement.Inhibit`, a logind `idle` block lock
+  and `XResetScreenSaver` every 20 s on X11 — bare wlroots compositors only have the Wayland
+  idle-inhibit protocol (needs a surface of ours): not covered there.
 - **Linux** (`power_watch/linux.rs`, plain threads with blocking zbus / Xlib connections;
   untested on Linux hardware): logind `PrepareForSleep` on the system bus, with a logind
   *delay* inhibitor held while awake so the suspend waits (≤ 3 s of our own, capped by

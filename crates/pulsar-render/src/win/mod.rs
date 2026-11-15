@@ -25,6 +25,8 @@ pub mod present; // NV12 → swapchain RGB via ID3D11VideoProcessor (letterbox)
 mod fsr; // FSR 1 upscale (EASU + RCAS) after the VideoProcessor (present.rs)
 pub mod hdr; // HDR10 (P010) present: PQ pass-through on an HDR monitor, else tone-mapped (present.rs)
 mod pointer; // pen + touch (WM_POINTER) → `pen` / `touch` stdout lines while engaged
+#[cfg(test)]
+mod colour_bars; // decode + present colour-bar harness (testdata/colour-*.h264)
 
 // Shared (cross-backend) streaming types + RTP depacketizer.
 use crate::stream::{self, parse_sdp, AccessUnit, Codec};
@@ -2074,7 +2076,11 @@ impl Renderer {
 		// Scoped borrow: video Blt onto the back buffer, then drop the `present` borrow so
 		// `paint_overlay` can take `&mut self`.
 		let drawn = match self.present.as_ref() {
-			Some(p) => p.blt(nv12, &back).is_ok(),
+			Some(p) => {
+				// The stream's colour description (BT.709 limited unless it says otherwise).
+				p.set_colour(self.decoder.as_ref().map(|d| d.colour()).unwrap_or_default());
+				p.blt(nv12, &back).is_ok()
+			}
 			None => false,
 		};
 		if drawn {
@@ -2151,7 +2157,11 @@ impl Renderer {
 		// Re-present the last frame if we have one + a live processor; otherwise dark-clear so
 		// the overlay still paints (matches clear()'s pre-first-frame background).
 		let drawn = match (self.last_nv12.clone(), self.present.as_ref()) {
-			(Some(nv12), Some(p)) => p.blt(&nv12, &back).is_ok(),
+			(Some(nv12), Some(p)) => {
+				// A resize rebuilt the processor: its colour spaces are the defaults again.
+				p.set_colour(self.decoder.as_ref().map(|d| d.colour()).unwrap_or_default());
+				p.blt(&nv12, &back).is_ok()
+			}
 			_ => false,
 		};
 		if !drawn {
@@ -2585,6 +2595,9 @@ unsafe fn event_loop(
 		let q = queue.clone();
 		let stop2 = stop.clone();
 		std::thread::spawn(move || {
+			// RTP intake at THREAD_PRIORITY_HIGHEST: a late wake here is added straight to the
+			// glass-to-glass delay and lets the socket buffer fill on an IDR burst.
+			let _prio = pulsar_prio::boost_current_thread(pulsar_prio::Role::Network);
 			stream::rtp::recv_loop(
 				port,
 				codec,

@@ -81,6 +81,42 @@ fn virtual_adapter(desc: &str) -> bool {
 	VIRTUAL_HINTS.iter().any(|h| d.contains(h))
 }
 
+/// Linux: the interface of the `/proc/net/route` entry for `peer` (longest prefix, then the
+/// lowest metric; only routes that are up). `Destination` / `Mask` are the address bytes as a
+/// host-order hex u32, so `to_le_bytes` gives them back in network order.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn linux_route_dev(table: &str, peer: std::net::Ipv4Addr) -> Option<String> {
+	let ip = u32::from_le_bytes(peer.octets());
+	let mut best: Option<(u32, u32, String)> = None;
+	for l in table.lines().skip(1) {
+		let f: Vec<&str> = l.split_whitespace().collect();
+		if f.len() < 8 {
+			continue;
+		}
+		let (Ok(dest), Ok(flags), Ok(mask)) =
+			(u32::from_str_radix(f[1], 16), u32::from_str_radix(f[3], 16), u32::from_str_radix(f[7], 16))
+		else {
+			continue;
+		};
+		if flags & 1 == 0 || ip & mask != dest & mask {
+			continue;
+		}
+		let prefix = mask.count_ones();
+		let metric = f[6].parse().unwrap_or(u32::MAX);
+		if best.as_ref().is_none_or(|b| prefix > b.0 || (prefix == b.0 && metric < b.1)) {
+			best = Some((prefix, metric, f[0].to_string()));
+		}
+	}
+	best.map(|(_, _, dev)| dev)
+}
+
+/// Linux overlay / VPN interfaces: the link under them can't be seen, so the default route's
+/// device stands in (as `route_adapter` on Windows and `peer_route` on macOS do).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn linux_overlay_dev(dev: &str) -> bool {
+	["wg", "tun", "tap", "zt", "tailscale", "ppp"].iter().any(|p| dev.starts_with(p))
+}
+
 /// Linux network drivers that are a phone or a cellular modem.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn mobile_driver(driver: &str) -> bool {
@@ -93,6 +129,17 @@ pub(crate) fn detect(peer: Option<IpAddr>) -> LinkKind {
 	let kind = imp::detect(peer);
 	tracing::debug!(?kind, ?peer, "route link kind");
 	kind
+}
+
+/// Does this client's route to `peer` leave on a Wi-Fi adapter? `None` = can't tell. Same
+/// route lookup as [`detect`]: Windows `IfType` 71 (IEEE 802.11), macOS a "Wi-Fi" / "AirPort"
+/// hardware port, Linux a `wireless` / `phy80211` entry under `/sys/class/net/<dev>`. The
+/// "Otomatik" audio pick keeps uncompressed audio off Wi-Fi (hidden-gaps 1.11a: L16 has no
+/// concealment worth the name, and Wi-Fi loses and reorders in bursts).
+pub(crate) fn wifi(peer: Option<IpAddr>) -> Option<bool> {
+	let w = imp::wifi(peer);
+	tracing::debug!(?w, ?peer, "route on wi-fi");
+	w
 }
 
 #[cfg(windows)]
@@ -201,22 +248,35 @@ mod imp {
 		LinkKind::Fixed
 	}
 
-	pub(super) fn detect(peer: Option<IpAddr>) -> LinkKind {
-		let list = adapters();
-		if list.is_empty() {
-			return LinkKind::Unknown;
-		}
+	/// The adapter the route to `peer` leaves on, unless that is an overlay adapter (then the
+	/// default route's).
+	fn route_adapter(list: &[Adapter], peer: Option<IpAddr>) -> Option<&Adapter> {
 		let find = |ip: [u8; 4]| best_if(ip).and_then(|i| list.iter().find(|a| a.index == i));
 		let peer_v4 = match peer {
 			Some(IpAddr::V4(v4)) if !v4.is_loopback() && !v4.is_unspecified() => Some(v4.octets()),
 			_ => None,
 		};
-		// The peer's route, unless it leaves on an overlay adapter (then the default route).
 		let mut adapter = peer_v4.and_then(find);
 		if adapter.is_none_or(|a| virtual_adapter(&a.desc) || virtual_adapter(&a.name)) {
 			adapter = find([1, 1, 1, 1]);
 		}
-		adapter.map_or(LinkKind::Unknown, judge)
+		adapter
+	}
+
+	pub(super) fn detect(peer: Option<IpAddr>) -> LinkKind {
+		let list = adapters();
+		if list.is_empty() {
+			return LinkKind::Unknown;
+		}
+		route_adapter(&list, peer).map_or(LinkKind::Unknown, judge)
+	}
+
+	/// IF_TYPE_IEEE80211.
+	const IF_TYPE_WIFI: u32 = 71;
+
+	pub(super) fn wifi(peer: Option<IpAddr>) -> Option<bool> {
+		let list = adapters();
+		route_adapter(&list, peer).map(|a| a.if_type == IF_TYPE_WIFI)
 	}
 }
 
@@ -254,13 +314,24 @@ mod imp {
 		None
 	}
 
-	pub(super) fn detect(peer: Option<IpAddr>) -> LinkKind {
+	/// (interface, gateway) of the route to `peer`, or the default route's behind an overlay.
+	fn peer_route(peer: Option<IpAddr>) -> Option<(String, String)> {
 		let dest = peer.filter(|p| !p.is_loopback()).map(|p| p.to_string());
 		let mut r = dest.as_deref().and_then(route);
 		if r.as_ref().is_none_or(|(dev, _)| dev.starts_with("utun") || dev.starts_with("feth") || dev.starts_with("zt")) {
 			r = route("default");
 		}
-		let Some((dev, gw)) = r else { return LinkKind::Unknown };
+		r
+	}
+
+	pub(super) fn wifi(peer: Option<IpAddr>) -> Option<bool> {
+		let (dev, _) = peer_route(peer)?;
+		let port = hardware_port(&dev)?;
+		Some(port.contains("Wi-Fi") || port.contains("AirPort"))
+	}
+
+	pub(super) fn detect(peer: Option<IpAddr>) -> LinkKind {
+		let Some((dev, gw)) = peer_route(peer) else { return LinkKind::Unknown };
 		if gw == "172.20.10.1" {
 			return LinkKind::Mobile("iPhone hotspot gateway 172.20.10.1".into());
 		}
@@ -296,6 +367,24 @@ mod imp {
 		best.map(|(_, i, g)| (i, g))
 	}
 
+	/// Whether the route to `peer` leaves on a Wi-Fi interface: the peer's own route (a LAN
+	/// host can sit behind wlan0 while the default route is a wired NIC or a VPN), or the
+	/// default route's when there is no IPv4 peer or its route is an overlay.
+	pub(super) fn wifi(peer: Option<IpAddr>) -> Option<bool> {
+		let table = std::fs::read_to_string("/proc/net/route").ok()?;
+		let peer_v4 = match peer {
+			Some(IpAddr::V4(v4)) if !v4.is_loopback() && !v4.is_unspecified() => Some(v4),
+			_ => None,
+		};
+		let mut dev = peer_v4.and_then(|p| super::linux_route_dev(&table, p));
+		if dev.as_deref().is_none_or(super::linux_overlay_dev) {
+			dev = default_route(&table).map(|(d, _)| d);
+		}
+		let dev = dev?;
+		let sys = std::path::Path::new("/sys/class/net").join(&dev);
+		Some(sys.join("wireless").exists() || sys.join("phy80211").exists())
+	}
+
 	pub(super) fn detect(_peer: Option<IpAddr>) -> LinkKind {
 		let Some((dev, gw)) = std::fs::read_to_string("/proc/net/route").ok().as_deref().and_then(default_route) else {
 			return LinkKind::Unknown;
@@ -328,6 +417,9 @@ mod imp {
 	use super::*;
 	pub(super) fn detect(_peer: Option<IpAddr>) -> LinkKind {
 		LinkKind::Unknown
+	}
+	pub(super) fn wifi(_peer: Option<IpAddr>) -> Option<bool> {
+		None
 	}
 }
 
@@ -363,6 +455,22 @@ mod tests {
 		         wlan0\t00000000\t0144A8C0\t0003\t0\t0\t600\t00000000\n\
 		         usb0\t00000000\t010A14AC\t0003\t0\t0\t100\t00000000\n";
 		assert_eq!(imp::default_route(t), Some(("usb0".to_string(), [172, 20, 10, 1])));
+	}
+
+	#[test]
+	fn linux_peer_route_takes_the_longest_prefix() {
+		// Default via eth0 (metric 100), 192.168.68.0/24 on wlan0, a ZeroTier /24 and a down
+		// route; Destination / Mask as /proc/net/route prints them (host-order hex).
+		let t = "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n\
+		         eth0\t00000000\t0100A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n\
+		         wlan0\t0044A8C0\t00000000\t0001\t0\t0\t600\t00FFFFFF\t0\t0\t0\n\
+		         ztabc\t000F790A\t00000000\t0001\t0\t0\t5000\t00FFFFFF\t0\t0\t0\n\
+		         eth1\t3D44A8C0\t00000000\t0000\t0\t0\t0\tFFFFFFFF\t0\t0\t0\n";
+		let dev = |ip: [u8; 4]| linux_route_dev(t, ip.into());
+		assert_eq!(dev([192, 168, 68, 61]).as_deref(), Some("wlan0"), "the down /32 is skipped");
+		assert_eq!(dev([10, 121, 15, 149]).as_deref(), Some("ztabc"));
+		assert_eq!(dev([1, 1, 1, 1]).as_deref(), Some("eth0"));
+		assert!(linux_overlay_dev("ztabc") && linux_overlay_dev("wg0") && !linux_overlay_dev("wlan0"));
 	}
 
 	/// Runs on the machine itself: never panics, always answers (manual check of the live route).

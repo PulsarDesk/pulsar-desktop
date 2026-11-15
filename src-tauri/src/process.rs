@@ -1208,7 +1208,7 @@ pub fn no_window(_cmd: &mut std::process::Command) {}
 /// capturing and streaming the host's screen/audio to the last client. Windows gets
 /// the equivalent through job.rs; macOS has no prctl (accepted gap).
 #[cfg(target_os = "linux")]
-fn die_with_parent(cmd: &mut std::process::Command) {
+pub(crate) fn die_with_parent(cmd: &mut std::process::Command) {
 	use std::os::unix::process::CommandExt;
 	unsafe {
 		cmd.pre_exec(|| {
@@ -1246,8 +1246,43 @@ pub fn spawn_tracked(
 			// encoder running and pegging NVENC (see job.rs).
 			#[cfg(windows)]
 			crate::job::assign(&child);
+			// Session media child: above the NORMAL-class game, no EcoQoS (pulsar-prio).
+			pulsar_prio::boost_child(&child);
 			procs.lock().unwrap().push(child);
 			Ok(())
+		}
+		Err(e) => Err(format!("{program} {}: {e}", crate::i18n::t("err.spawn"))),
+	}
+}
+
+/// [`spawn_tracked`] for a child started later from another thread (a capture's own fallback):
+/// spawned and registered under the `procs` lock, and only while `epoch` still is
+/// `epoch_at_spawn`. A teardown / re-stream drains `procs` and bumps the epoch under that same
+/// lock, so it can never be followed by an orphan streaming into the dead session.
+/// `Ok(false)`: the stream generation moved on, nothing was spawned.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn spawn_tracked_current(
+	procs: &Arc<Mutex<Vec<Child>>>,
+	epoch: &ProcEpoch,
+	epoch_at_spawn: u64,
+	program: &str,
+	args: &[String],
+) -> Result<bool, String> {
+	let mut g = procs.lock().unwrap();
+	if epoch.load(std::sync::atomic::Ordering::SeqCst) != epoch_at_spawn {
+		return Ok(false);
+	}
+	let mut cmd = std::process::Command::new(program);
+	cmd.args(args);
+	no_window(&mut cmd);
+	#[cfg(target_os = "linux")]
+	die_with_parent(&mut cmd);
+	match cmd.spawn() {
+		Ok(child) => {
+			#[cfg(windows)]
+			crate::job::assign(&child);
+			g.push(child);
+			Ok(true)
 		}
 		Err(e) => Err(format!("{program} {}: {e}", crate::i18n::t("err.spawn"))),
 	}
@@ -1337,6 +1372,9 @@ pub fn spawn_encode_with_fallback(
 			};
 			#[cfg(windows)]
 			crate::job::assign(&child);
+			// The encoder child: ABOVE_NORMAL class + no EcoQoS on Windows (it ran at NORMAL next
+			// to the game it streams), best-effort nice -5 on Unix (pulsar-prio::boost_child).
+			pulsar_prio::boost_child(&child);
 			// First `-progress` tick with frame >= 1 = the encoder initialized AND is
 			// emitting frames. `frame=0` ticks are NOT proof of life: ffmpeg's progress
 			// blocks are wall-clock-paced off the transcode loop, so an encoder that
@@ -1574,7 +1612,13 @@ pub fn spawn_shell(cmd: &str) {
 		let _ = c.spawn();
 	}
 	#[cfg(not(windows))]
-	let _ = std::process::Command::new("sh").args(["-c", cmd]).spawn();
+	{
+		let mut c = std::process::Command::new("sh");
+		c.args(["-c", cmd]);
+		// Linux: never hand a session-boosted nice value to a user command (pulsar-prio).
+		pulsar_prio::unboost_command(&mut c);
+		let _ = c.spawn();
+	}
 }
 
 /// Launch a host game: its start hook, then the program/command itself. Returns the PID of
@@ -1609,6 +1653,9 @@ fn spawn_program_pid(path: &str, args: &str) -> Option<u32> {
 		cmd.arg(a);
 	}
 	no_window(&mut cmd);
+	// Linux: the game is launched from the session's async code on a boosted worker and would
+	// inherit its nice value for its whole life, next to the encoder (pulsar-prio).
+	pulsar_prio::unboost_command(&mut cmd);
 	cmd.stdout(std::process::Stdio::null());
 	cmd.stderr(std::process::Stdio::null());
 	let child = cmd.spawn().ok()?;
@@ -1641,6 +1688,7 @@ fn spawn_shell_pid(cmd_str: &str) -> Option<u32> {
 		c
 	};
 	no_window(&mut c);
+	pulsar_prio::unboost_command(&mut c); // see spawn_program_pid
 	let child = c.spawn().ok()?;
 	#[cfg(windows)]
 	crate::job::assign(&child);

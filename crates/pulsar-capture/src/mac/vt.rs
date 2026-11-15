@@ -474,6 +474,20 @@ impl VtEncoder {
 			// macOS 12+; optional.
 			self.set(c"kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality", cf_bool(true));
 		}
+		// SDR = BT.709 limited range (Pulsar's rule on every host): ScreenCaptureKit hands over
+		// BT.709 NV12 video range (pulsar-core `set_sdr_colour`), and these write the colour
+		// description into the VUI so every client decodes it with the same matrix. The range
+		// comes from the pixel format ('420v' = video range). Optional: a key this macOS
+		// lacks leaves the encoder's default.
+		for (prop, value) in [
+			(c"kVTCompressionPropertyKey_ColorPrimaries", c"kCVImageBufferColorPrimaries_ITU_R_709_2"),
+			(c"kVTCompressionPropertyKey_TransferFunction", c"kCVImageBufferTransferFunction_ITU_R_709_2"),
+			(c"kVTCompressionPropertyKey_YCbCrMatrix", c"kCVImageBufferYCbCrMatrix_ITU_R_709_2"),
+		] {
+			if let Some(v) = key(value) {
+				self.set(prop, v);
+			}
+		}
 		self.set_bitrate(s.bitrate_kbps);
 		// SAFETY: a live session.
 		let st = unsafe { VTCompressionSessionPrepareToEncodeFrames(self.session) };

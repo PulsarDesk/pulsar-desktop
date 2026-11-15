@@ -14,6 +14,7 @@ members = [
   "crates/pulsar-sysagent",
   "crates/pulsar-macinput",
   "crates/pulsar-machine",
+  "crates/pulsar-prio",
   "src-tauri",
 ]
 # `cargo test` / `cargo build` default to the light, cross-platform capture crate.

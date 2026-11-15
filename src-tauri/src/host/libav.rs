@@ -295,6 +295,10 @@ impl LibavHost {
 		let thread = std::thread::Builder::new()
 			.name("pulsar-libav-host".into())
 			.spawn(move || {
+				// Capture + encode loop at nice -5 (setpriority or rtkit; libav's encoder threads
+				// started from here inherit it). -5, not lower: software x264 runs on every core.
+				let _prio = pulsar_prio::boost_current_thread(pulsar_prio::Role::Capture);
+				tracing::info!(how = _prio.how(), "libav host thread priority");
 				// SAFETY: every libav call below follows the documented ownership rules; the
 				// thread owns all contexts and frees them on every exit path.
 				let r = unsafe { run(&p, rx, ready_tx) };
@@ -508,13 +512,11 @@ unsafe fn open_decoder(ictx: *mut ff::AVFormatContext, vs: c_int) -> Result<*mut
 	Ok(dc)
 }
 
-/// The CPU chain: `scale/format` so the encoder gets exactly `w×h` in `pix_fmt`. `bt709`
-/// converts with the BT.709 matrix the client decodes (QSV; the encoder's VUI says so). The
-/// software / NVENC chain keeps swscale's default (BT.601, untagged) as it always had — a known
-/// mismatch with the client's BT.709 decode, recorded in docs/agents/status.md.
-fn cpu_graph_desc(w: u32, h: u32, pix_fmt: ff::AVPixelFormat, bt709: bool) -> String {
-	let scale = if bt709 { policy::bt709_scale(w, h) } else { format!("scale={}:{}:flags=fast_bilinear", w, h) };
-	format!("{scale},format=pix_fmts={}", pix_fmt as c_int)
+/// The CPU chain: `scale/format` so the encoder gets exactly `w×h` in `pix_fmt`, converted with
+/// the BT.709 matrix into limited range (Pulsar's SDR rule; the encoder's VUI says so —
+/// `tag_bt709`). swscale's default would convert x11grab's RGB with the BT.601 matrix.
+fn cpu_graph_desc(w: u32, h: u32, pix_fmt: ff::AVPixelFormat) -> String {
+	format!("{},format=pix_fmts={}", policy::bt709_scale(w, h), pix_fmt as c_int)
 }
 
 /// `PULSAR_LIBAV_SHORT_VBV` (libav_policy::rate_limits).
@@ -736,6 +738,10 @@ unsafe fn open_encoder_with(
 	let (max_rate, vbv) = policy::rate_limits((*ec).bit_rate, p.encoder, p.low_latency, short_vbv());
 	(*ec).rc_max_rate = max_rate;
 	(*ec).rc_buffer_size = vbv as c_int;
+	// Every chain converts with BT.709 limited range (`cpu_graph_desc` / libav_policy's
+	// `bt709_scale` / `vaapi_graph_desc`, and the NVENC SDK encoder fed from the CPU graph
+	// signals it too): say so in the VUI (Pulsar's SDR rule).
+	tag_bt709(ec);
 	(*ec).max_b_frames = 0;
 	// GOP as the CLI path: game ≈ 0.25 s, remote ≈ 2 s; the recovery modes force keyframes
 	// from the loop instead of changing this live.
@@ -751,15 +757,11 @@ unsafe fn open_encoder_with(
 			}
 			(*ec).hw_frames_ctx = ff::av_buffer_ref(frames);
 			(*ec).sw_pix_fmt = ff::AVPixelFormat::AV_PIX_FMT_NV12;
-			// Both VA-API chains convert with BT.709 limited range (libav_policy::vaapi_graph_desc).
-			tag_bt709(ec);
 		}
 		HwEncoder::Qsv => {
 			if !hw_dev.is_null() {
 				(*ec).hw_device_ctx = ff::av_buffer_ref(hw_dev);
 			}
-			// The QSV graph converts with BT.709 limited range (libav_policy::bt709_scale).
-			tag_bt709(ec);
 		}
 		_ => {}
 	}
@@ -917,7 +919,9 @@ unsafe fn reopen_encoder(
 }
 
 unsafe fn open_output(p: &Params, ec: *mut ff::AVCodecContext) -> Result<(*mut ff::AVFormatContext, *mut ff::AVStream), String> {
-	let url = format!("rtp://{}?pkt_size=1200", p.dest);
+	// Whole RTP packet capped so the session-framed datagram fits a 1280-byte overlay /
+	// relay MTU (pulsar-core `RTP_MAX_PACKET`).
+	let url = format!("rtp://{}?pkt_size={}", p.dest, pulsar_core::service::media::RTP_MAX_PACKET);
 	let mut octx: *mut ff::AVFormatContext = ptr::null_mut();
 	let url_c = cstr(&url);
 	// `null_mut` coerces to both the `*mut AVOutputFormat` (FFmpeg 4.4) and the `*const`
@@ -981,8 +985,7 @@ unsafe fn run(p: &Params, rx: Receiver<Cmd>, ready: Sender<Result<(), String>>) 
 			let desc = policy::vaapi_graph_desc(p.width, p.height, vpp);
 			build_graph(cx.dec, st, &desc, pix_fmt, cx.hw_dev)?
 		} else {
-			let bt709 = p.encoder == HwEncoder::Qsv;
-			build_graph(cx.dec, st, &cpu_graph_desc(p.width, p.height, pix_fmt, bt709), pix_fmt, ptr::null_mut())?
+			build_graph(cx.dec, st, &cpu_graph_desc(p.width, p.height, pix_fmt), pix_fmt, ptr::null_mut())?
 		};
 		cx.graph = graph;
 		cx.src = src;

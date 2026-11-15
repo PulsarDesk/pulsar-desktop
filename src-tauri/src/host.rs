@@ -151,7 +151,13 @@ fn send_host_restart(
 /// for hundreds of ms — measured entering/leaving a game: a 370 ms hole in the video, then
 /// 17–19 frames at once, RTT 584–934 ms, the bitrate cut to a third. Sunshine runs at HIGH for
 /// the same reason. Back to NORMAL when the last session ends. (Child encoders don't inherit
-/// it; the WebView2 UI is separate processes.)
+/// it — `pulsar_prio::boost_child` raises them to ABOVE_NORMAL; the WebView2 UI is separate
+/// processes.) macOS / Linux have no process-wide class an unprivileged app may raise: there the
+/// session's threads are raised one by one (crates/pulsar-prio: QoS / nice via setpriority or
+/// rtkit), and the per-session `pulsar_prio::session()` guard covers the async workers on every
+/// OS. Linux caveat: nice only weighs threads inside one CPU cgroup / autogroup, so where the
+/// desktop puts the game in its own systemd scope it does not put the host above the game
+/// (see the crate docs).
 fn hosting_priority(on: bool) {
 	#[cfg(windows)]
 	{
@@ -169,13 +175,16 @@ fn hosting_priority(on: bool) {
 }
 
 fn media_features() -> Vec<String> {
-	use pulsar_core::service::media::{FEAT_FEC, FEAT_FEC_RS, FEAT_MOS, FEAT_NACK};
+	use pulsar_core::service::media::{FEAT_AUDIO_FEC, FEAT_FEC, FEAT_FEC_RS, FEAT_MOS, FEAT_NACK};
 	#[allow(unused_mut)]
 	let mut v = vec![
 		FEAT_MOS.to_string(),
 		FEAT_NACK.to_string(),
 		FEAT_FEC.to_string(),
 		FEAT_FEC_RS.to_string(),
+		// Audio parity for a client that asks (`StreamReq::audio_fec`), every OS: the
+		// session's audio forwarder builds it from the RTP stream, whatever encoded it.
+		FEAT_AUDIO_FEC.to_string(),
 	];
 	// Real pinch gestures: Windows = two-finger touch injection, Linux = a virtual uinput
 	// touchpad pinch (libinput gesture), macOS = a trackpad magnify gesture (pulsar-core
@@ -232,15 +241,23 @@ fn media_features() -> Vec<String> {
 	// the matching shortcut. Untested on hardware.
 	#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 	v.push(pulsar_core::service::media::FEAT_GESTURE.to_string());
+	// Mouse side buttons (back / forward): SendInput XBUTTON1/2 on Windows, uinput
+	// BTN_SIDE/BTN_EXTRA on Linux, "other" mouse buttons 3/4 on macOS — the global injectors
+	// and the per-window ones (pulsar-core `input::mouse_button`). The Windows secure-desktop
+	// helper (pulsar-sysagent) drops them: its protocol has no XBUTTON flags.
+	#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+	v.push(pulsar_core::service::media::FEAT_MOUSE_X.to_string());
 	// The session-start bandwidth probe (pulsar-core serve loop answers it on every platform).
 	v.push(pulsar_core::service::media::FEAT_PROBE.to_string());
 	// DualSense passthrough: a virtual wired DualSense over USB/IP (usbip-win2 / vhci-hcd).
 	if crate::ds5::host::available() {
 		v.push(pulsar_core::input::ds5::wire::FEAT_DS5.to_string());
 	}
-	// Uncompressed audio (RTP L16) from the in-process encoder — the Windows process-loopback
-	// path. A host that ends up on an ffmpeg path sends High Opus instead.
-	#[cfg(windows)]
+	// Uncompressed audio (RTP L16) from the in-process encoder: Windows process / endpoint
+	// loopback, macOS ScreenCaptureKit (`spawn_system_audio_mac`), Linux `parec`
+	// (`spawn_pulse_audio_linux`). A host that ends up on an ffmpeg path (surround, a failed
+	// start, no `parec`) sends High Opus instead.
+	#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 	v.push(pulsar_core::service::media::FEAT_AUDIO_RAW.to_string());
 	v
 }
@@ -541,6 +558,10 @@ pub(crate) async fn bring_online(
 ) -> Result<String, String> {
 	// Shared mode: only the machine-wide host lease holder registers (one host per PC).
 	crate::shared_mode::lease::may_host()?;
+	// Remote input permission (Linux /dev/uinput, macOS Accessibility): with unattended access
+	// on, a toast now, so the person here can fix it before anyone connects (input_notice.rs;
+	// once per process).
+	crate::input_notice::host_started(&app);
 	// Remove the virtual pads a killed Pulsar left behind (orphaned Duo HID devices, Duo /
 	// USB/IP pads whose creating process is gone), once per process and off this thread
 	// (SetupAPI + maybe `usbip`): a dead pad is otherwise picked over the session's new one.
@@ -799,15 +820,16 @@ pub(crate) async fn bring_online(
 	let discovery = if !crate::seat::lan_discovery() {
 		None
 	} else {
-		match Discovery::start(announce_name.clone(), node_port, node.public_key(), None).await {
+		// The beacon carries only a name the user chose (never the OS user's real name: it
+		// is broadcast to the whole network) — see `util::beacon_name`.
+		let beacon = crate::util::beacon_name(&cfg.device_name);
+		match Discovery::start(beacon.clone(), node_port, node.public_key(), None).await {
 			Ok(d) => {
-				tracing::info!(port = node_port, name = %announce_name, "LAN discovery beacon started");
+				tracing::info!(port = node_port, name = %beacon, "LAN discovery beacon started");
 				// Honor the current serve gate: a beacon (re)started while in gaming mode must
-				// stay silent (don't advertise a pure client on the LAN).
-				if state
-					.hosting_disabled
-					.load(std::sync::atomic::Ordering::Relaxed)
-				{
+				// stay silent (don't advertise a pure client on the LAN), and so must an
+				// unattended host (see `beacon_silent`).
+				if beacon_silent(&app) {
 					d.set_paused(true);
 				}
 				*state.discovery.lock().unwrap() = Some(d.clone());
@@ -1182,6 +1204,8 @@ pub(crate) async fn bring_online(
 				// A clone the on_input gamepad path uses to forward the game's rumble back to
 				// the client (one dedicated thread per emulated DS4 pad).
 				let rumble_out = out_tx.clone();
+				// A clone for the on_input "your input does not reach this host" notices.
+				let input_out = out_tx.clone();
 
 				// C9: Register this session at accept time (not deferred to the first
 				// StartStream) so the host operator can always see and kick any
@@ -1714,8 +1738,10 @@ pub(crate) async fn bring_online(
 						u8,
 						(ResolvedTarget, Box<dyn VirtualGamepad>),
 					> = std::collections::HashMap::new();
+					// Opened on the first event that needs it; a failed open is retried at most
+					// every 5 s (input_notice::SessionNotice::open_due), so a permission fixed
+					// mid-session (the uinput rule) heals this session too.
 					let mut desktop: Option<sysinput::HostInput> = None;
-					let mut tried = false;
 					// PHASE 3B (same-host co-op): per-WINDOW input target. When THIS session captures
 					// a specific window (a launched game / picked app — Phase 2b stashed its HWND in
 					// `launched_hwnd`), its kb/mouse is delivered to THAT window's message pump via
@@ -1751,6 +1777,8 @@ pub(crate) async fn bring_online(
 					// Virtual pads the host can't create are reported (create_pad_or_tell).
 					let pad_app = app_h.clone();
 					let mut pad_told = false;
+					// Input that cannot reach this desktop is reported (input_notice.rs).
+					let mut input_notice = crate::input_notice::SessionNotice::new(input_out, app_h.clone());
 					// Which monitor's geometry is currently applied to the desktop injector, so we
 					// only re-resolve the virtual-desktop rect when the streamed monitor changes.
 					// `u32::MAX` = "none applied yet" (forces the first resolve).
@@ -1802,6 +1830,11 @@ pub(crate) async fn bring_online(
 					// Touchpad gestures (3 / 4 fingers): the host user's own action for each,
 					// read from this host's settings per gesture (pulsar-core `input::gesture`).
 					let mut gestures = pulsar_core::input::gesture::HostGestures::new();
+					// The client's pointer is relative (captured / locked: a native-renderer game
+					// client, or host pointer lock) — the last pointer motion it sent was relative.
+					// With a game session it picks whole-notch wheel output on Windows.
+					#[cfg(windows)]
+					let mut rel_pointer = false;
 					move |ev: InputEvent| {
 						// View-only: drop EVERY input event for this session (gamepad too)
 						// while the host user has control revoked.
@@ -1811,6 +1844,12 @@ pub(crate) async fn bring_online(
 							.get(&sid)
 							.map(|ci| (ci.view_only, ci.mode == crate::state::ConnMode::Remote))
 							.unwrap_or((false, true));
+						#[cfg(windows)]
+						match ev {
+							InputEvent::PointerRelative { .. } => rel_pointer = true,
+							InputEvent::PointerMotion { .. } => rel_pointer = false,
+							_ => {}
+						}
 						let pointer = matches!(
 							ev,
 							InputEvent::PointerMotion { .. }
@@ -2093,12 +2132,32 @@ pub(crate) async fn bring_online(
 								if routed_to_window {
 									return;
 								}
-								if !tried && !mock_capture() {
-									tried = true;
+								let now = std::time::Instant::now();
+								if desktop.is_none() && !mock_capture() && input_notice.open_due(now) {
 									match sysinput::HostInput::new() {
-										Ok(d) => desktop = Some(d),
-										Err(e) => tracing::warn!("desktop input unavailable: {e}"),
+										Ok(d) => {
+											desktop = Some(d);
+											input_notice.opened();
+										}
+										Err(e) => {
+											tracing::warn!("desktop input unavailable: {e}");
+											input_notice.open_failed(&e, now);
+										}
 									}
+								}
+								// Input permission (Linux /dev/uinput, macOS Accessibility, where the
+								// injector opens without the grant and drops every event): the client
+								// hears it in its session loop (input_notice.rs; once while it passes,
+								// every minute while it fails).
+								if !mock_capture() {
+									input_notice.preflight(now);
+								}
+								// Windows: an elevated window in front swallows this input (UIPI) unless
+								// the SYSTEM helper injects; tell the client (rate-limited).
+								#[cfg(windows)]
+								if let Some(d) = desktop.as_mut() {
+									let helper = d.system_helper_active();
+									input_notice.check_window(&other, helper);
 								}
 								// Windows: resolve the streamed monitor's rect for pen / touch (a pen-only
 								// client never sends PointerMotion, which is where the pointer resolves it).
@@ -2279,7 +2338,17 @@ pub(crate) async fn bring_online(
 										InputEvent::PointerButton { button, down } => {
 											d.button(button, down)
 										}
-										InputEvent::Scroll { dx, dy } => d.scroll(dx, dy),
+										InputEvent::Scroll { dx, dy } => {
+											// Windows: whole WHEEL_DELTA notches in a game session or
+											// while the pointer is relative — games often do
+											// `delta / 120` as an integer, so hi-res 1/8-notch steps
+											// would be a dead wheel there (pulsar-core `input::wheel`).
+											// Hi-res units for the desktop. Linux uinput sends both
+											// axes anyway; macOS posts line events.
+											#[cfg(windows)]
+											d.set_whole_notch_wheel(!remote_mode || rel_pointer);
+											d.scroll(dx, dy)
+										}
 										InputEvent::Key { code, down } => d.key(code, down),
 										InputEvent::Char(c) => d.type_char(c),
 										InputEvent::Pinch { phase, scale } => d.pinch(phase, scale),
@@ -2932,6 +3001,26 @@ pub(crate) async fn bring_online(
 				let _wlan = crate::wlan_lowlat::acquire();
 				// 1 ms timer while streaming: the video pacer's wakes stay on time (see timer_res.rs).
 				let _timer = crate::timer_res::acquire();
+				// Display + system kept awake from the first stream request until the session
+				// ends, whatever capture path / encoder serves it (see keep_awake.rs). The
+				// guard lives in the closure, so it drops with serve_with's future — on the
+				// normal end and on the abort() path alike. A session that never sends a
+				// StreamReq does not hold it.
+				let on_stream = {
+					let mut on_stream = on_stream;
+					let mut awake: Option<crate::keep_awake::Guard> = None;
+					move |req: StreamReq, addr: SocketAddr| {
+						if awake.is_none() {
+							awake = Some(crate::keep_awake::acquire("host session"));
+						}
+						on_stream(req, addr)
+					}
+				};
+				// Session scheduling on every OS (crates/pulsar-prio, hidden-gaps 1.13): Windows
+				// EcoQoS / ignored-timer opt-out, macOS App Nap opt-out, and the async workers that
+				// run the forwarder, the wire pacer and the session loop raised while it streams.
+				let _prio = pulsar_prio::session();
+				tracing::info!(process = %pulsar_prio::session_report(), "host session priority on");
 				let _cleanup_guard = SessionCleanupGuard {
 					procs: procs.clone(),
 					proc_epoch: proc_epoch.clone(),
@@ -3214,6 +3303,31 @@ async fn teardown_node(state: &AppState) {
 		let _ = h.await;
 	}
 	let _ = state.node.lock().unwrap().take();
+}
+
+/// Whether the LAN beacon must stay silent: in gaming mode (a pure client, not connectable) and
+/// while unattended access is on. An unattended host needs no password and no approval, and the
+/// beacon carries the node's address + port, which is all a typed direct connect needs — so on a
+/// shared network (café, hotel, office) announcing it would hand control to anyone there. Clients
+/// that know its id still reach it over the LAN: the relay rendezvous carries both sides' LAN
+/// candidates, so the punch picks the direct LAN path. It only leaves the LAN lists.
+pub(crate) fn beacon_silent(app: &AppHandle) -> bool {
+	let state = app.state::<AppState>();
+	state
+		.hosting_disabled
+		.load(std::sync::atomic::Ordering::Relaxed)
+		|| state.config.lock().unwrap().unattended_access
+}
+
+/// Re-apply the beacon's name and silence after a settings change (device name, unattended
+/// access) or a serve-gate change.
+pub(crate) async fn refresh_beacon(app: &AppHandle) {
+	let state = app.state::<AppState>();
+	let disc = state.discovery.lock().unwrap().clone();
+	let Some(d) = disc else { return };
+	let name = crate::util::beacon_name(&state.config.lock().unwrap().device_name);
+	d.set_paused(beacon_silent(app));
+	d.set_name(name).await;
 }
 
 /// Take this host fully offline (shared mode: the session lost the machine-wide host lease,

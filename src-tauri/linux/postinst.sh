@@ -1,19 +1,35 @@
 #!/bin/sh
-# Pulsar package post-install (deb + rpm): DualSense passthrough setup on Linux.
+# Pulsar package post-install (deb + rpm): DualSense passthrough + remote input setup on Linux.
 # Never fails the install: every step is best effort.
 
 # Group allowed to plug Pulsar's virtual DualSense in (vhci-hcd sysfs attach).
 getent group pulsar-vhci >/dev/null 2>&1 || groupadd --system pulsar-vhci 2>/dev/null || true
 
-# Load vhci-hcd now (also at every boot via /usr/lib/modules-load.d/pulsar.conf).
+# Load vhci-hcd and uinput now (also at every boot via /usr/lib/modules-load.d/pulsar.conf).
 modprobe vhci-hcd 2>/dev/null || true
+modprobe uinput 2>/dev/null || true
 
 if command -v udevadm >/dev/null 2>&1; then
 	udevadm control --reload-rules 2>/dev/null || true
 	# Re-apply to pads and vhci-hcd that are already present.
 	udevadm trigger --subsystem-match=hidraw --action=change 2>/dev/null || true
 	udevadm trigger --subsystem-match=platform --sysname-match='vhci_hcd.*' --action=add 2>/dev/null || true
+	# Remote control: the seat user gets /dev/uinput (70-pulsar-uinput.rules) without a re-login.
+	udevadm trigger --subsystem-match=misc --sysname-match=uinput --action=change 2>/dev/null || true
 fi
+
+# UDP socket buffer limits (/usr/lib/sysctl.d/10-pulsar.conf): applied at every boot by
+# systemd-sysctl; load them now so the first session does not run with the stock 208 KiB cap.
+# Only ever RAISES the caps: a machine already tuned higher keeps its values.
+pulsar_sysctl() {
+	for k in net.core.rmem_max net.core.wmem_max; do
+		cur=$(sysctl -n "$k" 2>/dev/null) || continue
+		if [ "${cur:-0}" -lt 16777216 ] 2>/dev/null; then
+			sysctl -q -w "$k=16777216" >/dev/null 2>&1 || true
+		fi
+	done
+}
+pulsar_sysctl || true
 
 # Shared (machine-wide) mode default for a fresh machine, like Windows: ON when nobody decided
 # yet (no /var/lib/pulsar/mode.json) and no user has Pulsar data. Untested on Linux hardware.

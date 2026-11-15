@@ -44,6 +44,9 @@ pub(crate) async fn set_config(
 ) -> Result<(), String> {
 	crate::i18n::set_lang(&config.language);
 	*state.config.lock().unwrap() = config.clone();
+	// The LAN beacon follows the device name and the unattended switch at once (an unattended
+	// host does not announce itself, see `host::beacon_silent`).
+	crate::host::refresh_beacon(&app).await;
 	config.save(config_path(&app)).map_err(|e| e.to_string())
 }
 
@@ -814,6 +817,14 @@ pub(crate) fn set_pad_background(enabled: bool) {
 	crate::focus_gate::set_background_input(enabled);
 }
 
+/// Sync the "keep the screen awake" preference (Settings → General): how long a viewed
+/// session holds this machine's display awake after the last input — "30", "120" (minutes),
+/// "always" or "off". See `keep_awake::ClientAwake`.
+#[tauri::command]
+pub(crate) fn set_client_awake(mode: String) {
+	crate::keep_awake::set_client_awake(&mode);
+}
+
 /// Enable/disable this device's HOST role from the UI. `serving = false` (set when the
 /// app enters gaming mode — a pure-client personality) makes the host serve loop reject
 /// every inbound connection at auth time, before any Allow/Deny popup, so nobody can
@@ -821,14 +832,15 @@ pub(crate) fn set_pad_background(enabled: bool) {
 /// connects still work. Default (never called) = serving, matching `hosting_disabled`'s
 /// `false` zero-value.
 #[tauri::command]
-pub(crate) fn set_host_serving(state: State<'_, AppState>, serving: bool) {
+pub(crate) fn set_host_serving(app: AppHandle, state: State<'_, AppState>, serving: bool) {
 	state
 		.hosting_disabled
 		.store(!serving, std::sync::atomic::Ordering::Relaxed);
 	// A pure client (gaming mode) must not advertise itself on the LAN — pause/resume the
-	// discovery beacon's announcing alongside the serve gate.
+	// discovery beacon's announcing alongside the serve gate (an unattended host stays
+	// silent either way, see `host::beacon_silent`).
 	if let Some(d) = state.discovery.lock().unwrap().clone() {
-		d.set_paused(!serving);
+		d.set_paused(crate::host::beacon_silent(&app));
 	}
 }
 

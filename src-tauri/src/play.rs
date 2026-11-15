@@ -51,15 +51,20 @@ pub(crate) struct ResidentRender {
 /// speak of) only on a LAN the probe measured with plenty of room and a host that can send it;
 /// High Opus (320 kb/s) once the probe saw a few Mbit/s â€” or on a LAN without a probe (older
 /// host); Standard (128 kb/s) otherwise.
+///
+/// Never Raw when this client reaches the host over Wi-Fi (`wifi`): L16 has no codec
+/// concealment, and Wi-Fi loses and reorders in bursts (hidden-gaps 1.11a). The user can still
+/// pick "raw" by hand.
 pub(crate) fn auto_audio_quality(
 	probe_kbps: Option<u32>,
 	path: crate::adapt_memory::PathClass,
 	host_raw: bool,
+	wifi: bool,
 ) -> pulsar_core::audio::AudioQuality {
 	use crate::adapt_memory::PathClass;
 	use pulsar_core::audio::AudioQuality;
 	match probe_kbps {
-		Some(k) if host_raw && path == PathClass::Lan && k >= 15_000 => AudioQuality::Raw,
+		Some(k) if host_raw && !wifi && path == PathClass::Lan && k >= 15_000 => AudioQuality::Raw,
 		Some(k) if k >= 3_000 => AudioQuality::High,
 		None if path == PathClass::Lan => AudioQuality::High,
 		_ => AudioQuality::Standard,
@@ -325,14 +330,26 @@ pub(crate) async fn start_remote_play(
 	// it â€” asked over the session (validated, hardware-only caps) BEFORE this client
 	// writes its decoder SDP, so the SDP and the stream the host starts can never
 	// disagree. Timeout/old host/empty caps â†’ H.264 (universally encodable).
-	let host_caps = tokio::time::timeout(
-		std::time::Duration::from_secs(2),
+	// SECURITY: no answer is NOT "empty caps". Defaulting used to drop the session to plain
+	// (unencrypted) RTP whenever the caps exchange went missing for 2 s — which an on-path
+	// attacker can force by dropping a few packets. Ask until the core gives up (~3 s of
+	// resends) and fail the connect instead.
+	let host_caps = match tokio::time::timeout(
+		std::time::Duration::from_secs(5),
 		pulsar_core::service::query_stream_caps(&mut sess),
 	)
 	.await
-	.ok()
-	.and_then(|r| r.ok())
-	.unwrap_or_default();
+	{
+		Ok(Ok(caps)) => caps,
+		Ok(Err(e)) => {
+			tracing::warn!(%e, "host caps query failed — refusing to stream without them");
+			return Err(crate::i18n::t("err.hostCaps").into());
+		}
+		Err(_) => {
+			tracing::warn!("host caps query timed out — refusing to stream without them");
+			return Err(crate::i18n::t("err.hostCaps").into());
+		}
+	};
 	tracing::info!(codecs = ?host_caps.codecs, encoders = ?host_caps.encoders, features = ?host_caps.features, "host caps received");
 	// Touchpad pinch: real gesture to hosts that inject it, Ctrl + wheel to the rest.
 	crate::kbdhook::set_host_pinch(
@@ -350,12 +367,14 @@ pub(crate) async fn start_remote_play(
 	// not also forward the mouse Windows synthesizes from them.
 	crate::kbdhook::set_host_pen_touch(host_pen, host_touch);
 	// Media-over-session: carry the RTP inside the encrypted session (ONE external
-	// socket â€” the same hole the control channel punched; symmetric NAT then works
-	// via the relay). Only when the host advertises it; old hosts stream direct.
-	let mos = host_caps
-		.features
-		.iter()
-		.any(|f| f == pulsar_core::service::media::FEAT_MOS);
+	// socket: the same hole the control channel punched; symmetric NAT then works
+	// via the relay). It is the only ENCRYPTED media path, so a host without it gets no
+	// stream at all (never the old plaintext direct RTP).
+	if !pulsar_core::service::media::encrypted_media(&host_caps.features) {
+		tracing::warn!(features = ?host_caps.features, "host does not offer encrypted media (mos) — refusing a plaintext stream");
+		return Err(crate::i18n::t("err.hostNoEncryptedMedia").into());
+	}
+	let mos = true;
 	let host_nack = host_caps
 		.features
 		.iter()
@@ -1167,9 +1186,19 @@ pub(crate) async fn start_remote_play(
 	// The memory is per peer AND per kind of path (LAN / internet / relay): the same host over
 	// the home LAN and over a tethered phone are different paths, and a LAN rate seeding a
 	// mobile session started it far above the link (the 2026-11-09 field collapse).
-	let path_class = crate::adapt_memory::PathClass::of(
+	// Overlay VPNs (ZeroTier / WireGuard / Tailscale) are classified `Wan` even with a
+	// private address (interface check + the measured round trip when the path choice ran).
+	let class_rtt = match sess.path_latency().await {
+		Some((d, r)) => match sess.transport() {
+			Transport::Direct => d,
+			Transport::Relay => r,
+		},
+		None => None,
+	};
+	let path_class = crate::adapt_memory::classify(
 		sess.transport(),
 		sess.peer_addr().await.map(|a| a.ip()),
+		class_rtt,
 	);
 	// The memory seeds 60 % of the last clean rate, but never under ~2 Mbit: one bad session
 	// (e.g. a host that couldn't keep up) must not start every later one at the floor.
@@ -1258,9 +1287,19 @@ pub(crate) async fn start_remote_play(
 	// Audio quality: the user's pick, or for "auto" the highest this path carries.
 	let host_audio_raw =
 		host_caps.features.iter().any(|f| f == pulsar_core::service::media::FEAT_AUDIO_RAW);
-	let auto_audio = auto_audio_quality(probe.as_ref().map(|e| e.kbps), path_class, host_audio_raw);
+	// Asked on every LAN path (off the session loop: it spawns `networksetup` on macOS): it
+	// picks the Raw audio quality AND the native player's jitter ceiling (a Wi-Fi client keeps
+	// the full one for its power-save / scan stalls).
+	let client_wifi = if path_class == crate::adapt_memory::PathClass::Lan {
+		let peer_ip = sess.peer_addr().await.map(|a| a.ip());
+		tokio::task::spawn_blocking(move || crate::mobile_link::wifi(peer_ip)).await.ok().flatten() == Some(true)
+	} else {
+		false
+	};
+	let auto_audio =
+		auto_audio_quality(probe.as_ref().map(|e| e.kbps), path_class, host_audio_raw, client_wifi);
 	let audio_quality = audio_quality_for(&aq_pref, auto_audio, host_audio_raw);
-	tracing::info!(pref = %aq_pref, auto = ?auto_audio, quality = ?audio_quality, "audio quality");
+	tracing::info!(pref = %aq_pref, auto = ?auto_audio, quality = ?audio_quality, client_wifi, "audio quality");
 	let mut acfg = pulsar_core::adapt::Config::new(pulsar_core::adapt::codec_from_wire(&codec_h), cap_for_ctl);
 	acfg.native = native_dims;
 	// No memory of this path â†’ 0: the controller starts cautiously (min(cap, ~4 Mbit)) and
@@ -1502,6 +1541,8 @@ pub(crate) async fn start_remote_play(
 		fec_rs: mos,
 		rfi: rfi_req,
 		audio_quality,
+		// Audio parity rides the session too; a host without it ignores the field.
+		audio_fec: mos,
 	};
 	if let Err(e) = request_stream(&mut sess, &req).await {
 		// Park ANY live pulsar-render child instead of killing it â€” regardless of whether
@@ -1557,7 +1598,11 @@ pub(crate) async fn start_remote_play(
 	// The host's Opus/RTP audio plays natively on every platform (libopus + SDL3,
 	// Moonlight's model â€” see native_audio.rs). Started even when transmit is off, so a live
 	// toggle on just works; the SDL device only opens when the first packet arrives.
-	let audio_native = (audio_port > 0).then(|| crate::native_audio::start(view.audio_packets(), id));
+	let audio_native = (audio_port > 0).then(|| crate::native_audio::start(
+		view.audio_packets(),
+		id,
+		path_class == crate::adapt_memory::PathClass::Lan && !client_wifi,
+	));
 
 	// Register this play session (one per connected-host tab). `id` was allocated above.
 	let running = Arc::new(AtomicBool::new(true));
@@ -2284,6 +2329,7 @@ pub(crate) async fn start_remote_play(
 		host_pen,
 		host_touch,
 		fixed_kbps,
+		host_caps.features.iter().any(|f| f == pulsar_core::service::media::FEAT_MOUSE_X),
 	));
 
 	state.plays.lock().unwrap().insert(
@@ -2806,25 +2852,9 @@ mod tests {
 	}
 }
 
-/// The adaptive controller's ceiling when neither the user nor the transport set one: what a
-/// clean picture of the native point needs, with headroom. Moonlight-like reference (â‰ˆ 20 Mbit
-/// for 1080p60 H.264 game content), scaled by pixels, by fps^0.75 (more frames share more
-/// redundancy), and by the codec's efficiency; desktop content needs ~60 % of that. Clamped
-/// to 15..150 Mbit. The controller still only climbs as far as the path stays clean.
-pub(crate) fn auto_cap_kbps(codec: &str, native: (u32, u32, u32), game_mode: bool) -> u32 {
-	let (w, h, fps) = native;
-	let (w, h) = if w == 0 || h == 0 { (1920, 1080) } else { (w, h) };
-	let fps = if fps == 0 { 60 } else { fps.max(30) };
-	let px = (w as f64 * h as f64) / (1920.0 * 1080.0);
-	let f = (fps as f64 / 60.0).powf(0.75);
-	let eff = match codec.to_ascii_lowercase().as_str() {
-		"h265" | "hevc" => 0.75,
-		"av1" => 0.65,
-		_ => 1.0,
-	};
-	let mode = if game_mode { 1.0 } else { 0.6 };
-	((20_000.0 * px * f * eff * mode) as u32).clamp(15_000, 150_000)
-}
+/// The adaptive controller's ceiling when neither the user nor the transport set one (shared
+/// with the mobile client; see `pulsar_core::adapt::caps`).
+pub(crate) use pulsar_core::adapt::caps::auto_cap_kbps;
 
 #[cfg(test)]
 mod audio_quality_tests {
@@ -2834,15 +2864,17 @@ mod audio_quality_tests {
 
 	#[test]
 	fn auto_takes_the_highest_the_path_carries() {
-		assert_eq!(auto_audio_quality(Some(18_920), PathClass::Lan, true), Raw);
+		assert_eq!(auto_audio_quality(Some(18_920), PathClass::Lan, true, false), Raw);
+		// The same LAN over this client's Wi-Fi: High Opus, never L16.
+		assert_eq!(auto_audio_quality(Some(18_920), PathClass::Lan, true, true), High);
 		// No raw-capable host, or not a LAN, or a thin LAN: Opus.
-		assert_eq!(auto_audio_quality(Some(18_920), PathClass::Lan, false), High);
-		assert_eq!(auto_audio_quality(Some(18_920), PathClass::Wan, true), High);
-		assert_eq!(auto_audio_quality(Some(9_000), PathClass::Lan, true), High);
-		assert_eq!(auto_audio_quality(Some(2_000), PathClass::Relay, true), Standard);
+		assert_eq!(auto_audio_quality(Some(18_920), PathClass::Lan, false, false), High);
+		assert_eq!(auto_audio_quality(Some(18_920), PathClass::Wan, true, false), High);
+		assert_eq!(auto_audio_quality(Some(9_000), PathClass::Lan, true, false), High);
+		assert_eq!(auto_audio_quality(Some(2_000), PathClass::Relay, true, false), Standard);
 		// An older host has no probe: a LAN still gets High, anything else Standard.
-		assert_eq!(auto_audio_quality(None, PathClass::Lan, false), High);
-		assert_eq!(auto_audio_quality(None, PathClass::Relay, false), Standard);
+		assert_eq!(auto_audio_quality(None, PathClass::Lan, false, false), High);
+		assert_eq!(auto_audio_quality(None, PathClass::Relay, false, false), Standard);
 	}
 
 	#[test]
@@ -2853,22 +2885,5 @@ mod audio_quality_tests {
 		assert_eq!(audio_quality_for("raw", Standard, true), Raw);
 		assert_eq!(audio_quality_for("raw", Standard, false), High);
 		assert_eq!(audio_quality_for("???", High, true), High);
-	}
-}
-
-#[cfg(test)]
-mod auto_cap_tests {
-	use super::auto_cap_kbps;
-
-	#[test]
-	fn scales_with_pixels_fps_codec_and_mode() {
-		let game_1200p120_hevc = auto_cap_kbps("h265", (1920, 1200, 120), true);
-		assert!((26_000..30_000).contains(&game_1200p120_hevc), "{game_1200p120_hevc}");
-		let remote = auto_cap_kbps("h265", (1920, 1200, 120), false);
-		assert!(remote < game_1200p120_hevc && remote >= 15_000, "{remote}");
-		let uhd = auto_cap_kbps("h265", (3840, 2160, 60), true);
-		assert!((55_000..65_000).contains(&uhd), "{uhd}");
-		assert_eq!(auto_cap_kbps("h264", (1280, 720, 30), false), 15_000, "never under 15 Mbit");
-		assert_eq!(auto_cap_kbps("h264", (0, 0, 0), true), 20_000, "unknown â†’ 1080p60 reference");
 	}
 }

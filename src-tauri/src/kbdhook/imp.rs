@@ -14,14 +14,15 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
 	CallNextHookEx, DispatchMessageW, GetMessageW, PostThreadMessageW, SetWindowsHookExW,
-	TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, LLKHF_UP,
+	TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED, LLKHF_UP,
 	LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_LBUTTONDOWN,
 	WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT,
-	WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
+	WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_XBUTTONDOWN, WM_XBUTTONUP,
 };
 
 mod keymap;
-use keymap::{scancode_to_evdev, vk_to_evdev};
+use keymap::{ll_key_to_evdev, scancode_to_evdev, vk_to_evdev};
+use pulsar_core::input::mouse_button;
 use windows_sys::Win32::UI::WindowsAndMessaging::{KillTimer, PeekMessageW, SetTimer, PM_NOREMOVE, WM_TIMER};
 
 
@@ -161,7 +162,8 @@ fn globals() -> &'static Mutex<Globals> {
 /// pointer-motion try_sends keep it full — so the first key after a burst of mouse moves
 /// killed the keyboard hook for good (mouse still working, no keys, no Ctrl+Alt+Z).
 /// One unbounded queue + one thread keeps the events in order; the thread does the
-/// (possibly blocking) send, still dropping coalescible motion when the channel is full.
+/// (possibly blocking) send. Coalescible motion on a full channel is merged with the next
+/// motion instead of dropped, so a congested moment doesn't lose mouse distance.
 fn fwd(tx: &Sender<InputEvent>, ev: InputEvent) {
 	use std::sync::mpsc;
 	use std::sync::OnceLock;
@@ -171,18 +173,13 @@ fn fwd(tx: &Sender<InputEvent>, ev: InputEvent) {
 		std::thread::Builder::new()
 			.name("kbdhook-fwd".into())
 			.spawn(move || {
-				for (tx, ev) in qrx {
-					if crate::util::is_coalescible_input(&ev) {
-						let _ = tx.try_send(ev);
-					} else {
-						if matches!(ev, InputEvent::Key { .. }) {
-							FWD_KEYS.fetch_add(1, Ordering::Relaxed);
-						}
-						if tx.blocking_send(ev).is_err() {
-							tracing::warn!("kbd forwarder: session channel closed");
-						}
+				// Edges wait for a slot; motion is merged (never dropped) while the session
+				// channel is full — see `util::input_forwarder_loop`.
+				crate::util::input_forwarder_loop(qrx, "kbd forwarder", |ev| {
+					if matches!(ev, InputEvent::Key { .. }) {
+						FWD_KEYS.fetch_add(1, Ordering::Relaxed);
 					}
-				}
+				});
 			})
 			.expect("spawn kbdhook forwarder");
 		Mutex::new(qtx)
@@ -957,6 +954,9 @@ fn capture_thread() {
 	// the active one (multi-instance on the same ASTER box). The thread just blocks
 	// until a filtered key arrives.
 	let mut stroke = [0u8; 24];
+	// Pause arrives as two strokes, E1 1D then 45 (the second looks like Num Lock): the
+	// verdict of the first (suppress or pass), applied to the tail when it comes.
+	let mut pause_tail: Option<bool> = None;
 	loop {
 		let device = unsafe { (it.wait)(it.ctx) }; // blocks until a keystroke
 		if device <= 0 {
@@ -973,8 +973,18 @@ fn capture_thread() {
 			// Keyboard stroke: code@0, state@2 (KEY_UP 0x01, E0 0x02, E1 0x04).
 			let code = u16::from_le_bytes([stroke[0], stroke[1]]);
 			let state = u16::from_le_bytes([stroke[2], stroke[3]]);
-			if state & 0x04 != 0 {
-				false // E1 (Pause/Break) 2-stroke seq we can't map cleanly — pass it
+			if let (Some(verdict), 0x45) = (pause_tail.take(), code) {
+				verdict // the 45 half of Pause's E1 1D 45: same fate as its first half
+			} else if state & 0x04 != 0 {
+				// E1 sequence = Pause (E1 1D 45): the 1D stroke carries the edge as evdev
+				// KEY_PAUSE, the 45 stroke that follows is swallowed or passed with it.
+				if code == 0x1D {
+					let verdict = handle_key(119, state & 0x01 == 0);
+					pause_tail = Some(verdict);
+					verdict
+				} else {
+					false
+				}
 			} else {
 				match scancode_to_evdev(code, state & 0x02 != 0) {
 					Some(ev) => handle_key(ev, state & 0x01 == 0),
@@ -1270,6 +1280,18 @@ fn handle_key(evdev: u32, down: bool) -> bool {
 	false
 }
 
+/// An Interception wheel stroke (`state` bits, raw `rolling` delta) as a wire scroll.
+fn interception_wheel(state: u16, rolling: i16) -> Option<InputEvent> {
+	let px = rolling as f64 * 100.0 / 120.0;
+	if state & 0x400 != 0 {
+		Some(InputEvent::Scroll { dx: 0.0, dy: -px })
+	} else if state & 0x800 != 0 {
+		Some(InputEvent::Scroll { dx: px, dy: 0.0 })
+	} else {
+		None
+	}
+}
+
 /// Forward a captured mouse stroke (native-renderer mode) to the host as relative
 /// motion + buttons + wheel, and suppress it locally (cursor lock — the mouse only
 /// drives the remote). Returns true (suppress) whenever a session is active.
@@ -1326,13 +1348,17 @@ fn handle_mouse(state: u16, flags: u16, rolling: i16, x: i32, y: i32) -> bool {
 	// flaps (e.g. the render-child activation), so re-assert it on each mouse event.
 	reassert_confine();
 	// Relative movement (skip absolute-coordinate mice — 0x001 = ABSOLUTE flag).
+	// Through `fwd` like the buttons below (not a direct try_send): the same ordered queue
+	// keeps a click behind the motion that preceded it, and a full channel merges motion
+	// instead of dropping it. Batching to the wire happens in the session loop.
 	if flags & 0x001 == 0 && (x != 0 || y != 0) {
 		let (dx, dy) = super::scale_relative(x as f64, y as f64);
 		if dx != 0.0 || dy != 0.0 {
-			let _ = tx.try_send(InputEvent::PointerRelative { dx, dy });
+			fwd(tx, InputEvent::PointerRelative { dx, dy });
 		}
 	}
-	// Buttons (Interception mouse-state bitflags → 0=left, 1=right, 2=middle).
+	// Buttons (Interception mouse-state bitflags → 0=left, 1=right, 2=middle, 3=back,
+	// 4=forward). Side buttons reach only hosts with FEAT_MOUSE_X (play/hold.rs).
 	for (bit, button, down) in [
 		(0x001u16, 0u8, true),
 		(0x002, 0, false),
@@ -1340,6 +1366,11 @@ fn handle_mouse(state: u16, flags: u16, rolling: i16, x: i32, y: i32) -> bool {
 		(0x008, 1, false),
 		(0x010, 2, true),
 		(0x020, 2, false),
+		// BUTTON_4 / BUTTON_5 = the side buttons X1 (back) / X2 (forward).
+		(0x040, mouse_button::BACK, true),
+		(0x080, mouse_button::BACK, false),
+		(0x100, mouse_button::FORWARD, true),
+		(0x200, mouse_button::FORWARD, false),
 	] {
 		if state & bit != 0 {
 			if down {
@@ -1349,12 +1380,15 @@ fn handle_mouse(state: u16, flags: u16, rolling: i16, x: i32, y: i32) -> bool {
 			fwd(tx, InputEvent::PointerButton { button, down });
 		}
 	}
-	// Wheel: state carries the WHEEL bit (0x400), rolling is the signed delta.
-	if state & 0x400 != 0 && rolling != 0 {
-		let _ = tx.try_send(InputEvent::Scroll {
-			dx: 0.0,
-			dy: -(rolling as f64),
-		});
+	// Wheel: state carries INTERCEPTION_MOUSE_WHEEL (0x400) or INTERCEPTION_MOUSE_HWHEEL
+	// (0x800); `rolling` is the raw signed delta in WHEEL_DELTA units (120 per notch, finer on
+	// hi-res wheels), +up / +right. The wire is browser px (100 per notch, +y down, +x right)
+	// like the WM_MOUSEWHEEL path — the raw 120s used to go out as px, so this path scrolled
+	// 1.2x too far, and the horizontal wheel was dropped entirely.
+	if rolling != 0 {
+		if let Some(ev) = interception_wheel(state, rolling) {
+			fwd(tx, ev);
+		}
 	}
 	// Track held buttons for the disengage flush (mirror `g.held` for keys). Done after
 	// the `tx` borrow above so the disjoint `g.held_buttons` field can be mutated. A
@@ -1367,6 +1401,11 @@ fn handle_mouse(state: u16, flags: u16, rolling: i16, x: i32, y: i32) -> bool {
 		(0x008, 1, false),
 		(0x010, 2, true),
 		(0x020, 2, false),
+		// BUTTON_4 / BUTTON_5 = the side buttons X1 (back) / X2 (forward).
+		(0x040, mouse_button::BACK, true),
+		(0x080, mouse_button::BACK, false),
+		(0x100, mouse_button::FORWARD, true),
+		(0x200, mouse_button::FORWARD, false),
 	] {
 		if state & bit != 0 {
 			if down {
@@ -1679,14 +1718,24 @@ fn handle_mouse_wh(msg: u32, x: i32, y: i32, data: u32) -> bool {
 			return false;
 		}
 		WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MBUTTONDOWN
-		| WM_MBUTTONUP => {
+		| WM_MBUTTONUP | WM_XBUTTONDOWN | WM_XBUTTONUP => {
 			let (button, down) = match msg {
 				WM_LBUTTONDOWN => (0u8, true),
 				WM_LBUTTONUP => (0, false),
 				WM_RBUTTONDOWN => (1, true),
 				WM_RBUTTONUP => (1, false),
 				WM_MBUTTONDOWN => (2, true),
-				_ => (2, false),
+				WM_MBUTTONUP => (2, false),
+				// MSLLHOOKSTRUCT.mouseData high word = XBUTTON1 / XBUTTON2. Engaged, the side
+				// buttons act on the remote only (they used to be swallowed and dropped);
+				// hosts without FEAT_MOUSE_X never get them (play/hold.rs).
+				_ => {
+					let Some(b) = mouse_button::from_win_xbutton((data >> 16) as u16) else {
+						drop(g);
+						return true;
+					};
+					(b, msg == WM_XBUTTONDOWN)
+				}
 			};
 			if down {
 				g.held_buttons.insert(button);
@@ -2378,8 +2427,16 @@ unsafe extern "system" fn ll_keyboard_proc(ncode: i32, wparam: WPARAM, lparam: L
 	}
 	let msg = wparam as u32;
 	let down = matches!(msg, WM_KEYDOWN | WM_SYSKEYDOWN) && (kb.flags & LLKHF_UP == 0);
-	let Some(evdev) = vk_to_evdev(kb.vkCode as u16) else {
-		// Unknown VK (no evdev mapping): don't break the local machine — let it through.
+	// By VK, told apart / completed by the scancode (Numpad Enter, JIS Yen / Ro, and VKs
+	// without a US meaning such as VK_OEM_8 = TR-Q `*?\`, VK_CLEAR = Numpad 5, Ctrl+Break).
+	let Some(evdev) = ll_key_to_evdev(kb.vkCode as u16, kb.scanCode as u16, kb.flags & LLKHF_EXTENDED != 0) else {
+		// Neither the VK nor the scancode maps. Engaged, every key belongs to the remote: one
+		// the remote cannot take must not act on the desktop behind the session (an IME key
+		// switching the local input method), so it is swallowed — except the volume / media
+		// keys, which keep driving THIS machine. Disengaged it types locally as always.
+		if ENGAGED.load(Ordering::SeqCst) && !keymap::local_only_vk(kb.vkCode as u16) {
+			return 1;
+		}
 		return CallNextHookEx(std::ptr::null_mut(), ncode, wparam, lparam);
 	};
 	match evdev {
@@ -2410,6 +2467,17 @@ unsafe extern "system" fn ll_keyboard_proc(ncode: i32, wparam: WPARAM, lparam: L
 #[cfg(test)]
 mod chord_tests {
 	use super::*;
+
+	#[test]
+	fn interception_wheel_is_browser_px_both_axes() {
+		// One notch up = 120 raw → 100 px toward the top (dy negative), not 120.
+		assert_eq!(interception_wheel(0x400, 120), Some(InputEvent::Scroll { dx: 0.0, dy: -100.0 }));
+		// A hi-res 1/8 notch down.
+		assert_eq!(interception_wheel(0x400, -15), Some(InputEvent::Scroll { dx: 0.0, dy: 12.5 }));
+		// The horizontal wheel (tilt right) is forwarded, + = right.
+		assert_eq!(interception_wheel(0x800, 120), Some(InputEvent::Scroll { dx: 100.0, dy: 0.0 }));
+		assert_eq!(interception_wheel(0x001, 120), None);
+	}
 
 	#[test]
 	fn pen_and_touch_synthesized_mouse_is_recognized() {

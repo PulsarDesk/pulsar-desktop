@@ -212,6 +212,18 @@ Part of the pulsar-desktop agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
   Leaky queue bounds latency. **Input injection is uinput**
   (`DesktopInput`), NOT the RemoteDesktop portal (its `Start` hangs on this KDE);
   needs the user in the `input` group.
+  **Colour conversion (2026-11-15, hidden-gaps 1.10, untested on hardware):** `videoconvert` /
+  `videoscale` run with `n-threads=0` (one slice per core; the element default was ONE thread)
+  on every gst path (Wayland, raw frames, X11). With a `va` encoder (`vah26Xenc`) the
+  in-process pipeline first tries `vapostproc ! video/x-raw(memory:VAMemory),format=NV12`: GPU
+  conversion, and zero-copy when PipeWire + GStreamer negotiate DMA-BUF (caps left open; SHM
+  frames are uploaded otherwise). That attempt must get a frame to the encoder within 3 s or
+  the CPU convert runs on the same portal session (`PULSAR_WAYLAND_CPU_CONVERT=1` skips it;
+  log line `wayland capture colour conversion`). A start-race failure (not PLAYING) retries
+  the GPU path in the next slot; a broken one (parse error, no frame) is remembered for the
+  process, so re-streams and reconnects don't pay the 3 s again. Not done: NVENC/x264/gstreamer-vaapi keep the
+  CPU convert (NVENC's ARGB input and `cudaconvert` would belong to the encoder work); the
+  X11 libav path still scales on the CPU.
   **AppImage:** the binary links libgstreamer, so linuxdeploy bundles Ubuntu 22.04's
   1.20 core — a distro's newer plugins can't load into it (no elements → black screen on
   every non-Debian Wayland host). `release.yml` therefore bundles the pipeline's plugins
@@ -261,6 +273,12 @@ CLI cannot be asked for one) and no RFI. Now `make_on_stream` starts the native 
   budget at 1080p; CBR then skips frames to repay it — measured), QualityVsSpeed 0 in game mode.
   The Qualcomm MFT ignores `AVEncCommonBufferSize` (identical output for a 1-15 frame VBV) and
   `AVScenarioInfo = DisplayRemoting` halves the frame rate — not used.
+- **Colour / HDR / 4:4:4** (wip/all merge): the VideoProcessor converts BT.709 limited
+  (`d3d::set_sdr_colour_spaces`) and both media types carry the BT.709 limited attributes
+  (`set_type_with_colour`; an MFT that rejects them gets the type again without — see "Colour
+  space"). The path is 8-bit 4:2:0: an HDR10 or 4:4:4 request streams SDR 4:2:0 here
+  (`start_capture_encode`: `mf_only` plans neither). Its RTP goes through the shared
+  `RtpEgress` (1136-byte packets, `rtp::MTU` = pulsar-core `RTP_MAX_PACKET`).
 - **Live**: bitrate (`AVEncCommonMeanBitRate` + Max + BufferSize, next frame), keyframe on
   request (`AVEncVideoForceKeyFrame`: the very next frame), monitor switch (the thread rebuilds).
 - **Loss recovery = long-term references** where the MFT has `AVEncVideoLTRBufferControl` /
@@ -428,9 +446,9 @@ Host column = what `auto` resolves to, in fallback order (each step falls back t
 | OS | GPU | Host encode (auto order) | Client decode (`pulsar-render`) |
 | --- | --- | --- | --- |
 | Windows x64 | NVIDIA | native NVENC SDK (DXGI or WGC, `path.rs`; a hybrid panel may pick the iGPU's MF encoder) → ffmpeg `ddagrab` + `*_nvenc` → libx264. H.264 / HEVC / AV1 (AV1 on RTX 40+); HDR10 (HEVC / AV1, monitor in HDR mode) and 4:4:4 (H.264 / HEVC) only on the native path. **Measured** (RTX 3080 Laptop) | Media Foundation, synchronous MFT on the default adapter. `hw` per codec = the MFT is D3D11-aware AND the adapter has the DXVA profile (`win/decode.rs::probe_json`). HEVC needs the HEVC Video Extensions, AV1 the AV1 Video Extension. **Measured**: the RTX 3080 Laptop + Vega box opens the Vega as default adapter → H.264/HEVC hw, AV1 software |
-| Windows x64 | AMD | ffmpeg `ddagrab` + `*_amf` (CPU bounce to NV12, SDR 4:2:0: HDR10 and 4:4:4 are native-NVENC only) → libx264. A native MF path for AMD/Intel is not on main. Only the hybrid box's Vega iGPU ran it (failover from a hung NVENC); a discrete-AMD-only host never ran | same MF probe; hw where the GPU has the DXVA profile |
-| Windows x64 | Intel | ffmpeg `ddagrab` + `*_qsv` (fully on GPU, SDR 4:2:0) → libx264. Never run on hardware | same MF probe |
-| Windows ARM64 | Qualcomm Adreno | ffmpeg `ddagrab` + `h264_mf` / `hevc_mf` (Qualcomm MFT; NV12 CPU bounce, SDR 4:2:0) → libx264. **Measured**: the Snapdragon laptop has been a daily host + client since 2026-11-07 | MF: **measured** H.264/HEVC hw (DXVA); AV1 not available (no AV1 MFT installed) |
+| Windows x64 | AMD | native Media Foundation path (DXGI / WGC → VideoProcessor → AMD's MFT in-process, SDR 4:2:0; "Windows without NVENC" above) → ffmpeg `ddagrab` + `*_amf` (CPU bounce to NV12, SDR 4:2:0: HDR10 and 4:4:4 are native-NVENC only) → libx264. The native MF path never ran on AMD; only the hybrid box's Vega iGPU ran AMF (failover from a hung NVENC); a discrete-AMD-only host never ran | same MF probe; hw where the GPU has the DXVA profile |
+| Windows x64 | Intel | native Media Foundation path (Intel's MFT, SDR 4:2:0) → ffmpeg `ddagrab` + `*_qsv` (fully on GPU, SDR 4:2:0) → libx264. Never run on hardware | same MF probe |
+| Windows ARM64 | Qualcomm Adreno | native Media Foundation path (Qualcomm MFT in-process, SDR 4:2:0, LTR loss recovery; measured headless, untested in a real session) → ffmpeg `ddagrab` + `h264_mf` / `hevc_mf` (Qualcomm MFT; NV12 CPU bounce, SDR 4:2:0) → libx264. **Measured**: the Snapdragon laptop has been a daily host + client since 2026-11-07 (on the ffmpeg CLI) | MF: **measured** H.264/HEVC hw (DXVA); AV1 not available (no AV1 MFT installed) |
 | macOS | Apple silicon / Intel | native ScreenCaptureKit (a display or one window) → VideoToolbox (H.264/HEVC) → ffmpeg `avfoundation` + `*_videotoolbox` → libx264; AV1 = software SVT-AV1 via ffmpeg only. Never run on hardware | VideoToolbox; `--probe` asks `VTIsHardwareDecodeSupported` (`mac/decode.rs`): H.264/HEVC always ok (hw or not), AV1 only in hardware (M3+). Never run on hardware |
 | Linux X11 | NVIDIA | libav in-process (x11grab) + NVENC SDK on CUDA → libavcodec `*_nvenc` → ffmpeg CLI. Never run on hardware | tiered probe (`decode.rs`): hwaccel CUDA (NVIDIA display) / VA-API (nvidia-vaapi-driver) / Vulkan → software |
 | Linux X11 | Intel / AMD | libav in-process (x11grab) + `*_vaapi` / `*_qsv` on the screen GPU's render node (`drm_node.rs`) → ffmpeg CLI `*_vaapi` / `*_vulkan` → libx264. Never run on hardware | hwaccel VA-API / Vulkan / DRM → software |
@@ -444,9 +462,57 @@ explicit codec in the set still wins. With 4:4:4 wanted, `pick_codec` first narr
 the codecs the client shows in 4:4:4 (see "4:4:4 chroma").
 
 Not possible / not done: HDR and 4:4:4 are clamped to SDR 4:2:0 on every GPU-filter ffmpeg path
-(NVENC / QSV `ddagrab`, MF) — `StreamPlan::effective_hdr_yuv444` — so HDR10 and 4:4:4 encode
-only on the Windows native NVENC path; the gst families model no AV1
+(NVENC / QSV `ddagrab`, MF) — `StreamPlan::effective_hdr_yuv444` — and on the native Media
+Foundation path (8-bit 4:2:0: `CaptureConfig::encoder = MediaFoundation` plans neither), so HDR10
+and 4:4:4 encode only on the Windows native NVENC path; the gst families model no AV1
 elements; VideoToolbox has no AV1 encoder.
+
+## Colour space — SDR = BT.709 limited range on every host (2026-11-15, branch `fix/colour-bt709`, untested on a real session)
+
+One rule: every host converts the captured RGB with the **BT.709 matrix into limited
+(16–235) range** and says so in the stream (H.264 / HEVC VUI, AV1 sequence header); every
+client decodes what the stream says, and BT.709 limited when it says nothing
+(`crates/pulsar-render/src/colour.rs`). Before, nothing was signalled: the Windows
+VideoProcessor (driver default, BT.601 on most GPUs) and ffmpeg (swscale default BT.601)
+converted with BT.601, Linux / macOS clients decoded BT.709 → shifted reds / greens / skin.
+
+| Host path | Conversion | Signalling |
+| --- | --- | --- |
+| Windows native (DXGI / WGC → VideoProcessor → NVENC / MF) | `encode/d3d.rs::set_sdr_colour_spaces` (`VideoProcessorSetStreamColorSpace1` RGB_FULL_G22_P709, `SetOutputColorSpace1` YCBCR_STUDIO_G22_LEFT_P709; the legacy `ID3D11VideoContext` words as fallback) | NVENC VUI (`nvenc.rs` `set_sdr_bt709`: H.264 / HEVC VUI, AV1 colour fields); MF media type `MF_MT_YUV_MATRIX` / `MF_MT_VIDEO_NOMINAL_RANGE` / primaries / transfer (`mf.rs::set_type_with_colour`, on the native MF path's async encoder) |
+| ffmpeg CLI (all OSes, pulsar-core `pipeline/command.rs` + `types.rs`) | every conversion names `out_color_matrix=bt709:out_range=tv` itself (not only FFmpeg 7.1+ colour negotiation): x11grab / gdigrab get an explicit `scale` ahead of the encoder's format, the ddagrab CPU bounces (AMF / MF / software) carry it on their `scale`, the zero-copy GPU scalers on `scale_cuda` (NVENC) and `vpp_qsv` (QSV; `scale_qsv` has no colour options) | `-colorspace bt709 -color_range tv` + a `setparams` frame tag (primaries / transfer; all four for an already-YUV capture: avfoundation, raw NV12) |
+| Linux X11 libav (`src-tauri/src/host/libav.rs`) | `scale=…:out_color_matrix=bt709:out_range=tv` | encoder context colorspace / primaries / trc / range = BT.709 / MPEG |
+| Linux NVENC SDK (`NvencCuda`) | the libav graph / gst `videoconvert` | `nvsession::configure` VUI (shared with Windows) |
+| Linux gst (Wayland, X11 fallback, probes) | `videoconvert ! video/x-raw,format=NV12,colorimetry=bt709` (gst's default is BT.601 below 720 lines) | the encoder element reads the caps colorimetry |
+| macOS native (SCK → VideoToolbox) | pulsar-core `macos_capture::sck::set_sdr_colour`: SCK `colorMatrix` = ITU_R_709_2, `colorSpaceName` = sRGB (a P3 display is mapped into BT.709 primaries) | VT `ColorPrimaries` / `TransferFunction` / `YCbCrMatrix` = ITU_R_709_2 (`mac/vt.rs`); range from '420v' |
+| Android host (pulsar-mobile `HostEncoder.kt`) | `KEY_COLOR_STANDARD` BT709, `KEY_COLOR_RANGE` LIMITED, `KEY_COLOR_TRANSFER` SDR_VIDEO (API 24+) | the same keys |
+
+Not covered / unmeasured (measure with colour bars before trusting them):
+- the Orange Pi X11 direct-BGRx `mpph26xenc` path (`gst.rs` `direct_bgrx`): RGA / VEPU converts
+  with MPP's own matrix and gst gives no VUI control. Clients now read an untagged stream as
+  BT.709 (the old Windows client read BT.601): if RGA converts BT.601, a Pi host is off on every
+  client. Measure on the Pi (bars on the X screen → stream → decoded Y of red: 63 = BT.709,
+  81 = BT.601); if BT.601, drop that path to `videoconvert` or set the encoder's colour
+  property if gst-rockchip exposes one;
+- the hybrid ffmpeg `ddagrab → h264_nvenc` path that hands NVENC BGRA (NVENC converts
+  internally; ffmpeg's NVENC wrapper tags what it does);
+- `scale_cuda` / `vpp_qsv` options are from the bundled FFmpeg 8 `-h filter=` listing; no
+  NVIDIA / Intel GPU here, so neither chain has run with them (check one session on each).
+
+HDR keeps its own BT.2020 / PQ signalling.
+
+Version skew: there is no wire field for the rule, so mixed old / new Windows pairs shift until
+both ends update (same desktop release, auto-update). An old Windows client (VideoProcessor
+default, BT.601 on NVIDIA / AMD) shows a new host's BT.709 stream off; a new client reads an old
+host's untagged BT.601 stream (old Windows NVENC / MF, old ffmpeg / libav) as BT.709. Old Linux /
+macOS clients already assumed BT.709, so they improve. Tests:
+`encode::d3d::tests::bgra_to_nv12_is_bt709_limited` (the real VideoProcessor, read back),
+`nvenc::tests::sdr_bt709_colour_description`, pulsar-core `pipeline::tests::sdr_*` and
+`sdr_colour_bars_through_ffmpeg` (`PULSAR_TEST_FFMPEG=<bundled ffmpeg>`: real gdigrab and x11grab
+chains encode → decode, red must be Y 63, not BT.601's 81), and
+`encode::mf::tests::mf_encoder_bars_are_bt709_limited` (the real MF encoder MFT, H.264 + HEVC,
+decoded with `PULSAR_TEST_FFMPEG`; measured on the Snapdragon's QCOM MFT: attributes taken, VUI
+`tv, bt709`). An MFT that rejects a media type over the colour attributes gets it again
+without them (`mf.rs::set_type_with_colour`, logged): the conversion stays BT.709 limited.
 
 ## Host monitor picker + live display-change watch (per OS, 2026-11-14, untested on macOS / Wayland hardware)
 
@@ -483,7 +549,7 @@ The id on the wire is an opaque `i64` whose meaning is the HOST's (table in puls
 
 | Host | Picker | Capture | Status |
 | --- | --- | --- | --- |
-| Windows | `pulsar_capture::list_capture_windows` (HWND) | WGC → NVENC (native path; HDR10 when the window's monitor is in HDR mode; 4:4:4 too); a non-NVENC stream falls back to the monitor | shipped |
+| Windows | `pulsar_capture::list_capture_windows` (HWND) | WGC → NVENC (native path; HDR10 when the window's monitor is in HDR mode; 4:4:4 too) or, on a host without NVENC, WGC → the native Media Foundation encoder (SDR 4:2:0, `wgc-window-mf`); a stream with neither falls back to the monitor | shipped |
 | Linux X11 | `_NET_CLIENT_LIST` via pure-Rust `x11rb` (X window id) | libav `x11grab window_id` (`host/libav.rs` `Source::X11Window`), ffmpeg CLI `-window_id` + `scale`, or gst `ximagesrc xid=` (`gst::x11_window_pipeline`, MPP hosts; never KMS) | untested on hardware |
 | Linux Wayland | one entry `WindowInfo::PORTAL_PICK` ("Pencereyi bu bilgisayarda seç") | ScreenCast portal with source type WINDOW only (`capture::start_with(.., Source::Window)`): the person AT THE HOST picks the window in the compositor's dialog; frames scaled into the requested box (`wayland_pipeline_sized`) | untested on hardware |
 | macOS | ScreenCaptureKit `SCShareableContent` (`CGWindowID`) | **native** (2026-11-15): `SCContentFilter(desktopIndependentWindow:)` → NV12 `CVPixelBuffer` → the same VideoToolbox encoder as the display (`pulsar-capture` `mac/`, `CaptureConfig::window_hwnd` = the `CGWindowID`): live bitrate, keyframe on request, `LiveStats.source = "sck-window"`. Fallback (HDR / 4:4:4 / AV1 / a native start that fails / `PULSAR_FFMPEG_CAPTURE=1`): NV12 → loopback TCP → ffmpeg `-f rawvideo` → VideoToolbox (`pulsar_core::window_capture::serve_for`) | untested on hardware |
@@ -570,7 +636,7 @@ GPU runs the **same NVENC SDK session as Windows**:
   API < 12.2 = driver < 550, no free session) logs a warning and opens libavcodec as before.
 - **Wayland** (pulsar-core `capture::start_with_frames` / `start_full`, `capture/frames.rs`; screen casts
   only — a Wayland WINDOW cast keeps the gst pipeline): the portal's
-  PipeWire stream → `videoconvert` → NV12 → `fakesink` handoff → the app's `FrameEncoder`
+  PipeWire stream → `videoconvert n-threads=0` → NV12 → `fakesink` handoff → the app's `FrameEncoder`
   (`src-tauri/src/host/nvenc_frames.rs`, the SDK encoder). Built on the first frame at the
   cast's size, rebuilt on a size change. If it cannot be built or no frame arrives in 4 s,
   the gst-encoder pipeline runs on the SAME portal session (no second share dialog). Chosen

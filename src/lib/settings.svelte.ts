@@ -6,6 +6,10 @@ export type VideoCodec = 'auto' | 'h264' | 'h265' | 'av1';
 export type RumbleStrength = 'off' | 'weak' | 'medium' | 'strong';
 /** Session audio: auto = the highest the link carries (Raw on a LAN with room, else High). */
 export type AudioQuality = 'auto' | 'standard' | 'high' | 'raw';
+/** How long a viewed session keeps this machine's display awake after the last input
+ * (minutes, or always / off). Rust: `keep_awake::set_client_awake`. */
+export type ClientAwake = '30' | '120' | 'always' | 'off';
+export const CLIENT_AWAKE_MODES: ClientAwake[] = ['30', '120', 'always', 'off'];
 /** DualSense feature choice: auto = on, but auto-degrade may turn it off on a weak
  *  Bluetooth link; on = always on; off = off. Same tokens as the Rust `Mode`. */
 export type Ds5Mode = 'auto' | 'on' | 'off';
@@ -156,6 +160,9 @@ export interface UiSettings {
 	/** Controller input reaches the host while another app is focused (Moonlight's
 	 * "process gamepad input in the background"). Off by default. */
 	padBackground: boolean;
+	/** Keep the display awake while a session is viewed and focused, until this long after
+	 * the last input (gamepad included). Also holds back an idle screen lock. Default 30 min. */
+	clientAwake: ClientAwake;
 	/** Two-way clipboard sync with every open session (viewed and hosted). On by default;
 	 * also switchable from the session overlay. */
 	clipboardSync: boolean;
@@ -295,6 +302,7 @@ const DEFAULTS: UiSettings = {
 	tray: true,
 	padWake: false,
 	padBackground: false,
+	clientAwake: '30',
 	clipboardSync: true,
 	debug: false,
 	// Off by default (2026-11-08): pacing buffers ~1-2 frames — latency the maintainer would

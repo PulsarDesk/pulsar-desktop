@@ -8,10 +8,12 @@
 				"files": {
 					"/usr/lib/udev/rules.d/70-pulsar-ds5.rules": "linux/70-pulsar-ds5.rules",
 					"/usr/lib/udev/rules.d/70-pulsar-vhci.rules": "linux/70-pulsar-vhci.rules",
+					"/usr/lib/udev/rules.d/70-pulsar-uinput.rules": "linux/70-pulsar-uinput.rules",
 					"/usr/lib/modules-load.d/pulsar.conf": "linux/modules-load-pulsar.conf",
 					"/usr/lib/modprobe.d/pulsar.conf": "linux/modprobe-pulsar.conf",
 					"/etc/ufw/applications.d/pulsar": "linux/ufw-pulsar",
-					"/usr/lib/firewalld/services/pulsar.xml": "linux/firewalld-pulsar.xml"
+					"/usr/lib/firewalld/services/pulsar.xml": "linux/firewalld-pulsar.xml",
+					"/usr/lib/sysctl.d/10-pulsar.conf": "linux/sysctl-pulsar.conf"
 				},
 				"postInstallScript": "linux/postinst.sh",
 				"preRemoveScript": "linux/prerm.sh"
@@ -21,10 +23,12 @@
 				"files": {
 					"/usr/lib/udev/rules.d/70-pulsar-ds5.rules": "linux/70-pulsar-ds5.rules",
 					"/usr/lib/udev/rules.d/70-pulsar-vhci.rules": "linux/70-pulsar-vhci.rules",
+					"/usr/lib/udev/rules.d/70-pulsar-uinput.rules": "linux/70-pulsar-uinput.rules",
 					"/usr/lib/modules-load.d/pulsar.conf": "linux/modules-load-pulsar.conf",
 					"/usr/lib/modprobe.d/pulsar.conf": "linux/modprobe-pulsar.conf",
 					"/etc/ufw/applications.d/pulsar": "linux/ufw-pulsar",
-					"/usr/lib/firewalld/services/pulsar.xml": "linux/firewalld-pulsar.xml"
+					"/usr/lib/firewalld/services/pulsar.xml": "linux/firewalld-pulsar.xml",
+					"/usr/lib/sysctl.d/10-pulsar.conf": "linux/sysctl-pulsar.conf"
 				},
 				"postInstallScript": "linux/postinst.sh",
 				"preRemoveScript": "linux/prerm.sh"

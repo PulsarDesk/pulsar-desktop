@@ -5,7 +5,8 @@ import type { AutoConnectTarget, Config, ConnInfo, ControllerInfo, PulsarToast }
 import type { FsEntry, LocalCaps } from './api.types';
 import type { GameInfo, LanDevice, PenSample, PlayInfo, RemoteSources, ScannedApp, TouchSample, WindowInfo } from './api.types';
 import { invoke } from './api.invoke';
-import type { Ds5Settings } from './settings.svelte';
+import { withLanNames } from './lanName';
+import type { ClientAwake, Ds5Settings } from './settings.svelte';
 
 // The keyboard/mouse capture commands must land on the Rust side IN ISSUE ORDER. A tab
 // re-arm is a stop immediately followed by a start (effect cleanup + re-run in one tick);
@@ -39,8 +40,9 @@ export const api = {
 	/** Whether the in-app relay is currently running, and on what address. */
 	localRelayStatus: () =>
 		invoke<{ running: boolean; port: number; lanAddr: string }>('local_relay_status'),
-	/** Pulsar devices auto-discovered on the local network (multicast beacon). */
-	lanDevices: () => invoke<LanDevice[]>('lan_devices'),
+	/** Pulsar devices auto-discovered on the local network (multicast beacon). A beacon
+	 * without a name gets a localized generic label (never a blank row or saved name). */
+	lanDevices: () => invoke<LanDevice[]>('lan_devices').then(withLanNames),
 	controllers: () => invoke<ControllerInfo[]>('controllers'),
 	/** Persist the controller slot permutation. order[n] = gilrs uuid hex of the pad
 	 * assigned to player-slot n. Written by the controller reorder UI; the play reader
@@ -502,6 +504,9 @@ export const api = {
 	/** Background controller input (Settings → General): the pad keeps driving the host
 	 * while another app is focused. Off = the host gets a released pad. */
 	setPadBackground: (enabled: boolean) => invoke<void>('set_pad_background', { enabled }),
+	/** "Ekranı uyanık tut" (Settings → General): how long a viewed session keeps this
+	 * machine's display awake after the last input. */
+	setClientAwake: (mode: ClientAwake) => invoke<void>('set_client_awake', { mode }),
 	/** "Kullanıcılar arası ortak Pulsar" (Settings → Genel): machine-wide identity + host. */
 	sharedModeStatus: () => invoke<import('./api.types').SharedModeStatus>('shared_mode_status'),
 	/** Turn the machine-wide setting on/off; the app restarts itself on success. Rejects with

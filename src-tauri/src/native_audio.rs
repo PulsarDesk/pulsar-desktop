@@ -7,13 +7,13 @@
 //!
 //! Pipeline: the viewer's audio UDP socket (fed by the media-over-session demuxer, or by the
 //! host on the legacy direct path) → broadcast → this player's thread: RTP header strip and
-//! sequence check → libopus decode, with packet-loss concealment for a short gap → an SDL3
+//! sequence order + parity repair (`pulsar_core::audio::AudioRepair`) → libopus decode, with packet-loss concealment for a short gap → an SDL3
 //! audio stream. The SDL queue is a sawtooth (+10 ms per packet, −one device buffer per device
 //! pull); its LOW point is held near a margin (`PULSAR_AUDIO_TARGETMS`, default 15 ms) by
 //! nudging the playback rate (slowly, at most ±2 %; host and client clocks drift apart by far
 //! less). Playback starts once margin + one device buffer is queued; a queue that runs dry
-//! (late packets: Wi-Fi jitter) raises the margin by 10 ms, up to 120 ms, and it eases back
-//! after 20 s without one. A queue far past the target is flushed and re-buffered, so latency
+//! (late packets: Wi-Fi jitter) raises the margin by 10 ms (once per 200 ms burst), up to
+//! 120 ms (60 ms on a LAN path), and it eases back by 5 ms every 4 s without one. A queue far past the target is flushed and re-buffered, so latency
 //! stays bounded. SDL is asked for a 10 ms device buffer.
 //!
 //! The old steering held the queue right after each push near 30 ms and moved the rate up to
@@ -45,6 +45,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::audio_devices::{self as devs, Kind, Opened, Retry};
+use pulsar_core::audio::Repaired;
 
 /// The host's Opus rate (`pulsar_core::audio::SAMPLE_RATE`).
 const RATE: u32 = 48_000;
@@ -69,9 +70,12 @@ impl Drop for NativeAudio {
 	}
 }
 
-/// Play every RTP/Opus datagram that arrives on `rx`. Must be called inside the tokio
-/// runtime (a task bridges the broadcast to the player thread).
-pub fn start(mut rx: tokio::sync::broadcast::Receiver<Vec<u8>>, play_id: u64) -> NativeAudio {
+/// Play every RTP/Opus datagram that arrives on `rx` (and rebuild lost ones from the audio
+/// parity that arrives there too). `lan`: the session runs over a wired LAN path (not a Wi-Fi
+/// client, whose power-save and scan stalls can run past 60 ms): the jitter target stops at
+/// `LAN_MAX_TARGET_MS`. Must be called inside the tokio runtime (a task bridges the
+/// broadcast to the player thread).
+pub fn start(mut rx: tokio::sync::broadcast::Receiver<Vec<u8>>, play_id: u64, lan: bool) -> NativeAudio {
 	let stop = Arc::new(AtomicBool::new(false));
 	let (tx, packets) = mpsc::sync_channel::<Vec<u8>>(QUEUE);
 	tokio::spawn(async move {
@@ -90,7 +94,7 @@ pub fn start(mut rx: tokio::sync::broadcast::Receiver<Vec<u8>>, play_id: u64) ->
 	let flag = stop.clone();
 	let spawned = std::thread::Builder::new()
 		.name("native-audio".into())
-		.spawn(move || run(packets, flag, play_id));
+		.spawn(move || run(packets, flag, play_id, lan));
 	if let Err(e) = spawned {
 		tracing::warn!("audio: player thread failed to start: {e}");
 	}
@@ -134,49 +138,6 @@ fn decode_l16(payload: &[u8], out: &mut [f32]) -> usize {
 	n / CHANNELS
 }
 
-/// What to do with a packet, from its sequence number.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Step {
-	/// Decode it, after concealing this many lost packets in front of it.
-	Play { conceal: u16 },
-	/// It is older than one already played (late or duplicate): drop it.
-	Late,
-	/// A gap too long to conceal, or a new stream (the host restarted its encoder): reset the
-	/// decoder, then decode it.
-	Restart,
-}
-
-/// Tracks the expected RTP sequence number.
-#[derive(Default)]
-pub(crate) struct Sequencer {
-	next: Option<u16>,
-}
-
-impl Sequencer {
-	pub(crate) fn step(&mut self, seq: u16) -> Step {
-		let Some(next) = self.next else {
-			self.next = Some(seq.wrapping_add(1));
-			return Step::Play { conceal: 0 };
-		};
-		let ahead = seq.wrapping_sub(next);
-		if ahead >= 0x8000 {
-			// Behind `next`. A small step back is a late or repeated packet; a huge one is a
-			// new stream whose numbers start lower.
-			if next.wrapping_sub(seq) <= 64 {
-				return Step::Late;
-			}
-			self.next = Some(seq.wrapping_add(1));
-			return Step::Restart;
-		}
-		self.next = Some(seq.wrapping_add(1));
-		if ahead <= MAX_CONCEAL {
-			Step::Play { conceal: ahead }
-		} else {
-			Step::Restart
-		}
-	}
-}
-
 /// Where decoded audio goes: the client output or a DualSense's headset jack (module docs).
 struct Route {
 	play_id: u64,
@@ -192,6 +153,8 @@ struct Route {
 	next_check: Instant,
 	/// Reopens of a stalled stream in a row (only the first is logged loudly).
 	stalls: u32,
+	/// Jitter target ceiling for every stream this route opens.
+	max_target_ms: f32,
 }
 
 /// Where the local output should play: a DS4's headset jack, else the menu's pick when it is
@@ -230,9 +193,10 @@ fn fade(pcm: &mut [f32], up: bool) {
 }
 
 impl Route {
-	fn new(play_id: u64) -> Route {
+	fn new(play_id: u64, lan: bool) -> Route {
 		Route {
 			play_id,
+			max_target_ms: if lan { LAN_MAX_TARGET_MS } else { MAX_TARGET_MS },
 			away: false,
 			fade_in: false,
 			on: Opened::Default,
@@ -251,9 +215,9 @@ impl Route {
 		}
 		let (want, _) = want_output();
 		let quiet = self.stalls > 1;
-		let mut opened = want.and_then(|id| SdlOut::open(id, quiet).map(|s| (s, Opened::Device(id))));
+		let mut opened = want.and_then(|id| SdlOut::open(id, quiet, self.max_target_ms).map(|s| (s, Opened::Device(id))));
 		if opened.is_none() {
-			opened = SdlOut::open(0, quiet).map(|s| (s, Opened::Default));
+			opened = SdlOut::open(0, quiet, self.max_target_ms).map(|s| (s, Opened::Default));
 		}
 		match opened {
 			Some((s, on)) => {
@@ -356,7 +320,7 @@ impl Route {
 	}
 }
 
-fn run(packets: mpsc::Receiver<Vec<u8>>, stop: Arc<AtomicBool>, play_id: u64) {
+fn run(packets: mpsc::Receiver<Vec<u8>>, stop: Arc<AtomicBool>, play_id: u64, lan: bool) {
 	let mut decoder = match opus::Decoder::new(RATE, opus::Channels::Stereo) {
 		Ok(d) => d,
 		Err(e) => {
@@ -365,27 +329,35 @@ fn run(packets: mpsc::Receiver<Vec<u8>>, stop: Arc<AtomicBool>, play_id: u64) {
 		}
 	};
 	let mut out: Option<SdlOut> = None;
-	let mut seq = Sequencer::default();
+	let mut repair = pulsar_core::audio::AudioRepair::new();
+	let mut seen = pulsar_core::audio::RepairStats::default();
 	let mut pcm = vec![0f32; MAX_FRAME * CHANNELS];
 	// The host's frame length, learnt from the stream; a concealed packet is this long.
 	let mut frame = RATE as usize / 100;
+	// Payload type of the last packet played: what a reported loss is concealed as.
+	let mut last_pt = pulsar_core::audio::OPUS_PAYLOAD_TYPE;
 	let mut concealed: u64 = 0;
 	// Packet arrival times: the largest gap per stats window tells sender/network bursts apart
 	// from device-side chunking when the queue swings.
 	let mut last_arrival: Option<std::time::Instant> = None;
 	// The last uncompressed packet (L16), replayed (faded) for a lost one.
 	let mut last_l16: Vec<f32> = Vec::new();
-	let mut route = Route::new(play_id);
+	let mut route = Route::new(play_id, lan);
 	// Counters kept while no local device is open (the stats live on the device).
 	let mut spare = Stats::default();
 	while !stop.load(Ordering::Relaxed) {
-		let pkt = match packets.recv_timeout(Duration::from_millis(100)) {
-			Ok(p) => p,
-			Err(mpsc::RecvTimeoutError::Timeout) => continue,
+		// How long a hole may stay open waiting for its packet (reordered) or its parity: what
+		// the device queue still covers, so waiting never runs it dry.
+		let hold = hold_for(out.as_ref());
+		let wait = repair
+			.deadline(hold)
+			.map(|d| d.saturating_duration_since(Instant::now()))
+			.unwrap_or(IDLE_WAIT)
+			.min(IDLE_WAIT);
+		let pkt = match packets.recv_timeout(wait) {
+			Ok(p) => Some(p),
+			Err(mpsc::RecvTimeoutError::Timeout) => None,
 			Err(mpsc::RecvTimeoutError::Disconnected) => break,
-		};
-		let Some((pt, n, payload)) = rtp_audio(&pkt) else {
-			continue;
 		};
 		// The local output opens on the first packet played locally (Route::emit); without
 		// one the packets are still decoded (sequence, PLC state) and dropped.
@@ -397,64 +369,126 @@ fn run(packets: mpsc::Receiver<Vec<u8>>, stop: Arc<AtomicBool>, play_id: u64) {
 				}
 			};
 		}
-		match seq.step(n) {
-			Step::Late => {
-				stats!().late += 1;
-				continue;
-			}
-			Step::Restart => {
-				stats!().restarts += 1;
-				let _ = decoder.reset_state();
-			}
-			Step::Play { conceal } => {
-				for _ in 0..conceal {
-					if pt == pulsar_core::audio::L16_PAYLOAD_TYPE {
-						// Uncompressed: no codec PLC — replay the last packet, halved each time, so
-						// a lost one is a dip rather than a hard gap.
-						for x in last_l16.iter_mut() {
-							*x *= 0.5;
-						}
-						let mut l = last_l16.clone();
-						route.emit(&mut out, &mut l);
-						concealed += 1;
-						stats!().concealed += 1;
-					} else if let Ok(got) = decoder.decode_float(&[], &mut pcm[..frame * CHANNELS], false) {
-						route.emit(&mut out, &mut pcm[..got * CHANNELS]);
-						concealed += 1;
-						stats!().concealed += 1;
-					}
+		let now = Instant::now();
+		if let Some(p) = pkt {
+			if p.first() == Some(&pulsar_core::service::media::TAG_AUDIO_FEC) {
+				repair.push_parity(&p[1..], now);
+			} else if rtp_audio(&p).is_some() {
+				stats!().packets += 1;
+				if let Some(prev) = last_arrival.replace(now) {
+					let gap = now.duration_since(prev).as_secs_f32() * 1000.0;
+					let st = stats!();
+					st.gap_max_ms = st.gap_max_ms.max(gap);
 				}
+				repair.push(p, now);
 			}
-		}
-		stats!().packets += 1;
-		let now = std::time::Instant::now();
-		if let Some(prev) = last_arrival.replace(now) {
-			let gap = now.duration_since(prev).as_secs_f32() * 1000.0;
+			let rs = repair.stats();
 			let st = stats!();
-			st.gap_max_ms = st.gap_max_ms.max(gap);
+			st.late += rs.late - seen.late + rs.dup - seen.dup;
+			st.recovered += rs.recovered - seen.recovered;
+			seen = rs;
 		}
-		if pt == pulsar_core::audio::L16_PAYLOAD_TYPE {
-			stats!().raw = true;
-			let got = decode_l16(payload, &mut pcm);
-			if got > 0 {
-				frame = got.min(MAX_FRAME);
-				last_l16.clear();
-				last_l16.extend_from_slice(&pcm[..got * CHANNELS]);
-				route.emit(&mut out, &mut pcm[..got * CHANNELS]);
-			}
-			continue;
-		}
-		match decoder.decode_float(payload, &mut pcm, false) {
-			Ok(got) => {
+		while let Some(step) = repair.pop(Instant::now(), hold) {
+			let pkt = match step {
+				Repaired::Restart => {
+					stats!().restarts += 1;
+					let _ = decoder.reset_state();
+					continue;
+				}
+				Repaired::Lost(n) if n > MAX_CONCEAL => {
+					// An outage: concealing it would only add latency.
+					stats!().restarts += 1;
+					let _ = decoder.reset_state();
+					continue;
+				}
+				Repaired::Lost(n) => {
+					for _ in 0..n {
+						if last_pt == pulsar_core::audio::L16_PAYLOAD_TYPE {
+							// Uncompressed: no codec PLC — replay the last packet, halved each time,
+							// so a lost one is a dip rather than a hard gap.
+							for x in last_l16.iter_mut() {
+								*x *= 0.5;
+							}
+							let mut l = last_l16.clone();
+							route.emit(&mut out, &mut l);
+							concealed += 1;
+							stats!().concealed += 1;
+						} else if let Ok(got) = decoder.decode_float(&[], &mut pcm[..frame * CHANNELS], false) {
+							route.emit(&mut out, &mut pcm[..got * CHANNELS]);
+							concealed += 1;
+							stats!().concealed += 1;
+						}
+					}
+					continue;
+				}
+				Repaired::Packet(pkt) => pkt,
+			};
+			let Some((pt, _, payload)) = rtp_audio(&pkt) else { continue };
+			last_pt = pt;
+			if pt == pulsar_core::audio::L16_PAYLOAD_TYPE {
+				stats!().raw = true;
+				let got = decode_l16(payload, &mut pcm);
 				if got > 0 {
 					frame = got.min(MAX_FRAME);
+					last_l16.clear();
+					last_l16.extend_from_slice(&pcm[..got * CHANNELS]);
+					route.emit(&mut out, &mut pcm[..got * CHANNELS]);
 				}
-				route.emit(&mut out, &mut pcm[..got * CHANNELS]);
+				continue;
 			}
-			Err(e) => tracing::debug!("audio: undecodable Opus packet: {e}"),
+			match decoder.decode_float(payload, &mut pcm, false) {
+				Ok(got) => {
+					if got > 0 {
+						frame = got.min(MAX_FRAME);
+					}
+					route.emit(&mut out, &mut pcm[..got * CHANNELS]);
+				}
+				Err(e) => tracing::debug!("audio: undecodable Opus packet: {e}"),
+			}
 		}
 	}
-	tracing::info!(concealed, "audio: native player stopped");
+	let rs = repair.stats();
+	tracing::info!(concealed, recovered = rs.recovered, lost = rs.lost, late = rs.late, "audio: native player stopped");
+}
+
+/// Longest wait on the packet channel (the stop flag is checked this often).
+const IDLE_WAIT: Duration = Duration::from_millis(100);
+/// Most a hole is held open (a reordered packet or its parity can still fill it).
+const MAX_HOLD_MS: f32 = 40.0;
+/// Queue kept in reserve while a hole is held, on top of one device pull (ms).
+const HOLD_RESERVE_MS: f32 = 5.0;
+
+/// How long a sequence hole may wait (see `run`): what the device queue covers beyond one
+/// device pull (the device takes `device_ms` at a time, so anything less is already a dry pull
+/// in waiting) and a small reserve, at most [`MAX_HOLD_MS`]; nothing while the device is
+/// paused, prebuffering or closed (a loss then is concealed at once, as before). Recomputed on
+/// every wake from the current queue and counted from the hole's start, so the release comes
+/// before the queue is down to one pull plus the reserve.
+fn hold_for(out: Option<&SdlOut>) -> Duration {
+	let ms = match out {
+		Some(s) if s.playing => hold_ms(s.queued_ms(), s.device_ms),
+		_ => 0.0,
+	};
+	Duration::from_secs_f32(ms / 1000.0)
+}
+
+/// The raised target after a dry queue `since_step` after the last raise, or `None` inside the
+/// debounce (the same late burst).
+fn next_target(target_ms: f32, max_ms: f32, since_step: Duration) -> Option<f32> {
+	(since_step >= DRY_DEBOUNCE).then(|| (target_ms + DRY_STEP_MS).min(max_ms))
+}
+
+fn hold_ms(queued_ms: f32, device_ms: f32) -> f32 {
+	(queued_ms - device_ms - HOLD_RESERVE_MS).clamp(0.0, MAX_HOLD_MS)
+}
+
+/// The eased target after `quiet` without a dry queue and `since_ease` after the last step, or
+/// `None` (no step now). The first step waits for `EASE_QUIET` of quiet, so a raise survives
+/// stalls that repeat every few seconds (Wi-Fi scans, power save, mesh roams); after that
+/// it steps every `EASE_STEP` while the quiet lasts.
+fn eased_target(target_ms: f32, base_ms: f32, quiet: Duration, since_ease: Duration) -> Option<f32> {
+	(target_ms > base_ms && quiet >= EASE_QUIET && since_ease >= EASE_STEP)
+		.then(|| (target_ms - EASE_STEP_MS).max(base_ms))
 }
 
 /// Per-window player counters, logged every [`STATS_EVERY`]. `dry` = the queue ran empty and
@@ -462,7 +496,10 @@ fn run(packets: mpsc::Receiver<Vec<u8>>, stop: Arc<AtomicBool>, play_id: u64) {
 #[derive(Default)]
 struct Stats {
 	packets: u32,
+	/// Late or repeated packets (dropped).
 	late: u32,
+	/// Lost packets rebuilt from the host's audio parity.
+	recovered: u32,
 	restarts: u32,
 	concealed: u32,
 	frames: u64,
@@ -487,10 +524,20 @@ const MAX_RATE_ADJ: f32 = 0.02;
 const DEADBAND_MS: f32 = 3.0;
 /// Rate change per ms of smoothed queue error past the deadband: 10 ms over → +0.5 %.
 const GAIN_PER_MS: f32 = 0.0005;
-/// Target growth on a dry queue, its ceiling, and how long without one before it eases back.
+/// Target growth on a dry queue, its ceiling, and how it eases back: nothing until
+/// `EASE_QUIET` without a dry queue, then 5 ms every `EASE_STEP`. Dry queues closer together
+/// than `DRY_DEBOUNCE` are one event: one late burst used to run the queue dry on several
+/// packets in a row and add 10 ms for each, and the target then took 20 s per 5 ms to come
+/// back, ~7 minutes from the 120 ms ceiling (hidden-gaps 1.11b). Now ~100 s, while stalls that
+/// repeat inside `EASE_QUIET` keep the raise. A wired LAN session never goes past
+/// `LAN_MAX_TARGET_MS` (a Wi-Fi client keeps `MAX_TARGET_MS`, see `start`).
 const DRY_STEP_MS: f32 = 10.0;
+const DRY_DEBOUNCE: Duration = Duration::from_millis(200);
 const MAX_TARGET_MS: f32 = 120.0;
-const EASE_AFTER: Duration = Duration::from_secs(20);
+const LAN_MAX_TARGET_MS: f32 = 60.0;
+const EASE_QUIET: Duration = Duration::from_secs(20);
+const EASE_STEP: Duration = Duration::from_secs(4);
+const EASE_STEP_MS: f32 = 5.0;
 
 /// Device buffer asked of SDL (10 ms). A device that pulls big chunks needs that much queued
 /// at every pull; the laptop this was measured on pulled ~100 ms at a time by default.
@@ -515,7 +562,13 @@ struct SdlOut {
 	ratio: f32,
 	/// Playing; false = device paused while the queue fills to the target.
 	playing: bool,
+	/// Ceiling of `target_ms` (`MAX_TARGET_MS`, or `LAN_MAX_TARGET_MS` on a LAN).
+	max_target_ms: f32,
+	/// The last dry queue, and the last one that raised the target (debounce).
 	last_dry: std::time::Instant,
+	last_dry_step: std::time::Instant,
+	/// The last ease step.
+	last_ease: std::time::Instant,
 	stats: Stats,
 	stats_at: std::time::Instant,
 	/// Queue level right after the last push (ms; 0 after a clear).
@@ -532,7 +585,7 @@ struct SdlOut {
 impl SdlOut {
 	/// Open on SDL playback device `dev` (0 = the default output). `quiet`: a retry in a
 	/// stall streak (no info line).
-	fn open(dev: u32, quiet: bool) -> Option<SdlOut> {
+	fn open(dev: u32, quiet: bool, max_target_ms: f32) -> Option<SdlOut> {
 		use sdl3_sys::audio::{
 			SDL_AudioSpec, SDL_OpenAudioDeviceStream, SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,
 			SDL_AUDIO_F32,
@@ -604,7 +657,11 @@ impl SdlOut {
 				win_pushes: 0,
 				ratio: 1.0,
 				playing: false,
+				// A PULSAR_AUDIO_TARGETMS above the ceiling raises the ceiling with it.
+				max_target_ms: max_target_ms.max(target_ms),
 				last_dry: now,
+				last_dry_step: now - DRY_DEBOUNCE,
+				last_ease: now,
 				stats: Stats::default(),
 				stats_at: now,
 				last_after_ms: 0.0,
@@ -689,13 +746,22 @@ impl SdlOut {
 		}
 		self.last_push = now;
 		if self.playing && before <= 0.0 {
-			// Ran dry: the device has been playing silence — a crackle. Buffer more.
+			// Ran dry: the device has been playing silence — a crackle. Buffer more (once per
+			// burst, see DRY_DEBOUNCE).
 			self.stats.dry += 1;
-			self.target_ms = (self.target_ms + DRY_STEP_MS).min(MAX_TARGET_MS);
+			if let Some(t) = next_target(self.target_ms, self.max_target_ms, now.duration_since(self.last_dry_step)) {
+				self.target_ms = t;
+				self.last_dry_step = now;
+			}
 			self.last_dry = now;
-		} else if self.target_ms > self.base_target_ms && now.duration_since(self.last_dry) > EASE_AFTER {
-			self.target_ms = (self.target_ms - 5.0).max(self.base_target_ms);
-			self.last_dry = now;
+		} else if let Some(t) = eased_target(
+			self.target_ms,
+			self.base_target_ms,
+			now.duration_since(self.last_dry),
+			now.duration_since(self.last_ease),
+		) {
+			self.target_ms = t;
+			self.last_ease = now;
 		}
 		// SAFETY: as in queued_ms; SDL copies the buffer.
 		unsafe {
@@ -763,6 +829,7 @@ impl SdlOut {
 			tracing::info!(
 				packets = st.packets,
 				late = st.late,
+				recovered = st.recovered,
 				restarts = st.restarts,
 				concealed = st.concealed,
 				in_hz = (st.frames as f32 / span.as_secs_f32()) as u32,
@@ -865,25 +932,71 @@ mod tests {
 	}
 
 	#[test]
-	fn a_short_gap_is_concealed_a_long_one_restarts() {
-		let mut s = Sequencer::default();
-		assert_eq!(s.step(100), Step::Play { conceal: 0 });
-		assert_eq!(s.step(101), Step::Play { conceal: 0 });
-		assert_eq!(s.step(104), Step::Play { conceal: 2 });
-		assert_eq!(s.step(104 + MAX_CONCEAL + 2), Step::Restart);
+	fn a_dry_burst_raises_the_target_once_and_a_lan_stops_at_60ms() {
+		assert_eq!(next_target(15.0, MAX_TARGET_MS, Duration::from_millis(50)), None);
+		assert_eq!(next_target(15.0, MAX_TARGET_MS, DRY_DEBOUNCE), Some(25.0));
+		assert_eq!(next_target(55.0, LAN_MAX_TARGET_MS, Duration::from_secs(1)), Some(60.0));
+		assert_eq!(next_target(115.0, MAX_TARGET_MS, Duration::from_secs(1)), Some(120.0));
 	}
 
 	#[test]
-	fn late_packets_drop_and_the_sequence_wraps() {
-		let mut s = Sequencer::default();
-		assert_eq!(s.step(65534), Step::Play { conceal: 0 });
-		assert_eq!(s.step(65535), Step::Play { conceal: 0 });
-		assert_eq!(s.step(0), Step::Play { conceal: 0 });
-		assert_eq!(s.step(65535), Step::Late);
-		assert_eq!(s.step(2), Step::Play { conceal: 1 });
-		// A restarted host encoder starts somewhere far behind: a new stream, not "late".
-		assert_eq!(s.step(30_000), Step::Restart);
-		assert_eq!(s.step(30_001), Step::Play { conceal: 0 });
+	fn a_hole_waits_only_for_what_the_queue_covers() {
+		assert_eq!(hold_ms(0.0, 10.0), 0.0);
+		assert_eq!(hold_ms(14.0, 10.0), 0.0);
+		// Right after a push at the sawtooth's top (15 ms target + one 10 ms pull): the pull
+		// due within 10 ms must still find a full device buffer.
+		assert!(hold_ms(25.0, 10.0) <= 10.0);
+		assert_eq!(hold_ms(25.0, 10.0), 10.0);
+		// A device that pulls 100 ms at a time holds its own pull back too.
+		assert_eq!(hold_ms(115.0, 100.0), 10.0);
+		assert_eq!(hold_ms(300.0, 10.0), MAX_HOLD_MS);
+	}
+
+	/// Steps the target over `secs` seconds (1 s ticks) with a dry queue at each `dry` second.
+	fn simulate(secs: u64, dry: impl Fn(u64) -> bool) -> Vec<f32> {
+		let (base, mut target) = (15.0f32, 15.0f32);
+		let (mut last_dry, mut last_step, mut last_ease) = (0u64, None::<u64>, 0u64);
+		let mut out = Vec::new();
+		for t in 1..=secs {
+			if dry(t) {
+				let since = last_step.map_or(Duration::MAX, |s| Duration::from_secs(t - s));
+				if let Some(n) = next_target(target, MAX_TARGET_MS, since) {
+					target = n;
+					last_step = Some(t);
+				}
+				last_dry = t;
+			} else if let Some(n) = eased_target(
+				target,
+				base,
+				Duration::from_secs(t - last_dry),
+				Duration::from_secs(t - last_ease),
+			) {
+				target = n;
+				last_ease = t;
+			}
+			out.push(target);
+		}
+		out
+	}
+
+	#[test]
+	fn a_stall_every_10s_keeps_the_target_raised() {
+		let t = simulate(120, |s| s % 10 == 0);
+		// Every stall raises once; nothing eases between them, so the raises accumulate up to
+		// the ceiling instead of crackling at the same level again and again.
+		assert!(t[9..].iter().all(|&x| x >= 25.0), "{t:?}");
+		assert_eq!(*t.last().unwrap(), MAX_TARGET_MS);
+	}
+
+	#[test]
+	fn the_target_eases_from_the_ceiling_in_about_100s() {
+		let t = simulate(240, |s| s <= 120 && s % 10 == 0);
+		assert_eq!(t[119], MAX_TARGET_MS);
+		// Quiet from 120 s: first step at 140 s, then every 4 s, down to the base by ~220 s.
+		assert_eq!(t[138], MAX_TARGET_MS);
+		assert_eq!(t[139], MAX_TARGET_MS - EASE_STEP_MS);
+		let back = t.iter().rposition(|&x| x > 15.0).unwrap() + 2;
+		assert!((215..=230).contains(&back), "back at the base after {back} s");
 	}
 
 	#[test]
@@ -935,7 +1048,7 @@ mod tests {
 			}
 		}
 		let (tx, rx) = tokio::sync::broadcast::channel::<Vec<u8>>(1024);
-		let player = start(rx, 0);
+		let player = start(rx, 0, false);
 		let feed = tokio::spawn(async move {
 			let mut enc =
 				opus::Encoder::new(RATE, opus::Channels::Stereo, opus::Application::LowDelay).unwrap();

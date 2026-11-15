@@ -85,6 +85,9 @@ pub struct Decoder {
 	/// from the bitstream's colour description; a 10-bit stream that does not say counts as PQ
 	/// (the only 10-bit streams a Pulsar host sends are HDR10 — see pulsar-capture `hdr.rs`).
 	pq: bool,
+	/// The output's colour description (the stream's VUI as the MFT reports it; BT.709
+	/// limited when it reports nothing — Pulsar's SDR rule, see `colour.rs`).
+	colour: crate::colour::Colour,
 	width: u32,
 	height: u32,
 	fps: u32,
@@ -177,6 +180,7 @@ impl Decoder {
 				visible: None,
 				out_format,
 				pq: false,
+				colour: crate::colour::Colour::default(),
 				width: w,
 				height: h,
 				fps,
@@ -242,6 +246,7 @@ impl Decoder {
 					self.out_format = set_output(&self.transform)?;
 					self.pq = output_is_pq(&self.transform, self.out_format);
 					self.visible = visible_size(&self.transform);
+					self.colour = output_colour(&self.transform);
 					continue;
 				}
 				Err(e) => return Err(e),
@@ -306,6 +311,20 @@ impl Decoder {
 	pub fn is_hdr(&self) -> bool {
 		self.out_format == DXGI_FORMAT_P010 && self.pq
 	}
+	/// The decoded pictures' colour description (see `colour`).
+	pub fn colour(&self) -> crate::colour::Colour {
+		self.colour
+	}
+}
+
+/// The output type's `MF_MT_YUV_MATRIX` + `MF_MT_VIDEO_NOMINAL_RANGE` (the decoder fills them
+/// from the stream's VUI / colour config). Missing = BT.709 limited.
+unsafe fn output_colour(transform: &IMFTransform) -> crate::colour::Colour {
+	use windows::Win32::Media::MediaFoundation::{MF_MT_VIDEO_NOMINAL_RANGE, MF_MT_YUV_MATRIX};
+	let Ok(t) = transform.GetOutputCurrentType(0) else {
+		return crate::colour::Colour::default();
+	};
+	crate::colour::Colour::from_mf(t.GetUINT32(&MF_MT_YUV_MATRIX).ok(), t.GetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE).ok())
 }
 
 /// The output type's visible area: `MF_MT_MINIMUM_DISPLAY_APERTURE` (an `MFVideoArea`; the

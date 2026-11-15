@@ -10,6 +10,20 @@ const list: PulsarToast[] = [
 		name: 'Bu Pulsar sürümü sanal kol iznine (imza) sahip değil; kol girişi oyuna gitmiyor',
 		peer: '',
 		path: null
+	},
+	{
+		id: 3,
+		kind: 'input-off',
+		name: 'Erişilebilirlik izni yok; uzaktan fare ve klavye çalışmaz. Açmak için tıkla',
+		peer: '',
+		path: null
+	},
+	{
+		id: 4,
+		kind: 'input-on',
+		name: 'uinput kuralı kuruldu; uzaktan fare ve klavye artık çalışıyor',
+		peer: '',
+		path: null
 	}
 ];
 
@@ -34,5 +48,21 @@ describe('Toast window', () => {
 		expect(cause.closest('.card')).toHaveAttribute('title', list[1].name);
 		// No "X gönderdi" line for a notice nobody sent.
 		expect(screen.getAllByText(/gönderdi/)).toHaveLength(1);
+	});
+
+	it('shows a remote input notice with its cause as a wrapped line and tooltip', async () => {
+		render(ToastWindow);
+		expect(await screen.findByText('Uzaktan kontrol çalışmıyor')).toBeInTheDocument();
+		const cause = screen.getByText(/Erişilebilirlik izni yok/);
+		expect(cause).toHaveClass('wrap');
+		expect(cause.closest('.card')).toHaveAttribute('title', list[2].name);
+	});
+
+	it('shows a fixed remote input notice without the error colour', async () => {
+		render(ToastWindow);
+		expect(await screen.findByText('Uzaktan kontrol çalışıyor')).toBeInTheDocument();
+		const line = screen.getByText(/kuralı kuruldu/);
+		expect(line).toHaveClass('wrap');
+		expect(line.closest('.card')?.querySelector('.ic')).not.toHaveClass('del');
 	});
 });

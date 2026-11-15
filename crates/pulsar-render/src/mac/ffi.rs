@@ -22,6 +22,20 @@ pub type Boolean = u8;
 pub type OSStatus = i32;
 pub type CVReturn = i32;
 
+/// Opaque `CGColorSpace`, only so a `*mut CGColorSpaceObj` passed through `msg_send!` encodes
+/// as `^{CGColorSpace=}`: objc2 checks argument encodings in debug builds and panics on a plain
+/// `*mut c_void` (`^v`) where a method (`-[CAMetalLayer setColorspace:]`) takes a colour space.
+#[repr(C)]
+pub struct CGColorSpaceObj {
+	_p: [u8; 0],
+}
+
+// SAFETY: the encoding CoreGraphics' headers give `CGColorSpaceRef` (as objc2-core-graphics).
+unsafe impl objc2::encode::RefEncode for CGColorSpaceObj {
+	const ENCODING_REF: objc2::encode::Encoding =
+		objc2::encode::Encoding::Pointer(&objc2::encode::Encoding::Struct("CGColorSpace", &[]));
+}
+
 pub type CMFormatDescriptionRef = *const c_void;
 pub type CMBlockBufferRef = *mut c_void;
 pub type CMSampleBufferRef = *mut c_void;
@@ -356,6 +370,11 @@ extern "C" {
 	) -> i32;
 	/// Retained `id<MTLDevice>` driving `display` (macOS 10.11+).
 	pub fn CGDirectDisplayCopyCurrentMetalDevice(display: CGDirectDisplayID) -> *mut c_void;
+	/// `kCGColorSpaceSRGB` (macOS 10.5+): the colour space the video layer is tagged with.
+	pub static kCGColorSpaceSRGB: CFStringRef;
+	/// +1 `CGColorSpaceRef` (null when the name is unknown).
+	pub fn CGColorSpaceCreateWithName(name: CFStringRef) -> *mut CGColorSpaceObj;
+	pub fn CGColorSpaceRelease(space: *mut CGColorSpaceObj);
 }
 
 #[link(name = "Metal", kind = "framework")]
@@ -444,4 +463,17 @@ pub unsafe fn cf_bool(v: CFTypeRef) -> Option<bool> {
 		return None;
 	}
 	Some(CFBooleanGetValue(v) != 0)
+}
+
+#[cfg(test)]
+mod tests {
+	/// objc2 checks `msg_send!` argument encodings in debug builds: `-[CAMetalLayer
+	/// setColorspace:]` takes `^{CGColorSpace=}`, which a plain `*mut c_void` (`^v`) does not
+	/// match (panic at layer creation).
+	#[test]
+	fn colour_space_pointer_encodes_as_cgcolorspace() {
+		use objc2::encode::Encode;
+		assert!(<*mut super::CGColorSpaceObj>::ENCODING.equivalent_to_str("^{CGColorSpace=}"));
+		assert!(!<*mut std::ffi::c_void>::ENCODING.equivalent_to_str("^{CGColorSpace=}"));
+	}
 }

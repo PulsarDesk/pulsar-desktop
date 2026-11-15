@@ -123,6 +123,7 @@ pub fn open_log_dir() -> Result<String, String> {
 	let mut cmd = std::process::Command::new(opener);
 	cmd.arg(&dir);
 	crate::process::no_window(&mut cmd);
+	pulsar_prio::unboost_command(&mut cmd); // a file manager must not keep a session boost
 	let _ = cmd.spawn();
 	Ok(path)
 }

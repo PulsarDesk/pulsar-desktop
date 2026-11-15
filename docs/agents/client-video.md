@@ -41,6 +41,48 @@ chroma"). Per renderer:
   that refuses it falls back to software inside libavcodec). Not compiled on Windows: CI / the
   Pi check it.
 
+## Colour: the stream's matrix + range, BT.709 limited by default (2026-11-15, branch `fix/colour-bt709`)
+
+`crates/pulsar-render/src/colour.rs` (pure, tested everywhere): `Colour { matrix, full_range }`,
+default = BT.709 limited (what every host sends, see host-encode.md "Colour space"), the shader
+constants (`yuv_consts`, shared with macOS) and the EGL / KMS hint values.
+
+- **Windows:** `win/decode.rs` reads the MF output type's `MF_MT_YUV_MATRIX` /
+  `MF_MT_VIDEO_NOMINAL_RANGE` (filled from the VUI; missing = BT.709 limited), and
+  `Present::set_colour` sets `VideoProcessorSetStreamColorSpace1` + RGB_FULL_G22_P709 out
+  (re-applied after a processor rebuild). The processor's default ignores the tag (measured on
+  Adreno: a BT.601 stream came out with red `(255, 24, 0)`). Harness: `win/colour_bars.rs`
+  decodes `testdata/colour-{bt709,untagged,bt601}.h264` through MF + the VideoProcessor and
+  reads the bars back.
+- **Linux:** the GL YUV shaders take `yr` / `ym` uniforms per draw from the AVFrame's
+  `colorspace` / `color_range` (`video.rs::set_colour`; P010 dmabuf layers as 10-bit MSB). They
+  were fixed BT.709 with full-range chroma gains (limited-range chroma ~12 % desaturated). A
+  composed YUV dmabuf (rkmpp NV12 / NV15) gets `EGL_YUV_COLOR_SPACE_HINT_EXT` /
+  `EGL_SAMPLE_RANGE_HINT_EXT` (drivers default to BT.601), and the DRM-lease video plane gets
+  `COLOR_ENCODING` / `COLOR_RANGE` (`kms_lease.rs`). Not compiled on the Windows dev box: check
+  on the Pi / CI.
+- **macOS:** VideoToolbox attaches the stream's matrix (`Frame::matrix`, BT.709 when absent) and
+  the range follows the pixel format ('420v' / '420f'); the `CAMetalLayer` is now tagged
+  `kCGColorSpaceSRGB` (`mac/metal.rs`), so macOS colour-matches it to the display instead
+  of showing the values raw (over-saturated on P3 panels). sRGB, NOT `kCGColorSpaceITUR_709`:
+  the pixels are sRGB-encoded (hosts capture sRGB and never convert the transfer; the stream's
+  BT.709 tag is the YUV matrix), and the 709 camera curve (~1.96) would lift midtones
+  (QuickTime's gamma shift) against the host and the Windows / Linux clients. CF / CG pointers
+  given to `msg_send!` must be typed (`ffi::CGColorSpaceObj`, pulsar-core `ffi::CFStringObj`):
+  objc2 checks argument encodings in debug builds and panics on `*const c_void`. Untested on a
+  Mac.
+- **Android:** the decoder `MediaFormat` gets BT.709 / limited / SDR-video keys when the stream
+  is not HDR (`PulsarVideoPlugin.kt`); the bitstream's VUI still wins. iOS has no video path yet.
+- **Linux frame props:** `av_hwframe_map` (VA-API → DRM_PRIME) and `av_hwframe_transfer_data`
+  (readback) copy pixels only, so `video.rs` calls `av_frame_copy_props` after either: the VUI
+  (a BT.601 tag, full range) reaches `frame_colour`. The `yr` / `ym` uniforms are cached per
+  program (`ColourUniforms`) and uploaded only when the colour changes. The DRM-lease plane
+  writes `COLOR_ENCODING` / `COLOR_RANGE` only when the plane's enum lists the value
+  (`Req::opt_enum`; an unlisted value fails the whole atomic commit with EINVAL).
+- **Version skew:** an untagged stream is read as BT.709, so an old host's untagged BT.601
+  stream (old Windows NVENC / MF, old ffmpeg / libav) shifts on a new client until the host
+  updates; see host-encode.md "Version skew".
+
 ## Linux / RK3588 (Orange Pi 5) renderer — the reality (IMPORTANT)
 
 - **VSync (Linux renderer, `linux.rs`):** the swap interval follows the compositor.
@@ -147,6 +189,18 @@ chroma"). Per renderer:
   A `.deb`/`.rpm` install (the Pi) updates through the package manager instead
   (`src-tauri/src/pkg_update.rs`: pkexec + apt-get/dnf, one password prompt from the
   modal, never silently) — see [status.md](status.md) "Platform parity".
+
+## Linux client on a Wayland session = XWayland (hidden-gaps 1.16)
+
+`src-tauri/src/main.rs` forces `GDK_BACKEND=x11` (the renderer embeds as an X11 child window
+via `--wid`; a native Wayland surface has no XID). On a Wayland session the whole client then
+runs under XWayland. KDE's default (X11 apps scale themselves) stays sharp; GNOME with
+fractional scaling (`scale-monitor-framebuffer`) and without mutter 47's
+`xwayland-native-scaling` upscales the X11 surface, so the stream looks soft. `main.rs` sets
+`PULSAR_FORCED_X11=1` when it forced X11 with `WAYLAND_DISPLAY` set; `link_hint.rs` logs
+`client runs under XWayland` at the first session and, when `gsettings get org.gnome.mutter
+experimental-features` shows that blur case, shows the one-time hint `hint.xwaylandScale`
+(tr/en). Untested on Linux hardware. The real fix, a native `wl_surface` renderer, is not done.
 
 ## Linux desktop GPUs — zero-copy needs the decoder on the DISPLAY GPU
 
@@ -387,6 +441,10 @@ and the picture returns with the overlay as it was.
 
 All in `src-tauri/src/play/hold.rs` unless noted. Why: a tethered ~10 Mbit / 78 ms link
 showed ~600 ms head-of-line holds, "stream stopped" over a live session and a locked RTT.
+Since 2026-11-15 the repair loop itself (gap tracking, reorder / FEC waits, re-NACK, write-off,
+window counters, FEC share, keyframe pacing, RTT window, `PongMatcher`), `auto_cap_kbps`,
+`path_cap_kbps` and the path-class memory live in pulsar-core (`adapt::{repair, pong, caps,
+memory}`) — the mobile client runs the same code; hold.rs feeds `RepairTracker` and actuates.
 
 - **Repair window** (`repair_window_ms`): median of the last 8 RTTs + 2 × their mean
   deviation + 20 ms host slack + the FEC hold, 60–200 ms; sweep every 50 ms. The renderer's reorder wait is

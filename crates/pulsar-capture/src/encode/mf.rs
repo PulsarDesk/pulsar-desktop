@@ -45,7 +45,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use windows::core::Interface;
+use windows::core::{Interface, GUID};
 use windows::Win32::Graphics::Direct3D11::{
 	ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D, ID3D11VideoContext,
 	ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
@@ -105,6 +105,9 @@ struct State {
 	lat_ewma_us: u32,
 	/// Set when the output thread has left.
 	done: bool,
+	/// Tests: every access unit sent, concatenated (Annex-B).
+	#[cfg(test)]
+	tap: Vec<u8>,
 }
 
 struct Shared {
@@ -207,6 +210,8 @@ impl OutputSide {
 			au = v;
 		}
 		super::submit::dump_bitstream(&au);
+		#[cfg(test)]
+		shared.state.lock().unwrap().tap.extend_from_slice(&au);
 		self.rtp.send_access_unit(&au, meta.rtp_ts);
 		let us = meta.t_in.elapsed().as_micros().min(u32::MAX as u128) as u32;
 		let mut st = shared.state.lock().unwrap();
@@ -433,14 +438,15 @@ impl MfEncoder {
 			}
 			Codec::Av1 => {}
 		}
-		transform.SetOutputType(0, &out, 0).map_err(|e| format!("SetOutputType: {e}"))?;
+		let out_tagged = set_type_with_colour(&out, "SetOutputType", |t| transform.SetOutputType(0, t, 0))?;
 		let inp = MFCreateMediaType().map_err(|e| e.to_string())?;
 		inp.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video).map_err(|e| e.to_string())?;
 		inp.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12).map_err(|e| e.to_string())?;
 		inp.SetUINT64(&MF_MT_FRAME_SIZE, pack(w, h)).map_err(|e| e.to_string())?;
 		inp.SetUINT64(&MF_MT_FRAME_RATE, pack(fps, 1)).map_err(|e| e.to_string())?;
 		inp.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32).map_err(|e| e.to_string())?;
-		transform.SetInputType(0, &inp, 0).map_err(|e| format!("SetInputType: {e}"))?;
+		let in_tagged = set_type_with_colour(&inp, "SetInputType", |t| transform.SetInputType(0, t, 0))?;
+		cap_dbg(&format!("mf: BT.709 limited colour attributes: output {out_tagged}, input {in_tagged}"));
 		// Again with the types set: some encoders (AMD's HEVC one) reset the rate control when
 		// the output type lands and otherwise run at their own default rate (measured: 60 Mbit
 		// for a 20 Mbit request).
@@ -450,6 +456,7 @@ impl MfEncoder {
 		let vdevice: ID3D11VideoDevice = device.cast().map_err(|e| format!("mf: no video device ({e}) — capture device lacks VIDEO_SUPPORT"))?;
 		let vctx: ID3D11VideoContext = context.cast().map_err(|e| format!("mf: no video context: {e}"))?;
 		let (vp_enum, vproc) = super::d3d::build_video_processor(&vdevice, cap_w, cap_h, w, h)?;
+		super::d3d::set_sdr_colour_spaces(&vctx, &vproc); // BT.709 limited, as the media type says
 		let nsurf = std::env::var("PULSAR_MF_SURFACES").ok().and_then(|s| s.parse::<usize>().ok()).filter(|n| (1..=8).contains(n)).unwrap_or(SURFACES);
 		let mut surfaces = Vec::with_capacity(nsurf);
 		for _ in 0..if sysmem { 1 } else { nsurf } {
@@ -793,6 +800,37 @@ impl Drop for MfEncoder {
 	}
 }
 
+/// Pulsar's SDR colour rule on a media type: BT.709 matrix, primaries and transfer, limited
+/// (16–235) range — what the VideoProcessor writes into the NV12 (`d3d::set_sdr_colour_spaces`)
+/// and what the encoder then signals in the VUI.
+const SDR_COLOUR: [(&GUID, i32); 4] = [
+	(&MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709.0),
+	(&MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235.0),
+	(&MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709.0),
+	(&MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709.0),
+];
+
+/// Set a media type with the [`SDR_COLOUR`] attributes. `SetUINT32` never fails, so an MFT that
+/// dislikes them rejects the WHOLE type at `set`: then the type goes again without them (the
+/// conversion stays BT.709 limited, only the VUI may stay empty, which clients read as BT.709
+/// limited too), so the colour tag never costs the native encoder. `Ok(true)` = tagged.
+unsafe fn set_type_with_colour(
+	t: &IMFMediaType,
+	what: &str,
+	set: impl Fn(&IMFMediaType) -> windows::core::Result<()>,
+) -> Result<bool, String> {
+	for (key, v) in SDR_COLOUR {
+		let _ = t.SetUINT32(key, v as u32);
+	}
+	let Err(e) = set(t) else { return Ok(true) };
+	for (key, _) in SDR_COLOUR {
+		let _ = t.DeleteItem(key);
+	}
+	set(t).map_err(|e2| format!("{what}: {e2} (with the BT.709 colour attributes: {e})"))?;
+	cap_dbg(&format!("mf: {what} rejected the BT.709 colour attributes ({e}); set without them"));
+	Ok(false)
+}
+
 /// VBV size in bits: `frames` frames of the mean rate.
 fn vbv_bits(bps: u32, fps: u32, frames: u32) -> u32 {
 	(bps / fps.max(1)).saturating_mul(frames.max(1))
@@ -917,4 +955,181 @@ fn has_parameter_sets(au: &[u8], codec: Codec) -> bool {
 		}
 	}
 	false
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use windows::Win32::Foundation::HMODULE;
+	use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0};
+	use windows::Win32::Graphics::Direct3D11::{
+		D3D11CreateDevice, D3D11_BIND_SHADER_RESOURCE, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+		D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION, D3D11_SUBRESOURCE_DATA,
+	};
+	use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+
+	/// Colour bars through the display GPU's real MF encoder (the Snapdragon / ARM64 host's
+	/// native path): the media type must take the BT.709 colour attributes or fall back
+	/// without them (never fail the encoder), and with `PULSAR_TEST_FFMPEG=<ffmpeg>` the
+	/// encoded bars are decoded and must be BT.709 limited (red Y 63, not BT.601's 81), the
+	/// VUI tagged when the attributes were taken. Skips without a hardware encoder MFT.
+	/// Measured 2026-11-15 on the Snapdragon laptop's "QCOM Hardware Encoder" (H.264 + HEVC):
+	/// attributes taken, VUI `tv, bt709`, bars within 4 codes. The access units are read from
+	/// the output thread's test tap (`State::tap`).
+	#[test]
+	fn mf_encoder_bars_are_bt709_limited() {
+		let bars: [([u8; 3], [u8; 3]); 5] = [
+			([255, 0, 0], [63, 102, 240]),
+			([0, 255, 0], [173, 42, 26]),
+			([0, 0, 255], [32, 240, 118]),
+			([255, 255, 255], [235, 128, 128]),
+			([0, 0, 0], [16, 128, 128]),
+		];
+		let (bw, h) = (64u32, 128u32);
+		let w = bw * bars.len() as u32;
+		// SAFETY: D3D11 / MF calls on a device and encoder owned by this test; buffers outlive
+		// the calls.
+		unsafe {
+			let (mut dev, mut ctx) = (None, None);
+			if D3D11CreateDevice(
+				None,
+				D3D_DRIVER_TYPE_HARDWARE,
+				HMODULE::default(),
+				D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+				Some(&[D3D_FEATURE_LEVEL_11_0]),
+				D3D11_SDK_VERSION,
+				Some(&mut dev),
+				None,
+				Some(&mut ctx),
+			)
+			.is_err()
+			{
+				eprintln!("no D3D11 video device: skipped");
+				return;
+			}
+			let (dev, ctx): (ID3D11Device, ID3D11DeviceContext) = (dev.unwrap(), ctx.unwrap());
+			for codec in [Codec::H264, Codec::H265] {
+				bars_through(&dev, &ctx, codec, &bars, bw, h, w);
+			}
+		}
+	}
+
+	unsafe fn bars_through(
+		dev: &ID3D11Device,
+		ctx: &ID3D11DeviceContext,
+		codec: Codec,
+		bars: &[([u8; 3], [u8; 3]); 5],
+		bw: u32,
+		h: u32,
+		w: u32,
+	) {
+		{
+			let p = super::super::EncParams {
+				width: w,
+				height: h,
+				capture_width: w,
+				capture_height: h,
+				fps: 30,
+				bitrate_kbps: 8000,
+				dest: "rtp://127.0.0.1:9".into(),
+				codec,
+				low_latency: true,
+				intra_refresh: false,
+				rotation: 0,
+				rfi: false,
+				hdr: None,
+				yuv444: false,
+			};
+			let mut enc = match MfEncoder::new(dev, ctx, &p) {
+				Ok(e) => e,
+				Err(e) => {
+					eprintln!("no MF hardware {codec:?} encoder here: {e}: skipped");
+					return;
+				}
+			};
+			let tagged = enc
+				.transform
+				.GetOutputCurrentType(0)
+				.and_then(|t| t.GetUINT32(&MF_MT_YUV_MATRIX))
+				.map(|m| m == MFVideoTransferMatrix_BT709.0 as u32)
+				.unwrap_or(false);
+			eprintln!("{codec:?}: MF output type keeps MF_MT_YUV_MATRIX BT.709: {tagged}");
+			let mut px = Vec::with_capacity((w * h * 4) as usize);
+			for _ in 0..h {
+				for (rgb, _) in bars.iter() {
+					for _ in 0..bw {
+						px.extend_from_slice(&[rgb[2], rgb[1], rgb[0], 255]);
+					}
+				}
+			}
+			let desc = D3D11_TEXTURE2D_DESC {
+				Width: w,
+				Height: h,
+				MipLevels: 1,
+				ArraySize: 1,
+				Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+				SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+				Usage: D3D11_USAGE_DEFAULT,
+				BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+				CPUAccessFlags: 0,
+				MiscFlags: 0,
+			};
+			let init = D3D11_SUBRESOURCE_DATA { pSysMem: px.as_ptr().cast(), SysMemPitch: w * 4, SysMemSlicePitch: 0 };
+			let mut src = None;
+			dev.CreateTexture2D(&desc, Some(&init), Some(&mut src)).unwrap();
+			let src = src.unwrap();
+			for pts in 0..10 {
+				let frame = crate::Frame {
+					texture: &src,
+					format: DXGI_FORMAT_B8G8R8A8_UNORM,
+					width: w,
+					height: h,
+					is_new: true,
+					force_idr: false,
+					present_ns: 0,
+				};
+				enc.submit(&frame, pts, (pts as u32) * 3000).unwrap();
+			}
+			// Every frame out of the encoder (bounded), then close.
+			let t0 = Instant::now();
+			while !enc.shared.state.lock().unwrap().inflight.is_empty() && t0.elapsed() < Duration::from_secs(5) {
+				std::thread::sleep(Duration::from_millis(5));
+			}
+			let stream = std::mem::take(&mut enc.shared.state.lock().unwrap().tap);
+			enc.flush_and_close();
+			assert!(has_parameter_sets(&stream, codec), "{codec:?}: no parameter sets in {} bytes", stream.len());
+			let Ok(ffmpeg) = std::env::var("PULSAR_TEST_FFMPEG") else {
+				eprintln!("PULSAR_TEST_FFMPEG not set: decode check skipped");
+				return;
+			};
+			let dir = std::env::temp_dir().join(format!("pulsar-mf-colour-{}-{codec:?}", std::process::id()));
+			std::fs::create_dir_all(&dir).unwrap();
+			let file = dir.join(if codec == Codec::H264 { "bars.h264" } else { "bars.hevc" });
+			std::fs::write(&file, &stream).unwrap();
+			let dec = std::process::Command::new(&ffmpeg)
+				.args(["-hide_banner", "-loglevel", "error", "-i"])
+				.arg(&file)
+				.args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-"])
+				.output()
+				.unwrap();
+			assert!(dec.status.success(), "decode: {}", String::from_utf8_lossy(&dec.stderr));
+			let info = std::process::Command::new(&ffmpeg).args(["-hide_banner", "-i"]).arg(&file).output().unwrap();
+			let info = String::from_utf8_lossy(&info.stderr).into_owned();
+			let _ = std::fs::remove_dir_all(&dir);
+			let px = &dec.stdout;
+			let (w, h) = (w as usize, h as usize);
+			assert_eq!(px.len(), w * h * 3 / 2);
+			for (i, (_, want)) in bars.iter().enumerate() {
+				let x = i * bw as usize + bw as usize / 2;
+				let y = h / 2;
+				let got = [px[y * w + x], px[w * h + (y / 2) * (w / 2) + x / 2], px[w * h * 5 / 4 + (y / 2) * (w / 2) + x / 2]];
+				let near = got.iter().zip(want).all(|(a, b)| a.abs_diff(*b) <= 4);
+				assert!(near, "{codec:?} bar {i}: got {got:?}, BT.709 limited {want:?}");
+			}
+			eprintln!("{}", info.lines().find(|l| l.contains("Video:")).unwrap_or(""));
+			if tagged {
+				assert!(info.contains("(tv, bt709"), "{codec:?}: VUI not BT.709 limited: {info}");
+			}
+		}
+	}
 }

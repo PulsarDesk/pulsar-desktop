@@ -88,6 +88,9 @@ fn main() {
 				draw_mouse: true,
 				window_hwnd: None,
 				encoder: pulsar_capture::NativeEncoder::MediaFoundation,
+				// Media Foundation streams SDR 4:2:0.
+				yuv444: false,
+				hdr: false,
 			};
 			let h = pulsar_capture::start_capture_encode(cfg).expect("start_capture_encode (MF)");
 			println!("capture started in {} ms", t0.elapsed().as_millis());
