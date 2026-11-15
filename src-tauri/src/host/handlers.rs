@@ -2965,48 +2965,50 @@ pub(super) fn make_on_stream(
 		let (eff_w, eff_h) = clamp_dims(eff_w, eff_h);
 		// PER-WINDOW capture off Windows (Windows resolves its WGC target further down): the
 		// client's window pick (`req.window_hwnd`), else the window of the game this session
-		// launched. Linux X11 grabs the X window by id; macOS starts a ScreenCaptureKit window
-		// source now and serves its frames to ffmpeg on loopback. The stream is the window's
-		// own aspect fitted into the requested box (never upscaled). A window that is gone (or
-		// a ScreenCaptureKit start that fails) streams the screen instead — as Windows does
+		// launched. Linux X11 grabs the X window by id. macOS captures it through
+		// ScreenCaptureKit: the NATIVE path below (SCK window → VideoToolbox in-process: live
+		// bitrate, keyframe on request) when it is taken, else a loopback frame server for
+		// ffmpeg (`window_capture::serve_for`, started after the native decision so ONE
+		// ScreenCaptureKit stream runs per window). The stream is the window's own aspect
+		// fitted into the requested box (never upscaled). A window that is gone (or a
+		// ScreenCaptureKit start that fails) streams the screen instead — as Windows does
 		// when its window capture can't start. A window stream also maps the session's
 		// pointer onto the window and brings it to the front (`window_src::began`); the
 		// host's window watcher restarts the stream when it is resized or closed. Run off
-		// the async workers (`blocking`): the ScreenCaptureKit query + start can wait ~10 s
-		// behind the Screen Recording prompt. Untested on Linux X11 / macOS hardware.
+		// the async workers (`blocking`): the ScreenCaptureKit query can wait ~5 s behind the
+		// Screen Recording prompt. Untested on Linux X11 / macOS hardware.
+		#[cfg(target_os = "macos")]
+		let window_box = (eff_w, eff_h);
 		#[cfg(not(windows))]
-		let host_window: Option<(super::window_src::Target, (u32, u32), Option<String>)> = {
+		let host_window: Option<(super::window_src::Target, (u32, u32))> = {
 			use super::window_src::{self as ws, Target};
 			let want = req.window_hwnd.or_else(|| *launched_hwnd.lock().unwrap());
 			ws::blocking(|| {
 				let picked = match ws::current_target(want) {
-					Some(t @ Target::X11(id)) => match ws::window_size(id) {
-						Some(size) => Some((t, ws::encode_size(size, (eff_w, eff_h)), None)),
+					Some(t @ (Target::X11(id) | Target::Mac(id))) => match ws::window_size(id) {
+						Some(size) => Some((t, ws::encode_size(size, (eff_w, eff_h)))),
 						None => {
 							tracing::warn!(id, "the chosen window is gone, streaming the screen");
 							None
 						}
 					},
-					// One ScreenCaptureKit query gives the window, its size and the stream.
-					Some(t @ Target::Mac(id)) => {
-						match pulsar_core::window_capture::serve_for(sid, id, (eff_w, eff_h), eff_fps) {
-							Ok((url, size)) => Some((t, size, Some(url))),
-							Err(e) => {
-								tracing::warn!(id, "window capture failed to start, streaming the screen: {e}");
-								None
-							}
-						}
-					}
 					_ => None,
 				};
-				if let Some((Target::X11(id) | Target::Mac(id), ..)) = picked {
+				// macOS registers the window once its source has started (below).
+				if let Some((Target::X11(id), _)) = picked {
 					ws::began(sid, id);
 				}
 				picked
 			})
 		};
 		#[cfg(not(windows))]
-		let (eff_w, eff_h) = host_window.as_ref().map_or((eff_w, eff_h), |(_, s, _)| *s);
+		let (eff_w, eff_h) = host_window.as_ref().map_or((eff_w, eff_h), |(_, s)| *s);
+		// The macOS window this stream should show (`None` = the screen).
+		#[cfg(target_os = "macos")]
+		let mac_window: Option<u64> = match host_window {
+			Some((super::window_src::Target::Mac(id), _)) => Some(id),
+			_ => None,
+		};
 		// The X window this stream grabs (gst `ximagesrc xid=` / x11grab `-window_id`).
 		#[cfg(target_os = "linux")]
 		let win_xid: Option<u64> = match host_window {
@@ -3522,13 +3524,11 @@ pub(super) fn make_on_stream(
 			yuv444: req.yuv444,
 			loss_recovery: req.loss_recovery,
 			// Off Windows: the window picked above (Windows' own window capture is WGC on the
-			// native path below; its ffmpeg fallback streams the monitor).
+			// native path below; its ffmpeg fallback streams the monitor). A macOS window is
+			// filled in after the native attempt (`mac_window_src`).
 			#[cfg(not(windows))]
 			window: match &host_window {
-				Some((super::window_src::Target::X11(id), ..)) => Some(pipeline::WindowInput::X11 { id: *id }),
-				Some((super::window_src::Target::Mac(_), _, Some(url))) => {
-					Some(pipeline::WindowInput::RawNv12 { url: url.clone() })
-				}
+				Some((super::window_src::Target::X11(id), _)) => Some(pipeline::WindowInput::X11 { id: *id }),
 				_ => None,
 			},
 			#[cfg(windows)]
@@ -3665,14 +3665,14 @@ pub(super) fn make_on_stream(
 		};
 		// NATIVE macOS path: ScreenCaptureKit + VideoToolbox in-process (pulsar-capture `mac/`):
 		// live bitrate, keyframe on request, live display switch — what the ffmpeg CLI cannot do.
-		// Taken when the resolved encoder is VideoToolbox; the ffmpeg avfoundation chain below
+		// Taken when the resolved encoder is VideoToolbox, for a display or ONE window
+		// (`mac_window`: SCK desktop-independent window, same encoder). The ffmpeg chain below
 		// stays the fallback (macOS < 12.3, no Screen Recording permission, a codec VideoToolbox
-		// refuses, HDR / 4:4:4). PULSAR_FFMPEG_CAPTURE=1 forces ffmpeg. Untested on macOS hardware.
+		// refuses, HDR / 4:4:4 — a window then goes through the loopback frame server).
+		// PULSAR_FFMPEG_CAPTURE=1 forces ffmpeg. Untested on macOS hardware.
 		#[cfg(target_os = "macos")]
 		let native_started = if encoder == HwEncoder::VideoToolbox
 			&& capture == CaptureMethod::AvFoundation
-			// A window pick streams through the ScreenCaptureKit window source + ffmpeg below.
-			&& plan.window.is_none()
 			&& codec != pipeline::VCodec::Av1
 			&& !req.hdr
 			&& !req.yuv444
@@ -3702,12 +3702,17 @@ pub(super) fn make_on_stream(
 				intra_refresh: false,
 				rfi: req.rfi,
 				draw_mouse: true,
-				window_hwnd: None,
+				// A `CGWindowID`: SCK captures that window; `eff_w × eff_h` already has its
+				// aspect (fitted above).
+				window_hwnd: mac_window.and_then(|id| isize::try_from(id).ok()),
 			}) {
 				Ok(h) => {
 					native_enc_us = Some(h.encode_us_arc());
 					native_stats = Some(h.stats_arc());
 					*native_slot.lock().unwrap() = Some(h);
+					if let Some(id) = mac_window {
+						super::window_src::blocking(|| super::window_src::began(sid, id));
+					}
 					true
 				}
 				Err(e) => {
@@ -3726,6 +3731,38 @@ pub(super) fn make_on_stream(
 		};
 		#[cfg(not(any(windows, target_os = "macos")))]
 		let native_started = false;
+		// macOS window without the native path: serve the window's frames on loopback for the
+		// ffmpeg chain (raw NV12 → VideoToolbox CLI), sized by its own ScreenCaptureKit query.
+		// A start that fails streams the screen at the requested box (not the window's shape).
+		#[cfg(target_os = "macos")]
+		let mac_window_src: Option<(String, (u32, u32))> = match mac_window {
+			Some(id) if !native_started => super::window_src::blocking(|| {
+				match pulsar_core::window_capture::serve_for(sid, id, window_box, eff_fps) {
+					Ok(src) => {
+						super::window_src::began(sid, id);
+						Some(src)
+					}
+					Err(e) => {
+						tracing::warn!(id, "window capture failed to start, streaming the screen: {e}");
+						None
+					}
+				}
+			}),
+			_ => None,
+		};
+		#[cfg(target_os = "macos")]
+		let plan = match (mac_window, native_started, &mac_window_src) {
+			(Some(_), false, Some((url, (w, h)))) => StreamPlan {
+				width: *w,
+				height: *h,
+				window: Some(pipeline::WindowInput::RawNv12 { url: url.clone() }),
+				..plan
+			},
+			(Some(_), false, None) => StreamPlan { width: window_box.0, height: window_box.1, window: None, ..plan },
+			_ => plan,
+		};
+		#[cfg(target_os = "macos")]
+		let eff_h = plan.height;
 
 		// Publish the per-window capture state for the input path (Bug 0): the current stream routes
 		// kb/mouse to WindowInput ONLY when it ACTUALLY WGC-captured a specific window — i.e. the
@@ -3740,15 +3777,18 @@ pub(super) fn make_on_stream(
 			crate::coop::set_capture(sid, if native_started { target_hwnd } else { None });
 		}
 		// Linux X11 / macOS: the window `host_window` resolved above is what this stream shows
-		// (X11: x11grab -window_id / libav / gst ximagesrc xid=; macOS: the ScreenCaptureKit
-		// window source over rawvideo — the native display path never takes a window plan), so
-		// its id is the input target: `WindowInput` (X11 SendEvent / XTest when in front, macOS
+		// (X11: x11grab -window_id / libav / gst ximagesrc xid=; macOS: the native SCK window →
+		// VideoToolbox path, or the SCK window source over rawvideo for ffmpeg), so its id is
+		// the input target: `WindowInput` (X11 SendEvent / XTest when in front, macOS
 		// CGEventPostToPid). A screen stream (Wayland window casts included: no id) clears it.
 		#[cfg(not(windows))]
 		{
 			let w = match &host_window {
-				Some((super::window_src::Target::X11(id), ..)) => i64::try_from(*id).ok(),
-				Some((super::window_src::Target::Mac(id), _, Some(_))) => Some(*id as i64),
+				Some((super::window_src::Target::X11(id), _)) => i64::try_from(*id).ok(),
+				#[cfg(target_os = "macos")]
+				Some((super::window_src::Target::Mac(id), _)) if native_started || mac_window_src.is_some() => {
+					i64::try_from(*id).ok()
+				}
 				_ => None,
 			};
 			*win_capture_hwnd.lock().unwrap() = w;

@@ -7,7 +7,7 @@
 //! | --- | --- | --- | --- |
 //! | Linux X11 | `_NET_CLIENT_LIST` windows (id = X window id) | `x11grab -window_id` (libav / ffmpeg CLI) or gst `ximagesrc xid=` | uinput region = the window's rect in the root |
 //! | Linux Wayland | one entry, [`WindowInfo::PORTAL_PICK`] | ScreenCast portal, windows only — the person at the host picks | whole desktop (Wayland tells no program where a window is) |
-//! | macOS | ScreenCaptureKit windows (id = `CGWindowID`) | ScreenCaptureKit window → raw NV12 on loopback → ffmpeg | `CGEvent` points inside the window's frame |
+//! | macOS | ScreenCaptureKit windows (id = `CGWindowID`) | ScreenCaptureKit window → VideoToolbox in-process (`pulsar-capture` native path; live bitrate, keyframe on request), else → raw NV12 on loopback → ffmpeg | `CGEvent` points inside the window's frame |
 //!
 //! The listing / capture code lives in `pulsar_core::window_capture`. Untested on Linux and
 //! macOS hardware.
