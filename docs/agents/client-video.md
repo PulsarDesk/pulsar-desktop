@@ -274,6 +274,10 @@ and the picture returns with the overlay as it was.
 
 All in `src-tauri/src/play/hold.rs` unless noted. Why: a tethered ~10 Mbit / 78 ms link
 showed ~600 ms head-of-line holds, "stream stopped" over a live session and a locked RTT.
+Since 2026-11-15 the repair loop itself (gap tracking, reorder / FEC waits, re-NACK, write-off,
+window counters, FEC share, keyframe pacing, RTT window, `PongMatcher`), `auto_cap_kbps`,
+`path_cap_kbps` and the path-class memory live in pulsar-core (`adapt::{repair, pong, caps,
+memory}`) — the mobile client runs the same code; hold.rs feeds `RepairTracker` and actuates.
 
 - **Repair window** (`repair_window_ms`): median of the last 8 RTTs + 2 × their mean
   deviation + 20 ms host slack + the FEC hold, 60–200 ms; sweep every 50 ms. The renderer's reorder wait is
