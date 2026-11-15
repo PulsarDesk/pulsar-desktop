@@ -391,7 +391,7 @@ pub fn probe_json() -> String {
 			let _ = MFStartup(MF_VERSION, MFSTARTUP_FULL);
 		});
 	}
-	let dxva = unsafe { dxva_nv12_profiles() };
+	let dxva = dxva_nv12_profiles_bounded(DXVA_QUERY_TIMEOUT);
 	let mut entries = Vec::new();
 	for (name, subtype) in [
 		("h264", MFVideoFormat_H264),
@@ -421,6 +421,42 @@ fn probe_entry(codec: &str, ok: bool, hw: bool) -> String {
 		hw && ok,
 		if hw && ok { "hwaccel" } else { "software" }
 	)
+}
+
+/// How long the probe waits for the DXVA profile query before it treats the GPU as having
+/// none (`hw:false`).
+const DXVA_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(2500);
+
+/// `dxva_nv12_profiles` on a worker thread, bounded by `timeout`. The query is informational
+/// (it only sets `hw`/`tier`); `ok` comes from the MFT enumeration alone. `D3D11CreateDevice`
+/// can block for good on a GPU whose driver is wedged by another process (seen on NVIDIA:
+/// every device creation blocks while one hung encoder holds the driver). Without the bound
+/// the whole `--probe` would hang until caps.rs kills it after 15 s and falls back to H.264
+/// only, so one informational flag would cost HEVC/AV1 and a 15 s delay. On a timeout the
+/// worker is left behind (the process exits right after printing) and the list is empty.
+fn dxva_nv12_profiles_bounded(timeout: std::time::Duration) -> Vec<GUID> {
+	let (tx, rx) = std::sync::mpsc::channel();
+	let spawned = std::thread::Builder::new()
+		.name("dxva-probe".into())
+		.spawn(move || {
+			let _ = tx.send(unsafe { dxva_nv12_profiles() });
+		});
+	if spawned.is_err() {
+		return Vec::new();
+	}
+	rx.recv_timeout(timeout).unwrap_or_else(|_| {
+		DXVA_QUERY_ABANDONED.store(true, std::sync::atomic::Ordering::SeqCst);
+		Vec::new()
+	})
+}
+
+static DXVA_QUERY_ABANDONED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Did the probe leave a DXVA query thread blocked in the driver? Then a normal exit could
+/// hang in DLL detach (the thread may hold the loader lock), so `main` ends the process
+/// with `TerminateProcess` once the JSON is flushed.
+pub fn probe_abandoned_worker() -> bool {
+	DXVA_QUERY_ABANDONED.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// The DXVA (D3D11 video) decoder profiles of one codec subtype, 8-bit 4:2:0 — what the

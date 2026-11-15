@@ -183,8 +183,11 @@ pub(crate) fn probe_all(app: &AppHandle) -> LocalCaps {
 /// Media Foundation, and reporting NOTHING would grey out every codec in Settings on a box
 /// that can in fact stream. HEVC is deliberately NOT claimed here — it needs the (optional)
 /// HEVC Video Extensions, so an unprobed guess is exactly what steered negotiation into a
-/// black screen. macOS keeps the pair its fallback players (mpv / ffplay) decode in software
-/// on every Mac. Elsewhere, report nothing rather than guessing.
+/// black screen. That H.264 claim is `hw:false, tier:"software"`: whether the GPU decodes it
+/// (DXVA) is unknown without the probe, and a WARP / basic-display box has no hardware decoder
+/// at all, so the unprobed entry never claims one. macOS keeps the pair its fallback players
+/// (mpv / ffplay) decode in software on every Mac. Elsewhere, report nothing rather than
+/// guessing.
 fn probe_unavailable(platform: &str) -> Vec<DecoderCap> {
 	if platform == "macos" {
 		return ["h264", "h265"]
@@ -206,8 +209,8 @@ fn probe_unavailable(platform: &str) -> Vec<DecoderCap> {
 		codec: "h264".into(),
 		ok: true,
 		name: "mediafoundation".into(),
-		hw: true,
-		tier: "hwaccel".into(),
+		hw: false,
+		tier: "software".into(),
 		incompatible_with: Vec::new(),
 	}]
 }
