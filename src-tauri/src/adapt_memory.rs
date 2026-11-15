@@ -1,28 +1,15 @@
 //! Per-peer adaptive-streaming memory (Phase 1.3): the last rate a session to a peer ran
-//! cleanly at, so the next session starts near it instead of probing from scratch.
+//! cleanly at, keyed by peer AND path class (`lan` / `wan` / `relay`), so the next session starts
+//! near it instead of probing from scratch.
 //!
-//! A tiny JSON map in the app config dir (`adapt-memory.json`): `{ "<peer>|<class>": {
-//! "kbps": N, "at": <unix secs> } }`. Best-effort — a missing/corrupt file just means no hint.
-//!
-//! Keyed by peer AND path class (`lan` / `wan` / `relay`, see [`PathClass`]): the same host
-//! reached over the home LAN and over a tethered mobile link are two different paths, and a
-//! 40 Mbit LAN rate seeding a 10 Mbit mobile session was the opening of the 2026-11-09 field
-//! collapse (loss from the first window → the ABR halved to the floor and stayed there).
-//! Entries of the old peer-only format (no `|class` suffix) are ignored and dropped on the
-//! next write.
+//! The map, its keys and the path classification are shared with the mobile client
+//! (`pulsar_core::adapt::memory`, `pulsar_core::netpath`); this file only places it in the app
+//! config dir (`adapt-memory.json`).
 
-use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
-
-#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
-struct Entry {
-	kbps: u32,
-	at: u64,
-}
 
 /// What kind of network path a session runs on — the memory's second key. Shared with the
 /// mobile client (pulsar-core `netpath`): a ZeroTier / WireGuard / Tailscale path is `Wan`
@@ -37,27 +24,6 @@ pub(crate) fn classify(transport: pulsar_core::Transport, peer: Option<IpAddr>, 
 	pulsar_core::netpath::classify(transport, peer, rtt_ms)
 }
 
-fn key(peer: &str, class: PathClass) -> String {
-	format!("{peer}|{}", class.as_str())
-}
-
-/// Remembered for 30 days; the file keeps 90.
-const HINT_MAX_AGE_SECS: u64 = 30 * 24 * 3600;
-const KEEP_SECS: u64 = 90 * 24 * 3600;
-
-fn lookup(m: &HashMap<String, Entry>, peer: &str, class: PathClass, now: u64) -> Option<u32> {
-	let e = m.get(&key(peer, class))?;
-	(e.kbps > 0 && now.saturating_sub(e.at) < HINT_MAX_AGE_SECS).then_some(e.kbps)
-}
-
-fn store(m: &mut HashMap<String, Entry>, peer: &str, class: PathClass, kbps: u32, now: u64) {
-	m.insert(key(peer, class), Entry { kbps, at: now });
-	// Keep the file small: drop entries older than 90 days, and the old peer-only keys (no
-	// path class — they can't tell a LAN rate from a mobile one).
-	let cutoff = now.saturating_sub(KEEP_SECS);
-	m.retain(|k, e| e.at >= cutoff && k.contains('|'));
-}
-
 fn path(app: &AppHandle) -> PathBuf {
 	app.path()
 		.app_config_dir()
@@ -65,40 +31,15 @@ fn path(app: &AppHandle) -> PathBuf {
 		.join("adapt-memory.json")
 }
 
-fn load(app: &AppHandle) -> HashMap<String, Entry> {
-	std::fs::read(path(app))
-		.ok()
-		.and_then(|b| serde_json::from_slice(&b).ok())
-		.unwrap_or_default()
-}
-
-fn now_secs() -> u64 {
-	std::time::SystemTime::now()
-		.duration_since(std::time::UNIX_EPOCH)
-		.map(|d| d.as_secs())
-		.unwrap_or(0)
-}
-
 /// The peer's last known-good rate (kbit/s) on this kind of path, if remembered within the
 /// last 30 days.
 pub(crate) fn hint(app: &AppHandle, peer: &str, class: PathClass) -> Option<u32> {
-	lookup(&load(app), peer, class, now_secs())
+	pulsar_core::adapt::memory::hint(&path(app), peer, class)
 }
 
 /// Remember `kbps` as the peer's last known-good rate on this kind of path (overwrites).
 pub(crate) fn remember(app: &AppHandle, peer: &str, class: PathClass, kbps: u32) {
-	if kbps == 0 || peer.is_empty() {
-		return;
-	}
-	let mut m = load(app);
-	store(&mut m, peer, class, kbps, now_secs());
-	let p = path(app);
-	if let Some(dir) = p.parent() {
-		let _ = std::fs::create_dir_all(dir);
-	}
-	if let Ok(json) = serde_json::to_vec_pretty(&m) {
-		let _ = std::fs::write(p, json);
-	}
+	pulsar_core::adapt::memory::remember(&path(app), peer, class, kbps)
 }
 
 #[cfg(test)]
@@ -128,38 +69,5 @@ mod tests {
 		assert_eq!(classify(Transport::Direct, ip("10.8.0.3"), Some(14.0)), PathClass::Wan);
 		// Unknown address: the cautious class.
 		assert_eq!(classify(Transport::Direct, None, None), PathClass::Wan);
-	}
-
-	#[test]
-	fn memory_is_keyed_by_peer_and_path_class() {
-		let now = 1_000_000_000;
-		let mut m = HashMap::new();
-		store(&mut m, "123456789", PathClass::Lan, 40_000, now);
-		// A LAN rate never seeds a mobile (wan) or relayed session to the same peer.
-		assert_eq!(lookup(&m, "123456789", PathClass::Lan, now), Some(40_000));
-		assert_eq!(lookup(&m, "123456789", PathClass::Wan, now), None);
-		assert_eq!(lookup(&m, "123456789", PathClass::Relay, now), None);
-		store(&mut m, "123456789", PathClass::Wan, 5_000, now);
-		assert_eq!(lookup(&m, "123456789", PathClass::Wan, now), Some(5_000));
-		assert_eq!(lookup(&m, "123456789", PathClass::Lan, now), Some(40_000));
-		assert_eq!(lookup(&m, "other", PathClass::Lan, now), None);
-		// Expiry: 30 days for a hint.
-		assert_eq!(lookup(&m, "123456789", PathClass::Lan, now + HINT_MAX_AGE_SECS), None);
-	}
-
-	#[test]
-	fn old_peer_only_entries_are_ignored_and_dropped() {
-		let now = 1_000_000_000;
-		let mut m: HashMap<String, Entry> =
-			serde_json::from_str(r#"{ "123456789": { "kbps": 40000, "at": 1000000000 } }"#).unwrap();
-		for c in [PathClass::Lan, PathClass::Wan, PathClass::Relay] {
-			assert_eq!(lookup(&m, "123456789", c, now), None);
-		}
-		store(&mut m, "123456789", PathClass::Relay, 3_000, now);
-		assert_eq!(m.len(), 1);
-		assert!(m.contains_key("123456789|relay"));
-		// Entries past 90 days are dropped on write.
-		store(&mut m, "x", PathClass::Lan, 1_000, now + KEEP_SECS + 1);
-		assert_eq!(m.len(), 1);
 	}
 }

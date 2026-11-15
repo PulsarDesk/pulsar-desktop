@@ -19,59 +19,25 @@ use pulsar_core::Session;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc::Receiver;
 
-use pulsar_core::adapt::{Controller, Sample};
+use pulsar_core::adapt::repair::{
+	decoder_overloaded, fast_drop_on, goodput_kbps, FecShare, FrameClock, KeyframePacer, RepairTracker,
+	REPAIR_SWEEP_MS,
+};
+use pulsar_core::adapt::caps::path_cap_kbps;
+use pulsar_core::adapt::pong::PongMatcher;
+use pulsar_core::adapt::Controller;
 use crate::events::{
 	AvatarPayload, DataPayload, FilePayload, FsEntriesPayload, PlayRtt, PlayStats,
 };
 use crate::state::Restream;
 
-/// Keepalive/RTT ping cadence. 500 ms (was 2 s): the adaptive controller (`pulsar_core::adapt`)
-/// decides on 2 s windows and needs a few RTT samples per window to see a queue building
-/// (Phase 0.1) and to size the NACK repair window (Phase 0.5). Each Ping is a ~10-byte
-/// datagram; the host answers every one with a Pong and refreshes its liveness timer.
-const PING_MS: u64 = 500;
-/// At most this many already-queued input events are taken per wake of the input arm (see
-/// the backlog drain there): bounded so one busy moment can't starve the other arms.
-const INPUT_BACKLOG_MAX: usize = 64;
-/// A Ping still unanswered this long is written off as lost. Pings go out every `PING_MS`
-/// whether or not the last one was answered (see `match_pong`): on a 40 %-loss link a lost
-/// Ping or Pong used to stall the RTT samples for a second.
-const PING_LOST: std::time::Duration = std::time::Duration::from_secs(2);
-/// How many recent RTT samples size the repair window (~4 s of Pings).
-const RTT_RECENT: usize = 8;
-/// How often unanswered NACKs are swept (re-NACKed once, then written off as a failed
-/// repair → keyframe request + renderer hold). 50 ms (was 100): the renderer waits one sweep
-/// longer than this loop (see `maxdelay` below), so the sweep period is extra head-of-line
-/// wait behind every unrepaired hole; a 20 Hz pass over a few dozen entries costs nothing.
-const REPAIR_SWEEP_MS: u64 = 50;
-/// Bounds of the RTT-derived repair window (ms): how long a missing packet is waited for
-/// before the repair is declared failed. The renderer's RTP reorder `max_delay` is this plus
-/// one sweep, so both give up together, and a hole holds the frames behind it for 250 ms at
-/// most (the renderer's own cap) — a repair slower than that loses to the RFI / keyframe
-/// recovery anyway. See `repair_window_ms`.
-const REPAIR_MIN_MS: f32 = 60.0;
-const REPAIR_MAX_MS: f32 = 250.0 - REPAIR_SWEEP_MS as f32;
-/// Allowance on top of the RTT for the host's side of a retransmit (its pacer queue + send).
-const REPAIR_SLACK_MS: f32 = 20.0;
 /// How long the renderer holds the last good frame after an unrepaired loss while the
 /// keyframe is on its way (Phase 0.5). Bounded (a keyframe ends it sooner), and the renderer
 /// arms it once per loss episode, so a run of losses can't chain holds into a long freeze.
 const HOLD_MS: u32 = 300;
-
-/// Game mode on a high-RTT path (median RTT at or over `FAST_DROP_RTT_ON_MS`; off again under
-/// `FAST_DROP_RTT_OFF_MS`) with a recovery that needs no keyframe (RFI / intra refresh): a hole
-/// is dropped fast instead of holding every later frame for a NACK repair that needs ≥ 1 RTT —
-/// Moonlight-like (moonlight-common-c drops an incomplete frame as soon as the next one's
-/// packets arrive and asks for RFI / IDR, no NACK at all). The renderer's reorder wait shrinks
-/// to the reorder / FEC wait plus a frame (`fast_drop_wait_ms`) and no NACK is sent (its
-/// answer would land after the renderer gave up). Remote-desktop sessions keep the
-/// repair-friendly wait: a held frame there is text that arrives whole, not a stutter.
-const FAST_DROP_RTT_ON_MS: f32 = 35.0;
-const FAST_DROP_RTT_OFF_MS: f32 = 25.0;
-/// Bounds of the fast-drop wait (ms): at least a couple of frames of reordering, at most what
-/// a mobile link's reordering / FEC wait needs — never the 250 ms repair cap.
-const FAST_DROP_MIN_MS: f32 = 30.0;
-const FAST_DROP_MAX_MS: f32 = 80.0;
+/// At most this many already-queued input events are taken per wake of the input arm (see
+/// the backlog drain there): bounded so one busy moment can't starve the other arms.
+const INPUT_BACKLOG_MAX: usize = 64;
 
 /// Whether this host takes `ev`. Mouse side buttons (3 = back, 4 = forward) go only to hosts
 /// that advertise `FEAT_MOUSE_X`: older hosts turned every button id they did not know into a
@@ -84,25 +50,6 @@ fn host_takes(ev: &InputEvent, host_mouse_x: bool) -> bool {
 		}
 		_ => true,
 	}
-}
-
-/// Whether the fast drop is on (`prev` = its last state; hysteresis on the median RTT).
-fn fast_drop_on(prev: bool, game_mode: bool, keyframe_free: bool, rtt_med_ms: f32) -> bool {
-	if !game_mode || !keyframe_free || !(rtt_med_ms > 0.0) {
-		return false;
-	}
-	if prev {
-		rtt_med_ms >= FAST_DROP_RTT_OFF_MS
-	} else {
-		rtt_med_ms >= FAST_DROP_RTT_ON_MS
-	}
-}
-
-/// The fast-drop wait (ms): the gap's reorder / FEC wait (`nack_hold_ms`, see `nack_wait_ms`)
-/// plus one frame interval and a little slack, bounded by `FAST_DROP_MIN_MS..=FAST_DROP_MAX_MS`.
-fn fast_drop_wait_ms(nack_hold_ms: f32, fps: u32) -> f32 {
-	let frame = 1000.0 / if fps == 0 { 60 } else { fps } as f32;
-	(nack_hold_ms.max(0.0) + frame + 10.0).clamp(FAST_DROP_MIN_MS, FAST_DROP_MAX_MS)
 }
 
 /// The point a stream runs at: the controller's while it adapts; with "Otomatik ayar" off the
@@ -135,26 +82,6 @@ fn loss_hold_ms(recovery: LossRecovery) -> Option<u32> {
 	(recovery != LossRecovery::IntraRefresh).then_some(HOLD_MS)
 }
 
-/// Keyframe-request pacing. While losses keep coming, every request within 5 s of the previous
-/// one doubles the gap (0.5 s → 1 → 2 → 4 s); 5 s without one resets it. And never sooner than
-/// ~2 RTT: the keyframe asked for can't have arrived yet. Without this a lossy link fell into a
-/// keyframe storm — 1080p keyframes every ~0.4 s were most of the traffic (2 Mbit/s sent for a
-/// 0.3 Mbit/s target), which caused the next losses, which asked for more keyframes.
-const KF_GAP_MIN: std::time::Duration = std::time::Duration::from_millis(500);
-const KF_GAP_MAX: std::time::Duration = std::time::Duration::from_secs(4);
-
-fn kf_allowed(since_last: std::time::Duration, gap: std::time::Duration, rtt_ms: f32) -> bool {
-	since_last >= gap.max(std::time::Duration::from_secs_f32((2.0 * rtt_ms.max(0.0) + 100.0) / 1000.0))
-}
-
-fn kf_next_gap(since_last: std::time::Duration, gap: std::time::Duration) -> std::time::Duration {
-	if since_last < std::time::Duration::from_secs(5) {
-		(gap * 2).min(KF_GAP_MAX)
-	} else {
-		KF_GAP_MIN
-	}
-}
-
 /// Reference-frame invalidation is the recovery: the host does it and the codec has the
 /// recovery tag (H.264 / HEVC). Whether a reported hole still lies within the encoder's
 /// reference buffer is the HOST's call — it knows its DPB depth and sends a keyframe itself
@@ -163,336 +90,6 @@ fn kf_next_gap(since_last: std::time::Duration, gap: std::time::Duration) -> std
 /// keyframe request.)
 fn rfi_reach(host_rfi: bool, codec: &str) -> bool {
 	host_rfi && codec != "av1"
-}
-
-/// Median of the recent RTT samples (`fallback` while there are none).
-fn median_ms(v: &std::collections::VecDeque<f32>, fallback: f32) -> f32 {
-	if v.is_empty() {
-		return fallback;
-	}
-	let mut s: Vec<f32> = v.iter().copied().collect();
-	s.sort_by(f32::total_cmp);
-	s[s.len() / 2]
-}
-
-/// The client decoder cannot keep up with `fps`: each access unit takes most of the frame time
-/// (`decode_ms`) AND fewer AUs get decoded than the stream sends (`decoded` per second; 0 = the
-/// renderer does not report it). The time alone misleads: the Windows decode call returns when
-/// the picture is out, so on a decoder that is merely pipelined it reads about one frame
-/// interval at ANY fps — 11 ms at 120, 17 ms at 60 — and the old rule stepped 120 → 60 → 30
-/// on a laptop whose decoder had room to spare (2026-11-14). A decoder that is really behind
-/// sheds AUs (the backlog overflows), so its decoded rate falls below the stream's.
-fn decoder_overloaded(decode_ms: f32, decoded: f32, fps: u32) -> bool {
-	if !(decode_ms > 0.0) || !(decoded > 0.0) || fps == 0 {
-		return false;
-	}
-	let budget = 1000.0 / fps as f32;
-	decode_ms >= budget * 0.8 && decoded < fps as f32 * 0.85
-}
-
-/// The repair window in ms (see `REPAIR_MIN_MS`): a NACK retransmit lands ~1 RTT after the
-/// NACK, so wait the median RTT plus twice its jitter (the mean absolute deviation of the
-/// recent samples) — an answer that is late but normal for this link still makes it, a lost one
-/// is not waited out for long. `fec_hold_ms` = how long NACKs are held back for FEC now (see
-/// `fec_wait_ms`). The old `1.5 × RTT + 100` (+ a 100 ms sweep) reached ~600 ms on a jittery
-/// mobile link, every frame behind a hole held that long. No samples yet: the upper bound.
-fn repair_window_ms(rtt_recent: &std::collections::VecDeque<f32>, fec_hold_ms: f32) -> f32 {
-	if rtt_recent.is_empty() {
-		return REPAIR_MAX_MS;
-	}
-	let med = median_ms(rtt_recent, 0.0);
-	let jitter = rtt_jitter_ms(rtt_recent);
-	(med + 2.0 * jitter + REPAIR_SLACK_MS + fec_hold_ms.max(0.0)).clamp(REPAIR_MIN_MS, REPAIR_MAX_MS)
-}
-
-/// How much the round trip varies (ms): the mean absolute deviation of the recent RTT samples
-/// around their median. Sizes the repair window, and is what the UI shows next to the latency
-/// ("4 ms (±0.6 ms)"). No samples = 0.
-fn rtt_jitter_ms(rtt_recent: &std::collections::VecDeque<f32>) -> f32 {
-	if rtt_recent.is_empty() {
-		return 0.0;
-	}
-	let med = median_ms(rtt_recent, 0.0);
-	rtt_recent.iter().map(|r| (r - med).abs()).sum::<f32>() / rtt_recent.len() as f32
-}
-
-/// Which unanswered Ping a Pong answers (`ages` = time since each was sent, oldest first;
-/// `expected_ms` = the latest RTT sample, 0 = none yet). The Pong carries no id: take the Ping
-/// whose age is nearest the latest RTT. A lost Ping (or Pong) leaves an old Ping ~`PING_MS`
-/// too old, so the next Pong is timed against the newer one; an RTT that grows past `PING_MS`
-/// (a filling queue) keeps matching the older one. No sample yet: the oldest. Ties go to the
-/// older Ping.
-fn match_pong(ages: &[std::time::Duration], expected_ms: f32) -> Option<usize> {
-	if ages.is_empty() {
-		return None;
-	}
-	if expected_ms <= 0.0 {
-		return Some(0);
-	}
-	let off = |a: &std::time::Duration| (a.as_secs_f32() * 1000.0 - expected_ms).abs();
-	let mut best = 0;
-	for (i, a) in ages.iter().enumerate().skip(1) {
-		if off(a) < off(&ages[best]) {
-			best = i;
-		}
-	}
-	Some(best)
-}
-
-/// Pongs a `PongMatcher` vote looks back over.
-const PONG_VOTES: usize = 4;
-/// A vote needs this many of the last `PONG_VOTES` Pongs behind it; with less evidence the
-/// matcher falls back to `match_pong`.
-const PONG_VOTE_MIN: i32 = 2;
-/// RTT drift (ms per ms) a vote allows for since its Pong: 0.1 = 100 ms a second, more than a
-/// filling queue shows, far less than a Ping gap (350+ ms) — wrong candidates still miss.
-const PONG_DRIFT: f32 = 0.1;
-
-/// The gap before the Ping after the `n`-th (ms): 350–650 ms, mean `PING_MS`, never periodic
-/// (a golden-ratio sequence). With a fixed 500 ms cadence a Pong cannot tell its Ping from the
-/// next one: a sustained 600 ms RTT and a 100 ms RTT with one lost Ping give the very same
-/// arrival times, and the matcher locked onto RTT − 500 for as long as the RTT stayed over
-/// 500 ms (the repair window shrank under the real RTT, the ABR read no queue). Uneven gaps make
-/// only the true RTT repeat from Pong to Pong.
-fn ping_gap_ms(n: u64) -> u64 {
-	let frac = (n as f64 * 0.618_033_988_75).fract();
-	PING_MS - 150 + (300.0 * frac) as u64
-}
-
-/// Times the host's Pongs against our Pings. A Pong carries no id (the wire format stays as
-/// released apps speak it), so each Pong could answer any recent Ping. The RTT that keeps
-/// showing up among the candidate ages of the last `PONG_VOTES` Pongs wins (with the uneven
-/// `ping_gap_ms` cadence only the true one repeats); a Ping already answered, or older than the
-/// last one answered, needs one vote more (it is the "the last match was off by a Ping" fix-up).
-/// Without enough votes (a jittery link, the first Pongs) the latest-RTT rule of `match_pong`
-/// picks among the unanswered newer Pings, as before.
-struct PongMatcher {
-	/// Recent Pings, oldest first: when each was sent and whether a Pong was matched to it. Kept
-	/// for `PING_LOST` either way — the vote needs the answered ones too.
-	sent: std::collections::VecDeque<(std::time::Instant, bool)>,
-	/// The last `PONG_VOTES` Pongs: when each arrived and its candidate ages (ms).
-	votes: std::collections::VecDeque<(std::time::Instant, Vec<f32>)>,
-	last_matched: Option<std::time::Instant>,
-	/// The latest RTT reading (ms; 0 = none yet).
-	rtt_last: f32,
-	/// Pings sent (the `ping_gap_ms` index).
-	n: u64,
-}
-
-impl PongMatcher {
-	fn new() -> Self {
-		Self {
-			sent: std::collections::VecDeque::with_capacity(8),
-			votes: std::collections::VecDeque::with_capacity(PONG_VOTES + 1),
-			last_matched: None,
-			rtt_last: 0.0,
-			n: 0,
-		}
-	}
-
-	fn forget_old(&mut self, now: std::time::Instant) {
-		while self.sent.front().is_some_and(|(t, _)| now.saturating_duration_since(*t) > PING_LOST) {
-			self.sent.pop_front();
-		}
-	}
-
-	/// A Ping went out at `now`; returns the gap before the next one.
-	fn on_ping(&mut self, now: std::time::Instant) -> std::time::Duration {
-		self.forget_old(now);
-		self.sent.push_back((now, false));
-		self.n += 1;
-		std::time::Duration::from_millis(ping_gap_ms(self.n))
-	}
-
-	/// A Pong arrived at `now`: its RTT (ms), or `None` when no Ping is outstanding.
-	fn on_pong(&mut self, now: std::time::Instant) -> Option<f32> {
-		self.forget_old(now);
-		if self.sent.is_empty() {
-			return None;
-		}
-		let ages: Vec<f32> =
-			self.sent.iter().map(|(t, _)| now.saturating_duration_since(*t).as_secs_f32() * 1000.0).collect();
-		let last = self.last_matched;
-		let fresh = |j: usize| {
-			let (t, answered) = self.sent[j];
-			!answered && last.is_none_or(|m| t > m)
-		};
-		// A vote counts within the scatter of one reading, plus the drift an RTT can show since
-		// that Pong (a filling queue grows it by tens of ms per second).
-		let score = |c: f32| {
-			self.votes
-				.iter()
-				.filter(|(at, v)| {
-					let tol = (0.05 * c).max(40.0) + PONG_DRIFT * now.saturating_duration_since(*at).as_secs_f32() * 1000.0;
-					v.iter().any(|x| (c - x).abs() <= tol)
-				})
-				.count() as i32
-		};
-		let near = |c: f32| if self.rtt_last > 0.0 { -(c - self.rtt_last).abs() } else { c };
-		// (key, fresh, nearness): ties go to a fresh Ping, then to the age nearest the latest RTT.
-		let mut best: Option<(i32, bool, f32, usize)> = None;
-		for (j, &c) in ages.iter().enumerate() {
-			let f = fresh(j);
-			let key = score(c) - i32::from(!f);
-			let cand = (key, f, near(c), j);
-			if best.is_none_or(|b| (cand.0, cand.1) > (b.0, b.1) || ((cand.0, cand.1) == (b.0, b.1) && cand.2 > b.2)) {
-				best = Some(cand);
-			}
-		}
-		let (key, _, _, mut j) = best?;
-		if key < PONG_VOTE_MIN {
-			// No consistent RTT yet: the latest-RTT rule among the unanswered newer Pings.
-			let pool: Vec<usize> = (0..ages.len()).filter(|&j| fresh(j)).collect();
-			let pool = if pool.is_empty() { (0..ages.len()).collect() } else { pool };
-			let pool_ages: Vec<std::time::Duration> =
-				pool.iter().map(|&j| std::time::Duration::from_secs_f32(ages[j] / 1000.0)).collect();
-			j = pool[match_pong(&pool_ages, self.rtt_last)?];
-		}
-		self.sent[j].1 = true;
-		self.last_matched = Some(self.sent[j].0);
-		self.rtt_last = ages[j];
-		if self.votes.len() >= PONG_VOTES {
-			self.votes.pop_front();
-		}
-		self.votes.push_back((now, ages.clone()));
-		Some(ages[j])
-	}
-}
-
-/// The adaptive cap for the path the media runs on now: on the relay its per-session
-/// forwarding cap (`relay_cap_raw`, 0 = uncapped; 10 % headroom and ≥ 2 Mbit, as play.rs sizes
-/// it at the start) bounds the direct-path cap; direct = `direct_cap` alone.
-fn path_cap_kbps(relay: bool, relay_cap_raw: u32, direct_cap: u32) -> u32 {
-	if relay && relay_cap_raw > 0 {
-		let c = (relay_cap_raw * 9 / 10).max(2_000);
-		if direct_cap > 0 { c.min(direct_cap) } else { c }
-	} else {
-		direct_cap
-	}
-}
-
-/// A video packet seen missing (a seq gap) that has not arrived or been rebuilt yet.
-#[derive(Clone, Copy, Debug)]
-struct Miss {
-	/// When the gap showed it missing (the repair window runs from here).
-	t0: std::time::Instant,
-	/// When it was NACKed (`None` = held back while FEC may still rebuild it).
-	nacked: Option<std::time::Instant>,
-	/// The NACK was re-sent once (the first NACK or its answer may itself have been lost).
-	renacked: bool,
-}
-
-/// How many recently FEC-rebuilt seqs to remember (several frames' worth at 120 fps).
-const FEC_REBUILT_KEEP: usize = 256;
-/// Parity seen within this long = the host is sending FEC (it turns it off on a clean path).
-const FEC_ACTIVE_FOR: std::time::Duration = std::time::Duration::from_secs(1);
-
-/// Whether the host sends FEC parity now (`since_parity` = since the last parity datagram).
-fn fec_active(since_parity: Option<std::time::Duration>) -> bool {
-	since_parity.is_some_and(|d| d < FEC_ACTIVE_FOR)
-}
-
-/// How long a missing packet's NACK waits for FEC at most while the host sends parity (it is
-/// sent sooner once its block's parity arrived without rebuilding it, `fec_block_gave_up`):
-/// two frame intervals + 8 ms, as a small frame's parity trails it by up to two more frames
-/// (`media::RS_GROUP_MAX_FRAMES`) plus the pacing. A NACK sent before FEC had its go asks for a
-/// retransmit FEC was about to make redundant — more traffic on the very link losing packets.
-/// fps 0 = the host default: assume 60.
-fn fec_wait_ms(fps: u32) -> f32 {
-	let fps = if fps == 0 { 60 } else { fps };
-	(2000.0 / fps as f32 + 8.0).clamp(15.0, 50.0)
-}
-
-/// Bounds of the reorder wait (ms): how long a seq gap is given to fill by itself before it is
-/// NACKed. Some paths reorder a lot — a Wi-Fi Windows host (MF/ffmpeg) to the Orange Pi showed
-/// ~20 % of video packets late by a few ms (2026-11-09) — and an instant NACK on every gap made
-/// each of them a retransmit (duplicates) and, worse, a "repair" the controller read as ~20 %
-/// pre-repair loss on a clean LAN (it cut to 2 Mbit).
-const REORDER_WAIT_MIN_MS: f32 = 3.0;
-const REORDER_WAIT_MAX_MS: f32 = 25.0;
-
-/// The reorder wait for the observed reorder lateness (a slowly decaying peak, ms).
-fn reorder_wait_ms(reorder_peak_ms: f32) -> f32 {
-	(reorder_peak_ms * 1.25).clamp(REORDER_WAIT_MIN_MS, REORDER_WAIT_MAX_MS)
-}
-
-/// How long a gap waits before its NACK: the reorder wait, and while the host sends parity
-/// also FEC's go (`fec_wait_ms`).
-fn nack_wait_ms(fec_on: bool, fps: u32, reorder_peak_ms: f32) -> f32 {
-	let reorder = reorder_wait_ms(reorder_peak_ms);
-	if fec_on { fec_wait_ms(fps).max(reorder) } else { reorder }
-}
-
-/// A missing seq arrived: was it the retransmit our NACK asked for (a repair), or the original
-/// arriving late (reordering)? Never NACKed = reordering. NACKed less than half an RTT ago = the
-/// original too — a retransmit can't be back that soon.
-fn arrival_is_repair(nacked: Option<std::time::Instant>, now: std::time::Instant, rtt_ms: f32) -> bool {
-	nacked.is_some_and(|t| now.duration_since(t).as_secs_f32() * 1000.0 >= 0.5 * rtt_ms.max(0.0))
-}
-
-/// After a Reed-Solomon parity shard (`idx` of `m`) of a block was applied: FEC can no longer
-/// rebuild the block's still-missing packets — more are missing than the block has parity, or
-/// its last parity shard is here (the host sends them in order).
-fn fec_block_gave_up(missing_in_block: usize, m: u8, idx: u8) -> bool {
-	missing_in_block > m as usize || idx.saturating_add(1) >= m
-}
-
-/// How many of the block `base..base+k` are missing.
-fn missing_in(missing: &std::collections::HashMap<u16, Miss>, base: u16, k: u16) -> usize {
-	(0..k).filter(|&i| missing.contains_key(&base.wrapping_add(i))).count()
-}
-
-/// The block `base..base+k`'s missing packets whose NACK still waits for FEC: marked NACKed
-/// (`now`) and returned, as FEC is done with them.
-fn take_block_nacks(
-	missing: &mut std::collections::HashMap<u16, Miss>,
-	base: u16,
-	k: u16,
-	now: std::time::Instant,
-) -> Vec<u16> {
-	let mut out = Vec::new();
-	for i in 0..k {
-		let seq = base.wrapping_add(i);
-		if let Some(e) = missing.get_mut(&seq) {
-			if e.nacked.is_none() {
-				e.nacked = Some(now);
-				out.push(seq);
-			}
-		}
-	}
-	out
-}
-
-/// The held-back NACKs (`pending`, detection order) whose FEC wait (`wait`) ran out: marked
-/// NACKed and returned. Seqs repaired meanwhile, or already NACKed with their block, drop out.
-fn take_due_fec_nacks(
-	pending: &mut std::collections::VecDeque<(u16, std::time::Instant)>,
-	missing: &mut std::collections::HashMap<u16, Miss>,
-	wait: std::time::Duration,
-	now: std::time::Instant,
-) -> Vec<u16> {
-	let mut out = Vec::new();
-	while let Some(&(seq, t)) = pending.front() {
-		if now.duration_since(t) < wait {
-			break;
-		}
-		pending.pop_front();
-		if let Some(e) = missing.get_mut(&seq) {
-			if e.nacked.is_none() {
-				e.nacked = Some(now);
-				out.push(seq);
-			}
-		}
-	}
-	out
-}
-
-/// Remember a seq FEC rebuilt (bounded, oldest out).
-fn note_rebuilt(rebuilt: &mut std::collections::VecDeque<u16>, seq: u16) {
-	if rebuilt.len() >= FEC_REBUILT_KEEP {
-		rebuilt.pop_front();
-	}
-	rebuilt.push_back(seq);
 }
 
 /// Host-silence watchdog bounds. Nothing at all from the host (control OR media) for
@@ -557,15 +154,6 @@ fn shortfall_text(picked: &str, current: &str, english: bool) -> String {
 		format!("The connection can't carry {picked} — using {current}")
 	} else {
 		format!("Bağlantı {picked} taşımıyor — {current} kullanılıyor")
-	}
-}
-
-/// Received video payload rate in kbit/s over a `window_ms` window (0 when unknown).
-fn goodput_kbps(bytes: u64, window_ms: u32) -> u32 {
-	if window_ms == 0 {
-		0
-	} else {
-		(bytes * 8 / window_ms as u64).min(u32::MAX as u64) as u32
 	}
 }
 
@@ -714,30 +302,12 @@ pub(super) async fn hold_session(
 	let a_dest = std::net::SocketAddr::from(([127, 0, 0, 1], audio_port));
 	// One-shot diagnostic: did host media actually reach this client + get forwarded?
 	let mut first_video_logged = false;
-	// Video RTP gap tracking → NACK retransmit requests + the loss% the adaptive
-	// controller runs on. `missing` holds requested-but-not-yet-seen seqs (see `Miss`: when
-	// first noticed, when NACKed, and whether the NACK was already re-sent once).
-	let mut last_vseq: Option<u16> = None;
-	let mut missing: std::collections::HashMap<u16, Miss> = std::collections::HashMap::new();
-	// Missing seqs whose NACK waits for FEC (detection order; see `fec_wait_ms`), the seqs FEC
-	// rebuilt lately (a block's tail can be rebuilt before the next frame's first packet shows
-	// the gap — not lost, not to be NACKed), and when the last parity datagram arrived.
-	let mut fec_pending: std::collections::VecDeque<(u16, std::time::Instant)> = std::collections::VecDeque::new();
-	let mut fec_rebuilt: std::collections::VecDeque<u16> = std::collections::VecDeque::with_capacity(FEC_REBUILT_KEEP);
-	let mut last_parity_at: Option<std::time::Instant> = None;
-	let (mut win_recv, mut win_lost) = (0u32, 0u32);
-	// NACK bookkeeping per window (forwarded to the host in the stats JSON).
-	let (mut win_nack_sent, mut win_nack_ok) = (0u32, 0u32);
-	// Missing seqs that arrived on their own (reordering, not a repair) this window, and the
-	// lateness peak (ms, decays slowly) the reorder wait follows.
-	let mut win_reordered = 0u32;
-	let mut reorder_peak_ms: f32 = 0.0;
-	// Keepalive RTT samples of the current window + a smoothed RTT for the repair window.
-	let mut rtt_samples: Vec<f32> = Vec::with_capacity(8);
-	let mut rtt_ema: f32 = 0.0;
-	// The last few RTT samples: their median and spread size the repair window (the EMA keeps
-	// the first, setup-inflated ping for seconds).
-	let mut rtt_recent: std::collections::VecDeque<f32> = std::collections::VecDeque::with_capacity(RTT_RECENT);
+	// Video RTP gap tracking → NACK retransmit requests + the loss% the adaptive controller runs
+	// on, the FEC decoders (Phase 2.1: XOR parity rebuilds a group's single missing packet,
+	// Reed-Solomon several per frame), the window counters (incl. goodput and the parity share)
+	// and the keepalive RTT that sizes the repair window — the shared repair loop
+	// (`pulsar_core::adapt::repair::RepairTracker`, also the mobile client's).
+	let mut repair_st = RepairTracker::new();
 	// The repair window last pushed to the renderer (ms) — re-sent only on a real change.
 	let mut sent_repair_ms: f32 = 0.0;
 	// Loss-recovery mode currently requested from the host (flipped once by the controller).
@@ -755,18 +325,11 @@ pub(super) async fn hold_session(
 	// while it is off (their answer would come after the renderer gave up).
 	let mut fast_drop = false;
 	let mut nack_on = host_nack;
-	// FEC (Phase 2.1): the host sends XOR parity over the video packets once we report loss;
-	// the decoder keeps the recent packets and rebuilds a group's single missing one.
-	let mut fec_dec = media::FecDecoder::default();
-	// Reed-Solomon parity (preferred: several losses per frame); the XOR decoder above stays
-	// for hosts that only have the single-loss groups.
-	let mut fec_rs = media::RsFecDecoder::default();
-	let mut win_fec_ok = 0u32;
 	// Delay-gradient sampling (Phase 3): per video FRAME (RTP timestamp), the arrival time of
 	// its last packet on a session-local ms clock feeds the controller's trendline estimator.
 	let epoch = std::time::Instant::now();
 	let mono_ms = move || epoch.elapsed().as_secs_f64() * 1000.0;
-	let mut frame_ts: Option<u32> = None;
+	let mut frame_clock = FrameClock::default();
 	// A Dynamic-refresh panel idles at its low rate for us: run it at its top rate while this
 	// session streams faster than that (restored when the guard drops at the session's end).
 	#[cfg(windows)]
@@ -777,7 +340,6 @@ pub(super) async fn hold_session(
 	// Opening phase (Windows `--hold-reveal`): reveal the video once the bitrate has settled.
 	let mut revealed = false;
 	let mut first_frames_at: Option<std::time::Instant> = None;
-	let mut frame_last_arrival_ms: f64 = 0.0;
 	// The host's display name (DataMsg::PeerName), for the "file arrived" toasts.
 	let mut host_name = String::new();
 	// Frame-clock probe (diagnostics): over ~2 s, how far the host's RTP clock advanced vs our
@@ -798,8 +360,7 @@ pub(super) async fn hold_session(
 	// Failed-repair keyframe request: when a NACKed packet never arrives (expired from
 	// `missing`), the reference chain is broken until the next keyframe — with long host
 	// GOPs that is seconds of smear. Ask the host for an immediate IDR instead (rate-limited).
-	let mut last_kfreq = std::time::Instant::now();
-	let mut kf_gap = KF_GAP_MIN; // see kf_allowed / kf_next_gap
+	let mut kf_pacer = KeyframePacer::new(std::time::Instant::now());
 	// When the last menu re-request (esp. a monitor switch) fired. The host rebuilds its encoder
 	// for one → a brief packet-loss gap that is NOT congestion; the adaptive controller must
 	// ignore it for a moment, or it steps the bitrate (a full-path restream that churns + slows
@@ -819,17 +380,7 @@ pub(super) async fn hold_session(
 	// (`video_stopped`; edge-triggered `stopped 1|0`).
 	let mut last_video = std::time::Instant::now();
 	let mut told_stopped = false;
-	// Per-window measurement (field diagnostics + the controller's goodput): video RTP payload
-	// bytes / packets received as FIRST copies (NACK-repaired ones included, duplicates and
-	// parity not), and when the window started.
-	let mut win_recv_bytes: u64 = 0;
-	let mut win_recv_fresh: u32 = 0;
-	// Parity bytes received this window (RS + XOR) and the smoothed parity share they give:
-	// what the controller deducts from the target for the encoder. Measured over the window,
-	// not taken from the last block — at a low bitrate a block is 1-2 packets and its own
-	// ratio read 50-100 %, so the encoder share flipped 0 ↔ 100 % every window (2026-11-13).
-	let mut win_parity_bytes: u64 = 0;
-	let mut fec_share_ema: f32 = 0.0;
+	// When the measurement window started (its counters live in `repair_st`).
 	let mut win_start = std::time::Instant::now();
 	// The kind of path the media runs on now (`adapt_memory` key): the last good rate is
 	// remembered under the class the session actually ran cleanly on.
@@ -1022,6 +573,10 @@ pub(super) async fn hold_session(
 					}
 					let mut evs = Vec::with_capacity(batch.len());
 					for ev in batch {
+						// Drained events pass the same side-button gate as the first one.
+						if !host_takes(&ev, host_mouse_x) {
+							continue;
+						}
 						awake.on_input(&ev, now);
 						let aug = if host_pen { tablet_aug.on_event(now, ev, tablet::latest()) } else { vec![ev] };
 						for ev in aug {
@@ -1111,58 +666,24 @@ pub(super) async fn hold_session(
 							}
 							continue;
 						}
-						if tag == media::TAG_FEC_RS {
-							last_parity_at = Some(std::time::Instant::now());
-							win_parity_bytes += rtp.len() as u64;
-							let block = media::parse_rs_parity(rtp).map(|p| (p.base_seq, p.k as u16, p.m, p.idx));
-							for (seq, pkt) in fec_rs.on_parity(rtp) {
-								if !v_unix.try_send(&pkt) {
+						if tag == media::TAG_FEC_RS || tag == media::TAG_FEC {
+							let now = std::time::Instant::now();
+							let po = if tag == media::TAG_FEC_RS {
+								repair_st.on_rs_parity(rtp, now, nack_on)
+							} else {
+								repair_st.on_xor_parity(rtp, now, nack_on)
+							};
+							for (_, pkt) in &po.rebuilt {
+								if !v_unix.try_send(pkt) {
 									if let Some(s) = fwd_sock.as_ref() {
-										let _ = s.send_to(&pkt, v_dest).await;
+										let _ = s.send_to(pkt, v_dest).await;
 									}
 								}
-								if missing.remove(&seq).is_some() {
-									win_lost = win_lost.saturating_sub(1);
-								}
-								note_rebuilt(&mut fec_rebuilt, seq);
-								win_fec_ok += 1;
 							}
 							// The block's parity is all here (or can't cover what is missing) and
 							// packets of it are still missing: FEC is done with them — NACK now.
-							if let Some((base, k, m, idx)) = block {
-								if fec_block_gave_up(missing_in(&missing, base, k), m, idx) {
-									let nacks = take_block_nacks(&mut missing, base, k, std::time::Instant::now());
-									if nack_on && !nacks.is_empty() {
-										win_nack_sent += nacks.len() as u32;
-										let _ = send_data(&sess, &DataMsg::MediaNack(nacks)).await;
-									}
-								}
-							}
-							continue;
-						}
-						if tag == media::TAG_FEC {
-							last_parity_at = Some(std::time::Instant::now());
-							win_parity_bytes += rtp.len() as u64;
-							let group = media::parse_parity(rtp).map(|p| (p.base_seq, p.n as u16));
-							if let Some((seq, pkt)) = fec_dec.on_parity(rtp) {
-								if !v_unix.try_send(&pkt) {
-									if let Some(s) = fwd_sock.as_ref() {
-										let _ = s.send_to(&pkt, v_dest).await;
-									}
-								}
-								if missing.remove(&seq).is_some() {
-									win_lost = win_lost.saturating_sub(1);
-								}
-								note_rebuilt(&mut fec_rebuilt, seq);
-								win_fec_ok += 1;
-							}
-							// One parity per XOR group: what it didn't rebuild, it never will.
-							if let Some((base, n)) = group {
-								let nacks = take_block_nacks(&mut missing, base, n, std::time::Instant::now());
-								if nack_on && !nacks.is_empty() {
-									win_nack_sent += nacks.len() as u32;
-									let _ = send_data(&sess, &DataMsg::MediaNack(nacks)).await;
-								}
+							if !po.nacks.is_empty() {
+								let _ = send_data(&sess, &DataMsg::MediaNack(po.nacks)).await;
 							}
 							continue;
 						}
@@ -1184,193 +705,68 @@ pub(super) async fn hold_session(
 						if tag == media::TAG_VIDEO {
 							last_video = std::time::Instant::now();
 							if let Some(seq) = media::rtp_seq(rtp) {
-								fec_dec.on_packet(seq, rtp);
-								fec_rs.on_packet(seq, rtp);
 								// Frame boundary = a new RTP timestamp: the previous frame is
-								// complete, sample its send-vs-arrival delay for the estimator.
-								if rtp.len() >= 8 {
-									let ts = u32::from_be_bytes([rtp[4], rtp[5], rtp[6], rtp[7]]);
-									let now_ms = mono_ms();
-									// Only a NEWER timestamp closes the frame. A NACK-retransmitted (or
-									// reordered) packet of an older frame used to flip `frame_ts` back
-									// and re-sample frames against its late arrival — a steady fake
-									// "queue draining" signal that froze the bitrate climb.
-									let newer = frame_ts.is_none_or(|cur| (ts.wrapping_sub(cur) as i32) > 0);
-									if newer {
-										if let Some(prev) = frame_ts {
-											ctl.on_frame(prev, frame_last_arrival_ms);
-											let arr = frame_last_arrival_ms;
-											match fc {
-												None => {
+								// complete, sample its send-vs-arrival delay for the estimator
+								// (only a NEWER timestamp closes it, see `FrameClock`).
+								if let Some(ts) = pulsar_core::adapt::repair::rtp_timestamp(rtp) {
+									if let Some((prev, arr)) = frame_clock.on_packet(ts, mono_ms()) {
+										ctl.on_frame(prev, arr);
+										match fc {
+											None => {
+												fc = Some((prev, arr));
+												fc_n = 0;
+												fc_max_gap = 0.0;
+											}
+											Some((ts0, t0)) => {
+												fc_n += 1;
+												fc_max_gap = fc_max_gap.max(arr - fc_prev_arr);
+												if arr - t0 >= 2000.0 {
+													let rtp_ms = (prev.wrapping_sub(ts0) as i32) as f64 / 90.0;
+													let wall_ms = arr - t0;
+													let drift_pct = (rtp_ms / wall_ms - 1.0) * 100.0;
+													let fps = fc_n as f64 * 1000.0 / wall_ms;
+													// Info only when it's worth a look: the host clock drifting
+													// from ours, or a long hole in the stream. (A stream restart
+													// re-bases the host clock — that window is skipped.)
+													if rtp_ms > 0.0 && (drift_pct.abs() > 2.0 || fc_max_gap > 250.0) {
+														tracing::info!(
+															frames = fc_n,
+															fps = format!("{fps:.1}"),
+															rtp_ms = format!("{rtp_ms:.0}"),
+															wall_ms = format!("{wall_ms:.0}"),
+															rtp_vs_wall_pct = format!("{drift_pct:.1}"),
+															max_gap_ms = format!("{fc_max_gap:.0}"),
+															"frame clock: host RTP clock drifts or the stream had a hole"
+														);
+													} else {
+														tracing::debug!(
+															frames = fc_n,
+															fps = format!("{fps:.1}"),
+															rtp_vs_wall_pct = format!("{drift_pct:.1}"),
+															max_gap_ms = format!("{fc_max_gap:.0}"),
+															"frame clock"
+														);
+													}
 													fc = Some((prev, arr));
 													fc_n = 0;
 													fc_max_gap = 0.0;
 												}
-												Some((ts0, t0)) => {
-													fc_n += 1;
-													fc_max_gap = fc_max_gap.max(arr - fc_prev_arr);
-													if arr - t0 >= 2000.0 {
-														let rtp_ms = (prev.wrapping_sub(ts0) as i32) as f64 / 90.0;
-														let wall_ms = arr - t0;
-														let drift_pct = (rtp_ms / wall_ms - 1.0) * 100.0;
-														let fps = fc_n as f64 * 1000.0 / wall_ms;
-														// Info only when it's worth a look: the host clock drifting
-														// from ours, or a long hole in the stream. (A stream restart
-														// re-bases the host clock — that window is skipped.)
-														if rtp_ms > 0.0 && (drift_pct.abs() > 2.0 || fc_max_gap > 250.0) {
-															tracing::info!(
-																frames = fc_n,
-																fps = format!("{fps:.1}"),
-																rtp_ms = format!("{rtp_ms:.0}"),
-																wall_ms = format!("{wall_ms:.0}"),
-																rtp_vs_wall_pct = format!("{drift_pct:.1}"),
-																max_gap_ms = format!("{fc_max_gap:.0}"),
-																"frame clock: host RTP clock drifts or the stream had a hole"
-															);
-														} else {
-															tracing::debug!(
-																frames = fc_n,
-																fps = format!("{fps:.1}"),
-																rtp_vs_wall_pct = format!("{drift_pct:.1}"),
-																max_gap_ms = format!("{fc_max_gap:.0}"),
-																"frame clock"
-															);
-														}
-														fc = Some((prev, arr));
-														fc_n = 0;
-														fc_max_gap = 0.0;
-													}
-												}
-											}
-											fc_prev_arr = arr;
-										}
-										frame_ts = Some(ts);
-										frame_last_arrival_ms = now_ms;
-									} else if frame_ts == Some(ts) {
-										frame_last_arrival_ms = now_ms;
-									}
-								}
-								win_recv += 1;
-								// First copy of this seq? Duplicates (and stale reorders of a seq
-								// already seen) clear it below; they carry no new payload.
-								let mut fresh = true;
-								// The ORIGINAL of a packet FEC already rebuilt (Wi-Fi reordering: the
-								// parity beat the late original): it was never lost — take it back out
-								// of the repairs, which the controller reads as pre-repair loss. On a
-								// busy LAN Wi-Fi 15-17 % "loss" was this alone (2026-11-13), and the
-								// controller cut 16.8 → 5.3 Mbit for it.
-								if !missing.contains_key(&seq) {
-									if let Some(i) = fec_rebuilt.iter().position(|&r| r == seq) {
-										fec_rebuilt.remove(i);
-										win_fec_ok = win_fec_ok.saturating_sub(1);
-										win_reordered += 1;
-									}
-								}
-								if let Some(e) = missing.remove(&seq) {
-									// A requested retransmit or a late reorder arrived — not lost. Only the
-									// retransmit counts as a repair (the controller reads repairs as
-									// pre-repair loss); a late original feeds the reorder wait instead.
-									win_lost = win_lost.saturating_sub(1);
-									let now_i = std::time::Instant::now();
-									if arrival_is_repair(e.nacked, now_i, median_ms(&rtt_recent, rtt_ema)) {
-										win_nack_ok += 1;
-									} else {
-										win_reordered += 1;
-										let late = now_i.duration_since(e.t0).as_secs_f32() * 1000.0;
-										reorder_peak_ms = reorder_peak_ms.max(late);
-									}
-								} else if let Some(last) = last_vseq {
-									let d = media::seq_forward(last, seq);
-									if d == 0 {
-										// Duplicate / retransmit of the last seq — ignore.
-										fresh = false;
-									} else if d < 0x8000 && d <= 128 {
-										// Small forward gap → NACK the missing seqs for retransmit.
-										// While the host sends parity the NACK waits until FEC had its
-										// go (`fec_pending`, see `fec_wait_ms`).
-										if d > 1 {
-											let now = std::time::Instant::now();
-											// Every gap waits a little first (the reorder wait, plus FEC's
-											// go while parity flows); `take_due_fec_nacks` sends it after.
-											let defer = true;
-											let mut nacks = Vec::with_capacity((d - 1) as usize);
-											for i in 1..d {
-												let m = last.wrapping_add(i);
-												if fec_rebuilt.contains(&m) {
-													// FEC rebuilt it before this gap showed: not lost.
-													continue;
-												}
-												missing.insert(m, Miss { t0: now, nacked: (!defer).then_some(now), renacked: false });
-												if defer {
-													fec_pending.push_back((m, now));
-												} else {
-													nacks.push(m);
-												}
-												win_lost += 1;
-											}
-											if nack_on && !nacks.is_empty() {
-												win_nack_sent += nacks.len() as u32;
-												let _ = send_data(&sess, &DataMsg::MediaNack(nacks)).await;
 											}
 										}
-										last_vseq = Some(seq);
-									} else if d < 0x8000 {
-										// Big forward gap (d > 128 but < 0x8000) — encoder restarted
-										// with a fresh RTP sequence base (every monitor/codec switch
-										// rebuilds it). Resync cleanly to the new base.
-										missing.clear();
-										fec_pending.clear();
-										fec_rebuilt.clear();
-										fec_dec.reset();
-										fec_rs.reset();
-										ctl.on_stream_restart();
-										frame_ts = None;
-										last_vseq = Some(seq);
-									} else {
-										// Backward jump (d >= 0x8000). Compute the backward distance:
-										// how far behind seq is relative to last.
-										let back = 0x10000u32 - d as u32;
-										if back > 128 {
-											// Large backward jump = the host's encoder RESTARTED with a
-											// new sequence base that happens to be numerically lower
-											// (roughly half of random bases land here). The old code
-											// skipped these — last_vseq stayed STUCK, so every later
-											// packet re-tripped the discontinuity and NACK-flooded the
-											// session. Resync cleanly to the new base instead.
-											missing.clear();
-											fec_pending.clear();
-											fec_rebuilt.clear();
-											fec_dec.reset();
-											fec_rs.reset();
-											ctl.on_stream_restart();
-											frame_ts = None;
-											last_vseq = Some(seq);
-										}
-										// else: small backward distance (≤128 seqs behind) = an
-										// ordinary stale reorder or duplicate that arrived late.
-										// Leave last_vseq unchanged and do NOT NACK or count loss.
-										// (A seq still awaited is in `missing`, handled above —
-										// so this one was already seen or written off.)
-										else {
-											fresh = false;
-										}
+										fc_prev_arr = arr;
 									}
-								} else {
-									last_vseq = Some(seq);
 								}
-								if fresh {
-									win_recv_fresh += 1;
-									win_recv_bytes += rtp.len() as u64;
+								// Gap tracking (`RepairTracker::on_video`): loss for the controller,
+								// and each missing seq NACKed after the reorder wait (plus FEC's go
+								// while parity flows). A big seq jump = the encoder restarted with a
+								// fresh RTP sequence base (every monitor/codec switch): resync.
+								let vo = repair_st.on_video(seq, rtp, std::time::Instant::now(), nack_on, cur_fps);
+								if vo.restart {
+									ctl.on_stream_restart();
+									frame_clock.reset();
 								}
-								// Held-back NACKs whose FEC wait ran out: send them now.
-								if !fec_pending.is_empty() {
-									let fec_on = fec_active(last_parity_at.map(|t| t.elapsed()));
-									let wait = std::time::Duration::from_secs_f32(nack_wait_ms(fec_on, cur_fps, reorder_peak_ms) / 1000.0);
-									let nacks = take_due_fec_nacks(&mut fec_pending, &mut missing, wait, std::time::Instant::now());
-									if nack_on && !nacks.is_empty() {
-										win_nack_sent += nacks.len() as u32;
-										let _ = send_data(&sess, &DataMsg::MediaNack(nacks)).await;
-									}
+								if !vo.nacks.is_empty() {
+									let _ = send_data(&sess, &DataMsg::MediaNack(vo.nacks)).await;
 								}
 							}
 						}
@@ -1394,16 +790,11 @@ pub(super) async fn hold_session(
 						}
 						if pulsar_core::service::is_pong(&bytes) {
 						if let Some(rtt) = pings.on_pong(std::time::Instant::now()) {
+							repair_st.on_rtt(rtt);
 							let rtt = rtt as f64;
-							rtt_samples.push(rtt as f32);
-							rtt_ema = if rtt_ema <= 0.0 { rtt as f32 } else { rtt_ema * 0.7 + rtt as f32 * 0.3 };
-							if rtt_recent.len() >= RTT_RECENT {
-								rtt_recent.pop_front();
-							}
-							rtt_recent.push_back(rtt as f32);
 							// The latency and how much it varies, for the status bar and (below)
 							// the renderer's tile and HUD.
-							let jitter = rtt_jitter_ms(&rtt_recent) as f64;
+							let jitter = repair_st.rtt().jitter() as f64;
 							let _ = app_ev.emit("play-rtt", PlayRtt { id, rtt, jitter });
 							// Feed the native overlay's "Gecikme" tile the real NETWORK
 							// latency (it used to show the render present-gap), and size the
@@ -1417,13 +808,12 @@ pub(super) async fn hold_session(
 								// before its demuxer flushes past the hole and decodes the smear.
 								// The controller sees a far sample at once (a stall: the fast reflex holds off).
 								ctl.on_rtt(rtt as f32, mono_ms());
-								let fec_on = fec_active(last_parity_at.map(|t| t.elapsed()));
-								let fec_hold_ms = if fec_on { fec_wait_ms(cur_fps) } else { 0.0 };
+								let now_i = std::time::Instant::now();
 								// Game mode on a high-RTT path with a keyframe-free recovery: drop a
 								// hole fast instead of holding the frames behind it (`fast_drop_on`).
 								let keyframe_free =
 									cur_recovery == LossRecovery::IntraRefresh || rfi_reach(host_rfi, &cur_codec);
-								let rtt_med = median_ms(&rtt_recent, rtt as f32);
+								let rtt_med = repair_st.rtt().median(rtt as f32);
 								let fd = fast_drop_on(fast_drop, game_mode, keyframe_free, rtt_med);
 								if fd != fast_drop {
 									fast_drop = fd;
@@ -1431,15 +821,11 @@ pub(super) async fn hold_session(
 									tracing::info!(
 										on = fd,
 										rtt_med,
-										wait_ms = fast_drop_wait_ms(nack_wait_ms(fec_on, cur_fps, reorder_peak_ms), cur_fps),
+										wait_ms = repair_st.renderer_wait_ms(now_i, cur_fps, true),
 										"game mode, high RTT: holes dropped fast (RFI / intra refresh heals them, no NACK)"
 									);
 								}
-								let want = if fast_drop {
-									fast_drop_wait_ms(nack_wait_ms(fec_on, cur_fps, reorder_peak_ms), cur_fps)
-								} else {
-									repair_window_ms(&rtt_recent, fec_hold_ms) + REPAIR_SWEEP_MS as f32
-								};
+								let want = repair_st.renderer_wait_ms(now_i, cur_fps, fast_drop);
 								let changed = (want - sent_repair_ms).abs() > sent_repair_ms * 0.15 + 5.0;
 								if let Some(si) = render_stdin.lock().unwrap().as_mut() {
 									let _ = writeln!(si, "rtt {rtt:.1} {jitter:.1}");
@@ -1954,48 +1340,19 @@ pub(super) async fn hold_session(
 				// not wait out, or a resync) while this loop may count the loss as repaired: ask now.
 				if crate::render_stats::RENDER_WANTS_IDR.swap(false, std::sync::atomic::Ordering::Relaxed)
 					&& host_nack
-					&& kf_allowed(last_kfreq.elapsed(), kf_gap, rtt_ema)
+					&& kf_pacer.try_request(std::time::Instant::now(), std::time::Duration::ZERO, repair_st.rtt().ema())
 				{
-					kf_gap = kf_next_gap(last_kfreq.elapsed(), kf_gap);
-					last_kfreq = std::time::Instant::now();
 					let _ = send_data(&sess, &DataMsg::MediaNack(vec![0])).await;
 					tracing::info!("renderer lost its reference picture → keyframe request");
 				}
-				if !missing.is_empty() {
-					let now = std::time::Instant::now();
-					let fec_hold = fec_active(last_parity_at.map(|t| t.elapsed()));
-					let fec_hold_ms = if fec_hold { fec_wait_ms(cur_fps) } else { 0.0 };
-					// Held-back NACKs whose FEC wait ran out while no packet came to send them —
-					// all of them once the parity stopped (nothing will rebuild them).
-					let nack_hold_ms = nack_wait_ms(fec_hold, cur_fps, reorder_peak_ms);
-					let wait = std::time::Duration::from_secs_f32(nack_hold_ms / 1000.0);
-					let mut renack = take_due_fec_nacks(&mut fec_pending, &mut missing, wait, now);
-					// Fast drop: written off when the renderer gives up on it (no repair is coming).
-					let window_ms =
-						if fast_drop { fast_drop_wait_ms(nack_hold_ms, cur_fps) } else { repair_window_ms(&rtt_recent, nack_hold_ms) };
-					let window = std::time::Duration::from_secs_f32(window_ms / 1000.0);
-					let rtt_med = median_ms(&rtt_recent, rtt_ema);
-					let renack_after = std::time::Duration::from_secs_f32((rtt_med * 1.2 + 20.0).max(40.0) / 1000.0);
-					let mut expired = 0u32;
-					missing.retain(|&seq, e| {
-						let age = now.duration_since(e.t0);
-						if age >= window {
-							expired += 1;
-							false
-						} else {
-							// ~1 RTT after the NACK went out (a NACK held for FEC left later
-							// than the gap showed).
-							if !e.renacked && e.nacked.is_some_and(|t| now.duration_since(t) >= renack_after) {
-								e.renacked = true;
-								renack.push(seq);
-							}
-							true
-						}
-					});
-					if nack_on && !renack.is_empty() {
-						win_nack_sent += renack.len() as u32;
-						let _ = send_data(&sess, &DataMsg::MediaNack(renack)).await;
+				{
+					// Held-back NACKs whose wait ran out while no packet came to send them, one
+					// re-NACK ~1 RTT after a NACK, and the write-offs (`RepairTracker::sweep`).
+					let sw = repair_st.sweep(std::time::Instant::now(), cur_fps, fast_drop, nack_on);
+					if !sw.nacks.is_empty() {
+						let _ = send_data(&sess, &DataMsg::MediaNack(sw.nacks)).await;
 					}
+					let expired = sw.expired;
 					if expired > 0 {
 						// An intra-refreshed stream heals itself within its refresh period: no
 						// keyframe (whose size spike is what IR avoids) and no renderer hold
@@ -2008,10 +1365,11 @@ pub(super) async fn hold_session(
 						let rfi = rfi_reach(host_rfi, &cur_codec);
 						if !ir
 							&& !rfi && host_nack
-							&& kf_allowed(last_kfreq.elapsed(), kf_gap.max(std::time::Duration::from_secs(1)), rtt_ema)
-						{
-							kf_gap = kf_next_gap(last_kfreq.elapsed(), kf_gap);
-							last_kfreq = std::time::Instant::now();
+							&& kf_pacer.try_request(
+								std::time::Instant::now(),
+								std::time::Duration::from_secs(1),
+								repair_st.rtt().ema(),
+							) {
 							let _ = send_data(&sess, &DataMsg::MediaNack(vec![0])).await;
 						}
 						// Sent on every sweep that writes a packet off: the renderer arms one hold per
@@ -2153,63 +1511,41 @@ pub(super) async fn hold_session(
 				// a tick late): the controller turns `recv_bytes` into a delivered rate with it.
 				let window_ms = win_start.elapsed().as_millis().min(u32::MAX as u128) as u32;
 				win_start = std::time::Instant::now();
+				// The window's counters and RTT samples (reset for the next one).
+				let win = repair_st.take_window();
 				// Field measurement, one line per window: what actually arrived (first copies),
 				// what is still missing, and the delivered video rate vs the target — tells
 				// congestion (goodput pinned under the target, loss rising with the rate) from
 				// policing / MTU trouble (loss at any rate) in the next field log.
 				tracing::info!(
-					recv = win_recv,
-					fresh = win_recv_fresh,
-					reordered = win_reordered,
-					reorder_wait_ms = reorder_wait_ms(reorder_peak_ms),
-					lost = win_lost,
-					recv_bytes = win_recv_bytes,
+					recv = win.recv,
+					fresh = win.recv_fresh,
+					reordered = win.reordered,
+					reorder_wait_ms = win.reorder_wait_ms,
+					lost = win.lost,
+					recv_bytes = win.recv_bytes,
 					window_ms,
-					goodput_kbps = goodput_kbps(win_recv_bytes, window_ms),
+					goodput_kbps = goodput_kbps(win.recv_bytes, window_ms),
 					target = ctl.target_kbps(),
 					kbps = cur_bitrate,
 					point = %ctl.point().label(),
 					path = cur_class.as_str(),
 					"net window"
 				);
-				// The FEC share is learned from parity packets as they arrive, so a host that turns
-				// parity OFF sends nothing that would say so: without this the controller kept
-				// deducting the last share for the rest of the session (2026-11-09 LAN run: a
-				// startup WAN guess turned 15 % parity on for one window, the host turned it off,
-				// and the encoder sat at 12 of the 15 Mbit target for good).
-				if !fec_active(last_parity_at.map(|t| t.elapsed())) && ctl.fec_overhead() > 0.0 {
-					ctl.set_fec_overhead(0.0);
-					fec_share_ema = 0.0;
+				// The FEC share follows the parity this window carried, and is released when the host
+				// turns parity off (it sends nothing that would say so) — `update_fec_share`.
+				if repair_st.update_fec_share(&mut ctl, std::time::Instant::now(), &win) == FecShare::Released {
 					tracing::info!("no parity from the host lately → FEC share released");
-				} else if win_recv_bytes > 0 && win_parity_bytes > 0 {
-					// This window's parity share, smoothed (half the old value, half the new) and
-					// capped at the host's highest policy ratio, so one odd window can't halve the
-					// encoder.
-					let share = (win_parity_bytes as f32 / win_recv_bytes as f32).min(pulsar_core::adapt::fec_policy::RS_MAX_RATIO_HIGH);
-					fec_share_ema = if fec_share_ema <= 0.0 { share } else { (fec_share_ema + share) * 0.5 };
-					if (fec_share_ema - ctl.fec_overhead()).abs() > 0.01 {
-						ctl.set_fec_overhead(fec_share_ema);
-					}
 				}
-				win_parity_bytes = 0;
 				// ---- Adaptive controller (`pulsar_core::adapt`): one decision per 2 s window from
 				// loss (seq gaps after NACK repair) + the window's RTT samples. Actuates a
 				// bitrate step and/or the loss-recovery mode flip by re-requesting the stream
 				// (live NVENC reconfigure on the native path; an encoder restart elsewhere).
-				let sample = Sample {
-					recv: win_recv,
-					lost: win_lost,
-					rtt_ms: std::mem::take(&mut rtt_samples),
-					nack_sent: win_nack_sent,
-					nack_ok: win_nack_ok,
-					fec_ok: win_fec_ok,
-					recv_bytes: win_recv_bytes,
-					window_ms,
-				};
+				let sample = win.sample(window_ms);
 				if last_switch_at.elapsed() < std::time::Duration::from_millis(2500) {
 					// A recent menu switch / point change caused an encoder-rebuild gap — skip
 					// this window so that loss isn't mistaken for congestion (counters are
-					// zeroed below).
+					// reset when the window was taken).
 				} else if adapt_enabled {
 					let mut d = ctl.tick(&sample);
 					// Windows: the client's own decoder is the limit when it can't decode the
@@ -2365,13 +1701,6 @@ pub(super) async fn hold_session(
 						}
 					}
 				}
-				(win_recv, win_lost) = (0, 0);
-				(win_nack_sent, win_nack_ok) = (0, 0);
-				win_reordered = 0;
-				// The peak decays so one burst of reordering doesn't slow every later NACK.
-				reorder_peak_ms *= 0.8;
-				win_fec_ok = 0;
-				(win_recv_bytes, win_recv_fresh) = (0, 0);
 			},
 			q = restream_rx.recv() => match q {
 				// Session menu changed the resolution or encoder: merge it into the
@@ -2381,6 +1710,11 @@ pub(super) async fn hold_session(
 					// A menu re-request (esp. a monitor switch) → the host rebuilds its encoder
 					// (a brief gap). Mark it so the adaptive controller ignores that gap's loss.
 					last_switch_at = std::time::Instant::now();
+					// What makes the host rebuild its encoder (a fresh RTP sequence base).
+					let encoder_key = |w: u32, h: u32, fps: u32, codec: &str, enc: &str, disp: u32, win: Option<i64>, adapt: Option<(u32, u32)>| {
+						(w, h, fps, codec.to_owned(), enc.to_owned(), disp, win, adapt)
+					};
+					let before = encoder_key(cur_w, cur_h, cur_fps, &cur_codec, &cur_encoder, cur_display, cur_window, cur_adapt);
 					match cmd {
 						// An explicit size pins the ladder's resolution; (0, 0) = "Otomatik"
 						// hands it back to the controller (which re-picks for its target).
@@ -2550,6 +1884,14 @@ pub(super) async fn hold_session(
 					if rs.is_err() {
 						break;
 					}
+					// The host rebuilds its encoder on a fresh RTP base: forget the old stream's
+					// gaps / FEC state and frame clock now (the mobile client does the same). The
+					// seq-jump detection alone misses a new base that lands close to the old one —
+					// bogus gaps, NACKs and counted loss.
+					if encoder_key(cur_w, cur_h, cur_fps, &cur_codec, &cur_encoder, cur_display, cur_window, cur_adapt) != before {
+						repair_st.reset_stream();
+						frame_clock.reset();
+					}
 				}
 				None => {}
 			},
@@ -2620,32 +1962,6 @@ mod input_gate_tests {
 }
 
 #[cfg(test)]
-mod reorder_tests {
-	use super::*;
-
-	#[test]
-	fn a_late_original_is_reordering_not_a_repair() {
-		let t0 = std::time::Instant::now();
-		let ms = |n: u64| t0 + std::time::Duration::from_millis(n);
-		// Never NACKed: it filled the gap by itself.
-		assert!(!arrival_is_repair(None, ms(10), 8.0));
-		// NACKed 2 ms ago on an 8 ms path: the retransmit can't be back yet — the original.
-		assert!(!arrival_is_repair(Some(ms(0)), ms(2), 8.0));
-		// NACKed a full RTT ago: the retransmit.
-		assert!(arrival_is_repair(Some(ms(0)), ms(9), 8.0));
-	}
-
-	#[test]
-	fn the_nack_waits_for_reordering_and_for_fec() {
-		assert_eq!(nack_wait_ms(false, 60, 0.0), REORDER_WAIT_MIN_MS);
-		assert_eq!(nack_wait_ms(false, 60, 8.0), 10.0);
-		assert_eq!(nack_wait_ms(false, 60, 400.0), REORDER_WAIT_MAX_MS);
-		// FEC's go is longer than a small reorder wait.
-		assert_eq!(nack_wait_ms(true, 120, 2.0), fec_wait_ms(120));
-	}
-}
-
-#[cfg(test)]
 mod kf_tests {
 	use super::*;
 	use std::time::Duration;
@@ -2706,95 +2022,12 @@ mod kf_tests {
 		assert_eq!(shortfall_text("1080p120", "720p60", true), "The connection can't carry 1080p120 — using 720p60");
 	}
 
-	#[test]
-	fn goodput_from_window_bytes() {
-		assert_eq!(goodput_kbps(250_000, 2000), 1000);
-		assert_eq!(goodput_kbps(250_000, 0), 0);
-	}
 
-	#[test]
-	fn keyframe_requests_back_off_during_a_loss_streak() {
-		let ms = Duration::from_millis;
-		// A lone loss is answered fast...
-		assert!(kf_allowed(ms(600), KF_GAP_MIN, 20.0));
-		// ...but not before ~2 RTT (the requested keyframe can't be here yet).
-		assert!(!kf_allowed(ms(600), KF_GAP_MIN, 300.0));
-		// Requests in a streak double the gap up to the cap.
-		let mut gap = KF_GAP_MIN;
-		for want in [1000, 2000, 4000, 4000] {
-			gap = kf_next_gap(ms(600), gap);
-			assert_eq!(gap, ms(want));
-		}
-		assert!(!kf_allowed(ms(3000), gap, 20.0));
-		// A quiet spell resets it.
-		assert_eq!(kf_next_gap(Duration::from_secs(6), gap), KF_GAP_MIN);
-	}
 
-	fn rtts(v: &[f32]) -> std::collections::VecDeque<f32> {
-		v.iter().copied().collect()
-	}
 
-	#[test]
-	fn a_pipelined_decoder_is_not_overloaded() {
-		// The 2026-11-14 laptop: decode time ≈ the frame interval, every AU decoded.
-		assert!(!decoder_overloaded(11.3, 119.0, 120));
-		assert!(!decoder_overloaded(17.4, 60.0, 60));
-		// Behind for real: most of the frame time AND AUs shed.
-		assert!(decoder_overloaded(11.3, 80.0, 120));
-		// Not reported (an older renderer, other platforms) or no stats yet: never.
-		assert!(!decoder_overloaded(11.3, 0.0, 120));
-		assert!(!decoder_overloaded(0.0, 80.0, 120));
-		// Fast decoding with few AUs is a thin stream, not a slow decoder.
-		assert!(!decoder_overloaded(2.0, 30.0, 120));
-	}
 
-	#[test]
-	fn repair_window_follows_median_rtt_and_jitter() {
-		// No samples yet: the upper bound; the renderer then waits the full 250 ms.
-		assert_eq!(repair_window_ms(&rtts(&[]), 0.0), REPAIR_MAX_MS);
-		assert_eq!(REPAIR_MAX_MS + REPAIR_SWEEP_MS as f32, 250.0);
-		// A steady 78 ms mobile path: median + slack, no jitter term.
-		assert_eq!(repair_window_ms(&rtts(&[78.0; 8]), 0.0), 78.0 + REPAIR_SLACK_MS);
-		// Jitter widens it: median 80, mean |dev| 8 → 80 + 2 × 8 + slack.
-		let w = repair_window_ms(&rtts(&[70.0, 90.0, 70.0, 90.0, 80.0]), 0.0);
-		assert!((w - (80.0 + 2.0 * 8.0 + REPAIR_SLACK_MS)).abs() < 0.01, "{w}");
-		// The field link (avg 78, spikes to 248) no longer reaches ~600 ms: capped.
-		let field = repair_window_ms(&rtts(&[60.0, 248.0, 75.0, 230.0, 90.0, 210.0, 70.0, 240.0]), 0.0);
-		assert_eq!(field, REPAIR_MAX_MS);
-		// A LAN: the lower bound (a retransmit still has room to land).
-		assert_eq!(repair_window_ms(&rtts(&[2.0, 3.0, 2.0]), 0.0), REPAIR_MIN_MS);
-		// NACKs held for FEC add their wait.
-		assert_eq!(repair_window_ms(&rtts(&[50.0; 4]), 25.0), 50.0 + REPAIR_SLACK_MS + 25.0);
-	}
 
-	/// Game mode on a high-RTT path with RFI / intra refresh: holes are dropped fast (with
-	/// hysteresis); remote desktop, a keyframe-only recovery, or a LAN keep the repair wait.
-	#[test]
-	fn fast_drop_only_in_game_mode_on_a_high_rtt_path_with_keyframe_free_recovery() {
-		assert!(fast_drop_on(false, true, true, 45.0));
-		assert!(!fast_drop_on(false, true, true, 4.0), "LAN");
-		assert!(!fast_drop_on(false, false, true, 45.0), "remote desktop keeps the repair wait");
-		assert!(!fast_drop_on(false, true, false, 45.0), "a keyframe recovery would re-flood the link");
-		// Hysteresis: on at 35, off under 25.
-		assert!(!fast_drop_on(false, true, true, 30.0));
-		assert!(fast_drop_on(true, true, true, 30.0));
-		assert!(!fast_drop_on(true, true, true, 20.0));
-		assert!(!fast_drop_on(true, true, true, 0.0), "no RTT yet");
-	}
 
-	#[test]
-	fn fast_drop_wait_covers_reordering_and_fec_but_never_an_rtt() {
-		// Reorder wait 3 ms at 60 fps: a frame plus slack, at least the floor.
-		assert_eq!(fast_drop_wait_ms(3.0, 60), 30.0);
-		// The ~20 % reordering of a phone tether (25 ms wait) under FEC's go (two frames + 8 ms at
-		// 60 fps = 41 ms) + a frame + slack: ~68 ms.
-		let w = fast_drop_wait_ms(fec_wait_ms(60).max(reorder_wait_ms(40.0)), 60);
-		assert!((60.0..=75.0).contains(&w), "{w}");
-		// Never more than the cap, whatever the waits.
-		assert_eq!(fast_drop_wait_ms(500.0, 30), FAST_DROP_MAX_MS);
-		// Far under the normal repair window on a 45 ms path.
-		assert!(fast_drop_wait_ms(25.0, 120) < repair_window_ms(&rtts(&[45.0, 46.0, 44.0]), 0.0) + REPAIR_SWEEP_MS as f32);
-	}
 
 	#[test]
 	fn an_intra_refreshed_stream_gets_no_loss_hold() {
@@ -2815,169 +2048,12 @@ mod kf_tests {
 		assert!(!rfi_reach(false, "h265"));
 	}
 
-	#[test]
-	fn pongs_match_the_right_ping() {
-		let ms = Duration::from_millis;
-		// Nothing outstanding: a stray Pong times nothing.
-		assert_eq!(match_pong(&[], 80.0), None);
-		// No sample yet: the oldest Ping.
-		assert_eq!(match_pong(&[ms(120), ms(20)], 0.0), Some(0));
-		// The previous Ping (or its Pong) was lost: time the Pong against the newer Ping, not
-		// +500 ms against the lost one.
-		assert_eq!(match_pong(&[ms(580), ms(80)], 78.0), Some(1));
-		// A queue filling past PING_MS: the RTT keeps growing, the older Ping is the match.
-		assert_eq!(match_pong(&[ms(560), ms(60)], 450.0), Some(0));
-		// One outstanding: that one.
-		assert_eq!(match_pong(&[ms(300)], 78.0), Some(0));
-	}
 
-	/// Drive a `PongMatcher` with the real ping cadence over a path whose RTT is `rtt(t_ms)`;
-	/// `lost(i)` drops the round trip of Ping i. Returns (arrival ms, true RTT, reading).
-	fn pong_run(secs: u64, rtt: impl Fn(u64) -> u64, lost: impl Fn(u64) -> bool) -> Vec<(u64, u64, f32)> {
-		let base = std::time::Instant::now();
-		let at = |ms: u64| base + Duration::from_millis(ms);
-		let mut m = PongMatcher::new();
-		// (time, is_pong, ping index)
-		let mut events: Vec<(u64, bool, u64)> = Vec::new();
-		let (mut t, mut i) = (0u64, 0u64);
-		let mut gaps = PongMatcher::new();
-		while t < secs * 1000 {
-			events.push((t, false, i));
-			if !lost(i) {
-				events.push((t + rtt(t), true, i));
-			}
-			t += gaps.on_ping(at(0)).as_millis() as u64;
-			i += 1;
-		}
-		events.sort();
-		let mut sent_at = std::collections::HashMap::new();
-		let mut out = Vec::new();
-		for (t, pong, i) in events {
-			if pong {
-				if let Some(r) = m.on_pong(at(t)) {
-					out.push((t, t - sent_at[&i], r));
-				}
-			} else {
-				sent_at.insert(i, t);
-				m.on_ping(at(t));
-			}
-		}
-		out
-	}
 
-	#[test]
-	fn ping_gaps_average_the_cadence_and_never_repeat() {
-		let gaps: Vec<u64> = (1..=40).map(ping_gap_ms).collect();
-		assert!(gaps.iter().all(|g| (350..=650).contains(g)), "{gaps:?}");
-		let mean = gaps.iter().sum::<u64>() as f64 / gaps.len() as f64;
-		assert!((mean - PING_MS as f64).abs() < 25.0, "mean {mean}");
-		assert!(gaps.windows(2).all(|w| w[0] != w[1]), "uneven: {gaps:?}");
-	}
 
-	/// The RTT jumps from 78 ms to 600 ms and stays there: the readings follow it within a few
-	/// Pongs instead of locking onto RTT − 500 (a fixed 500 ms cadence read a steady 100 ms).
-	#[test]
-	fn a_sustained_rtt_over_the_ping_cadence_is_read_right() {
-		for jump in [600u64, 900, 1300] {
-			let out = pong_run(40, |t| if t < 3000 { 78 } else { jump }, |_| false);
-			let late: Vec<_> = out.iter().filter(|(t, _, _)| *t > 12_000).collect();
-			assert!(late.len() > 40);
-			let wrong = late.iter().filter(|(_, truth, r)| (*r - *truth as f32).abs() > 5.0).count();
-			assert!(wrong == 0, "{jump} ms: {wrong} of {} wrong, e.g. {:?}", late.len(), &late[..6]);
-		}
-	}
 
-	/// A short RTT with lost Pings: the Pong after a loss is timed against its own Ping, not
-	/// +500 ms against the lost one; and a growing queue is followed.
-	#[test]
-	fn lost_pings_and_a_growing_queue_keep_the_readings_right() {
-		let out = pong_run(40, |_| 78, |i| i % 3 == 1 || i % 7 == 0);
-		// (The very first Pongs, before any sample, go to the oldest Ping as ever; Pings 0 and 1
-		// are both lost here.)
-		let wrong: Vec<_> =
-			out.iter().filter(|(t, truth, r)| *t > 3000 && (*r - *truth as f32).abs() > 5.0).collect();
-		assert!(wrong.is_empty(), "{} of {} wrong: {wrong:?}", wrong.len(), out.len());
-		// 78 ms → 1 s over 20 s and back.
-		let ramp = |t: u64| 78 + (t.saturating_sub(5000).min(20_000) * 922 / 20_000);
-		let out = pong_run(40, ramp, |i| i % 5 == 2);
-		let wrong = out.iter().filter(|(_, truth, r)| (*r - *truth as f32).abs() > 5.0).count();
-		assert!(wrong * 10 <= out.len(), "{wrong} of {} wrong", out.len());
-	}
 
-	#[test]
-	fn path_change_picks_the_cap_of_the_new_path() {
-		// Onto the relay: its forwarding cap with 10 % headroom bounds the direct cap.
-		assert_eq!(path_cap_kbps(true, 10_000, 40_000), 9_000);
-		// …never under 2 Mbit, and never above what the direct cap allows.
-		assert_eq!(path_cap_kbps(true, 1_000, 40_000), 2_000);
-		assert_eq!(path_cap_kbps(true, 50_000, 15_000), 15_000);
-		// An uncapped relay, or the direct path: the direct cap.
-		assert_eq!(path_cap_kbps(true, 0, 40_000), 40_000);
-		assert_eq!(path_cap_kbps(false, 10_000, 40_000), 40_000);
-	}
 
-	#[test]
-	fn fec_wait_is_two_frames_bounded() {
-		assert!((fec_wait_ms(120) - (2000.0 / 120.0 + 8.0)).abs() < 0.01);
-		assert!((fec_wait_ms(0) - (2000.0 / 60.0 + 8.0)).abs() < 0.01, "host default = 60 fps");
-		assert_eq!(fec_wait_ms(30), 50.0);
-		assert_eq!(fec_wait_ms(1000), 15.0);
-		// FEC counts as on while parity arrived within the last second.
-		assert!(!fec_active(None));
-		assert!(fec_active(Some(Duration::from_millis(300))));
-		assert!(!fec_active(Some(Duration::from_secs(2))));
-	}
 
-	#[test]
-	fn nack_waits_for_fec_until_it_gave_up() {
-		// A block of 10 packets with 2 parity shards.
-		assert!(!fec_block_gave_up(1, 2, 0), "first shard, more to come: wait");
-		assert!(fec_block_gave_up(1, 2, 1), "last shard here, still missing: FEC is done");
-		assert!(fec_block_gave_up(3, 2, 0), "3 missing > 2 parity: never repairable");
-		assert!(!fec_block_gave_up(2, 2, 0));
 
-		let t0 = std::time::Instant::now();
-		let miss = |nacked: Option<std::time::Instant>| Miss { t0, nacked, renacked: false };
-		let mut missing = std::collections::HashMap::new();
-		// 101 and 103 held for FEC, 200 already NACKed (FEC was off when it went missing).
-		missing.insert(101u16, miss(None));
-		missing.insert(103u16, miss(None));
-		missing.insert(200u16, miss(Some(t0)));
-		assert_eq!(missing_in(&missing, 100, 10), 2);
-		let mut pending: std::collections::VecDeque<(u16, std::time::Instant)> =
-			[(101u16, t0), (103u16, t0)].into_iter().collect();
-		let wait = Duration::from_millis(25);
-		// Within the wait nothing is NACKed.
-		assert!(take_due_fec_nacks(&mut pending, &mut missing, wait, t0 + Duration::from_millis(10)).is_empty());
-		assert_eq!(pending.len(), 2);
-		// The block's parity gave up on 103's block (100..105): only its held seqs go, once.
-		let now = t0 + Duration::from_millis(12);
-		assert_eq!(take_block_nacks(&mut missing, 100, 5, now), vec![101, 103]);
-		assert!(take_block_nacks(&mut missing, 100, 5, now).is_empty(), "never twice");
-		assert_eq!(missing[&103].nacked, Some(now));
-		// A held seq FEC rebuilt meanwhile (gone from `missing`) is never NACKed; a due one is.
-		let t1 = t0 + Duration::from_millis(30);
-		missing.insert(300u16, miss(None));
-		missing.insert(301u16, miss(None));
-		missing.remove(&300);
-		pending.clear();
-		pending.extend([(300u16, t0), (301u16, t0)]);
-		assert_eq!(take_due_fec_nacks(&mut pending, &mut missing, wait, t1), vec![301]);
-		assert!(pending.is_empty());
-		// FEC off (zero wait): every held NACK goes at once.
-		missing.insert(400u16, miss(None));
-		pending.push_back((400, t1));
-		assert_eq!(take_due_fec_nacks(&mut pending, &mut missing, Duration::ZERO, t1), vec![400]);
-	}
-
-	#[test]
-	fn rebuilt_seqs_are_remembered_bounded() {
-		let mut r = std::collections::VecDeque::new();
-		for s in 0..(FEC_REBUILT_KEEP as u16 + 10) {
-			note_rebuilt(&mut r, s);
-		}
-		assert_eq!(r.len(), FEC_REBUILT_KEEP);
-		assert!(!r.contains(&0));
-		assert!(r.contains(&(FEC_REBUILT_KEEP as u16 + 9)));
-	}
 }

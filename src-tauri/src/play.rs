@@ -2586,25 +2586,9 @@ mod tests {
 	}
 }
 
-/// The adaptive controller's ceiling when neither the user nor the transport set one: what a
-/// clean picture of the native point needs, with headroom. Moonlight-like reference (â‰ˆ 20 Mbit
-/// for 1080p60 H.264 game content), scaled by pixels, by fps^0.75 (more frames share more
-/// redundancy), and by the codec's efficiency; desktop content needs ~60 % of that. Clamped
-/// to 15..150 Mbit. The controller still only climbs as far as the path stays clean.
-pub(crate) fn auto_cap_kbps(codec: &str, native: (u32, u32, u32), game_mode: bool) -> u32 {
-	let (w, h, fps) = native;
-	let (w, h) = if w == 0 || h == 0 { (1920, 1080) } else { (w, h) };
-	let fps = if fps == 0 { 60 } else { fps.max(30) };
-	let px = (w as f64 * h as f64) / (1920.0 * 1080.0);
-	let f = (fps as f64 / 60.0).powf(0.75);
-	let eff = match codec.to_ascii_lowercase().as_str() {
-		"h265" | "hevc" => 0.75,
-		"av1" => 0.65,
-		_ => 1.0,
-	};
-	let mode = if game_mode { 1.0 } else { 0.6 };
-	((20_000.0 * px * f * eff * mode) as u32).clamp(15_000, 150_000)
-}
+/// The adaptive controller's ceiling when neither the user nor the transport set one (shared
+/// with the mobile client; see `pulsar_core::adapt::caps`).
+pub(crate) use pulsar_core::adapt::caps::auto_cap_kbps;
 
 #[cfg(test)]
 mod audio_quality_tests {
@@ -2635,22 +2619,5 @@ mod audio_quality_tests {
 		assert_eq!(audio_quality_for("raw", Standard, true), Raw);
 		assert_eq!(audio_quality_for("raw", Standard, false), High);
 		assert_eq!(audio_quality_for("???", High, true), High);
-	}
-}
-
-#[cfg(test)]
-mod auto_cap_tests {
-	use super::auto_cap_kbps;
-
-	#[test]
-	fn scales_with_pixels_fps_codec_and_mode() {
-		let game_1200p120_hevc = auto_cap_kbps("h265", (1920, 1200, 120), true);
-		assert!((26_000..30_000).contains(&game_1200p120_hevc), "{game_1200p120_hevc}");
-		let remote = auto_cap_kbps("h265", (1920, 1200, 120), false);
-		assert!(remote < game_1200p120_hevc && remote >= 15_000, "{remote}");
-		let uhd = auto_cap_kbps("h265", (3840, 2160, 60), true);
-		assert!((55_000..65_000).contains(&uhd), "{uhd}");
-		assert_eq!(auto_cap_kbps("h264", (1280, 720, 30), false), 15_000, "never under 15 Mbit");
-		assert_eq!(auto_cap_kbps("h264", (0, 0, 0), true), 20_000, "unknown â†’ 1080p60 reference");
 	}
 }
