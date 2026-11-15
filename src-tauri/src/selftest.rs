@@ -121,6 +121,32 @@ mod linux {
 					Ok(decoders.join(" "))
 				}),
 			);
+			// Generic linux-arm64 bundles: the Rockchip renderer variant (private ffmpeg-rockchip
+			// + MPP). Optional: when it can't run the app keeps `pulsar-render` (process.rs
+			// `rkmpp_render_bin`), so a WARN here never fails the image. Off a Rockchip board
+			// (CI containers) its rkmpp decoders can't open and it reports software decoders —
+			// a PASS still proves the private libs load on this distro. The loader's own wording
+			// is rephrased: the AppImage smoke test fails on "error while loading shared
+			// libraries" anywhere in the report, and this optional part must not hold a release.
+			let rk = res.join("pulsar-render-rkmpp");
+			if rk.is_file() {
+				let mut probe = Command::new(&rk);
+				probe.arg("--probe");
+				crate::process::apply_render_lib_env(&mut probe);
+				r.line(
+					false,
+					"pulsar-render-rkmpp",
+					run_tool(probe)
+						.and_then(|o| {
+							serde_json::from_str::<serde_json::Value>(o.trim())
+								.map_err(|e| format!("bad probe output: {e}"))?;
+							Ok(o.trim().to_string())
+						})
+						.map_err(|e| {
+							e.replace("error while loading shared libraries", "private libs did not load")
+						}),
+				);
+			}
 		}
 		r.line(true, "gst x264 (Wayland capture)", gst(GstEncoder::X264));
 		r.line(false, "gst vaapi", gst(GstEncoder::Vaapi));

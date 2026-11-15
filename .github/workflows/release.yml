@@ -157,6 +157,45 @@ jobs:
           mkdir -p src-tauri/resources
           cp "$BIN" "src-tauri/resources/pulsar-render${EXT}"
 
+      # linux-arm64 only: the Rockchip renderer variant. The generic arm64 bundles link Ubuntu's
+      # libavcodec58 (no rkmpp), so an RK3588 board decoded in software unless it ran the opi5
+      # .deb. scripts/rkmpp/build-rkmpp-render.sh builds Rockchip MPP + a minimal
+      # ffmpeg-rockchip (pinned SHAs) into a private prefix, builds pulsar-render against it
+      # (own target dir) and stages resources/pulsar-render-rkmpp + resources/pulsar-rkmpp/*.
+      # The app runs it only where an MPP device exists and its probe decodes on rkmpp
+      # (process.rs `rkmpp_render_bin`); everywhere else nothing changes. Best effort: if any
+      # of it fails, `args` stays empty, the bundles are built exactly as before, the release
+      # is not held back, and a warning on the run summary says the variant is missing. If the
+      # bundler then fails WITH the variant's resources (linuxdeploy walking its ELF files),
+      # "Build app bundles (without the Rockchip variant)" below rebuilds them without it.
+      # The overlay appends to tauri.linux.conf.json's resources (a --config array REPLACES
+      # the earlier one, so it lists them all).
+      - name: Build Rockchip renderer variant (pulsar-render-rkmpp, best effort)
+        id: rkmpp
+        if: matrix.name == 'linux-arm64'
+        continue-on-error: true
+        shell: bash
+        run: |
+          # Sources, prefix AND the variant's cargo target dir outside target/: rust-cache would
+          # otherwise keep a second full dependency tree for this key, and a cached
+          # ffmpeg-sys-next (its build script has no rerun-if-changed) would keep bindings made
+          # against the previous ffmpeg-rockchip pin after a bump.
+          RKMPP_WORK="$RUNNER_TEMP/rkmpp-build" CARGO_TARGET_DIR="$RUNNER_TEMP/rkmpp-target" \
+            INSTALL_DEPS=1 bash scripts/rkmpp/build-rkmpp-render.sh
+          node -e '
+            const fs = require("fs");
+            const base = JSON.parse(fs.readFileSync("src-tauri/tauri.linux.conf.json")).bundle.resources;
+            const resources = [...base, "resources/pulsar-render-rkmpp", "resources/pulsar-rkmpp/*"];
+            const out = process.env.RUNNER_TEMP + "/rkmpp.conf.json";
+            fs.writeFileSync(out, JSON.stringify({ bundle: { resources } }));
+            console.log(out, "->", resources);
+          '
+          echo "args=--config $RUNNER_TEMP/rkmpp.conf.json" >> "$GITHUB_OUTPUT"
+      - name: Warn — Rockchip renderer variant missing from this release
+        if: matrix.name == 'linux-arm64' && steps.rkmpp.outcome == 'failure'
+        shell: bash
+        run: echo "::warning title=pulsar-render-rkmpp::The Rockchip renderer variant failed to build; the linux-arm64 bundles ship without it (RK3588 boards decode in software). See the 'Build Rockchip renderer variant' step log."
+
       # The branded "Pulsar is updating" window (pulsar-setup --updating, NO payload): the
       # in-app updater runs the NSIS installer quietly and shows this instead of the wizard.
       # Bundled as resources/pulsar-update.exe (tauri.windows.conf.json).
@@ -274,13 +313,38 @@ jobs:
       - name: Build app bundles
         id: tauri
         uses: tauri-apps/tauri-action@v0
+        # Only with the Rockchip variant's overlay may this fail softly: the next step then
+        # rebuilds without it. Every other failure stops the job as before.
+        continue-on-error: ${{ steps.rkmpp.outputs.args != '' }}
         env:
           # Sign the updater artifacts (createUpdaterArtifacts emits a .sig per bundle).
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: .
-          args: ${{ matrix.args }} ${{ startsWith(matrix.os, 'ubuntu') && format('--config {0}/appimage.conf.json', runner.temp) || '' }} ${{ steps.macsign.outputs.args }}
+          args: ${{ matrix.args }} ${{ startsWith(matrix.os, 'ubuntu') && format('--config {0}/appimage.conf.json', runner.temp) || '' }} ${{ steps.macsign.outputs.args }} ${{ steps.rkmpp.outputs.args }}
+
+      # Fallback for the step above: it failed with the Rockchip variant's resources in the
+      # bundle, so build the bundles exactly as a release without the variant would. A failure
+      # here is a real bundling failure and stops the job.
+      - name: Drop the Rockchip variant and the half-built bundles
+        if: steps.tauri.outcome == 'failure' && steps.rkmpp.outputs.args != ''
+        shell: bash
+        run: rm -rf src-tauri/resources/pulsar-render-rkmpp src-tauri/resources/pulsar-rkmpp target/release/bundle
+      - name: Build app bundles (without the Rockchip variant)
+        id: tauri_plain
+        if: steps.tauri.outcome == 'failure' && steps.rkmpp.outputs.args != ''
+        uses: tauri-apps/tauri-action@v0
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: .
+          args: ${{ matrix.args }} ${{ format('--config {0}/appimage.conf.json', runner.temp) }}
+      - name: Warn — bundles rebuilt without the Rockchip renderer variant
+        if: steps.tauri_plain.outcome == 'success'
+        shell: bash
+        run: echo "::warning title=pulsar-render-rkmpp::Bundling with the Rockchip renderer variant failed; the linux-arm64 bundles were rebuilt without it. See the 'Build app bundles' step log."
 
       # The AppImage must start and stream on distros other than the 22.04 it was built on:
       # run its `--selftest` (bundled gst encode, pulsar-render libs, ffmpeg) in clean
@@ -290,7 +354,7 @@ jobs:
         if: startsWith(matrix.os, 'ubuntu')
         shell: bash
         run: |
-          img="$(echo '${{ steps.tauri.outputs.artifactPaths }}' | jq -r '.[]' | grep '\.AppImage$' | head -1)"
+          img="$(echo '${{ steps.tauri_plain.outputs.artifactPaths || steps.tauri.outputs.artifactPaths }}' | jq -r '.[]' | grep '\.AppImage$' | head -1)"
           distros="fedora:41 ubuntu:24.04 debian:12 opensuse/tumbleweed"
           # archlinux has no arm64 image.
           [ "$(uname -m)" = x86_64 ] && distros="$distros archlinux:latest"
@@ -302,7 +366,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p release-artifacts
-          echo '${{ steps.tauri.outputs.artifactPaths }}' | jq -r '.[]' | while read -r p; do
+          echo '${{ steps.tauri_plain.outputs.artifactPaths || steps.tauri.outputs.artifactPaths }}' | jq -r '.[]' | while read -r p; do
             p="${p%$'\r'}"          # strip trailing CR (Windows artifactPaths)
             if [ -f "$p" ]; then    # copy real installer files; skip the macOS .app directory entry
               echo "  + $p"

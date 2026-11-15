@@ -55,9 +55,59 @@ chroma"). Per renderer:
     overrides the choice.
 - **Orange Pi 5B appliance image:** `scripts/opi5-image/` (+ `.github/workflows/opi5-image.yml`,
   manual). It builds ubuntu-rockchip 22.04 server + a Pulsar `.deb` linked against the
-  rockchip-multimedia PPA's rkmpp libavcodec, set up as a kiosk. The generic linux-arm64 release
-  links Ubuntu's libavcodec, which has no rkmpp, so it decodes in software on the board. The
-  image is prepared but not yet built or booted; see the verify checklist in its README.
+  rockchip-multimedia PPA's rkmpp libavcodec, set up as a kiosk. The image is prepared but not
+  yet built or booted; see the verify checklist in its README.
+- **Generic linux-arm64 release on Rockchip boards (`pulsar-render-rkmpp`, 2026-11-15, NOT yet
+  built by CI nor run on a board):**
+  - The generic arm64 `pulsar-render` links Ubuntu 22.04's libavcodec58, which has no rkmpp,
+    so on an RK3588 it decodes in software.
+  - So the release workflow's linux-arm64 job also runs `scripts/rkmpp/build-rkmpp-render.sh`.
+    It builds Rockchip MPP, dav1d and a minimal ffmpeg-rockchip (nyanmisaka, FFmpeg 7.1,
+    threaded, pinned SHAs) into a private prefix and builds the SAME renderer source against it.
+  - ffmpeg-rockchip 7.x declares the rkmpp decoders' DRM_PRIME output only in their hw configs
+    (no `pix_fmts`), so tier 0 in `decode.rs` also accepts a hardware decoder whose hw config
+    offers DRM_PRIME with internal setup. The build fails unless `pulsar-render-rkmpp
+    --list-zerocopy` names `h264_rkmpp` and `hevc_rkmpp`, and unless its `--probe` decodes all
+    three codecs (off-board: the software floor).
+  - The bundles (AppImage/.deb/.rpm) then carry `resources/pulsar-render-rkmpp` and its private
+    libs in `resources/pulsar-rkmpp/` (libavcodec.so.61, libavformat.so.61, libavutil.so.59,
+    librockchip_mpp.so.1, libdav1d.so.7). From the board they need glibc ≥ 2.35, libdrm, and
+    libstdc++ / libgcc_s (MPP is partly C++).
+  - Selection (`process.rs` `rkmpp_choice`, once per run), in this order. The variant is used
+    only when every step passes:
+    1. it is bundled;
+    2. an MPP node exists (`/dev/mpp_service`, or `/dev/vpu_service` / `/dev/vpu-service` on
+       old vendor kernels);
+    3. `PULSAR_PREFER_SYSTEM_FFMPEG` is not `1`/`on`/`true` (that keeps `pulsar-render` on the
+       board's own ffmpeg, as before);
+    4. the GENERIC `pulsar-render --probe`, with its usual lib env, puts no codec on a
+       zero-copy `*_rkmpp` decoder. A board whose system libavcodec58 already has rkmpp keeps
+       the generic renderer;
+    5. the variant's own `--probe` puts at least one codec on a zero-copy `*_rkmpp` decoder.
+    Otherwise `pulsar-render` runs as before: x64, other arm64 boards, mainline-kernel
+    Rockchip boards, and boards without access to the MPP nodes. The probe that decided is kept
+    and reused by the caps probe (`caps.rs` `probe_decoders`), so startup runs at most two
+    probes. A transient probe failure keeps the generic renderer for that run.
+  - `apply_render_lib_env` gives the variant LD_LIBRARY_PATH = its private dir first. It does
+    not use the system-ffmpeg preference below, so a distro libavcodec.so.61 without rkmpp
+    cannot shadow it.
+  - `PULSAR_RKMPP_RENDER=0` never uses the variant; `=1` always uses it when bundled (no device
+    check, no probe).
+  - Software fallback inside the variant (runtime zero-output fallback, codecs MPP rejects):
+    native h264/hevc (threaded) and libdav1d for AV1 — the same floor as the generic renderer.
+    FFmpeg's native `av1` decoder is hwaccel-only, so it is not built.
+  - `pulsar --selftest` adds an optional `pulsar-render-rkmpp` line (a WARN never fails the
+    AppImage smoke test).
+  - The CI step is best effort (`continue-on-error`): if the MPP or ffmpeg build fails, the
+    arm64 bundles are built exactly as before and the run summary shows a warning. If bundling
+    fails WITH the variant's resources, the job rebuilds the bundles without them (also with a
+    warning). The variant's cargo target dir lives in `$RUNNER_TEMP` (never cached), so a pin
+    bump always rebuilds ffmpeg-sys-next against the new headers.
+  - To try it without a release: run the manual **Rockchip renderer check** workflow
+    (`.github/workflows/rkmpp-check.yml`). It uploads the staged files; its header says how to
+    probe them on a board.
+  - Still separate: the opi5 `.deb`/image (PPA ffmpeg, its own update channel) and the bundled
+    ffmpeg CLI (host capture/encode; on RK3588 the host encodes through gst `mpph26xenc`).
 
 - **WebKitGTK can't hardware-decode** the stream. Video MUST be native:
   historically `mpv --wid=<XID>` with `--hwdec` → `h264_rkmpp`/`hevc_rkmpp`

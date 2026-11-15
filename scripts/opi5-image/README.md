@@ -13,8 +13,12 @@ Hardware video decode on the RK3588 needs three board-specific pieces together:
 - The MPP/RGA userspace libraries.
 - An ffmpeg built with the `rkmpp` decoders.
 
-The generic `linux-arm64` release links Ubuntu's own libavcodec, which has no rkmpp, so on
-the board it would decode in software. Shipping a whole image keeps that stack consistent.
+The generic `linux-arm64` release's main renderer links Ubuntu's own libavcodec, which has no
+rkmpp. Since 2026-11-15 those bundles also carry `pulsar-render-rkmpp` (a private
+ffmpeg-rockchip + MPP build, see `scripts/rkmpp/build-rkmpp-render.sh` and
+`docs/agents/client-video.md`), which the app picks on a board whose vendor kernel exposes the
+MPP device. That variant is not yet verified on a board. The image still matters: it brings the
+vendor kernel, the GPU userspace and the device permissions as one consistent stack.
 
 ## What is in it
 

@@ -50,5 +50,6 @@ pulsar-desktop/
                           #     Gaming/(6 comps), Games/, Approve, Connections,
                           #     FilesWindow, HostChat
   scripts/                # fetch-ffmpeg.mjs, fetch-drivers.mjs, fetch-player.mjs,
-                          #   gen-update-manifest.mjs, bump-version.mjs
+                          #   gen-update-manifest.mjs, bump-version.mjs,
+                          #   rkmpp/ (Rockchip renderer variant for linux-arm64)
 ```
