@@ -79,6 +79,7 @@ mod pad_notice;
 mod play_notice;
 // Sleep / display off ends the sessions this machine is viewing; waking reconnects them.
 mod power_watch;
+mod wlan_lowlat;
 mod process;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod render;

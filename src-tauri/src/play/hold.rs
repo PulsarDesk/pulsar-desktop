@@ -811,6 +811,8 @@ pub(super) async fn hold_session(
 	let mut cur_transmit = true;
 	// The renderer's decode numbers belong to the previous session until this one's arrive.
 	crate::render_stats::clear_decode_stats();
+	// Wi-Fi low-latency mode while this session receives (see wlan_lowlat.rs).
+	let _wlan = crate::wlan_lowlat::acquire();
 	// Consecutive stats windows in which the client decoder looked overloaded (see
 	// `decoder_overloaded`); the fps steps down at 2.
 	let mut dec_over_windows: u32 = 0;

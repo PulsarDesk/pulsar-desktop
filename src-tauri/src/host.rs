@@ -2813,6 +2813,8 @@ pub(crate) async fn bring_online(
 				// is safe (procs drain finds an empty vec, cap_slot.take() returns None,
 				// release_redirect is a no-op when already removed, and the map removals
 				// are sid-guarded so they silently no-op when already cleared).
+				// Wi-Fi low-latency mode while this session streams (see wlan_lowlat.rs).
+				let _wlan = crate::wlan_lowlat::acquire();
 				let _cleanup_guard = SessionCleanupGuard {
 					procs: procs.clone(),
 					proc_epoch: proc_epoch.clone(),
