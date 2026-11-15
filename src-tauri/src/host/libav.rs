@@ -1457,7 +1457,7 @@ mod tests {
 	}
 
 	/// VA-API / QSV X11 plans run in-process (unless `PULSAR_LIBAV_HW=0`) on the plan's render
-	/// node; Vulkan and HDR stay on the CLI.
+	/// node; Vulkan and 4:4:4 stay on the CLI (an HDR request is SDR here and stays in-process).
 	#[test]
 	fn vaapi_and_qsv_plans_are_taken_in_process() {
 		if super::super::mock_capture() || std::env::var("PULSAR_LIBAV_HOST").is_ok() || std::env::var("PULSAR_LIBAV_HW").is_ok() {
@@ -1491,9 +1491,14 @@ mod tests {
 		assert!(supported(&plan));
 		plan.vaapi_device.clear();
 		assert_eq!(Params::from_plan(&plan).unwrap().vaapi_device, crate::drm_node::DEFAULT_NODE);
+		// An HDR request is SDR on x11grab (8-bit capture, `effective_hdr_yuv444`): it stays
+		// in-process. 4:4:4 goes to the CLI.
 		plan.hdr = true;
-		assert!(!supported(&plan));
+		assert!(supported(&plan));
 		plan.hdr = false;
+		plan.yuv444 = true;
+		assert!(!supported(&plan));
+		plan.yuv444 = false;
 		plan.encoder = HwEncoder::Vulkan;
 		assert!(!supported(&plan));
 	}
