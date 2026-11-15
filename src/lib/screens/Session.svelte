@@ -962,7 +962,7 @@
 				case 'statshud': controls.setStatsHud(val === 'on' || val === '1' || val === 'true'); break;
 				// Picture upscaling picked in the native menu: the same setting as Settings → Görüntü.
 				case 'upscale':
-					if (val === 'off' || val === 'auto' || val === 'fsr' || val === 'ai') {
+					if (val === 'off' || val === 'auto' || val === 'fsr' || val === 'ai' || val === 'sgsr') {
 						ui.upscale = val;
 						saveUi();
 					}

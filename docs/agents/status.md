@@ -96,8 +96,8 @@ selection.
 **Picture upscaling parity (2026-11-14, untested on hardware):** Windows = NVIDIA/Intel VSR,
 FSR, SGSR; Linux pulsar-render = FSR, SGSR (`gl_fsr.rs` + `sgsr1.glsl`; not on the KMS lease
 path, which bypasses GL); macOS pulsar-render = MetalFX spatial / FSR; mpv (macOS / Linux
-fallback) = FSR. SGSR is hidden in the settings on
-every OS (`PULSAR_UPSCALE=sgsr` reaches it) until the 2025-math fix is A/B'd — see
+fallback) = FSR. SGSR ("Snapdragon GSR") is offered again in the settings and the native menu
+since the 2025-math re-test (2026-11-15, Windows/Adreno, headless test stream only) — see
 [client-video.md](client-video.md#picture-upscaling-settings--görüntü--görüntü-iyileştirme).
 
 **Per-window host capture on Linux + macOS (2026-11-14, branch `parity/window-capture`,

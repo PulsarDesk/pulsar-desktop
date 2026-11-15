@@ -329,9 +329,9 @@ to `DefWindowProc` and the mouse hook forwards the synthesized mouse as before.
   `fsr` or any other GPU = AMD FSR 1: the VideoProcessor converts into a source-sized texture,
   EASU scales it, RCAS sharpens into the back buffer. Shader failure → plain scaling, never
   black. `cargo test -p pulsar-render fsr` compiles the HLSL. `sgsr` = Snapdragon GSR 1
-  (`win/sgsr1.hlsl`, one pass) — NOT offered in the settings since the 2026-11-13 A/B (dark
-  halos on desktop text, Adreno); reachable via `PULSAR_UPSCALE=sgsr` (diagnostic override of
-  the mode, both Windows and Linux) or a saved `upscale=sgsr`.
+  (`win/sgsr1.hlsl`, one pass), offered as "Snapdragon GSR" (settings + native menu; never
+  picked by `auto`). `PULSAR_UPSCALE=off|auto|fsr|ai|sgsr` pins the mode over the setting
+  (diagnostics, Windows / Linux / macOS).
 - **macOS pulsar-render** (`crates/pulsar-render/src/mac/metal.rs`, `metalfx.rs`; choice =
   `view::pick`, unit-tested): only when the picture is scaled UP. `ai` / `auto` = Apple's
   **MetalFX spatial scaler** (`MTLFXSpatialScaler`, macOS 13+) when the system has MetalFX and
@@ -358,12 +358,19 @@ to `DefWindowProc` and the mouse hook forwards the synthesized mouse as before.
   GL composite into a scanout buffer, i.e. no longer zero-copy (by design, not done).
 - **SGSR math** (both `sgsr1.glsl` and `win/sgsr1.hlsl`): the 2025 revision of upstream's GLSL
   mobile shader — std = 2.181818 / sum, distance weight 0.55, luma change limited to ±23/255.
-  Upstream's HLSL still has the 2023 math (std = (10.14185 / sum)², weight 0.5, no limit), which
-  over-sharpens edges; that was the likely cause of the halos. Untested on hardware with the new
-  math (Windows and Linux): A/B it on desktop text before offering SGSR in the settings again
-  (add `<option value="sgsr">` back in `DisplayTab.svelte`, the native menu row in
-  `overlay.rs`, and accept `sgsr` in `Session.svelte`'s `upscale` case). macOS: the mac renderer
-  can reuse `sgsr1.glsl` as is (GLSL ES 1.00 body; needs the prelude `gl_fsr.rs` PRE provides:
+  Upstream's HLSL still has the 2023 math (std = (10.14185 / sum)², weight 0.5, no limit): on
+  desktop text it breaks glyphs into jagged dark halos (the 2026-11-13 result, reproduced).
+  **A/B 2026-11-15** (Windows, Adreno X1, headless harness: renderer in an off-screen
+  never-activated window, a still UI test picture streamed as H.264 crf 4, PrintWindow grabs;
+  1280x720 → 2560x1440, 1600x900 → 2560x1440, 1920x1200 → 2880x1800; reference = Lanczos of the
+  renderer's own 1:1 grab): the 2025 math has NO ring past the source's local 3x3 range (FSR
+  has a few), the fewest darkened background pixels next to dark-on-light text (2.3–3.0 % vs
+  FSR 5.3–7.7 %, plain 25–29 %), the best PSNR on text and lines, and photos untouched (FSR
+  over-sharpens them, edge energy ×2). Sharpness sits between plain scaling and FSR (edge
+  energy vs reference 0.79–0.89 against 0.68–0.79 plain, 0.88–0.94 FSR); diagonals step a
+  little. The 2023 math on the same input: PSNR −5…−18 dB, SSIM 0.55–0.92. Not tested: a real
+  stream (codec noise, ClearType colour fringes) and the Linux GLSL on hardware. macOS: the mac
+  renderer can reuse `sgsr1.glsl` as is (GLSL ES 1.00 body; needs the prelude `gl_fsr.rs` PRE provides:
   `uv`, `tex`, `con0`) or translate it to Metal.
 - ABR: with an upscaler on, game mode uses `min_kbps_scale = 1.25` (gives resolution up earlier).
 

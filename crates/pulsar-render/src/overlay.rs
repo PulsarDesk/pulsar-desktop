@@ -467,7 +467,7 @@ pub fn set_host_name(name: &str) {
 	*HOST_NAME.lock().unwrap_or_else(|e| e.into_inner()) = name.trim().to_string();
 }
 
-/// Picture-upscaling setting as the overlay shows it ("off"|"auto"|"fsr"|"ai"), mirrored from
+/// Picture-upscaling setting as the overlay shows it ("off"|"auto"|"fsr"|"ai"|"sgsr"), mirrored from
 /// the app's `upscale <mode>` line and the overlay's own pick.
 static UPSCALE_MODE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 /// The upscaler the presenter is running right now ("" = none: the picture isn't enlarged, or
@@ -1978,6 +1978,7 @@ fn draw_display(
 		("auto", t("upscale.auto")),
 		("fsr", "FSR"),
 		("ai", t("upscale.ai")),
+		("sgsr", "Snapdragon GSR"),
 	];
 	let up_live = upscale_mode();
 	let up_cur = staged(deferred, "upscale", &up_live);

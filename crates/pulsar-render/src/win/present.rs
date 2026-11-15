@@ -116,7 +116,7 @@ pub fn fit_rects(
 /// Picture upscaling (Settings → Görüntü → Görüntü iyileştirme), stdin `upscale <mode>`:
 /// 0 off · 1 auto (the GPU's AI upscaler if it has one, else FSR) · 2 FSR · 3 AI (NVIDIA RTX
 /// Video Super Resolution / Intel VSR; FSR where the GPU has none) · 4 Snapdragon GSR (any GPU;
-/// experimental, not offered in the settings — see `pick`).
+/// only when picked by name — see `pick`).
 static UPSCALE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 pub fn set_upscale(mode: &str) {
@@ -151,9 +151,9 @@ fn pick(mode: u8, vendor: u32) -> Upscaler {
 	let ai = vendor == VENDOR_NVIDIA || vendor == VENDOR_INTEL;
 	match mode {
 		1 | 3 if ai => Upscaler::Vendor,
-		// Not on Auto (2026-11-13 A/B on desktop text, 1920x1200 → 2880x1800 on an Adreno: SGSR
-		// came out jagged with dark halos where FSR and plain scaling were clean) — only when
-		// asked for by name, which the settings don't offer until that's fixed.
+		// Not on Auto — only when picked by name. The 2023 shader math broke desktop text into
+		// jagged dark halos (2026-11-13, Adreno); the 2025 math re-tested clean on 2026-11-15
+		// (no ring past the source range, between plain scaling and FSR in sharpness).
 		4 => Upscaler::Sgsr,
 		1..=3 => Upscaler::Fsr,
 		_ => Upscaler::None,

@@ -244,6 +244,7 @@
 		<option value="auto">{t('settings.upscaleAuto')}</option>
 		<option value="fsr">FSR</option>
 		<option value="ai">{t('settings.upscaleAi')}</option>
+		<option value="sgsr">Snapdragon GSR</option>
 	</select>
 </div>
 <div class="srow">
