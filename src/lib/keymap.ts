@@ -20,11 +20,21 @@ export const EVDEV: Record<string, number> = {
 	Numpad7: 71, Numpad8: 72, Numpad9: 73, NumpadSubtract: 74,
 	Numpad4: 75, Numpad5: 76, Numpad6: 77, NumpadAdd: 78,
 	Numpad1: 79, Numpad2: 80, Numpad3: 81, Numpad0: 82, NumpadDecimal: 83,
+	IntlBackslash: 86, // ISO <>| next to Left Shift
 	F11: 87, F12: 88,
-	NumpadEnter: 96, ControlRight: 97, NumpadDivide: 98, AltRight: 100,
+	IntlRo: 89, // JIS \_
+	Convert: 92, KanaMode: 93, NonConvert: 94,
+	NumpadEnter: 96, ControlRight: 97, NumpadDivide: 98, PrintScreen: 99, AltRight: 100,
 	Home: 102, ArrowUp: 103, PageUp: 104, ArrowLeft: 105, ArrowRight: 106,
 	End: 107, ArrowDown: 108, PageDown: 109, Insert: 110, Delete: 111,
-	MetaLeft: 125, MetaRight: 126, ContextMenu: 127
+	// The JIS and ABNT keypad commas both arrive as 'NumpadComma' (there is no separate JIS
+	// code), so KEY_KPJPCOMMA (95) is reached as KEY_KPCOMMA (121) from the webview.
+	NumpadEqual: 117, Pause: 119, NumpadComma: 121,
+	Lang1: 122, Lang2: 123, // Korean Hangul / Hanja, Japanese Kana / Eisu (macOS)
+	IntlYen: 124, // JIS ¥|
+	MetaLeft: 125, MetaRight: 126, ContextMenu: 127,
+	F13: 183, F14: 184, F15: 185, F16: 186, F17: 187, F18: 188,
+	F19: 189, F20: 190, F21: 191, F22: 192, F23: 193, F24: 194
 };
 
 /** Map a KeyboardEvent.code to an evdev keycode, or 0 if unknown. */

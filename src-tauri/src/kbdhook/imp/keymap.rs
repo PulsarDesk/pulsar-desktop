@@ -15,9 +15,28 @@ pub(super) fn scancode_to_evdev(code: u16, e0: bool) -> Option<u32> {
 		_ => {}
 	}
 	if !e0 {
-		return (1..=88).contains(&code).then_some(code as u32);
+		// The base block is identity; past it the set-1 codes no longer match evdev
+		// (Linux atkbd's translation): F13..F24 and the JIS / Korean / ABNT extras.
+		return match code {
+			1..=88 => Some(code as u32),
+			0x64..=0x6E => Some(183 + (code - 0x64) as u32), // F13..F23
+			0x76 => Some(194),                               // F24
+			0x70 => Some(93),                                // Katakana/Hiragana
+			0x73 => Some(89),                                // JIS Ro (\_)
+			0x79 => Some(92),                                // Henkan
+			0x7B => Some(94),                                // Muhenkan
+			0x7D => Some(124),                               // JIS Yen
+			0x7E => Some(121),                               // ABNT keypad comma
+			0x59 => Some(117),                               // Keypad =
+			// No Hanja / Hangul: Korean keyboards send them as make-only bytes 0xF1 / 0xF2 (or as
+			// E0 38 / E0 1D = Right Alt / Ctrl), and Interception's code has no break bit room
+			// for those (it is <= 0x7F), so they never arrive here.
+			_ => None,
+		};
 	}
 	Some(match code {
+		0x37 => 99,  // Print Screen (E0 37)
+		0x46 => 119, // Ctrl+Break (E0 46) → Pause
 		0x1C => 96,  // Numpad Enter
 		0x1D => 97,  // Right Ctrl
 		0x35 => 98,  // Numpad /
@@ -132,13 +151,125 @@ pub(super) fn vk_to_evdev(vk: u16) -> Option<u32> {
 		0x10 => 42,
 		0x11 => 29,
 		0x12 => 56,
+		// The rest of `pulsar_core::input::keytables::CLIENT_KEYS`: ISO / JIS / Korean / ABNT
+		// extras, Print Screen, Pause, F13..F24.
+		0xE2 => 86,                               // VK_OEM_102 (ISO <>|, JIS \_ on JIS layouts)
+		0xC1 => 89,                               // VK_ABNT_C1 (JIS Ro / ABNT /?)
+		0x1C => 92,                               // VK_CONVERT (Henkan)
+		0x1D => 94,                               // VK_NONCONVERT (Muhenkan)
+		0xF2 => 93,                               // VK_DBE_HIRAGANA / VK_OEM_COPY (Katakana/Hiragana)
+		0x6C => 95,                               // VK_SEPARATOR (JIS keypad comma)
+		0x2C => 99,                               // VK_SNAPSHOT (Print Screen)
+		0x92 => 117,                              // VK_OEM_NEC_EQUAL (keypad =)
+		0x13 => 119,                              // VK_PAUSE
+		0xC2 => 121,                              // VK_ABNT_C2 (keypad comma)
+		0x15 => 122,                              // VK_HANGUL / VK_KANA
+		0x19 => 123,                              // VK_HANJA
+		0x7C..=0x87 => 183 + (vk - 0x7C) as u32, // VK_F13..VK_F24
 		_ => return None,
 	})
 }
 
+/// The evdev code of a key the WH_KEYBOARD_LL hook saw: by virtual key, told apart by the
+/// scancode where one VK covers two keys, else by the scancode alone. `vk_to_evdev` maps VKs
+/// by their US meaning, so a VK without that meaning (VK_OEM_8 = TR-Q `*?\` at scan 0x0C and
+/// the UK key left of 1 at 0x29, VK_CLEAR = Numpad 5 with Num Lock off, VK_CANCEL =
+/// Ctrl+Break, the JIS Hankaku / Eisu keys, VK 0xFF) still reaches the host positionally.
+pub(super) fn ll_key_to_evdev(vk: u16, scan: u16, extended: bool) -> Option<u32> {
+	match (vk, scan, extended) {
+		(0x0D, _, true) => return Some(96),     // Numpad Enter (VK_RETURN + LLKHF_EXTENDED)
+		(0xE2, 0x73, false) => return Some(89), // VK_OEM_102 on the JIS Ro key
+		(0xDC, 0x7D, false) => return Some(124), // VK_OEM_5 on the JIS Yen key
+		_ => {}
+	}
+	if local_only_vk(vk) {
+		return None; // volume / media / browser keys stay on this machine
+	}
+	vk_to_evdev(vk).or_else(|| scancode_to_evdev(scan, extended))
+}
+
+/// Keys the LL hook passes through to THIS machine even while engaged: the volume / media /
+/// browser keys (VK_BROWSER_BACK..VK_LAUNCH_APP2), so the local speakers stay under local
+/// control. Every other key that neither its VK nor its scancode maps is swallowed while
+/// engaged — a key the remote cannot get must not act on the local desktop behind the session.
+pub(super) fn local_only_vk(vk: u16) -> bool {
+	matches!(vk, 0xA6..=0xB7)
+}
+
 #[cfg(test)]
 mod tests {
-	use super::{scancode_to_evdev, vk_to_evdev};
+	use super::{ll_key_to_evdev, local_only_vk, scancode_to_evdev, vk_to_evdev};
+	use pulsar_core::input::keytables::CLIENT_KEYS;
+
+	#[test]
+	fn vk_table_reaches_every_client_key() {
+		// Every key a host can type is reachable from the Windows hook: by VK, plus the two a VK
+		// alone cannot tell apart, which the hook tells by flag / scancode (Numpad Enter =
+		// VK_RETURN + LLKHF_EXTENDED, JIS Yen = VK_OEM_5 at scan 0x7D).
+		let mut reached: std::collections::HashSet<u32> = (0u16..=0xFF).filter_map(vk_to_evdev).collect();
+		reached.extend(ll_key_to_evdev(0x0D, 0x1C, true));
+		reached.extend(ll_key_to_evdev(0xDC, 0x7D, false));
+		for &k in CLIENT_KEYS {
+			assert!(reached.contains(&(k as u32)), "evdev {k} unreachable from the LL hook");
+		}
+	}
+
+	#[test]
+	fn ll_hook_falls_back_to_the_scancode() {
+		assert_eq!(ll_key_to_evdev(0xDF, 0x0C, false), Some(12)); // VK_OEM_8, TR-Q *?\
+		assert_eq!(ll_key_to_evdev(0xDF, 0x29, false), Some(41)); // VK_OEM_8, UK `
+		assert_eq!(ll_key_to_evdev(0x0C, 0x4C, false), Some(76)); // VK_CLEAR = Numpad 5
+		assert_eq!(ll_key_to_evdev(0x03, 0x46, true), Some(119)); // VK_CANCEL = Ctrl+Break
+		assert_eq!(ll_key_to_evdev(0xF3, 0x29, false), Some(41)); // JIS Hankaku/Zenkaku
+		assert_eq!(ll_key_to_evdev(0xF0, 0x3A, false), Some(58)); // JIS Eisu (VK_OEM_ATTN)
+		assert_eq!(ll_key_to_evdev(0x0D, 0x1C, false), Some(28)); // Enter
+		assert_eq!(ll_key_to_evdev(0x0D, 0x1C, true), Some(96)); // Numpad Enter
+		assert_eq!(ll_key_to_evdev(0xE2, 0x56, false), Some(86)); // ISO <>|
+		assert_eq!(ll_key_to_evdev(0xE2, 0x73, false), Some(89)); // JIS Ro
+		assert_eq!(ll_key_to_evdev(0xDC, 0x2B, false), Some(43)); // backslash
+		assert_eq!(ll_key_to_evdev(0xDC, 0x7D, false), Some(124)); // JIS Yen
+		assert_eq!(ll_key_to_evdev(0x41, 0x1E, false), Some(30)); // A: the VK wins
+		assert_eq!(ll_key_to_evdev(0xAF, 0x30, true), None); // volume up stays local
+		assert_eq!(ll_key_to_evdev(0xFF, 0x00, false), None); // nothing maps: swallowed
+	}
+
+	#[test]
+	fn interception_reaches_every_client_key() {
+		let mut reached = std::collections::HashSet::new();
+		for code in 0u16..=0xFF {
+			for e0 in [false, true] {
+				if let Some(k) = scancode_to_evdev(code, e0) {
+					reached.insert(k);
+				}
+			}
+		}
+		// Pause arrives as an E1 sequence, handled before this table (imp.rs). The JIS keypad
+		// comma's scancode 0x5C is read as Right Win (kept E0-less on purpose: some paths drop
+		// the flag, and a lost Win key opens the local Start menu). Hangul / Hanja (122 / 123)
+		// are make-only bytes 0xF2 / 0xF1 with no room in Interception's 7-bit code.
+		for &k in CLIENT_KEYS {
+			if matches!(k, 119 | 95 | 122 | 123) {
+				continue;
+			}
+			assert!(reached.contains(&(k as u32)), "evdev {k} unreachable from a scancode");
+		}
+	}
+
+	#[test]
+	fn extras_map_to_their_evdev_codes() {
+		assert_eq!(vk_to_evdev(0xE2), Some(86)); // ISO <>|
+		assert_eq!(vk_to_evdev(0x2C), Some(99)); // Print Screen
+		assert_eq!(vk_to_evdev(0x13), Some(119)); // Pause
+		assert_eq!(vk_to_evdev(0x7C), Some(183)); // F13
+		assert_eq!(vk_to_evdev(0x87), Some(194)); // F24
+		assert_eq!(scancode_to_evdev(0x56, false), Some(86));
+		assert_eq!(scancode_to_evdev(0x64, false), Some(183)); // F13
+		assert_eq!(scancode_to_evdev(0x76, false), Some(194)); // F24
+		assert_eq!(scancode_to_evdev(0x37, true), Some(99)); // Print Screen
+		assert_eq!(scancode_to_evdev(0x7D, false), Some(124)); // Yen
+		assert!(local_only_vk(0xAF)); // volume up stays local
+		assert!(!local_only_vk(0x41));
+	}
 	#[test]
 	fn win_keys_map_to_meta() {
 		assert_eq!(vk_to_evdev(0x5B), Some(125)); // LWin → MetaLeft
