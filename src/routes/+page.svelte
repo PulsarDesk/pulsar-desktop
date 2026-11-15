@@ -767,6 +767,7 @@
 		api.setTray(ui.tray).catch(() => {});
 		api.setPadWake(ui.padWake).catch(() => {});
 		api.setPadBackground(ui.padBackground).catch(() => {});
+		api.setClientAwake(ui.clientAwake).catch(() => {});
 		api.setDs5Settings($state.snapshot(ui.ds5)).catch(() => {});
 		api.setClipboardSync(ui.clipboardSync).catch(() => {});
 		await goOnline();

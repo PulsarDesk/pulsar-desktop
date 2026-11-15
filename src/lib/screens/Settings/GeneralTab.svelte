@@ -1,7 +1,7 @@
 <script lang="ts">
 	import Icon from '#lib/Icon.svelte';
 	import type { Config } from '#lib/types.js';
-	import { ui, saveUi } from '#lib/settings.svelte.js';
+	import { ui, saveUi, CLIENT_AWAKE_MODES, type ClientAwake } from '#lib/settings.svelte.js';
 	import { t, i18n, setLang, LANGS } from '#lib/i18n.svelte.js';
 	import { theme, setDark } from '#lib/theme.svelte.js';
 	import { api, isTauri } from '#lib/api.js';
@@ -249,6 +249,22 @@
 	</div>
 	<button class="toggle" aria-label={t('settings.duplicateSessions')} class:on={ui.duplicateSessions} aria-pressed={ui.duplicateSessions} onclick={() => { ui.duplicateSessions = !ui.duplicateSessions; saveUi(); }}><span class="knob"></span></button>
 </div>
+<div class="srow">
+	<div class="st">
+		<b>{t('settings.clientAwake')}</b>
+		<span>{t('settings.clientAwakeDesc')}</span>
+	</div>
+	<select
+		class="select"
+		aria-label={t('settings.clientAwake')}
+		value={ui.clientAwake}
+		onchange={(e) => { ui.clientAwake = e.currentTarget.value as ClientAwake; saveUi(); api.setClientAwake(ui.clientAwake).catch(() => {}); }}
+	>
+		{#each CLIENT_AWAKE_MODES as m (m)}
+			<option value={m}>{t('settings.clientAwake.' + m)}</option>
+		{/each}
+	</select>
+</div>
 <div class="subgroup">{t('settings.subPad')}</div>
 <div class="subdesc">{t('settings.subPadDesc')}</div>
 <div class="srow">
@@ -282,6 +298,26 @@
 </div>
 
 <style>
+	/* Same as DisplayTab's selects. */
+	.select {
+		font-family: var(--font-sans);
+		font-size: 13px;
+		color: var(--text);
+		background: var(--surface);
+		border: 1px solid var(--border-strong);
+		border-radius: var(--r-sm);
+		padding: 8px 11px;
+		cursor: pointer;
+		min-width: 180px;
+	}
+	.select:focus-visible {
+		outline: 2px solid var(--accent);
+		outline-offset: 2px;
+	}
+	.select option {
+		background: var(--surface);
+		color: var(--text);
+	}
 	.avprev {
 		flex: none;
 		width: 40px;

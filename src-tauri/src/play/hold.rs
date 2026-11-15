@@ -675,6 +675,11 @@ pub(super) async fn hold_session(
 	}
 	let mut pen_tick = tokio::time::interval(std::time::Duration::from_millis(50));
 	pen_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+	// The client display stays awake while this session is in use: from now until
+	// `keep_awake::client_hold` after the last real input (pads included). Every input the
+	// session forwards passes the `input_rx` arm below; focus / lock / expiry are checked on
+	// the 2 s `keep` tick (see keep_awake.rs).
+	let mut awake = crate::keep_awake::ClientAwake::start(std::time::Instant::now());
 	// ---- Media-over-session demux state (single-socket transport) ----
 	// Media frames arrive INSIDE this session ([tag][rtp…]); forward each datagram to
 	// the local consumer: the renderer's RTP port (video) / the viewer's audio port.
@@ -970,6 +975,7 @@ pub(super) async fn hold_session(
 				Some(ev) => {
 					let mut dead = false;
 					let now = std::time::Instant::now();
+					awake.on_input(&ev, now);
 					let evs = if host_pen { tablet_aug.on_event(now, ev, tablet::latest()) } else { vec![ev] };
 					'send: for ev in evs {
 						for ev in pen_touch.on_event(now, ev) {
@@ -1964,6 +1970,7 @@ pub(super) async fn hold_session(
 				}
 			},
 			_ = keep.tick() => {
+				awake.tick(std::time::Instant::now());
 				// Host silent too long (a kick / drop without a clean UDP close) → end the
 				// session so the client tears down instead of freezing with input grabbed.
 				// Media counts as liveness (a lossy link drops Pongs long before it drops the

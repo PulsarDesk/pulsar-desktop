@@ -814,6 +814,14 @@ pub(crate) fn set_pad_background(enabled: bool) {
 	crate::focus_gate::set_background_input(enabled);
 }
 
+/// Sync the "keep the screen awake" preference (Settings → General): how long a viewed
+/// session holds this machine's display awake after the last input — "30", "120" (minutes),
+/// "always" or "off". See `keep_awake::ClientAwake`.
+#[tauri::command]
+pub(crate) fn set_client_awake(mode: String) {
+	crate::keep_awake::set_client_awake(&mode);
+}
+
 /// Enable/disable this device's HOST role from the UI. `serving = false` (set when the
 /// app enters gaming mode — a pure-client personality) makes the host serve loop reject
 /// every inbound connection at auth time, before any Allow/Deny popup, so nobody can

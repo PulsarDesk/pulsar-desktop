@@ -82,6 +82,8 @@ mod play_notice;
 mod power_watch;
 mod wlan_lowlat;
 mod timer_res;
+// Display / system kept awake while a session streams (host) or is in use (client).
+mod keep_awake;
 mod process;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod render;
@@ -125,7 +127,7 @@ use commands::{
 	list_audio_sources, list_remote_games, list_remote_sources, coop_status, open_coop_dir, local_ip, log_dir_path, new_password, node_port,
 	open_log_dir, publish_games, run_command, scan_folder, self_update_possible, session_password,
 	set_config, set_controller_emulation, set_controller_order, set_controller_rumble, set_ds5_headset_volume, set_ds5_settings,
-	set_disabled_controllers, set_host_serving, set_language, set_pad_background, set_pad_wake, set_stream_settings, set_tray,
+	set_disabled_controllers, set_host_serving, set_language, set_pad_background, set_client_awake, set_pad_wake, set_stream_settings, set_tray,
 	steam_path, test_controller_rumble, webview_sw_painted,
 };
 use connections::{list_connections, set_view_only, show_connections, take_pending_chat};
@@ -848,6 +850,7 @@ pub fn run() {
 			set_tray,
 			set_pad_wake,
 			set_pad_background,
+			set_client_awake,
 			set_host_serving,
 			gamepad_nav_start,
 			gamepad_nav_stop,
