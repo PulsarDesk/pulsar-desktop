@@ -802,6 +802,21 @@
 			End: 'end'
 		};
 		const onKey = (e: KeyboardEvent) => {
+			// One typed character (an emoji is 2 UTF-16 units, so count code points). AltGr is
+			// reported as Ctrl+Alt on Windows: AltGr+Q = '@' on a Turkish keyboard (also # $ { [ ] }
+			// \ | ~ €) is text, not a shortcut — it used to be dropped as a Ctrl/Alt chord.
+			const typed = [...e.key].length === 1;
+			// (A chord like Ctrl+Alt+Z reports the plain letter, so a plain letter/digit with
+			// Alt is a shortcut; on macOS Option+key yields the special character itself.)
+			const altGr =
+				e.getModifierState?.('AltGraph') ||
+				(e.altKey && !e.metaKey && !/^[a-z0-9]$/i.test(e.key));
+			if (typed && altGr) {
+				api.renderKin(playId, 't', e.key).catch(() => {});
+				e.preventDefault();
+				e.stopPropagation();
+				return;
+			}
 			const mods = (e.ctrlKey ? 'ctrl+' : '') + (e.altKey ? 'alt+' : '') + (e.metaKey ? 'meta+' : '');
 			const edit =
 				editKeys[e.key] ?? ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a' ? 'a' : undefined);
@@ -824,7 +839,7 @@
 				// chat composer (chat view) — each view consumes only its own channel.
 				api.renderNav(playId, 'go').catch(() => {});
 				api.renderKin(playId, 'k', 'enter').catch(() => {});
-			} else if (e.key.length === 1) {
+			} else if (typed) {
 				api.renderKin(playId, 't', e.key).catch(() => {});
 			} else if (e.key === 'Backspace') {
 				api.renderKin(playId, 'k', 'backspace').catch(() => {});

@@ -395,6 +395,14 @@ fn stdin_control() {
 	let stdin = std::io::stdin();
 	for line in stdin.lock().lines() {
 		let Ok(l) = line else { break };
+		// Composer text is taken verbatim, BEFORE the trim below: a typed space arrives as
+		// `kin t ` and trimming it away made the space key do nothing (2026-11-15).
+		if let Some(text) = l.strip_prefix("kin t ") {
+			if !text.is_empty() {
+				EGUI_EVENTS.lock().unwrap().push(egui::Event::Text(text.to_string()));
+			}
+			continue;
+		}
 		let l = l.trim();
 		if l == "open" {
 			OPEN.store(true, Ordering::SeqCst);
