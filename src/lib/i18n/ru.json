@@ -218,6 +218,8 @@
 	"devices.lanTitle": "В вашей сети",
 	"devices.lanScanning": "Сканирование… Устройства Pulsar в этой сети появятся здесь.",
 	"devices.lanSave": "Сохранить",
+	"devices.lanUnnamed": "Устройство Pulsar",
+	"devices.lanUnnamedOn": "Устройство Pulsar ({platform})",
 	"devices.savedBadge": "Сохранено",
 	"devices.editTitle": "Изменить устройство",
 	"devices.edit": "Изменить",

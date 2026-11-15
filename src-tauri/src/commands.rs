@@ -44,6 +44,9 @@ pub(crate) async fn set_config(
 ) -> Result<(), String> {
 	crate::i18n::set_lang(&config.language);
 	*state.config.lock().unwrap() = config.clone();
+	// The LAN beacon follows the device name and the unattended switch at once (an unattended
+	// host does not announce itself, see `host::beacon_silent`).
+	crate::host::refresh_beacon(&app).await;
 	config.save(config_path(&app)).map_err(|e| e.to_string())
 }
 
@@ -829,14 +832,15 @@ pub(crate) fn set_client_awake(mode: String) {
 /// connects still work. Default (never called) = serving, matching `hosting_disabled`'s
 /// `false` zero-value.
 #[tauri::command]
-pub(crate) fn set_host_serving(state: State<'_, AppState>, serving: bool) {
+pub(crate) fn set_host_serving(app: AppHandle, state: State<'_, AppState>, serving: bool) {
 	state
 		.hosting_disabled
 		.store(!serving, std::sync::atomic::Ordering::Relaxed);
 	// A pure client (gaming mode) must not advertise itself on the LAN — pause/resume the
-	// discovery beacon's announcing alongside the serve gate.
+	// discovery beacon's announcing alongside the serve gate (an unattended host stays
+	// silent either way, see `host::beacon_silent`).
 	if let Some(d) = state.discovery.lock().unwrap().clone() {
-		d.set_paused(!serving);
+		d.set_paused(crate::host::beacon_silent(&app));
 	}
 }
 

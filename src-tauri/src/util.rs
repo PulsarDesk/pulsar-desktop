@@ -912,6 +912,39 @@ pub(crate) fn announce_name(device_name: &str) -> String {
 	}
 }
 
+/// The name this device puts in its LAN discovery beacon, which is broadcast every 2 s to
+/// everyone on the network (a café, a hotel): a name the user CHOSE (Settings device name, a
+/// seat's display name), else the machine's hostname (already public on the LAN through DHCP,
+/// mDNS and NetBIOS) — never the OS user's real name, which [`announce_name`] falls back to
+/// for authenticated peers. A saved name equal to that real name counts as not chosen, as in
+/// Settings. Empty only when the machine has no hostname (receivers show a generic label).
+/// Capped at the receivers' 64-byte limit.
+pub(crate) fn beacon_name(device_name: &str) -> String {
+	if let Some(n) = crate::seat::announce_name() {
+		return cap_utf8(n.trim(), 64);
+	}
+	beacon_name_from(
+		device_name,
+		machine_hostname().as_deref(),
+		&pulsar_core::discovery::os_display_name(),
+	)
+}
+
+fn beacon_name_from(device_name: &str, host: Option<&str>, real_name: &str) -> String {
+	let n = device_name.trim();
+	let real = real_name.trim();
+	let chosen = !n.is_empty() && n != "Pulsar Cihazı" && !(!real.is_empty() && n == real);
+	cap_utf8(if chosen { n } else { host.unwrap_or("").trim() }, 64)
+}
+
+fn cap_utf8(s: &str, max: usize) -> String {
+	let mut end = s.len().min(max);
+	while !s.is_char_boundary(end) {
+		end -= 1;
+	}
+	s[..end].to_string()
+}
+
 pub(crate) fn machine_hostname() -> Option<String> {
 	#[cfg(windows)]
 	let h = std::env::var("COMPUTERNAME").ok();
@@ -926,4 +959,39 @@ pub(crate) fn machine_hostname() -> Option<String> {
 				.and_then(|o| String::from_utf8(o.stdout).ok())
 		});
 	h.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+#[cfg(test)]
+mod net_tests {
+	/// Every host packetizer caps its RTP packets at the same size: the native one
+	/// (pulsar-capture, which cannot see pulsar-core on every OS), and the core's (gst, the
+	/// ffmpeg CLI URL, libav here) — sized for a 1280-byte overlay / relay MTU.
+	#[test]
+	fn rtp_sizes_agree() {
+		assert_eq!(pulsar_capture::rtp::MTU, pulsar_core::service::media::RTP_MAX_PACKET);
+	}
+
+	/// The LAN beacon carries a chosen name, else the hostname — never the OS user's real
+	/// name, even when a config saved it as the device name; capped at the receivers' 64
+	/// bytes on a char boundary.
+	#[test]
+	fn beacon_name_is_a_chosen_name_or_the_hostname() {
+		let f = super::beacon_name_from;
+		assert_eq!(f("", Some("DESKTOP-1"), "Ada Lovelace"), "DESKTOP-1");
+		assert_eq!(f("  ", Some("DESKTOP-1"), "Ada Lovelace"), "DESKTOP-1");
+		assert_eq!(f("Pulsar Cihazı", Some("DESKTOP-1"), "Ada Lovelace"), "DESKTOP-1");
+		assert_eq!(f("Ada Lovelace", Some("DESKTOP-1"), "Ada Lovelace"), "DESKTOP-1");
+		assert_eq!(f("Ada Lovelace", None, "Ada Lovelace"), "");
+		assert_eq!(f("", None, "Ada Lovelace"), "");
+		assert_eq!(f("Salon PC", Some("DESKTOP-1"), "Ada Lovelace"), "Salon PC");
+		assert_eq!(f("Salon PC", Some("DESKTOP-1"), ""), "Salon PC");
+		let long = "ş".repeat(40); // 80 bytes
+		let capped = f(&long, None, "");
+		assert!(capped.len() <= 64 && capped.chars().all(|c| c == 'ş'), "{capped}");
+		// The live one never yields the OS user's real name for a default config.
+		let real = pulsar_core::discovery::os_display_name();
+		if super::machine_hostname().is_some_and(|h| h != real) {
+			assert_ne!(super::beacon_name(""), real);
+		}
+	}
 }

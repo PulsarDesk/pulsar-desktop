@@ -761,15 +761,16 @@ pub(crate) async fn bring_online(
 	let discovery = if !crate::seat::lan_discovery() {
 		None
 	} else {
-		match Discovery::start(announce_name.clone(), node_port, node.public_key(), None).await {
+		// The beacon carries only a name the user chose (never the OS user's real name: it
+		// is broadcast to the whole network) — see `util::beacon_name`.
+		let beacon = crate::util::beacon_name(&cfg.device_name);
+		match Discovery::start(beacon.clone(), node_port, node.public_key(), None).await {
 			Ok(d) => {
-				tracing::info!(port = node_port, name = %announce_name, "LAN discovery beacon started");
+				tracing::info!(port = node_port, name = %beacon, "LAN discovery beacon started");
 				// Honor the current serve gate: a beacon (re)started while in gaming mode must
-				// stay silent (don't advertise a pure client on the LAN).
-				if state
-					.hosting_disabled
-					.load(std::sync::atomic::Ordering::Relaxed)
-				{
+				// stay silent (don't advertise a pure client on the LAN), and so must an
+				// unattended host (see `beacon_silent`).
+				if beacon_silent(&app) {
 					d.set_paused(true);
 				}
 				*state.discovery.lock().unwrap() = Some(d.clone());
@@ -3150,6 +3151,31 @@ async fn teardown_node(state: &AppState) {
 		let _ = h.await;
 	}
 	let _ = state.node.lock().unwrap().take();
+}
+
+/// Whether the LAN beacon must stay silent: in gaming mode (a pure client, not connectable) and
+/// while unattended access is on. An unattended host needs no password and no approval, and the
+/// beacon carries the node's address + port, which is all a typed direct connect needs — so on a
+/// shared network (café, hotel, office) announcing it would hand control to anyone there. Clients
+/// that know its id still reach it over the LAN: the relay rendezvous carries both sides' LAN
+/// candidates, so the punch picks the direct LAN path. It only leaves the LAN lists.
+pub(crate) fn beacon_silent(app: &AppHandle) -> bool {
+	let state = app.state::<AppState>();
+	state
+		.hosting_disabled
+		.load(std::sync::atomic::Ordering::Relaxed)
+		|| state.config.lock().unwrap().unattended_access
+}
+
+/// Re-apply the beacon's name and silence after a settings change (device name, unattended
+/// access) or a serve-gate change.
+pub(crate) async fn refresh_beacon(app: &AppHandle) {
+	let state = app.state::<AppState>();
+	let disc = state.discovery.lock().unwrap().clone();
+	let Some(d) = disc else { return };
+	let name = crate::util::beacon_name(&state.config.lock().unwrap().device_name);
+	d.set_paused(beacon_silent(app));
+	d.set_name(name).await;
 }
 
 /// Take this host fully offline (shared mode: the session lost the machine-wide host lease,

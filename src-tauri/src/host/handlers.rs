@@ -2125,6 +2125,16 @@ pub(super) fn make_on_stream(
 	// is applied live (the forwarders keep running), so they'd otherwise pace a stale rate.
 	let pace_target_kbps = Arc::new(std::sync::atomic::AtomicU32::new(0));
 	move |req: StreamReq, addr: SocketAddr| {
+		// SECURITY: media goes only through the encrypted session (media-over-session, see the
+		// media destinations below). A request without it (a pre-mos client) gets NO stream and
+		// a stream-error line on the client, never plaintext RTP — refused before any fast path
+		// or baseline bookkeeping, so it leaves the running stream's state untouched.
+		if !req.media_over_session {
+			tracing::warn!(%addr, "stream request without media-over-session — refusing a plaintext stream");
+			let msg = crate::i18n::t("host.plaintextRefused").to_string();
+			let _ = stats_out.try_send(DataMsg::Stats(format!("!{msg}")));
+			return;
+		}
 		// Client-requested bitrate wins; 0 falls back to the host config (as the encoders do).
 		let eff_target = if req.bitrate_kbps > 0 {
 			req.bitrate_kbps
@@ -2393,40 +2403,54 @@ pub(super) fn make_on_stream(
 			flag.store(false, std::sync::atomic::Ordering::SeqCst);
 		}
 
-		// Media destinations. Legacy: plain UDP straight to the client's ports.
-		// Media-over-session (client opted in + this host advertised `mos`): the
-		// encoders target LOCAL loopback intakes whose forwarders ship each datagram
-		// through the encrypted session — ONE external socket total. A re-stream
+		// Media destinations. Media-over-session (client opted in + this host advertised
+		// `mos`): the encoders target LOCAL loopback intakes whose forwarders ship each
+		// datagram through the encrypted session — ONE external socket total. A re-stream
 		// replaces the forwarders (fresh retransmit ring / NACK channel).
+		// SECURITY: it is the only encrypted media path. The legacy flow (plain UDP RTP
+		// straight to the client's ports) is never used any more: a request without
+		// `media_over_session` (a pre-mos client) or a forwarder that could not start gets
+		// NO stream and a stream-error line on the client, never plaintext media.
 		for h in fwd_slot.lock().unwrap().drain(..) {
 			h.abort();
 		}
 		*nack_slot.lock().unwrap() = None;
 		let lo = std::net::IpAddr::from([127, 0, 0, 1]);
-		let (vdest, adest) = if req.media_over_session {
-			match spawn_media_forwarders(
-				&media_tx,
-				&nack_slot,
-				&fwd_slot,
-				(req.fec || req.fec_rs).then(|| (req.fec_rs, fec_n.clone())),
-				pace_target_kbps.clone(),
-				pace_loss.clone(),
-				media_sent.clone(),
-			) {
-				Some((vp, ap)) => (
-					SocketAddr::new(lo, vp),
-					SocketAddr::new(lo, if req.audio_port > 0 { ap } else { 0 }),
-				),
-				None => (
-					SocketAddr::new(addr.ip(), req.port),
-					SocketAddr::new(addr.ip(), req.audio_port),
-				),
+		let (vdest, adest) = match spawn_media_forwarders(
+			&media_tx,
+			&nack_slot,
+			&fwd_slot,
+			(req.fec || req.fec_rs).then(|| (req.fec_rs, fec_n.clone())),
+			pace_target_kbps.clone(),
+			pace_loss.clone(),
+			media_sent.clone(),
+		) {
+			Some((vp, ap)) => (
+				SocketAddr::new(lo, vp),
+				SocketAddr::new(lo, if req.audio_port > 0 { ap } else { 0 }),
+			),
+			None => {
+				tracing::error!("media forwarders failed to start — no stream (never plaintext)");
+				let msg = crate::i18n::t("host.mediaForwarderFailed").to_string();
+				let _ = stats_out.try_send(DataMsg::Stats(format!("!{msg}")));
+				// The running encode (if any) now feeds dead loopback intakes: forget every
+				// live-restream baseline so the client's next request takes the full restart
+				// (which replaces that encode) instead of being absorbed as a bitrate step.
+				#[cfg(not(target_os = "linux"))]
+				{
+					last_ff_req = None;
+				}
+				#[cfg(any(windows, target_os = "macos"))]
+				{
+					last_native_req = None;
+				}
+				#[cfg(target_os = "linux")]
+				{
+					last_wl_req = None;
+					last_libav_req = None;
+				}
+				return;
 			}
-		} else {
-			(
-				SocketAddr::new(addr.ip(), req.port),
-				SocketAddr::new(addr.ip(), req.audio_port),
-			)
 		};
 
 		// First stream request reveals this connection's mode: upgrade the connections

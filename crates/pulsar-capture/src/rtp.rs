@@ -86,11 +86,13 @@ const NAL_FU_A: u8 = 28;
 /// header's `nal_unit_type` field (bits 1..=6 of byte 0), NOT the low 5 bits like H.264.
 const HEVC_NAL_FU: u8 = 49;
 
-/// Per-packet UDP payload budget. 1200 keeps a whole RTP packet inside a typical
-/// 1500-byte Ethernet MTU with comfortable room for IPv4/IPv6 + UDP headers (the
-/// usual streaming default, same ballpark ffmpeg uses). A NAL whose RTP packet
-/// would exceed this is FU-A fragmented.
-const MTU: usize = 1200;
+/// Per-packet UDP payload budget (whole RTP packet). Shared with every other host
+/// packetizer (pulsar-core `service::media::RTP_MAX_PACKET`; pulsar-core is not a dependency
+/// of this crate on Windows/Linux, so the app's `rtp_sizes_agree` test pins the two): sized so the packet, once framed by
+/// the encrypted session — and by the relay, and as FEC parity — still fits a 1280-byte
+/// overlay VPN / IPv6 MTU without IP fragmentation. A NAL whose RTP packet would exceed
+/// this is FU-A fragmented.
+pub const MTU: usize = 1136;
 
 /// Largest single-NAL payload that still fits the MTU once the RTP header is added.
 const MAX_SINGLE_NAL: usize = MTU - RTP_HEADER_LEN;

@@ -218,6 +218,8 @@
 	"devices.lanTitle": "Желіңізде",
 	"devices.lanScanning": "Сканерленуде… Осы желідегі Pulsar құрылғылары осында көрінеді.",
 	"devices.lanSave": "Сақтау",
+	"devices.lanUnnamed": "Pulsar құрылғысы",
+	"devices.lanUnnamedOn": "Pulsar құрылғысы ({platform})",
 	"devices.savedBadge": "Сақталды",
 	"devices.editTitle": "Құрылғыны өңдеу",
 	"devices.edit": "Өңдеу",

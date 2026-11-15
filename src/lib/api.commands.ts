@@ -5,6 +5,7 @@ import type { AutoConnectTarget, Config, ConnInfo, ControllerInfo, PulsarToast }
 import type { FsEntry, LocalCaps } from './api.types';
 import type { GameInfo, LanDevice, PenSample, PlayInfo, RemoteSources, ScannedApp, TouchSample, WindowInfo } from './api.types';
 import { invoke } from './api.invoke';
+import { withLanNames } from './lanName';
 import type { ClientAwake, Ds5Settings } from './settings.svelte';
 
 // The keyboard/mouse capture commands must land on the Rust side IN ISSUE ORDER. A tab
@@ -39,8 +40,9 @@ export const api = {
 	/** Whether the in-app relay is currently running, and on what address. */
 	localRelayStatus: () =>
 		invoke<{ running: boolean; port: number; lanAddr: string }>('local_relay_status'),
-	/** Pulsar devices auto-discovered on the local network (multicast beacon). */
-	lanDevices: () => invoke<LanDevice[]>('lan_devices'),
+	/** Pulsar devices auto-discovered on the local network (multicast beacon). A beacon
+	 * without a name gets a localized generic label (never a blank row or saved name). */
+	lanDevices: () => invoke<LanDevice[]>('lan_devices').then(withLanNames),
 	controllers: () => invoke<ControllerInfo[]>('controllers'),
 	/** Persist the controller slot permutation. order[n] = gilrs uuid hex of the pad
 	 * assigned to player-slot n. Written by the controller reorder UI; the play reader
