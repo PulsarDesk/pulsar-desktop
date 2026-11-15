@@ -10,21 +10,30 @@
 //! that waits for it would be the same bug again. The UI is told first (`system-sleep`): it
 //! notes which sessions were open and connects them again on `system-wake`.
 //!
-//! "Sleep-like" = the system suspends, or its display turns off. On a Modern Standby machine
-//! the display turning off IS the sleep (there is no suspend event while audio plays); on any
-//! machine nobody is looking at a stream on a dark screen.
+//! "Sleep-like" = the system suspends, its display turns off, or the session is locked (the
+//! lock screen / screen saver is up). On a Modern Standby machine the display turning off IS
+//! the sleep (there is no suspend event while audio plays); on any machine nobody is looking
+//! at a stream on a dark screen or behind a lock screen. Unlocking is a wake.
+//!
+//! The lock is its own input because the client keep-awake (`keep_awake.rs`) holds the display
+//! on: Windows and macOS honour a display request on the lock screen too, so a locked client
+//! would otherwise never see a display-off edge and keep streaming. (Before keep-awake, Win+L
+//! turned the display off after the 60 s console-lock timeout, which ended the sessions.)
 //!
 //! An IDLE display-off is held back while the session is in use (`keep_awake.rs`: the client
-//! holds the display awake until 30 min after the last input, gamepad included), so this only
-//! fires for a sleep the user asks for (lid, power button, lock) or a session left alone.
+//! holds the display awake while Pulsar is focused, the session is unlocked and someone used
+//! it recently, gamepad included), so this only fires for a sleep the user asks for (lid,
+//! power button, lock) or a session left alone.
 //!
 //! Per platform (all untested on real hardware except Windows):
-//! - Windows: `PowerRegisterSuspendResumeNotification` + `GUID_CONSOLE_DISPLAY_STATE` (below).
+//! - Windows: `PowerRegisterSuspendResumeNotification` + `GUID_CONSOLE_DISPLAY_STATE` (below),
+//!   and the session's WTS lock state polled every 2 s (`ui_start::session_locked`).
 //! - Linux (`power_watch/linux.rs`): logind `PrepareForSleep` with a delay inhibitor (the
 //!   sessions end BEFORE the suspend), the desktop's screen saver `ActiveChanged`
 //!   (org.freedesktop / org.gnome), and the X server's DPMS state on X11.
 //! - macOS (`power_watch/macos.rs`): NSWorkspace will-sleep / did-wake and
-//!   screens-did-sleep / screens-did-wake, delivered on the main thread's run loop.
+//!   screens-did-sleep / screens-did-wake, delivered on the main thread's run loop, and the
+//!   `com.apple.screenIsLocked` / `screenIsUnlocked` distributed notifications.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -38,27 +47,33 @@ mod linux;
 mod macos;
 
 /// The display is off / the system is suspended / the desktop's screen saver (blank or lock
-/// screen) is up. Asleep = any of them. `SCREEN_SAVER` is only ever set on Linux.
+/// screen) is up / the session is locked. Asleep = any of them. `SCREEN_SAVER` is only ever
+/// set on Linux (its screen saver includes the lock screen), `LOCKED` on Windows and macOS.
 static DISPLAY_OFF: AtomicBool = AtomicBool::new(false);
 static SUSPENDED: AtomicBool = AtomicBool::new(false);
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 static SCREEN_SAVER: AtomicBool = AtomicBool::new(false);
+static LOCKED: AtomicBool = AtomicBool::new(false);
 /// What the UI was last told.
 static ASLEEP: AtomicBool = AtomicBool::new(false);
 
 /// The sessions sleep is ending (awaitable: Linux holds the suspend until they are done).
 type Stops = Vec<tauri::async_runtime::JoinHandle<()>>;
 
+/// The session is locked (or, on Linux, its screen saver / lock screen is up): nobody is
+/// looking. The client keep-awake drops its hold while this is set (`keep_awake.rs`).
+pub(crate) fn locked() -> bool {
+	LOCKED.load(Ordering::SeqCst) || SCREEN_SAVER.load(Ordering::SeqCst)
+}
+
 /// Set one of the inputs and act on the resulting edge (if any).
-#[cfg_attr(windows, allow(dead_code))]
 fn set(app: &AppHandle, flag: &AtomicBool, value: bool, why: &'static str) -> Stops {
 	flag.store(value, Ordering::SeqCst);
 	update(app, why)
 }
 
 /// "Asleep" from the inputs: any one of them.
-fn asleep_from(display_off: bool, suspended: bool, screen_saver: bool) -> bool {
-	display_off || suspended || screen_saver
+fn asleep_from(display_off: bool, suspended: bool, screen_saver: bool, locked: bool) -> bool {
+	display_off || suspended || screen_saver || locked
 }
 
 /// One of the inputs changed: tell the UI (and end the sessions) on an edge of "asleep".
@@ -67,6 +82,7 @@ fn update(app: &AppHandle, why: &'static str) -> Stops {
 		DISPLAY_OFF.load(Ordering::SeqCst),
 		SUSPENDED.load(Ordering::SeqCst),
 		SCREEN_SAVER.load(Ordering::SeqCst),
+		LOCKED.load(Ordering::SeqCst),
 	);
 	if ASLEEP.swap(asleep, Ordering::SeqCst) == asleep {
 		return Vec::new();
@@ -122,6 +138,8 @@ pub(crate) fn spawn(app: AppHandle) {
 			DidWake => set(&app, &SUSPENDED, false, "resume"),
 			ScreensDidSleep => set(&app, &DISPLAY_OFF, true, "display off"),
 			ScreensDidWake => set(&app, &DISPLAY_OFF, false, "display on"),
+			ScreenLocked => set(&app, &LOCKED, true, "lock"),
+			ScreenUnlocked => set(&app, &LOCKED, false, "unlock"),
 		};
 	});
 }
@@ -216,6 +234,7 @@ pub(crate) fn spawn(app: AppHandle) {
 		0
 	}
 
+	let app_for_lock = app.clone();
 	// Both registrations live as long as the process: the handle and the parameters leak.
 	let context = Box::into_raw(Box::new(app)) as *mut c_void;
 	let params = Box::into_raw(Box::new(Subscribe { callback: on_power, context })) as *mut c_void;
@@ -232,6 +251,30 @@ pub(crate) fn spawn(app: AppHandle) {
 	if a != 0 || b != 0 {
 		tracing::warn!(suspend = a, display = b, "power: sleep notifications not registered");
 	}
+	watch_lock_windows(app_for_lock);
+}
+
+/// Windows: poll the session's lock state (WTS, a few cheap calls every 2 s on a plain
+/// thread — no window of ours, which `WTSRegisterSessionNotification` would need). Locking
+/// this machine (Win+L, a screen-saver lock, switching user) ends the viewed sessions;
+/// unlocking brings them back like a wake.
+#[cfg(windows)]
+fn watch_lock_windows(app: AppHandle) {
+	const POLL: std::time::Duration = std::time::Duration::from_secs(2);
+	let spawned = std::thread::Builder::new().name("pulsar-lock-watch".into()).spawn(move || {
+		let mut was = false;
+		loop {
+			let now = crate::ui_start::session_locked();
+			if now != was {
+				was = now;
+				let _ = set(&app, &LOCKED, now, if now { "lock" } else { "unlock" });
+			}
+			std::thread::sleep(POLL);
+		}
+	});
+	if let Err(e) = spawned {
+		tracing::warn!("power: lock watch not started: {e}");
+	}
 }
 
 #[cfg(test)]
@@ -240,9 +283,10 @@ mod tests {
 
 	#[test]
 	fn any_input_means_asleep() {
-		assert!(!asleep_from(false, false, false));
-		assert!(asleep_from(true, false, false));
-		assert!(asleep_from(false, true, false));
-		assert!(asleep_from(false, false, true));
+		assert!(!asleep_from(false, false, false, false));
+		assert!(asleep_from(true, false, false, false));
+		assert!(asleep_from(false, true, false, false));
+		assert!(asleep_from(false, false, true, false));
+		assert!(asleep_from(false, false, false, true), "a locked session is asleep");
 	}
 }

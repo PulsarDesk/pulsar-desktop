@@ -91,17 +91,23 @@ fn test_fail() -> bool {
 	std::env::var_os("PULSAR_TEST_WEBVIEW_FAIL").is_some_and(|v| v == "1")
 }
 
+/// This process's session is locked, as WTS reports it (`WTS_SESSIONSTATE_LOCK`; Windows 7's
+/// inverted flags do not matter on the Windows 10+ Pulsar supports). Unknown = not locked.
+/// A UAC prompt on the secure desktop is NOT a lock here (unlike the input-desktop check).
+/// `power_watch` polls it: locking this machine ends the sessions it views.
 #[cfg(windows)]
-fn query() -> (Lock, Desk) {
+pub(crate) fn session_locked() -> bool {
+	wts_lock() == Lock::Locked
+}
+
+#[cfg(windows)]
+fn wts_lock() -> Lock {
 	use windows_sys::Win32::System::RemoteDesktop::{
 		WTSFreeMemory, WTSQuerySessionInformationW, WTSSessionInfoEx, WTSINFOEXW,
 		WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, WTS_SESSIONSTATE_LOCK,
 		WTS_SESSIONSTATE_UNLOCK,
 	};
-	use windows_sys::Win32::System::StationsAndDesktops::{
-		CloseDesktop, GetUserObjectInformationW, OpenInputDesktop, DESKTOP_READOBJECTS, UOI_NAME,
-	};
-	let lock = unsafe {
+	unsafe {
 		let mut buf: windows_sys::core::PWSTR = std::ptr::null_mut();
 		let mut n = 0u32;
 		if WTSQuerySessionInformationW(
@@ -127,7 +133,15 @@ fn query() -> (Lock, Desk) {
 			WTSFreeMemory(buf as _);
 			l
 		}
+	}
+}
+
+#[cfg(windows)]
+fn query() -> (Lock, Desk) {
+	use windows_sys::Win32::System::StationsAndDesktops::{
+		CloseDesktop, GetUserObjectInformationW, OpenInputDesktop, DESKTOP_READOBJECTS, UOI_NAME,
 	};
+	let lock = wts_lock();
 	let desk = unsafe {
 		let h = OpenInputDesktop(0, 0, DESKTOP_READOBJECTS);
 		if h.is_null() {

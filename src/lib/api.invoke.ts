@@ -264,6 +264,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 		case 'set_tray':
 		case 'set_pad_wake':
 		case 'set_pad_background':
+		case 'set_client_awake':
 		case 'set_host_serving':
 		case 'gamepad_nav_start':
 		case 'gamepad_nav_stop':

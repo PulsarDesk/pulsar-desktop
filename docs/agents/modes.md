@@ -261,11 +261,13 @@ out of Modern Standby — and keeps the host encoding (a laptop left connected s
 dark screen all night). So when the machine that VIEWS goes into a sleep-like state, its
 sessions end, and they come back by themselves afterwards:
 
-- **Sleep-like** = the system suspends, or its display turns off (on a Modern Standby machine
-  that is its sleep; no suspend event comes while audio plays). An automatic resume with the
-  display still off does not count as awake.
+- **Sleep-like** = the system suspends, its display turns off (on a Modern Standby machine
+  that is its sleep; no suspend event comes while audio plays), or the session locks (unlock =
+  wake). An automatic resume with the display still off does not count as awake.
 - `src-tauri/src/power_watch.rs` (Windows: `PowerRegisterSuspendResumeNotification` +
-  `PowerSettingRegisterNotification(GUID_CONSOLE_DISPLAY_STATE)`, callbacks, no window) emits
+  `PowerSettingRegisterNotification(GUID_CONSOLE_DISPLAY_STATE)`, callbacks, no window, plus
+  the WTS session lock state polled every 2 s; macOS: NSWorkspace sleep / screens-sleep and the
+  `com.apple.screenIsLocked` / `screenIsUnlocked` distributed notifications) emits
   `system-sleep`, then stops every play itself — the webview may be throttled with the
   display off, so the UI is not trusted to do it — and emits `system-wake` on the way back.
 - `SessionManager.systemSleep` remembers each remote session (target, mode, game, monitor,
@@ -278,11 +280,20 @@ sessions end, and they come back by themselves afterwards:
 - The HOST's own sleep is not handled here (its clients see it go silent).
 - **Keep-awake** (`src-tauri/src/keep_awake.rs`, one refcounted OS request per process): the
   host holds display + system awake from a session's first stream request to its end on every
-  capture path; the client holds it while a session is viewed and until 30 min after its last
-  real input (`PULSAR_CLIENT_AWAKE_MIN`, 0 = off; pads count only on a button / trigger change
-  or a real stick move — their 1 Hz keepalive and a DualSense's sensor stream do not), so a
-  pad-only or watch-only session no longer hits the display timeout while a forgotten one still
-  does. Only idle sleep is held: lid / power button / lock still end the sessions as above.
+  capture path; the client holds it while a session is viewed, Pulsar is the focused app (or
+  "Arka planda kol girdisi" is on), the session is not locked, and until a set time after its
+  last real input (Settings → Genel → "Ekranı uyanık tut": 30 min default / 2 h / always / off;
+  `PULSAR_CLIENT_AWAKE_MIN` overrides it, 0 = off; pads count only on a button / trigger change,
+  a real stick move or a DualSense touchpad touch / move — their 1 Hz keepalive and a
+  DualSense's sensor stream do not). So a pad-only session no longer hits the display timeout,
+  a watch-only one does only after that time without input (30 min by default), and a
+  forgotten one still does. The hold also holds back the screen saver and an idle screen LOCK
+  (e.g. a 5 min policy lock): pick "Kapalı" where the machine must lock on time. Only idle
+  sleep is held: lid / power button / lock still end the sessions as above — on Windows and
+  macOS the lock is watched directly, because both keep the lock screen lit while a display
+  request is held (no display-off edge would come). The ANDROID client has no equivalent yet:
+  it keeps `FLAG_KEEP_SCREEN_ON` for the whole stream and does not end it on screen-off, so a
+  phone left connected keeps the host awake (pulsar-mobile `docs/agents/layout.md`).
   Windows `PowerCreateRequest` + `PowerSetRequest(Display, System)`; macOS `IOPMAssertion`
   `PreventUserIdleDisplaySleep`; Linux `org.freedesktop.ScreenSaver.Inhibit` (GNOME Session idle
   inhibitor as fallback), `org.freedesktop.PowerManagement.Inhibit`, a logind `idle` block lock

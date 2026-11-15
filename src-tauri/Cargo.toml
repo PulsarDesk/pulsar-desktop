@@ -161,7 +161,7 @@ pulsar-macinput = { path = "../crates/pulsar-macinput" }
 # power_watch/macos.rs: NSWorkspace sleep / wake + screens sleep / wake notifications. The
 # same objc2 0.6 family tauri/tao already use on macOS (no new crates in the lock).
 block2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "NSNotification", "NSOperation", "NSString", "NSObject"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "NSNotification", "NSDistributedNotificationCenter", "NSOperation", "NSString", "NSObject"] }
 # mac_activate.rs (pad wake / bring forward): app activation. The same objc2 0.6 /
 # objc2-app-kit 0.3 tao already pulls in — no new crates, only the features they need.
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSWorkspace", "NSApplication", "NSRunningApplication", "NSWindow", "NSResponder"] }

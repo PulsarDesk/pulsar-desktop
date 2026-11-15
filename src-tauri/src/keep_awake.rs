@@ -8,20 +8,32 @@
 //! blanked or locked its screen in a watch-only or gamepad-only session (gamepad input from a
 //! virtual pad does not reset any OS idle timer), so the client saw the lock screen and then
 //! the machine went to sleep. The host holds it unconditionally while streaming: a forgotten
-//! session ends on the CLIENT side (below), which stops the stream and releases this.
+//! session is meant to end on the CLIENT side (below), which stops the stream and releases
+//! this. That holds for desktop clients only: the Android client keeps `FLAG_KEEP_SCREEN_ON`
+//! for the whole stream, has no input-idle expiry and does not end a stream when its screen
+//! goes off, so a phone left connected keeps this host awake until the session ends some other
+//! way (pulsar-mobile `docs/agents/layout.md`, "Keep-awake").
 //!
-//! **Client:** held while a session is viewed AND its user did something recently
+//! **Client:** held while a session is viewed, Pulsar is the focused app (or "Arka planda kol
+//! girdisi" is on), the session is not locked, and its user did something recently
 //! ([`ClientAwake`]). A display turning off ends every viewed session by design
 //! (`power_watch.rs`: on a Modern Standby laptop the display going off IS the sleep), so a
 //! session played only with a gamepad — or only watched — was cut off at the display timeout
 //! (2-5 min on battery): pad input never resets the OS idle timer, and the evdev grab hides
-//! Linux keyboard/mouse input from it too. The hold lasts [`client_hold`] (30 min by default,
-//! `PULSAR_CLIENT_AWAKE_MIN`, 0 = off) after the last real input, gamepad included; then the
-//! normal idle timeout applies again, so a laptop left connected overnight still turns its
-//! display off and ends the session (the 2026-11-14 field case `power_watch.rs` describes).
+//! Linux keyboard/mouse input from it too. The hold lasts [`client_hold`] after the last real
+//! input, gamepad included (Settings → Genel → "Ekranı uyanık tut": 30 min by default, 2 h,
+//! always or off; `PULSAR_CLIENT_AWAKE_MIN` overrides it, 0 = off); then the normal idle
+//! timeout applies again, so a laptop left connected overnight still turns its display off and
+//! ends the session (the 2026-11-14 field case `power_watch.rs` describes). A display request
+//! also holds back the screen saver and its idle LOCK: while the hold is on, a client whose
+//! policy locks it after N idle minutes stays unlocked — hence the focus condition, the expiry
+//! and "Kapalı" for machines that must lock on time.
 //!
 //! Only IDLE sleep is held back. A sleep the user asks for (lid, power button, Start → Sleep,
-//! locking the screen) still happens, and `power_watch` still ends the viewed sessions on it.
+//! locking the screen) still happens, and `power_watch` ends the viewed sessions on it — on
+//! every OS, the lock included: Windows and macOS honour a display request on the lock screen,
+//! so `power_watch` watches the lock itself (WTS lock state, `com.apple.screenIsLocked`; Linux:
+//! the screen saver's `ActiveChanged`). The client hold is also dropped while locked.
 //!
 //! Per OS (one process-wide request, refcounted over every host and client session):
 //! - Windows: `PowerCreateRequest` + `PowerSetRequest(DisplayRequired, SystemRequired)` —
@@ -38,7 +50,8 @@
 //! - Android / iOS: not this crate (pulsar-mobile; Android uses `FLAG_KEEP_SCREEN_ON` and a
 //!   screen wake lock in its video plugin).
 
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use pulsar_core::input::GamepadState;
@@ -81,16 +94,40 @@ fn release() {
 
 /// Default client hold after the last input.
 const CLIENT_HOLD_DEFAULT_MIN: u64 = 30;
+/// "Always" (no input expiry): the hold then ends only with focus, lock or the session.
+const ALWAYS: u64 = u64::MAX;
 
-/// How long the client keeps the display awake after the last input: `PULSAR_CLIENT_AWAKE_MIN`
-/// minutes (0 = never), else [`CLIENT_HOLD_DEFAULT_MIN`].
-pub(crate) fn client_hold() -> Duration {
-	hold_from(std::env::var("PULSAR_CLIENT_AWAKE_MIN").ok().as_deref())
+/// Settings → Genel → "Ekranı uyanık tut" (`set_client_awake`), in minutes (0 = off,
+/// [`ALWAYS`]). The UI syncs it at startup and on every change.
+static SETTING_MIN: AtomicU64 = AtomicU64::new(CLIENT_HOLD_DEFAULT_MIN);
+
+/// Settings value: "off", "always" or a number of minutes ("30", "120"). Anything else keeps
+/// the default. Live sessions pick it up on their next check (≤ 2 s).
+pub(crate) fn set_client_awake(mode: &str) {
+	let min = parse_min(mode).unwrap_or(CLIENT_HOLD_DEFAULT_MIN);
+	if SETTING_MIN.swap(min, Ordering::SeqCst) != min {
+		tracing::info!(mode, "keep-awake: client setting");
+	}
 }
 
-fn hold_from(env: Option<&str>) -> Duration {
-	let min = env.and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(CLIENT_HOLD_DEFAULT_MIN);
-	Duration::from_secs(min.saturating_mul(60))
+fn parse_min(v: &str) -> Option<u64> {
+	match v.trim() {
+		"off" => Some(0),
+		"always" => Some(ALWAYS),
+		n => n.parse::<u64>().ok(),
+	}
+}
+
+/// How long the client keeps the display awake after the last input: `PULSAR_CLIENT_AWAKE_MIN`
+/// (minutes, 0 = never, or "off" / "always") if set, else the Settings value.
+pub(crate) fn client_hold() -> Duration {
+	static ENV: OnceLock<Option<u64>> = OnceLock::new();
+	let env = *ENV.get_or_init(|| std::env::var("PULSAR_CLIENT_AWAKE_MIN").ok().as_deref().and_then(parse_min));
+	hold_from(env, SETTING_MIN.load(Ordering::SeqCst))
+}
+
+fn hold_from(env: Option<u64>, setting: u64) -> Duration {
+	Duration::from_secs(env.unwrap_or(setting).saturating_mul(60))
 }
 
 /// A stick must move this far from where it was at the last counted input (i16 axes, ~8 %):
@@ -98,9 +135,15 @@ fn hold_from(env: Option<&str>) -> Duration {
 const PAD_AXIS: i32 = 2600;
 /// Same for the 8-bit triggers and the DualSense's 8-bit sticks.
 const PAD_U8: i32 = 10;
-/// Leading DualSense input state bytes compared: sticks 0..4, triggers 4..6, the report
-/// counter 6 (ignored), buttons 7..10. Gyro / touchpad / timestamps follow and always change.
-const DS5_HEAD: usize = 10;
+/// Leading DualSense input state bytes kept: sticks 0..4, triggers 4..6, the report counter 6
+/// (ignored), buttons 7..10, then gyro / accel / timestamp (11..32, ignored: they always
+/// change) and the two touch points 32..36 / 36..40.
+const DS5_HEAD: usize = 40;
+/// The DualSense touch points (`[contact, x lo, x hi | y lo, y hi]`; contact bit 7 SET = no
+/// finger, the low 7 bits = a touch id that changes on every new touch; X 0..1919, Y 0..1079).
+const DS5_TOUCH: [usize; 2] = [32, 36];
+/// A finger must move this far on the touchpad (12-bit units, ~1 %) to count.
+const DS5_TOUCH_MOVE: i32 = 20;
 
 /// Which input events are a person using the session. Pads repeat their state about once a
 /// second (a lost datagram would leave a button stuck) and a DualSense streams its sensors
@@ -173,51 +216,94 @@ fn pad_moved(a: &GamepadState, b: &GamepadState) -> bool {
 }
 
 fn ds5_moved(a: &[u8; DS5_HEAD], b: &[u8; DS5_HEAD]) -> bool {
-	a[7..] != b[7..] || (0..6).any(|i| (a[i] as i32 - b[i] as i32).abs() > PAD_U8)
+	a[7..10] != b[7..10]
+		|| (0..6).any(|i| (a[i] as i32 - b[i] as i32).abs() > PAD_U8)
+		|| DS5_TOUCH.iter().any(|&o| touch_moved(&a[o..o + 4], &b[o..o + 4]))
 }
 
-/// The client side of one viewed session: holds a [`Guard`] from the start of the session and
-/// while input keeps arriving, drops it [`client_hold`] after the last input and takes it again
-/// on the next one. Lives in the session's hold loop (`play/hold.rs`), which sees every input
-/// the session forwards (webview, native keyboard hooks, renderer pen/touch, pads, DualSense).
+/// A finger touched / lifted, a new touch began, or a finger moved on the touchpad.
+fn touch_moved(a: &[u8], b: &[u8]) -> bool {
+	let down = |p: &[u8]| p[0] & 0x80 == 0;
+	let xy = |p: &[u8]| (p[1] as i32 | ((p[2] & 0x0F) as i32) << 8, (p[2] >> 4) as i32 | (p[3] as i32) << 4);
+	if down(a) != down(b) {
+		return true;
+	}
+	if !down(b) {
+		return false; // no finger: the stale position bytes mean nothing
+	}
+	let ((ax, ay), (bx, by)) = (xy(a), xy(b));
+	a[0] != b[0] || (ax - bx).abs() > DS5_TOUCH_MOVE || (ay - by).abs() > DS5_TOUCH_MOVE
+}
+
+/// The client side of one viewed session: holds a [`Guard`] while the session is in use —
+/// Pulsar focused (or background controller input on), the session unlocked, and an input
+/// within [`client_hold`] (connecting counts as one). Lives in the session's hold loop
+/// (`play/hold.rs`), which sees every input the session forwards (webview, native keyboard
+/// hooks, renderer pen/touch, pads, DualSense) and calls [`ClientAwake::tick`] every 2 s.
 pub(crate) struct ClientAwake {
-	hold: Duration,
 	last: Instant,
 	guard: Option<Guard>,
 	activity: Activity,
 }
 
-impl ClientAwake {
-	/// How often the hold loop should call [`ClientAwake::tick`].
-	pub(crate) const TICK: Duration = Duration::from_secs(15);
+/// Why the client holds the display, or why not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Want {
+	Hold,
+	Off,
+	Idle,
+	Unfocused,
+	Locked,
+}
 
+fn want(hold: Duration, last: Instant, now: Instant, viewed: bool, locked: bool) -> Want {
+	if hold.is_zero() {
+		Want::Off
+	} else if locked {
+		Want::Locked
+	} else if !viewed {
+		Want::Unfocused
+	} else if expired(last, now, hold) {
+		Want::Idle
+	} else {
+		Want::Hold
+	}
+}
+
+impl ClientAwake {
 	/// A session starts being viewed (connecting counts as input).
 	pub(crate) fn start(now: Instant) -> Self {
-		let hold = client_hold();
-		let guard = (!hold.is_zero()).then(|| acquire("client session"));
-		Self { hold, last: now, guard, activity: Activity::default() }
+		let mut s = Self { last: now, guard: None, activity: Activity::default() };
+		s.tick(now);
+		s
 	}
 
-	/// An input event this session forwards.
+	/// An input event this session forwards. A released hold comes back on the next
+	/// [`ClientAwake::tick`] (≤ 2 s; display timeouts are minutes).
 	pub(crate) fn on_input(&mut self, ev: &InputEvent, now: Instant) {
-		if !self.activity.is_user(ev) {
-			return;
-		}
-		self.last = now;
-		if self.guard.is_none() && !self.hold.is_zero() {
-			tracing::info!("keep-awake: input again — the display is held awake for this session");
-			self.guard = Some(acquire("client session"));
+		if self.activity.is_user(ev) {
+			self.last = now;
 		}
 	}
 
-	/// Periodic check: release the hold once nobody used the session for [`client_hold`].
+	/// Periodic check (every 2 s): take or release the hold (see [`want`]).
 	pub(crate) fn tick(&mut self, now: Instant) {
-		if self.guard.is_some() && expired(self.last, now, self.hold) {
-			tracing::info!(
-				idle_min = self.hold.as_secs() / 60,
-				"keep-awake: no input on this session — the display may turn off again (that ends the session)"
-			);
-			self.guard = None;
+		let hold = client_hold();
+		let viewed = crate::focus_gate::app_focused() || crate::focus_gate::background_input();
+		let w = want(hold, self.last, now, viewed, crate::power_watch::locked());
+		match (w, self.guard.is_some()) {
+			(Want::Hold, false) => {
+				tracing::info!("keep-awake: client session in use — the display is held awake");
+				self.guard = Some(acquire("client session"));
+			}
+			(Want::Hold, true) | (_, false) => {}
+			(why, true) => {
+				tracing::info!(
+					?why,
+					"keep-awake: client hold released — the display may turn off again (that ends the session)"
+				);
+				self.guard = None;
+			}
 		}
 	}
 }
@@ -535,11 +621,27 @@ mod tests {
 	}
 
 	#[test]
-	fn hold_from_env() {
-		assert_eq!(hold_from(None), Duration::from_secs(30 * 60));
-		assert_eq!(hold_from(Some("5")), Duration::from_secs(5 * 60));
-		assert_eq!(hold_from(Some(" 0 ")), Duration::ZERO);
-		assert_eq!(hold_from(Some("x")), Duration::from_secs(30 * 60));
+	fn hold_from_env_and_setting() {
+		assert_eq!(hold_from(None, CLIENT_HOLD_DEFAULT_MIN), Duration::from_secs(30 * 60));
+		assert_eq!(hold_from(parse_min("5"), 30), Duration::from_secs(5 * 60), "env wins");
+		assert_eq!(hold_from(parse_min(" 0 "), 120), Duration::ZERO);
+		assert_eq!(hold_from(parse_min("x"), 120), Duration::from_secs(120 * 60), "bad env: setting");
+		assert_eq!(hold_from(None, parse_min("off").unwrap()), Duration::ZERO);
+		let always = hold_from(None, parse_min("always").unwrap());
+		let t0 = Instant::now();
+		assert!(!expired(t0, t0 + Duration::from_secs(365 * 24 * 3600), always));
+	}
+
+	#[test]
+	fn hold_needs_focus_unlock_and_recent_input() {
+		let t0 = Instant::now();
+		let h = Duration::from_secs(60);
+		let soon = t0 + Duration::from_secs(10);
+		assert_eq!(want(h, t0, soon, true, false), Want::Hold);
+		assert_eq!(want(h, t0, t0 + h, true, false), Want::Idle);
+		assert_eq!(want(h, t0, soon, false, false), Want::Unfocused);
+		assert_eq!(want(h, t0, soon, true, true), Want::Locked);
+		assert_eq!(want(Duration::ZERO, t0, soon, true, false), Want::Off);
 	}
 
 	#[test]
@@ -592,7 +694,8 @@ mod tests {
 		noise[6] = 0x33; // report counter
 		noise[1] = 0x83; // stick jitter
 		noise[20] = 0x7f; // gyro
-		noise[40] = 0x12; // timestamp / touchpad area
+		noise[28] = 0x12; // sensor timestamp
+		noise[40] = 0x12; // past the touch points
 		assert!(!a.is_user(&ev(noise)));
 		let mut cross = noise;
 		cross[7] = 0x28; // cross button
@@ -600,6 +703,45 @@ mod tests {
 		let mut stick = cross;
 		stick[2] = 0xF0;
 		assert!(a.is_user(&ev(stick)));
+	}
+
+	#[test]
+	fn ds5_touchpad_counts() {
+		use pulsar_core::input::ds5::wire::Ds5Report;
+		let mut a = Activity::default();
+		let mut r = [0u8; 63];
+		r[..4].copy_from_slice(&[0x80; 4]);
+		r[7] = 0x08;
+		r[32] = 0x80; // no finger
+		r[36] = 0x80;
+		r[33] = 0x55; // stale position bytes of a lifted finger
+		let ev = |r: [u8; 63]| InputEvent::Ds5Input { slot: 0, report: Ds5Report(r) };
+		assert!(a.is_user(&ev(r)));
+		let mut lifted_noise = r;
+		lifted_noise[34] = 0x3c;
+		assert!(!a.is_user(&ev(lifted_noise)), "position bytes of a lifted finger are not input");
+		// Finger down at x 0x100, y 0x200: x lo 0x00, x hi 1 | y lo 0 << 4, y hi 0x20.
+		let mut down = lifted_noise;
+		down[32] = 0x05;
+		down[33] = 0x00;
+		down[34] = 0x01;
+		down[35] = 0x20;
+		assert!(a.is_user(&ev(down)), "a finger touching counts");
+		let mut jitter = down;
+		jitter[33] = 0x05; // x + 5
+		assert!(!a.is_user(&ev(jitter)), "a resting finger's jitter is not input");
+		let mut slide = jitter;
+		slide[33] = 0x40; // x + 64
+		assert!(a.is_user(&ev(slide)), "a finger moving counts");
+		let mut slide_y = slide;
+		slide_y[35] = 0x24; // y + 64
+		assert!(a.is_user(&ev(slide_y)));
+		let mut second = slide_y;
+		second[36] = 0x06; // second finger down
+		assert!(a.is_user(&ev(second)));
+		let mut lift = second;
+		lift[32] |= 0x80;
+		assert!(a.is_user(&ev(lift)), "a finger lifting counts");
 	}
 
 	#[test]
