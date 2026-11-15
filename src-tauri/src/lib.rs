@@ -81,6 +81,8 @@ mod play_notice;
 mod power_watch;
 mod wlan_lowlat;
 mod timer_res;
+// Display / system kept awake while a session streams (host) or is in use (client).
+mod keep_awake;
 mod process;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod render;

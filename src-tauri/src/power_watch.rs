@@ -14,6 +14,10 @@
 //! the display turning off IS the sleep (there is no suspend event while audio plays); on any
 //! machine nobody is looking at a stream on a dark screen.
 //!
+//! An IDLE display-off is held back while the session is in use (`keep_awake.rs`: the client
+//! holds the display awake until 30 min after the last input, gamepad included), so this only
+//! fires for a sleep the user asks for (lid, power button, lock) or a session left alone.
+//!
 //! Per platform (all untested on real hardware except Windows):
 //! - Windows: `PowerRegisterSuspendResumeNotification` + `GUID_CONSOLE_DISPLAY_STATE` (below).
 //! - Linux (`power_watch/linux.rs`): logind `PrepareForSleep` with a delay inhibitor (the
@@ -101,6 +105,12 @@ pub(crate) fn note_input() {
 #[cfg(target_os = "linux")]
 pub(crate) fn spawn(app: AppHandle) {
 	linux::spawn(app);
+}
+
+/// An X11 desktop session (not XWayland): the X server's own screen saver / DPMS matter.
+#[cfg(target_os = "linux")]
+pub(crate) fn is_x11_session() -> bool {
+	linux::is_x11_session()
 }
 
 #[cfg(target_os = "macos")]

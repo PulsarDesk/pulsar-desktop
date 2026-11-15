@@ -276,6 +276,18 @@ sessions end, and they come back by themselves afterwards:
   (password / approval prompt again where the host asks for one). Split panes come back as
   tabs.
 - The HOST's own sleep is not handled here (its clients see it go silent).
+- **Keep-awake** (`src-tauri/src/keep_awake.rs`, one refcounted OS request per process): the
+  host holds display + system awake from a session's first stream request to its end on every
+  capture path; the client holds it while a session is viewed and until 30 min after its last
+  real input (`PULSAR_CLIENT_AWAKE_MIN`, 0 = off; pads count only on a button / trigger change
+  or a real stick move — their 1 Hz keepalive and a DualSense's sensor stream do not), so a
+  pad-only or watch-only session no longer hits the display timeout while a forgotten one still
+  does. Only idle sleep is held: lid / power button / lock still end the sessions as above.
+  Windows `PowerCreateRequest` + `PowerSetRequest(Display, System)`; macOS `IOPMAssertion`
+  `PreventUserIdleDisplaySleep`; Linux `org.freedesktop.ScreenSaver.Inhibit` (GNOME Session idle
+  inhibitor as fallback), `org.freedesktop.PowerManagement.Inhibit`, a logind `idle` block lock
+  and `XResetScreenSaver` every 20 s on X11 — bare wlroots compositors only have the Wayland
+  idle-inhibit protocol (needs a surface of ours): not covered there.
 - **Linux** (`power_watch/linux.rs`, plain threads with blocking zbus / Xlib connections;
   untested on Linux hardware): logind `PrepareForSleep` on the system bus, with a logind
   *delay* inhibitor held while awake so the suspend waits (≤ 3 s of our own, capped by

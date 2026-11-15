@@ -2817,6 +2817,21 @@ pub(crate) async fn bring_online(
 				let _wlan = crate::wlan_lowlat::acquire();
 				// 1 ms timer while streaming: the video pacer's wakes stay on time (see timer_res.rs).
 				let _timer = crate::timer_res::acquire();
+				// Display + system kept awake from the first stream request until the session
+				// ends, whatever capture path / encoder serves it (see keep_awake.rs). The
+				// guard lives in the closure, so it drops with serve_with's future — on the
+				// normal end and on the abort() path alike. A session that never sends a
+				// StreamReq does not hold it.
+				let on_stream = {
+					let mut on_stream = on_stream;
+					let mut awake: Option<crate::keep_awake::Guard> = None;
+					move |req: StreamReq, addr: SocketAddr| {
+						if awake.is_none() {
+							awake = Some(crate::keep_awake::acquire("host session"));
+						}
+						on_stream(req, addr)
+					}
+				};
 				let _cleanup_guard = SessionCleanupGuard {
 					procs: procs.clone(),
 					proc_epoch: proc_epoch.clone(),
