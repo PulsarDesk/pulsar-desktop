@@ -610,6 +610,11 @@ impl CaptureDevice {
 	}
 
 	/// The pool / present texture format: FP16 scRGB while capturing an HDR monitor, else BGRA.
+	/// The monitor this duplication captures.
+	pub(crate) fn hmonitor(&self) -> windows::Win32::Graphics::Gdi::HMONITOR {
+		unsafe { self.output.GetDesc().map(|d| d.Monitor).unwrap_or_default() }
+	}
+
 	pub(crate) fn pool_format(&self) -> DXGI_FORMAT {
 		if self.hdr.is_some() {
 			DXGI_FORMAT_R16G16B16A16_FLOAT

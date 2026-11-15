@@ -221,8 +221,10 @@ impl CaptureDevice {
 					}
 					// If reinit() fell back to a different monitor (streamed output gone), rebuild via
 					// the outer loop so current_output()/build_gen + the host input rect follow it —
-					// same silent-desync guard as the Reinit arm above.
-					if self.output_idx != prev_output_idx {
+					// same silent-desync guard as the Reinit arm above. reinit() also re-reads the
+					// monitor's HDR state: a flip (FP16 ⇄ BGRA) needs the encoder rebuilt too, or a
+					// P010 encoder would read BGRA as scRGB (or the NV12 Blt FP16).
+					if self.output_idx != prev_output_idx || self.pool_format() != built_format {
 						return RunExit::Switch(self.output_idx);
 					}
 					// Re-anchor the pacing clock after the reinit sleeps, as above.

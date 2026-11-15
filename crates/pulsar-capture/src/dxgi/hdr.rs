@@ -54,7 +54,26 @@ pub(crate) unsafe fn sdr_white_nits(output: &IDXGIOutput1) -> f32 {
 	let Ok(desc) = output.GetDesc() else {
 		return 80.0;
 	};
-	let want: Vec<u16> = desc.DeviceName.iter().copied().take_while(|c| *c != 0).collect();
+	sdr_white_nits_for_name(&desc.DeviceName)
+}
+
+/// [`sdr_white_nits`] of the monitor `hmon` (GDI device name lookup, no DXGI factory): cheap
+/// enough for the host to re-read every few seconds while an HDR stream runs (the user can
+/// move the "SDR content brightness" slider mid-stream).
+pub(crate) unsafe fn monitor_sdr_white_nits(hmon: windows::Win32::Graphics::Gdi::HMONITOR) -> f32 {
+	use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITORINFOEXW};
+	let mut mi = MONITORINFOEXW::default();
+	mi.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+	if !GetMonitorInfoW(hmon, &mut mi.monitorInfo).as_bool() {
+		return 80.0;
+	}
+	sdr_white_nits_for_name(&mi.szDevice)
+}
+
+/// The SDR white level of the display source with GDI device name `name` (`\\.\DISPLAYn`,
+/// NUL-terminated UTF-16) in nits; 80 when Windows does not say.
+unsafe fn sdr_white_nits_for_name(name: &[u16]) -> f32 {
+	let want: Vec<u16> = name.iter().copied().take_while(|c| *c != 0).collect();
 	let (mut np, mut nm) = (0u32, 0u32);
 	if GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut np, &mut nm).is_err() {
 		return 80.0;
@@ -95,8 +114,13 @@ pub(crate) unsafe fn sdr_white_nits(output: &IDXGIOutput1) -> f32 {
 /// [`output_hdr`] of the DXGI output that drives `hmon` (a window's monitor), fresh factory.
 pub(crate) unsafe fn hdr_for_monitor(hmon: windows::Win32::Graphics::Gdi::HMONITOR) -> Option<HdrMeta> {
 	let factory: IDXGIFactory1 = CreateDXGIFactory1().ok()?;
+	hdr_for_monitor_in(&factory, hmon)
+}
+
+/// [hdr_for_monitor] through an existing factory (current only while IsCurrent()).
+unsafe fn hdr_for_monitor_in(factory: &IDXGIFactory1, hmon: windows::Win32::Graphics::Gdi::HMONITOR) -> Option<HdrMeta> {
 	let mut i = 0;
-	while let Ok((_, out, actual)) = super::CaptureDevice::find_output(&factory, i) {
+	while let Ok((_, out, actual)) = super::CaptureDevice::find_output(factory, i) {
 		if actual != i || i > 16 {
 			break;
 		}
@@ -126,4 +150,40 @@ pub(crate) unsafe fn outputs_hdr() -> Vec<bool> {
 		}
 	}
 	v
+}
+
+/// Re-checks, for a RUNNING capture, whether a monitor is in HDR mode, without the cost of a
+/// fresh DXGI factory + full output walk on every check: the factory is kept and the outputs
+/// are walked again only when DXGI says the factory is stale (`IsCurrent()` false: an HDR
+/// toggle or any other display-configuration change) or the monitor itself changed (a window
+/// moved to another one). At most once per `every`; between checks it costs a clock read.
+pub(crate) struct HdrWatch {
+	factory: Option<IDXGIFactory1>,
+	mon: windows::Win32::Graphics::Gdi::HMONITOR,
+	hdr: bool,
+	at: std::time::Instant,
+}
+
+impl HdrWatch {
+	/// `hdr`: the state the capture was built with (the first walk waits for `every`).
+	pub(crate) fn new(mon: windows::Win32::Graphics::Gdi::HMONITOR, hdr: bool) -> Self {
+		Self { factory: None, mon, hdr, at: std::time::Instant::now() }
+	}
+
+	/// `Some(in HDR mode now)` when a check ran, `None` before `every` elapsed.
+	pub(crate) unsafe fn poll(&mut self, mon: windows::Win32::Graphics::Gdi::HMONITOR, every: std::time::Duration) -> Option<bool> {
+		if self.at.elapsed() < every {
+			return None;
+		}
+		self.at = std::time::Instant::now();
+		let stale = self.factory.as_ref().is_none_or(|f| !f.IsCurrent().as_bool());
+		if stale {
+			self.factory = CreateDXGIFactory1::<IDXGIFactory1>().ok();
+		}
+		if stale || mon != self.mon {
+			self.mon = mon;
+			self.hdr = self.factory.as_ref().is_some_and(|f| hdr_for_monitor_in(f, mon).is_some());
+		}
+		Some(self.hdr)
+	}
 }

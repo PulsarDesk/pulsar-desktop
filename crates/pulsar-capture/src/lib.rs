@@ -127,6 +127,10 @@ pub struct LiveStats {
 	pub(crate) encoded: std::sync::atomic::AtomicU32,
 	/// The current build streams HDR10.
 	pub(crate) hdr: std::sync::atomic::AtomicBool,
+	/// HDR10 build: the captured monitor (HMONITOR as isize; 0 = unknown) and its peak (nits),
+	/// for [LiveStats::hdr_reference].
+	pub(crate) hdr_mon: std::sync::atomic::AtomicIsize,
+	pub(crate) hdr_peak_nits: std::sync::atomic::AtomicU32,
 }
 
 /// Tells how long a monotonic counter has been flat. The host feeds it the capture thread's
@@ -179,6 +183,26 @@ impl LiveStats {
 			encoded: self.encoded.load(Relaxed),
 			hdr: self.hdr.load(Relaxed),
 		}
+	}
+
+	/// While the stream is HDR10: `(SDR white, peak)` in nits — where the host's SDR content
+	/// sits on its HDR monitor (Windows "SDR content brightness", re-read now: the user can
+	/// move it mid-stream) and the monitor's peak. The client tone-maps around them
+	/// (`DataMsg::HdrMeta`). `None` for an SDR stream / off Windows. A GDI + display-config
+	/// lookup (no DXGI factory), cheap enough every few seconds.
+	pub fn hdr_reference(&self) -> Option<(u16, u16)> {
+		use std::sync::atomic::Ordering::Relaxed;
+		if !self.hdr.load(Relaxed) {
+			return None;
+		}
+		#[cfg(windows)]
+		{
+			let mon = windows::Win32::Graphics::Gdi::HMONITOR(self.hdr_mon.load(Relaxed) as *mut core::ffi::c_void);
+			let sdr = if mon.is_invalid() { 80.0 } else { unsafe { dxgi::hdr::monitor_sdr_white_nits(mon) } };
+			Some((sdr.round() as u16, self.hdr_peak_nits.load(Relaxed).min(u16::MAX as u32) as u16))
+		}
+		#[cfg(not(windows))]
+		None
 	}
 }
 
@@ -545,6 +569,13 @@ impl CapSource {
 			CapSource::Wgc(c) => c.hdr(),
 		}
 	}
+	/// The monitor being captured now (for the HDR reference white).
+	fn hmonitor(&self) -> windows::Win32::Graphics::Gdi::HMONITOR {
+		match self {
+			CapSource::Dxgi(c) => c.hmonitor(),
+			CapSource::Wgc(c) => c.hmonitor(),
+		}
+	}
 	/// Forward the pacing loop to the underlying source. Both `run` implementations share the
 	/// exact signature (fps, draw_cursor, requested_output, stop, on_frame) and return `RunExit`.
 	unsafe fn run(
@@ -572,6 +603,13 @@ enum AnyEncoder {
 
 #[cfg(windows)]
 impl AnyEncoder {
+	/// The encoder converts FP16 scRGB to P010 PQ (an HDR10 build).
+	fn is_hdr(&self) -> bool {
+		match self {
+			AnyEncoder::Nv(e) => e.is_hdr(),
+			AnyEncoder::Mf(_) => false,
+		}
+	}
 	unsafe fn submit(&mut self, frame: &Frame, pts: i64, rtp_ts: u32) -> Result<(), String> {
 		match self {
 			AnyEncoder::Nv(e) => e.submit(frame, pts, rtp_ts),
@@ -909,6 +947,10 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 				}
 				prev_good_output = output_idx;
 				stats_t.hdr.store(params.hdr.is_some(), Ordering::Relaxed);
+				if let Some(m) = params.hdr {
+					stats_t.hdr_mon.store(cap.hmonitor().0 as isize, Ordering::Relaxed);
+					stats_t.hdr_peak_nits.store(m.max_nits.round() as u32, Ordering::Relaxed);
+				}
 				if params.hdr.is_some() {
 					encode_log(&format!("HDR10 stream: {:?} {w}x{h} (FP16 scRGB → P010 PQ)", cfg.codec));
 				}
@@ -1029,6 +1071,15 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 									}
 								}
 							}
+						}
+						// The frame must match the encoder's mode: FP16 scRGB for an HDR10 encoder,
+						// BGRA for an SDR one. A source that flipped HDR on its own (a reinit, a
+						// monitor toggle) without leaving the run loop would otherwise feed wrong,
+						// dim colours; rebuild capture + encoder for the monitor's new mode instead.
+						if enc.is_hdr() != (frame.format == windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R16G16B16A16_FLOAT) {
+							cap_log(&format!("build #{build_no}: frame format {:?} vs encoder hdr={} — rebuild", frame.format, enc.is_hdr()));
+							rebuild.store(true, Ordering::Relaxed);
+							return;
 						}
 						let enc_t0 = std::time::Instant::now();
 						// 90 kHz ticks since the capture thread started (wraps after ~13 h, as RTP does).

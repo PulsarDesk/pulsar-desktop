@@ -12,8 +12,10 @@
 //! 2. chroma: half-size render into the CbCr plane (R16G16_UNORM view); the bilinear sample at
 //!    a chroma texel's centre averages the 2×2 block (in linear light).
 //!
-//! Both passes scale native → encode size (bilinear) and apply the host rotation (the encode
-//! surface is already W↔H swapped for 90/270, like the VideoProcessor path).
+//! Both passes scale native → encode size and apply the host rotation (the encode surface is
+//! already W↔H swapped for 90/270, like the VideoProcessor path). Downscaling is a box filter
+//! over each output pixel's footprint (bilinear taps on ~2×2-texel cells, linear light), so a
+//! 4K HDR monitor at a 1080p encode keeps thin text as clean as the SDR path's filtered Blt.
 //! Per pixel: scRGB (linear BT.709, 1.0 = 80 nits) → BT.2020 primaries → nits / 10 000 → PQ
 //! → Y'CbCr (BT.2020 NCL) → 10-bit codes 64–940 / 64–960 → `code << 6` (P010 is MSB-aligned).
 
@@ -57,12 +59,34 @@ float3 pq(float3 scrgb) {
 }
 float luma(float3 e) { return dot(e, float3(0.2627, 0.6780, 0.0593)); }
 float p010(float code) { return round(clamp(code, 0.0, 1023.0)) * (64.0 / 65535.0); }
+// The source (linear scRGB) averaged over this output pixel's footprint. A downscale (4K
+// monitor -> 1080p encode, a lower ABR rung, and the chroma pass always) covers more than the
+// 2x2 texels one bilinear tap reads; thin text / 1 px UI lines would alias and shimmer. So
+// the footprint (the uv step per output pixel along each screen axis — exact for this
+// full-screen triangle, rotation included) is split into n x m cells of about 2x2 texels and
+// each cell is one bilinear tap at its centre: a box filter in linear light. 1:1 and up to
+// 2:1 stay one tap (bilinear), the work grows only with the ratio (at most 4 x 4 taps).
+float3 footprint(float2 uv) {
+	float2 sz;
+	src.GetDimensions(sz.x, sz.y);
+	float2 dx = ddx(uv), dy = ddy(uv);
+	int nx = (int)clamp(ceil(length(dx * sz) * 0.5 - 1e-3), 1.0, 4.0);
+	int ny = (int)clamp(ceil(length(dy * sz) * 0.5 - 1e-3), 1.0, 4.0);
+	float3 acc = 0.0;
+	[loop] for (int j = 0; j < ny; j++) {
+		[loop] for (int i = 0; i < nx; i++) {
+			float2 o = dx * ((i + 0.5) / nx - 0.5) + dy * ((j + 0.5) / ny - 0.5);
+			acc += src.SampleLevel(lin, uv + o, 0).rgb;
+		}
+	}
+	return acc / (nx * ny);
+}
 float ps_y(VOut i) : SV_Target {
-	float3 e = pq(src.SampleLevel(lin, i.uv, 0).rgb);
+	float3 e = pq(footprint(i.uv));
 	return p010(64.0 + 876.0 * luma(e));
 }
 float2 ps_uv(VOut i) : SV_Target {
-	float3 e = pq(src.SampleLevel(lin, i.uv, 0).rgb);
+	float3 e = pq(footprint(i.uv));
 	float y = luma(e);
 	return float2(p010(512.0 + 896.0 * (e.b - y) / 1.8814), p010(512.0 + 896.0 * (e.r - y) / 1.4746));
 }
@@ -425,6 +449,29 @@ mod tests {
 		let (y, _) = read_p010(&d, &c, &dst, 16, 32);
 		assert!((y[0] as i32 - black as i32).abs() <= 2, "top {}", y[0]);
 		assert!((y[16 * 31] as i32 - white as i32).abs() <= 2, "bottom {}", y[16 * 31]);
+	}
+
+	/// A 4:1 downscale of 1 px lines (one white column in four): a single bilinear tap would land
+	/// between two black columns and drop the line; the footprint filter keeps its share (a
+	/// quarter of the light) in every output column, luma and chroma alike.
+	#[test]
+	fn downscale_filters_thin_lines_over_the_footprint() {
+		let Some((d, c)) = setup() else { return };
+		let w = 203.0 / 80.0;
+		let src = fp16_tex(&d, 64, 32, |x, _| if x % 4 == 0 { [w; 3] } else { [0.0; 3] });
+		let dst = create_p010_texture(&d, 16, 8).unwrap();
+		let mut conv = HdrConverter::new(&d, &dst, 16, 8, 0).unwrap();
+		unsafe { conv.run(&c, &src).unwrap() };
+		let (y, uv) = read_p010(&d, &c, &dst, 16, 8);
+		let (want, wcb, wcr) = crate::hdr::scrgb_to_ycbcr10([w * 0.25; 3]);
+		assert!(y.iter().all(|&v| (v as i32 - want as i32).abs() <= 3), "luma {:?} vs {want}", &y[..16]);
+		assert!(uv.iter().all(|&(cb, cr)| (cb as i32 - wcb as i32).abs() <= 3 && (cr as i32 - wcr as i32).abs() <= 3), "{:?}", &uv[..8]);
+		// The same lines rotated 90°: the filter follows the rotated footprint.
+		let dst = create_p010_texture(&d, 8, 16).unwrap();
+		let mut conv = HdrConverter::new(&d, &dst, 8, 16, 90).unwrap();
+		unsafe { conv.run(&c, &src).unwrap() };
+		let (y, _) = read_p010(&d, &c, &dst, 8, 16);
+		assert!(y.iter().all(|&v| (v as i32 - want as i32).abs() <= 3), "rotated luma {:?} vs {want}", &y[..8]);
 	}
 
 	/// The whole HDR encoder on an NVIDIA GPU (run by hand on a host with one:

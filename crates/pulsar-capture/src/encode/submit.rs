@@ -20,6 +20,11 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 
 impl Encoder {
+	/// An HDR10 build (FP16 scRGB in, P010 PQ Main10 out).
+	pub fn is_hdr(&self) -> bool {
+		self.hdr_conv.is_some()
+	}
+
 	/// Encode ONE paced tick: BGRA→NV12 (GPU), map→encode→lock the bitstream,
 	/// packetize the Annex-B AU to RTP, unmap. `is_new==false` still encodes (steady
 	/// cadence; NVENC emits a tiny P-frame). Per-frame errors are non-fatal upstream,
@@ -29,6 +34,13 @@ impl Encoder {
 	pub unsafe fn submit(&mut self, frame: &Frame, pts: i64, rtp_ts_90k: u32) -> Result<(), String> {
 		if self.closed {
 			return Err("submit after close".into());
+		}
+		// The frame must be what this encoder converts: FP16 scRGB for the HDR10 (P010) build,
+		// BGRA for the NV12 one. lib.rs rebuilds on a mismatch before calling here; this guard
+		// keeps a wrong frame from ever being encoded with wrong colours.
+		let fp16 = frame.format == windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R16G16B16A16_FLOAT;
+		if fp16 != self.is_hdr() {
+			return Err(format!("frame format {:?} does not match the encoder (hdr={})", frame.format, self.is_hdr()));
 		}
 
 		// (a) Get the BGRA the VideoProcessor will read. In the same-device fast path that

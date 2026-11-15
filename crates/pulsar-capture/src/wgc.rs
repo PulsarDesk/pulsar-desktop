@@ -143,6 +143,13 @@ pub struct WgcCaptureDevice {
     /// `Some` = an HDR stream from a monitor in HDR mode: the pool delivers FP16 scRGB (linear
     /// BT.709, 1.0 = 80 nits) and `tex` is FP16 (see `encode/hdr_conv.rs`). `None` = BGRA SDR.
     hdr: Option<crate::hdr::HdrMeta>,
+    /// An HDR stream was asked for and this device can carry it (the NVIDIA device): a monitor
+    /// that turns HDR ON mid-stream is then picked up by a rebuild (`run`).
+    hdr_capable: bool,
+    /// The captured MONITOR (None for a window: its monitor is looked up live, it can move).
+    hmon: Option<windows::Win32::Graphics::Gdi::HMONITOR>,
+    /// Re-checks the monitor's HDR state about once a second (see `run`).
+    hdr_watch: crate::dxgi::hdr::HdrWatch,
 }
 
 /// Outcome of one `pump_latest` drain: a fresh frame was copied into `tex`, no new frame arrived
@@ -202,7 +209,7 @@ impl WgcCaptureDevice {
         } else {
             None
         };
-        Self::start(device, context, Some(hwnd), item, output_idx, stop, hdr)
+        Self::start(device, context, Some(hwnd), None, item, output_idx, stop, want_hdr, hdr)
     }
 
     /// Build a WGC capture of the whole MONITOR at `output_idx` (DXGI attached-output order,
@@ -224,7 +231,7 @@ impl WgcCaptureDevice {
             windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
         let item: GraphicsCaptureItem = interop.CreateForMonitor(hmon)?;
         let hdr = if want_hdr { crate::dxgi::hdr::output_hdr(&output) } else { None };
-        Self::start(device, context, None, item, actual_idx, stop, hdr)
+        Self::start(device, context, None, Some(hmon), item, actual_idx, stop, want_hdr, hdr)
     }
 
     /// The common tail of `create`/`create_monitor`: WinRT device, frame pool, frame-arrival
@@ -233,14 +240,17 @@ impl WgcCaptureDevice {
         device: ID3D11Device,
         context: ID3D11DeviceContext,
         hwnd: Option<HWND>,
+        hmon: Option<windows::Win32::Graphics::Gdi::HMONITOR>,
         item: GraphicsCaptureItem,
         output_idx: u32,
         stop: Arc<AtomicBool>,
+        want_hdr: bool,
         hdr: Option<crate::hdr::HdrMeta>,
     ) -> windows::core::Result<Self> {
         // HDR needs the capture on the NVIDIA device (the P010 conversion + NVENC run where the
         // frames land; the hybrid bridge to another GPU's NVENC is 8-bit only).
-        let hdr = hdr.filter(|_| crate::encode::device_is_nvidia(&device));
+        let hdr_capable = want_hdr && crate::encode::device_is_nvidia(&device);
+        let hdr = hdr.filter(|_| hdr_capable);
         // SetMaximumFrameLatency(1): keep capture→encode queueing minimal (same as DXGI), and
         // the same max GPU scheduling priority as the DXGI device (PULSAR_GPU_PRIO=0 disables).
         if let Ok(dxgi_dev) = device.cast::<IDXGIDevice1>() {
@@ -326,6 +336,9 @@ impl WgcCaptureDevice {
             arrived_token,
             last_present_ns: 0,
             hdr,
+            hdr_capable,
+            hmon,
+            hdr_watch: crate::dxgi::hdr::HdrWatch::new(Self::monitor_of(hwnd, hmon), hdr.is_some()),
         };
         me.build_pool_texture()?;
         Ok(me)
@@ -478,6 +491,25 @@ impl WgcCaptureDevice {
         self.hdr
     }
 
+    /// The monitor the captured content is on now (a window's monitor can change).
+    pub fn hmonitor(&self) -> windows::Win32::Graphics::Gdi::HMONITOR {
+        unsafe { Self::monitor_of(self.hwnd, self.hmon) }
+    }
+
+    unsafe fn monitor_of(
+        hwnd: Option<HWND>,
+        hmon: Option<windows::Win32::Graphics::Gdi::HMONITOR>,
+    ) -> windows::Win32::Graphics::Gdi::HMONITOR {
+        match (hmon, hwnd) {
+            (Some(m), _) => m,
+            (None, Some(h)) => windows::Win32::Graphics::Gdi::MonitorFromWindow(
+                h,
+                windows::Win32::Graphics::Gdi::MONITOR_DEFAULTTONEAREST,
+            ),
+            (None, None) => Default::default(),
+        }
+    }
+
     /// The pool / `tex` format: FP16 for an HDR capture, else BGRA.
     fn format(&self) -> DXGI_FORMAT {
         if self.hdr.is_some() {
@@ -556,6 +588,20 @@ impl WgcCaptureDevice {
             }
             if rebuild.swap(false, Ordering::AcqRel) {
                 return RunExit::Switch(self.output_idx);
+            }
+            // HDR on/off on the captured monitor (or a window moved onto a monitor in the other
+            // mode): WGC keeps the pool format it started with, so FP16 scRGB from a monitor that
+            // went SDR would be encoded as dim PQ (and an SDR pool never becomes HDR). DXGI sees
+            // this as ACCESS_LOST + a new duplication format; here it is a cheap ~1 s re-check
+            // (cached factory, re-walked only when stale / the monitor changed). A mismatch
+            // rebuilds capture + encoder like a resize does.
+            if self.hdr_capable || self.hdr.is_some() {
+                let mon = self.hmonitor();
+                if let Some(now_hdr) = self.hdr_watch.poll(mon, std::time::Duration::from_secs(1)) {
+                    if now_hdr != self.hdr.is_some() {
+                        return RunExit::Switch(self.output_idx);
+                    }
+                }
             }
 
             // A17: re-anchor the cadence on a big overrun (a stall / long encode / scheduler
