@@ -2842,6 +2842,27 @@ fn text_w(ui: &egui::Ui, s: &str, size: f32) -> f32 {
 		.x
 }
 
+/// `s` cut to at most `max_w` points wide at `size`, with "…" when shortened (long device
+/// names in a value slot or an option tile).
+fn fit_text(ui: &egui::Ui, s: &str, size: f32, max_w: f32) -> String {
+	if text_w(ui, s, size) <= max_w {
+		return s.to_string();
+	}
+	let chars: Vec<char> = s.chars().collect();
+	// Binary search the longest prefix that fits with the ellipsis.
+	let (mut lo, mut hi) = (0usize, chars.len());
+	while lo < hi {
+		let mid = (lo + hi + 1) / 2;
+		let t: String = chars[..mid].iter().collect::<String>() + "…";
+		if text_w(ui, &t, size) <= max_w {
+			lo = mid;
+		} else {
+			hi = mid - 1;
+		}
+	}
+	chars[..lo].iter().collect::<String>().trim_end().to_string() + "…"
+}
+
 /// What a section hands [`Rows::new`]: its slice of the frame-persistent [`UiState`] plus this
 /// frame's nav input.
 struct RowsIn<'a> {
@@ -3115,6 +3136,9 @@ impl<'a> Rows<'a> {
 			RowKind::Page => {
 				let lit = selected || resp.hovered();
 				let disp = live.and_then(|i| options.get(i)).map(|(_, d)| *d).unwrap_or(current);
+				// Never over the label: a long value (a device name) is cut to the room left.
+				let room = (rect.width() - used - 32.0 - 16.0).max(40.0);
+				let disp = fit_text(ui, disp, 13.0, room);
 				ui.painter().text(
 					egui::pos2(rect.right() - 32.0, cy),
 					egui::Align2::RIGHT_CENTER,
@@ -3158,12 +3182,16 @@ impl<'a> Rows<'a> {
 		// As many columns as the longest option allows: short ones (fps, bitrate) four across,
 		// names (encoders, monitors) two.
 		let widest = options.iter().map(|(_, d)| text_w(ui, d, 13.5)).fold(0.0, f32::max);
+		// Longer than half the width (device names): one per line.
+		let half = (ui.available_width() - GRID_GAP) / 2.0 - 24.0;
 		let cols = (if widest <= 92.0 {
 			4
 		} else if widest <= 136.0 {
 			3
-		} else {
+		} else if widest <= half {
 			2
+		} else {
+			1
 		})
 		.min(n);
 		p.hi = p.hi.min(n - 1);
@@ -3217,10 +3245,12 @@ impl<'a> Rows<'a> {
 						ROW_BG
 					};
 					painter.rect_filled(rect, 8.0, fill);
+					let d = fit_text(ui, d, 13.5, rect.width() - 24.0);
+					let painter = ui.painter();
 					painter.text(
 						rect.center(),
 						egui::Align2::CENTER_CENTER,
-						*d,
+						d,
 						egui::FontId::proportional(13.5),
 						if is_cur || hi || hov { egui::Color32::WHITE } else { egui::Color32::from_gray(205) },
 					);
