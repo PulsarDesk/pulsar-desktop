@@ -529,6 +529,9 @@ fn stdin_control() {
 			crate::overlay::set_host_ptr_show(rest.trim() == "1");
 		} else if let Some(rest) = l.strip_prefix("hostname ") {
 			crate::overlay::set_host_name(rest);
+		} else if let Some(rest) = l.strip_prefix("hdrref ") {
+			// HDR10 tone-map reference from the host (SDR white, peak nits) — hdr_ref.rs.
+			crate::hdr_ref::set_from_args(rest.split_whitespace());
 		} else if let Some(rest) = l.strip_prefix("fit ") {
 			// View-fit mode pushed by the frontend (persisted value / respawn re-seed).
 			present::set_fit(rest.trim());
@@ -1015,6 +1018,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
 	// reaches us here (the hook isn't running / didn't suppress it) goes to the app as a
 	// `key <vk> <0|1>` line, into the same key handler. Engaged: never let DefWindowProc act
 	// on it (Alt opening a menu, Alt+F4 closing Pulsar, F10).
+	// A display change: the HDR output check walks the outputs again (`display_is_hdr`). Only
+	// top-level windows get this broadcast; as a child window the stale-factory check
+	// (IDXGIFactory1::IsCurrent) is what catches an HDR toggle.
+	if msg == windows::Win32::UI::WindowsAndMessaging::WM_DISPLAYCHANGE {
+		DISPLAY_CHANGED.store(true, Ordering::Relaxed);
+	}
 	// ---- Pen / touch (WM_POINTER) while engaged: reported to the app, no mouse made of it.
 	if ENGAGED_R.load(Ordering::SeqCst) && !OPEN.load(Ordering::SeqCst) && pointer::on_pointer(hwnd, msg, wp) {
 		return LRESULT(0);
@@ -1310,9 +1319,16 @@ struct Renderer {
 	// HDR10 output (win/hdr.rs): the swapchain is R10G10B10A2 + the PQ BT.2020 colour space
 	// while an HDR10 stream plays on a monitor in HDR mode; B8G8R8A8 SDR otherwise.
 	hdr_swap: bool,
-	// Is the monitor this window is on in HDR mode (re-read at most every 2 s)?
+	// Is the monitor this window is on in HDR mode? Cheap re-check at most every 500 ms
+	// (`display_is_hdr`): the outputs are walked again only when the window changed monitor or
+	// the cached DXGI factory went stale (an HDR toggle / display change).
 	display_hdr: bool,
 	display_hdr_at: Option<std::time::Instant>,
+	display_hdr_mon: windows::Win32::Graphics::Gdi::HMONITOR,
+	display_hdr_factory: Option<windows::Win32::Graphics::Dxgi::IDXGIFactory1>,
+	// The swapchain refused HDR10 on this monitor: stay SDR (tone-mapped) without retrying
+	// every check (each retry is a ResizeBuffers hitch) until the display setup changes.
+	hdr_swap_refused: bool,
 }
 
 impl Renderer {
@@ -1460,6 +1476,9 @@ impl Renderer {
 			hdr_swap: false,
 			display_hdr: false,
 			display_hdr_at: None,
+			display_hdr_mon: Default::default(),
+			display_hdr_factory: None,
+			hdr_swap_refused: false,
 		};
 		r.make_rtv()?;
 		Ok(r)
@@ -2040,9 +2059,14 @@ impl Renderer {
 		}
 		// HDR10 picture (P010): HDR swapchain on an HDR monitor, else SDR (tone-mapped); an SDR
 		// picture always gets the SDR swapchain back.
-		self.update_hdr_swap(td.Format == windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_P010);
+		// Only a PQ picture is HDR: a P010 picture the decoder did not flag PQ
+		// (MF_MT_TRANSFER_FUNCTION) is 10-bit SDR and is drawn as BT.709 (present.rs).
+		let p010 = td.Format == windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_P010;
+		let pq = p010 && self.decoder.as_ref().is_some_and(|d| d.is_hdr());
+		self.update_hdr_swap(pq);
 		if let Some(p) = self.present.as_ref() {
 			p.set_hdr_output(self.hdr_swap);
+			p.set_picture_pq(pq);
 		}
 		let Some(back) = self.swap.GetBuffer::<ID3D11Texture2D>(0).ok() else {
 			return;
@@ -2298,21 +2322,41 @@ impl Renderer {
 		}
 	}
 
-	/// Is the monitor this window is on in HDR mode? Re-read at most every 2 s through a fresh
-	/// DXGI factory (a factory caches outputs: an HDR switch toggled since would go unseen).
-	/// `PULSAR_HDR_OUT=0` forces SDR output (tone-mapped), `=1` HDR10 output.
+	/// Is the monitor this window is on in HDR mode? This runs on the present path, so it is
+	/// kept cheap: at most every 500 ms a `MonitorFromWindow` + `IsCurrent()` check (no
+	/// allocation, no enumeration); the adapters / outputs are walked again only when the
+	/// window moved to another monitor, the cached factory went stale (DXGI marks it so on an
+	/// HDR toggle or any display change) or WM_DISPLAYCHANGE arrived. Such a change also clears
+	/// the "swapchain refused HDR10" latch. `PULSAR_HDR_OUT=0` forces SDR output (tone-mapped),
+	/// `=1` HDR10 output (read once).
 	unsafe fn display_is_hdr(&mut self) -> bool {
-		match std::env::var("PULSAR_HDR_OUT").as_deref() {
-			Ok("0") => return false,
-			Ok("1") => return true,
-			_ => {}
+		use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
+		use windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONEAREST};
+		static FORCE: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+		match FORCE.get_or_init(|| match std::env::var("PULSAR_HDR_OUT").as_deref() {
+			Ok("0") => Some(false),
+			Ok("1") => Some(true),
+			_ => None,
+		}) {
+			Some(v) => return *v,
+			None => {}
 		}
-		if self.display_hdr_at.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(2)) {
-			return self.display_hdr;
+		if self.display_hdr_at.is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(500)) {
+			return self.display_hdr && !self.hdr_swap_refused;
 		}
 		self.display_hdr_at = Some(std::time::Instant::now());
-		self.display_hdr = output_is_hdr(&self.swap);
-		self.display_hdr
+		let mon = MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST);
+		let display_change = DISPLAY_CHANGED.swap(false, std::sync::atomic::Ordering::Relaxed);
+		let stale = display_change || self.display_hdr_factory.as_ref().is_none_or(|f| !f.IsCurrent().as_bool());
+		if stale || mon != self.display_hdr_mon {
+			if stale {
+				self.display_hdr_factory = CreateDXGIFactory1::<IDXGIFactory1>().ok();
+			}
+			self.display_hdr_mon = mon;
+			self.hdr_swap_refused = false;
+			self.display_hdr = self.display_hdr_factory.as_ref().is_some_and(|f| output_is_hdr(f, mon));
+		}
+		self.display_hdr && !self.hdr_swap_refused
 	}
 
 	/// Switch the swapchain between SDR and HDR10 for the picture about to be shown.
@@ -2334,11 +2378,13 @@ impl Renderer {
 			&& s3.CheckColorSpaceSupport(cs).is_ok_and(|f| f & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT.0 as u32 != 0)
 			&& s3.SetColorSpace1(cs).is_ok();
 		if !ok && want {
-			// The swapchain refused HDR10: stay SDR (tone-mapped) for this stream.
+			// The swapchain refused HDR10: stay SDR (tone-mapped), latched until the display
+			// setup changes (`display_is_hdr`) — no ResizeBuffers retry hitch every check.
 			self.hdr_swap = false;
 			let _ = self.swap.ResizeBuffers(0, self.width, self.height, self.swap_format(), Default::default());
 			let _ = s3.SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
-			self.display_hdr = false;
+			self.hdr_swap_refused = true;
+			eprintln!("pulsar-render(win): the swapchain refused HDR10 output — SDR (tone-mapped)");
 		}
 		if self.hdr_swap != prev {
 			eprintln!(
@@ -2363,20 +2409,19 @@ impl Renderer {
 	}
 }
 
-/// The monitor `swap` is on is in HDR mode (its colour space is BT.2020 / PQ), looked up by
-/// name through a fresh factory.
-unsafe fn output_is_hdr(swap: &IDXGISwapChain1) -> bool {
+/// Set by the window procedure on WM_DISPLAYCHANGE: `display_is_hdr` walks the outputs again.
+static DISPLAY_CHANGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The monitor `mon` is in HDR mode (its colour space is BT.2020 / PQ), looked up through `f`
+/// (current while `IsCurrent()`).
+unsafe fn output_is_hdr(f: &windows::Win32::Graphics::Dxgi::IDXGIFactory1, mon: windows::Win32::Graphics::Gdi::HMONITOR) -> bool {
 	use windows::Win32::Graphics::Dxgi::Common::DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
-	use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1, IDXGIOutput6};
-	let Ok(name) = swap.GetContainingOutput().and_then(|o| o.GetDesc()).map(|d| d.DeviceName) else {
-		return false;
-	};
-	let Ok(f) = CreateDXGIFactory1::<IDXGIFactory1>() else { return false };
+	use windows::Win32::Graphics::Dxgi::IDXGIOutput6;
 	let mut a = 0;
 	while let Ok(ad) = f.EnumAdapters1(a) {
 		let mut o = 0;
 		while let Ok(out) = ad.EnumOutputs(o) {
-			if out.GetDesc().is_ok_and(|d| d.DeviceName == name) {
+			if out.GetDesc().is_ok_and(|d| d.Monitor == mon) {
 				return out
 					.cast::<IDXGIOutput6>()
 					.and_then(|o6| o6.GetDesc1())

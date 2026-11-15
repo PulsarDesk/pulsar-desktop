@@ -514,6 +514,9 @@ fn stdin_control() {
 			crate::overlay::set_host_ptr_show(rest.trim() == "1");
 		} else if let Some(rest) = l.strip_prefix("hostname ") {
 			crate::overlay::set_host_name(rest);
+		} else if let Some(rest) = l.strip_prefix("hdrref ") {
+			// HDR10 tone-map reference from the host (SDR white, peak nits) — hdr_ref.rs.
+			crate::hdr_ref::set_from_args(rest.split_whitespace());
 		} else if let Some(rest) = l.strip_prefix("fit ") {
 			// View-fit mode pushed by the frontend (persisted value / respawn re-seed).
 			view::set_fit(rest.trim());

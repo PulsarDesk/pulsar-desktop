@@ -412,14 +412,42 @@ pub fn probe_json() -> String {
 			let _ = MFStartup(MF_VERSION, MFSTARTUP_FULL);
 		});
 	}
-	let mut entries = Vec::new();
-	for (name, subtype, codec, hdr_sample) in [
+	// 1. The base caps: MFT enumeration only (fast, no device), exactly as before HDR.
+	let codecs = [
 		("h264", MFVideoFormat_H264, Codec::H264, None),
 		("h265", MFVideoFormat_HEVC, Codec::H265, Some(TEST_HDR10_H265)),
 		("av1", MFVideoFormat_AV1, Codec::Av1, Some(TEST_HDR10_AV1)),
-	] {
-		let sync_ok = unsafe { create_decoder_mft(subtype, false).is_ok() };
-		let ten_bit = sync_ok && hdr_sample.is_some_and(|s| decodes_to_p010(codec, s));
+	];
+	let sync: Vec<bool> = codecs.iter().map(|c| unsafe { create_decoder_mft(c.1, false).is_ok() }).collect();
+	// 2. The 10-bit checks need a hardware D3D11 device and real decodes. A wedged GPU driver
+	// can block D3D11CreateDevice for good (seen on an NVIDIA host, 2026-11-13); the app gives
+	// the whole probe 15 s and then drops to `probe_unavailable`, which would cost every
+	// session its real codec caps. So they run on their own thread under a short deadline: a
+	// hang or a slow driver only clears `ten_bit` (the process exits after printing, taking a
+	// stuck thread with it). Same adapter as the renderer (the default one, `Renderer::new`).
+	let want: Vec<(usize, Codec, &'static [u8])> = codecs
+		.iter()
+		.enumerate()
+		.filter_map(|(i, c)| c.3.filter(|_| sync[i]).map(|s| (i, c.2, s)))
+		.collect();
+	let (tx, rx) = std::sync::mpsc::channel();
+	std::thread::spawn(move || {
+		// Media Foundation / D3D on this thread: join the process MTA.
+		let _ = unsafe {
+			windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED)
+		};
+		for (i, codec, sample) in want {
+			let _ = tx.send((i, decodes_to_p010(codec, sample)));
+		}
+	});
+	let deadline = std::time::Instant::now() + TEN_BIT_PROBE_BUDGET;
+	let mut ten = [false; 3];
+	while let Ok((i, ok)) = rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+		ten[i] = ok;
+	}
+	let mut entries = Vec::new();
+	for (i, (name, ..)) in codecs.iter().enumerate() {
+		let (sync_ok, ten_bit) = (sync[i], ten[i]);
 		entries.push(format!(
 			concat!(
 				"{{\"codec\":\"{}\",\"ok\":{},\"decoder\":\"mediafoundation\",",
@@ -430,6 +458,9 @@ pub fn probe_json() -> String {
 	}
 	format!("[{}]", entries.join(","))
 }
+
+/// How long the 10-bit decode checks may take in `--probe` before `ten_bit` is reported false.
+const TEN_BIT_PROBE_BUDGET: std::time::Duration = std::time::Duration::from_secs(4);
 
 /// 64×64 HDR10 keyframes (HEVC Main10 / AV1 10-bit, BT.2020 PQ) for the `ten_bit` probe.
 const TEST_HDR10_H265: &[u8] = include_bytes!("../../testdata/test-hdr10.h265");

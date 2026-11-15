@@ -220,6 +220,9 @@ extern "C" {
 		out: *mut CMFormatDescriptionRef,
 	) -> OSStatus;
 	pub fn CMVideoFormatDescriptionGetDimensions(d: CMFormatDescriptionRef) -> CMVideoDimensions;
+	/// +0 extension value (or null); its keys equal the CVImageBuffer attachment keys
+	/// (`kCMFormatDescriptionExtension_TransferFunction` == `kCVImageBufferTransferFunctionKey`).
+	pub fn CMFormatDescriptionGetExtension(d: CMFormatDescriptionRef, key: CFStringRef) -> CFTypeRef;
 	pub fn CMBlockBufferCreateWithMemoryBlock(
 		alloc: CFAllocatorRef,
 		memory: *mut c_void,

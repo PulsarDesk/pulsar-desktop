@@ -9,8 +9,11 @@
 //!   (identity up to 80 % of SDR reference white, then compressed toward 1.0 — no clipping of
 //!   bright highlights, no dimming of the rest; 1000 nits — the HDR10 mastering peak a host
 //!   reports by default — lands on 1.0) → sRGB, into the usual BGRA8 swapchain.
-//!   Reference white is 203 nits (ITU-R BT.2408), which is where a host's SDR desktop sits in
-//!   HDR mode, so the desktop looks like it does on an SDR stream.
+//!   Reference white is the HOST's SDR white level (its "SDR content brightness", sent as
+//!   `DataMsg::HdrMeta`, `crate::hdr_ref`; 203 nits — ITU-R BT.2408 — until it arrives), which
+//!   is where the host's SDR desktop sits in HDR mode, so the desktop looks like it does on an
+//!   SDR stream; the roll-off ends at the host monitor's peak.
+//! - **`Out::Bt709`** — a P010 picture that is not PQ (10-bit SDR): plain BT.709 conversion.
 //!
 //! The VideoProcessor is not used for P010: its HDR colour-space conversion is optional per
 //! driver and unreported; a driver that ignored it would show PQ code values as gamma ones
@@ -37,12 +40,15 @@ pub enum Out {
 	Pq,
 	/// Tone-mapped sRGB (BT.709) for an SDR swapchain / the upscalers.
 	Sdr,
+	/// A 10-bit picture that is NOT PQ (BT.709 SDR, e.g. a Main10 SDR stream): plain BT.709
+	/// Y'CbCr → R'G'B' for an SDR swapchain, no PQ maths.
+	Bt709,
 }
 
 /// SDR reference white in nits (ITU-R BT.2408): `Out::Sdr` maps it to 1.0 before the roll-off.
 pub const SDR_WHITE_NITS: f32 = 203.0;
 /// Below this share of reference white the tone curve is the identity.
-pub const KNEE: f32 = 0.8;
+pub const KNEE: f32 = crate::hdr_ref::KNEE;
 /// The highlight that maps to 1.0 (nits); brighter clips.
 pub const PEAK_NITS: f32 = 1000.0;
 
@@ -87,6 +93,12 @@ float3 rgb_pq(float2 uv) {
 	return saturate(float3(r, g, b));
 }
 float4 ps_pq(VOut i) : SV_Target { return float4(rgb_pq(i.uv), 1.0); }
+// 10-bit limited-range BT.709 Y'CbCr (an SDR Main10 picture) -> R'G'B', already gamma-coded.
+float4 ps_709(VOut i) : SV_Target {
+	float y = (ty.Sample(lin, i.uv) * (65535.0 / 64.0) - 64.0) / 876.0;
+	float2 c = (tc.Sample(lin, i.uv) * (65535.0 / 64.0) - 512.0) / 896.0;
+	return float4(saturate(float3(y + 1.5748 * c.y, y - 0.1873 * c.x - 0.4681 * c.y, y + 1.8556 * c.x)), 1.0);
+}
 float3 eotf(float3 e) {
 	float3 p = pow(e, 1.0 / 78.84375);
 	return 10000.0 * pow(max(p - 0.8359375, 0.0) / (18.8515625 - 18.6875 * p), 1.0 / 0.1593017578125);
@@ -184,6 +196,7 @@ pub struct HdrPresent {
 	vs: ID3D11VertexShader,
 	ps_pq: ID3D11PixelShader,
 	ps_sdr: ID3D11PixelShader,
+	ps_709: ID3D11PixelShader,
 	lin: ID3D11SamplerState,
 	cb: ID3D11Buffer,
 	/// Plane views of the last source texture (keyed by its COM pointer).
@@ -205,7 +218,9 @@ impl HdrPresent {
 	pub fn new(device: &ID3D11Device) -> Result<Self> {
 		unsafe {
 			let (vs_b, pq_b, sdr_b) = (compile("vs_main", "vs_5_0")?, compile("ps_pq", "ps_5_0")?, compile("ps_sdr", "ps_5_0")?);
-			let (mut vs, mut ps_pq, mut ps_sdr) = (None, None, None);
+			let b709 = compile("ps_709", "ps_5_0")?;
+			let (mut vs, mut ps_pq, mut ps_sdr, mut ps_709) = (None, None, None, None);
+			device.CreatePixelShader(bytes(&b709), None, Some(&mut ps_709))?;
 			device.CreateVertexShader(bytes(&vs_b), None, Some(&mut vs))?;
 			device.CreatePixelShader(bytes(&pq_b), None, Some(&mut ps_pq))?;
 			device.CreatePixelShader(bytes(&sdr_b), None, Some(&mut ps_sdr))?;
@@ -234,6 +249,7 @@ impl HdrPresent {
 				vs: vs.unwrap(),
 				ps_pq: ps_pq.unwrap(),
 				ps_sdr: ps_sdr.unwrap(),
+				ps_709: ps_709.unwrap(),
 				lin: lin.unwrap(),
 				cb: cb.unwrap(),
 				views: None,
@@ -266,7 +282,12 @@ impl HdrPresent {
 		let consts = Consts {
 			src: [crop.0 / tw, crop.1 / th, crop.2 / tw, crop.3 / th],
 			rot: rotation_matrix(rot_deg),
-			tm: [SDR_WHITE_NITS, KNEE, PEAK_NITS / SDR_WHITE_NITS, 0.0],
+			tm: {
+				// The host's SDR white + monitor peak (DataMsg::HdrMeta → `hdrref`; 203 / 1000
+				// until it says): its SDR desktop keeps the brightness it has on an SDR stream.
+				let (white, peak) = crate::hdr_ref::get();
+				[white, KNEE, peak / white, 0.0]
+			},
 		};
 		let ctx = &self.ctx;
 		let mut m = D3D11_MAPPED_SUBRESOURCE::default();
@@ -288,7 +309,14 @@ impl HdrPresent {
 		ctx.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 		ctx.VSSetShader(&self.vs, None);
 		ctx.VSSetConstantBuffers(0, Some(&[Some(self.cb.clone())]));
-		ctx.PSSetShader(if out == Out::Pq { &self.ps_pq } else { &self.ps_sdr }, None);
+		ctx.PSSetShader(
+			match out {
+				Out::Pq => &self.ps_pq,
+				Out::Sdr => &self.ps_sdr,
+				Out::Bt709 => &self.ps_709,
+			},
+			None,
+		);
 		ctx.PSSetConstantBuffers(0, Some(&[Some(self.cb.clone())]));
 		ctx.PSSetSamplers(0, Some(&[Some(self.lin.clone())]));
 		ctx.PSSetShaderResources(0, Some(&[Some(vy.clone()), Some(vc.clone())]));

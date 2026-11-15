@@ -733,7 +733,11 @@ impl Gpu {
 			// HDR10 (P010 tagged PQ): tone-mapped to SDR in `video_fs`. The drawable stays an
 			// 8-bit SDR layer — an EDR / PQ CAMetalLayer (true HDR output on an XDR display) is
 			// not wired (see docs/agents/client-video.md).
-			let tm = [if p010 && v.frame.is_pq() { 1.0 } else { 0.0 }, 203.0, 0.8, 1000.0 / 203.0];
+			// Keyed on the PQ tag alone: PQ code values need the same EOTF at 8 or 10 bits, so a
+			// Main10 picture VideoToolbox handed out as 8-bit is still tone-mapped (not shown
+			// washed out). Reference white / peak: the host's SDR white + monitor peak (hdr_ref.rs).
+			let (white, peak) = crate::hdr_ref::get();
+			let tm = [if v.frame.is_pq() { 1.0 } else { 0.0 }, white, crate::hdr_ref::KNEE, peak / white];
 			Some((v, y, c, YuvParams { range, mat, tm }, uvs))
 		});
 		let drew_video = pic.is_some();

@@ -188,6 +188,10 @@ pub struct Present {
 	/// The swapchain is HDR10 (R10G10B10A2 + PQ colour space): P010 passes through as PQ;
 	/// otherwise it is tone-mapped to SDR. Set by the renderer (`mod.rs`) with the swapchain.
 	hdr_out: std::cell::Cell<bool>,
+	/// The current P010 picture is PQ (HDR10); false = 10-bit BT.709 SDR (`set_picture_pq`).
+	picture_pq: std::cell::Cell<bool>,
+	/// FSR failed on the HDR (P010 shader) path; kept apart from `fsr_failed` (the SDR path).
+	fsr_failed_hdr: std::cell::Cell<bool>,
 }
 
 impl Present {
@@ -219,6 +223,8 @@ impl Present {
 			logged: std::cell::Cell::new(None),
 			hdr: std::cell::RefCell::new(None),
 			hdr_out: std::cell::Cell::new(false),
+			picture_pq: std::cell::Cell::new(true),
+			fsr_failed_hdr: std::cell::Cell::new(false),
 		};
 		// Black bars for letterboxing.
 		s.set_black_background();
@@ -402,24 +408,7 @@ impl Present {
 		if !up || (matches!(which, Upscaler::Fsr | Upscaler::Sgsr) && self.fsr_failed.get()) {
 			which = Upscaler::None;
 		}
-		if self.logged.get() != Some(which) {
-			self.logged.set(Some(which));
-			crate::overlay::set_upscaler_active(match which {
-				Upscaler::None => "",
-				Upscaler::Fsr => "FSR",
-				Upscaler::Sgsr => "SGSR",
-				Upscaler::Vendor if self.vendor == VENDOR_NVIDIA => "NVIDIA VSR",
-				Upscaler::Vendor => "Intel VSR",
-			});
-			eprintln!(
-				"pulsar-render(win): upscaler {which:?} (gpu vendor 0x{:04x}, {}x{} -> {}x{})",
-				self.vendor,
-				crop.0,
-				crop.1,
-				dst.right - dst.left,
-				dst.bottom - dst.top
-			);
-		}
+		self.note_upscaler(which, crop, dst);
 		let vendor_want = which == Upscaler::Vendor;
 		if vendor_want != self.vendor_on.get() {
 			self.set_vendor_upscale(vendor_want);
@@ -456,6 +445,35 @@ impl Present {
 		self.blt_to(src, back, None)
 	}
 
+	/// Tell the overlay (and the log) which upscaler runs now, on a change.
+	fn note_upscaler(&self, which: Upscaler, crop: (u32, u32), dst: RECT) {
+		if self.logged.get() == Some(which) {
+			return;
+		}
+		self.logged.set(Some(which));
+		crate::overlay::set_upscaler_active(match which {
+			Upscaler::None => "",
+			Upscaler::Fsr => "FSR",
+			Upscaler::Sgsr => "SGSR",
+			Upscaler::Vendor if self.vendor == VENDOR_NVIDIA => "NVIDIA VSR",
+			Upscaler::Vendor => "Intel VSR",
+		});
+		eprintln!(
+			"pulsar-render(win): upscaler {which:?} (gpu vendor 0x{:04x}, {}x{} -> {}x{})",
+			self.vendor,
+			crop.0,
+			crop.1,
+			dst.right - dst.left,
+			dst.bottom - dst.top
+		);
+	}
+
+	/// The decoder's transfer for the next P010 picture: PQ (HDR10) or not (a 10-bit SDR
+	/// stream, BT.709). Set by the renderer from `Decoder::is_hdr` (MF_MT_TRANSFER_FUNCTION).
+	pub fn set_picture_pq(&self, pq: bool) {
+		self.picture_pq.set(pq);
+	}
+
 	/// The swapchain's mode (see `hdr_out`).
 	pub fn set_hdr_output(&self, on: bool) {
 		self.hdr_out.set(on);
@@ -474,7 +492,15 @@ impl Present {
 			eprintln!("pulsar-render(win): HDR10 stream — shader present");
 		}
 		let hp = slot.as_mut().unwrap();
-		let out = if self.hdr_out.get() { Out::Pq } else { Out::Sdr };
+		// A P010 picture that is not PQ (a 10-bit SDR / BT.709 stream) is shown as BT.709 SDR —
+		// never through the PQ maths.
+		let out = if !self.picture_pq.get() {
+			Out::Bt709
+		} else if self.hdr_out.get() {
+			Out::Pq
+		} else {
+			Out::Sdr
+		};
 		let crop_rect = (
 			src_r.left as f32,
 			src_r.top as f32,
@@ -483,16 +509,20 @@ impl Present {
 		);
 		let up = (dst.right - dst.left) as u32 > crop.0 || (dst.bottom - dst.top) as u32 > crop.1;
 		let which = match pick(UPSCALE.load(std::sync::atomic::Ordering::Relaxed), self.vendor) {
-			_ if out == Out::Pq || !up || self.fsr_failed.get() => Upscaler::None,
+			// Own failure flag: an FSR failure on this path must not turn FSR off for the SDR
+			// streams this renderer shows later (and vice versa).
+			_ if out == Out::Pq || !up || self.fsr_failed_hdr.get() => Upscaler::None,
 			Upscaler::Vendor => Upscaler::Fsr,
 			u => u,
 		};
+		// The overlay names what really runs on this path (the vendor VSR never does here).
+		self.note_upscaler(which, crop, dst);
 		if matches!(which, Upscaler::Fsr | Upscaler::Sgsr) {
 			let mut fs = self.fsr.borrow_mut();
 			if fs.is_none() {
 				match super::fsr::Fsr::new(&self.device) {
 					Ok(f) => *fs = Some(f),
-					Err(_) => self.fsr_failed.set(true),
+					Err(_) => self.fsr_failed_hdr.set(true),
 				}
 			}
 			if let Some(fsr) = fs.as_mut() {
@@ -507,7 +537,7 @@ impl Present {
 					Ok(()) => return Ok(()),
 					Err(e) => {
 						eprintln!("pulsar-render(win): FSR pass on HDR failed ({e}) — plain scaling");
-						self.fsr_failed.set(true);
+						self.fsr_failed_hdr.set(true);
 					}
 				}
 			}

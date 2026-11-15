@@ -128,8 +128,10 @@ pub struct LiveStats {
 	/// The current build streams HDR10.
 	pub(crate) hdr: std::sync::atomic::AtomicBool,
 	/// HDR10 build: the captured monitor (HMONITOR as isize; 0 = unknown) and its peak (nits),
-	/// for [LiveStats::hdr_reference].
+	/// for [`LiveStats::hdr_reference`]. Windows only (no HDR capture elsewhere).
+	#[cfg_attr(not(windows), allow(dead_code))]
 	pub(crate) hdr_mon: std::sync::atomic::AtomicIsize,
+	#[cfg_attr(not(windows), allow(dead_code))]
 	pub(crate) hdr_peak_nits: std::sync::atomic::AtomicU32,
 }
 
