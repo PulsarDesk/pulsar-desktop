@@ -772,6 +772,9 @@ pub(super) async fn hold_session(
 	// Restream::Adapt; preserved across every re-request. Ignored host-side when a window target is
 	// set (per-window capture has no monitor mode).
 	let mut cur_adapt: Option<(u32, u32)> = None;
+	// The monitor's own size while screen adaptation runs (the ladder goes back to it when it is
+	// turned off).
+	let mut adapt_restore: Option<(u32, u32)> = None;
 	// Requested audio channel layout. Stereo today (the client default in play.rs — the
 	// audio paths expect opus/48000/2 and the host negotiates surround down anyway);
 	// kept as state so it's preserved across every re-request and a future surround
@@ -2259,6 +2262,32 @@ pub(super) async fn hold_session(
 						Restream::Adapt(a) => {
 							tracing::info!(adapt = ?a, "screen adaptation toggle");
 							cur_adapt = a;
+							// The host now runs its monitor at (about) this window's size: the
+							// ladder must top out there, not at the monitor's old native size —
+							// it stayed at 1920×1200 and a 2881×1801 desktop was sent scaled down
+							// to 1200p (2026-11-15). Turning it off goes back to the monitor's own.
+							let disp = host_displays.iter().find(|m| m.0 == cur_display).copied();
+							let hz = disp.map(|m| m.3).unwrap_or(0);
+							let fps = if hz > 1 { client_fps.min(crate::util::nearest_fps(hz)) } else { client_fps };
+							let native = match a {
+								Some((w, h)) => Some((w & !1, h & !1)),
+								None => adapt_restore.take().or(disp.map(|m| (m.1, m.2))),
+							};
+							if a.is_some() && adapt_restore.is_none() {
+								adapt_restore = disp.map(|m| (m.1, m.2));
+							}
+							if let Some((w, h)) = native {
+								ctl.set_native(w, h, fps);
+								let p = ctl.point();
+								if adapt_enabled || !manual_res {
+									cur_w = p.width;
+									cur_h = p.height;
+								}
+								if adapt_enabled || !manual_fps {
+									cur_fps = p.fps;
+								}
+								tracing::info!(native = %format!("{w}x{h}@{fps}"), point = %p.label(), "ladder rebuilt for screen adaptation");
+							}
 						}
 					}
 					let req = make_req!();
