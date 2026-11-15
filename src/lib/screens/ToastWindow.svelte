@@ -40,9 +40,11 @@
 					? 'keyboard'
 					: k === 'pad-off'
 						? 'gaming'
-						: k === 'chat-in'
-							? 'chat'
-							: 'edit';
+						: k === 'input-off' || k === 'input-on'
+							? 'keyboard'
+							: k === 'chat-in'
+								? 'chat'
+								: 'edit';
 </script>
 
 <div class="stack">
@@ -55,7 +57,7 @@
 				? t('toast.reveal')
 				: n.kind === 'kbd-perm'
 					? t('toast.kbd-perm-open')
-					: n.kind === 'pad-off'
+					: n.kind === 'pad-off' || n.kind === 'input-off' || n.kind === 'input-on'
 						? n.name
 						: n.kind === 'chat-in'
 							? t('toast.chat-open')
@@ -65,14 +67,14 @@
 				if (e.key === 'Enter' || e.key === ' ') api.toastOpen(n.id).catch(() => {});
 			}}
 		>
-			<span class="ic" class:del={n.kind === 'file-del' || n.kind === 'pad-off'}><Icon name={icon(n.kind)} size={16} /></span>
+			<span class="ic" class:del={n.kind === 'file-del' || n.kind === 'pad-off' || n.kind === 'input-off'}><Icon name={icon(n.kind)} size={16} /></span>
 			<div class="txt">
 				{#if n.kind === 'chat-in'}
 					<div class="ttl">{n.peer || t('toast.chat-in')}</div>
 					<div class="nm wrap">{n.name}</div>
 				{:else}
 					<div class="ttl">{t(`toast.${n.kind}`)}</div>
-					<div class="nm" class:wrap={n.kind === 'pad-off'}>{n.kind === 'kbd-perm' ? t('toast.kbd-perm-body') : n.name}</div>
+					<div class="nm" class:wrap={n.kind === 'pad-off' || n.kind === 'input-off' || n.kind === 'input-on'}>{n.kind === 'kbd-perm' ? t('toast.kbd-perm-body') : n.name}</div>
 					{#if n.peer}<div class="sub">{t('toast.from', { peer: n.peer })}</div>{/if}
 				{/if}
 			</div>

@@ -124,6 +124,13 @@ mod imp {
 			fallback(&mut self.desk);
 		}
 
+		/// The SYSTEM helper is connected and injects (it reaches elevated windows, UAC and
+		/// the lock screen, so UIPI blocks nothing).
+		pub(crate) fn system_helper_active(&mut self) -> bool {
+			self.ensure_sys();
+			self.sys.as_ref().is_some_and(|s| s.is_alive())
+		}
+
 		pub(crate) fn set_monitor(&mut self, rect: Option<MonitorRect>) {
 			self.monitor = rect;
 			self.desk.set_monitor(rect);

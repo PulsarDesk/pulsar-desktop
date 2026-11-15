@@ -76,6 +76,7 @@ mod mobile_link;
 mod pinch;
 mod play;
 mod pad_notice;
+mod input_notice;
 mod play_notice;
 // Sleep / display off ends the sessions this machine is viewing; waking reconnects them.
 mod power_watch;

@@ -1570,6 +1570,18 @@ pub(super) async fn hold_session(
 									crate::pad_notice::client_text(slot, &reason, crate::i18n::lang() == "en"),
 								);
 							}
+							DataMsg::InputUnavailable { reason } => {
+								// The host cannot pass our mouse / keyboard to its desktop (no
+								// /dev/uinput access, no Accessibility grant, an elevated window in
+								// front of a non-elevated Windows host): say why in-session instead of
+								// leaving a picture that ignores every click (drained on the 2 s tick).
+								// The host rate-limits these.
+								tracing::warn!(%reason, "host reports remote input does not reach its desktop");
+								crate::play_notice::push(
+									id,
+									crate::input_notice::client_text(&reason, crate::i18n::lang() == "en"),
+								);
+							}
 							DataMsg::FsEntries { path, entries } => {
 								// A host directory listing for the file panel's remote pane.
 								let _ = app_ev.emit("fs-entries", FsEntriesPayload { id, path, entries });

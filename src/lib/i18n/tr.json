@@ -432,6 +432,8 @@
 	"toast.file-del": "Dosya silindi",
 	"toast.file-mod": "Dosya değiştirildi",
 	"toast.pad-off": "Sanal kol oluşturulamadı",
+	"toast.input-off": "Uzaktan kontrol çalışmıyor",
+	"toast.input-on": "Uzaktan kontrol çalışıyor",
 	"toast.chat-in": "Yeni mesaj",
 	"toast.chat-open": "Sohbeti açmak için tıkla",
 	"toast.from": "{peer} gönderdi",

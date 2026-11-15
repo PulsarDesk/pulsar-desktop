@@ -505,6 +505,10 @@ pub(crate) async fn bring_online(
 ) -> Result<String, String> {
 	// Shared mode: only the machine-wide host lease holder registers (one host per PC).
 	crate::shared_mode::lease::may_host()?;
+	// Remote input permission (Linux /dev/uinput, macOS Accessibility): with unattended access
+	// on, a toast now, so the person here can fix it before anyone connects (input_notice.rs;
+	// once per process).
+	crate::input_notice::host_started(&app);
 	// Remove the virtual pads a killed Pulsar left behind (orphaned Duo HID devices, Duo /
 	// USB/IP pads whose creating process is gone), once per process and off this thread
 	// (SetupAPI + maybe `usbip`): a dead pad is otherwise picked over the session's new one.
@@ -1140,6 +1144,8 @@ pub(crate) async fn bring_online(
 				// A clone the on_input gamepad path uses to forward the game's rumble back to
 				// the client (one dedicated thread per emulated DS4 pad).
 				let rumble_out = out_tx.clone();
+				// A clone for the on_input "your input does not reach this host" notices.
+				let input_out = out_tx.clone();
 
 				// C9: Register this session at accept time (not deferred to the first
 				// StartStream) so the host operator can always see and kick any
@@ -1620,8 +1626,10 @@ pub(crate) async fn bring_online(
 						u8,
 						(ResolvedTarget, Box<dyn VirtualGamepad>),
 					> = std::collections::HashMap::new();
+					// Opened on the first event that needs it; a failed open is retried at most
+					// every 5 s (input_notice::SessionNotice::open_due), so a permission fixed
+					// mid-session (the uinput rule) heals this session too.
 					let mut desktop: Option<sysinput::HostInput> = None;
-					let mut tried = false;
 					// PHASE 3B (same-host co-op): per-WINDOW input target. When THIS session captures
 					// a specific window (a launched game / picked app — Phase 2b stashed its HWND in
 					// `launched_hwnd`), its kb/mouse is delivered to THAT window's message pump via
@@ -1657,6 +1665,8 @@ pub(crate) async fn bring_online(
 					// Virtual pads the host can't create are reported (create_pad_or_tell).
 					let pad_app = app_h.clone();
 					let mut pad_told = false;
+					// Input that cannot reach this desktop is reported (input_notice.rs).
+					let mut input_notice = crate::input_notice::SessionNotice::new(input_out, app_h.clone());
 					// Which monitor's geometry is currently applied to the desktop injector, so we
 					// only re-resolve the virtual-desktop rect when the streamed monitor changes.
 					// `u32::MAX` = "none applied yet" (forces the first resolve).
@@ -1999,12 +2009,32 @@ pub(crate) async fn bring_online(
 								if routed_to_window {
 									return;
 								}
-								if !tried && !mock_capture() {
-									tried = true;
+								let now = std::time::Instant::now();
+								if desktop.is_none() && !mock_capture() && input_notice.open_due(now) {
 									match sysinput::HostInput::new() {
-										Ok(d) => desktop = Some(d),
-										Err(e) => tracing::warn!("desktop input unavailable: {e}"),
+										Ok(d) => {
+											desktop = Some(d);
+											input_notice.opened();
+										}
+										Err(e) => {
+											tracing::warn!("desktop input unavailable: {e}");
+											input_notice.open_failed(&e, now);
+										}
 									}
+								}
+								// Input permission (Linux /dev/uinput, macOS Accessibility, where the
+								// injector opens without the grant and drops every event): the client
+								// hears it in its session loop (input_notice.rs; once while it passes,
+								// every minute while it fails).
+								if !mock_capture() {
+									input_notice.preflight(now);
+								}
+								// Windows: an elevated window in front swallows this input (UIPI) unless
+								// the SYSTEM helper injects; tell the client (rate-limited).
+								#[cfg(windows)]
+								if let Some(d) = desktop.as_mut() {
+									let helper = d.system_helper_active();
+									input_notice.check_window(&other, helper);
 								}
 								// Windows: resolve the streamed monitor's rect for pen / touch (a pen-only
 								// client never sends PointerMotion, which is where the pointer resolves it).

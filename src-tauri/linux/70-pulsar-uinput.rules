@@ -1,0 +1,13 @@
+# Pulsar (GPLv3): remote control on a Linux host.
+#
+# The host types and clicks for the connected client through uinput (virtual keyboard,
+# mouse, pen and touch devices) and creates virtual controllers there too. /dev/uinput is
+# root-only on most distros; this gives the user logged in at the seat access to it (same
+# rule as Steam's steam-devices package). `static_node` applies it to the node systemd
+# creates before the uinput module loads. `uaccess` must be tagged before
+# 73-seat-late.rules, hence the 70- prefix.
+#
+# Headless host (no local seat login, e.g. only over SSH): uaccess does not apply. Add the
+# user to a group instead, e.g. GROUP="input", MODE="0660" on this line plus
+# `sudo usermod -aG input <user>` (members can then read and fake all input devices).
+KERNEL=="uinput", SUBSYSTEM=="misc", OPTIONS+="static_node=uinput", TAG+="uaccess"

@@ -84,6 +84,45 @@ tarafta çalışmıyor: …" in-session (`pad_notice.rs` → `play_notice`), the
 toast. Whether GameController / SDL accept a virtual (non-USB/BT) device with these VID/PIDs
 is unverified.
 
+**Remote input permission notices (2026-11-15, untested on real hosts):** a host whose input
+cannot reach its desktop used to fail silently on every OS. pulsar-core
+`input::permission::preflight()` checks Linux `/dev/uinput` (writable) and macOS Accessibility
+(`AXIsProcessTrusted`); on Windows (skipped while the SYSTEM helper injects)
+`foreground_window_blocked()` (keys) / `pointer_target_blocked()` (clicks, scroll, pen, touch:
+the top-level window under the cursor — UIPI judges pointer input by that window) spot an
+elevated target of a non-elevated host (UIPI drops `SendInput` while it reports success), and
+the secure desktop (UAC prompt, lock screen → `win_secure_desktop`). The host sends
+`DataMsg::InputUnavailable { reason }` (an `InputFailure` token) from the session's input
+path, never at accept time (the client is then still in its caps / probe exchange, which
+drops other messages; metadata-only connections got it too): the preflight on the first
+input that goes to the desktop injector with control granted (again every 60 s while it
+fails), a failed injector open (retried every 5 s, so a fixed rule heals the running
+session), and a click / key into a newly blocked window (once per window, again after 60 s).
+The same cause reaches the client at most once a minute. The client shows "Fare ve klavyen
+karşı tarafa ulaşmıyor: …" in-session (`input_notice.rs` → `play_notice`; mobile:
+`input-unavailable` event → toast). The host shows an `input-off` toast (once per cause per
+10 min; at host start only with unattended access on, once per process — every Pulsar goes
+online as a host). A click asks for the Accessibility grant on macOS; on Linux it installs the
+uinput rule through pkexec, re-checks and toasts the result (`input-on` "fixed", or "rule
+installed but no local seat: add the user to the input group"; a host whose rule is already
+there gets that text instead of "click to install"). No elevation flow on Windows. Gap: a
+Linux X11 window-capture session routes the pointer through XTest, so its notice (keys /
+pen / touch in front still need uinput) says "mouse and keyboard" too broadly.
+`--selftest` prints a `remote-input` line. An Android host sends `android_control_off` (the
+control AccessibilityService is off) or `android_control_missing` (the build has none: the
+default release APK) on a press, checked at most every 5 s, told at most once a minute.
+
+**Linux uinput rule:** `/dev/uinput` is root-only on stock distros (Steam's `steam-devices`
+package is what usually opens it). The .deb / .rpm now ship
+`/usr/lib/udev/rules.d/70-pulsar-uinput.rules` (`KERNEL=="uinput", SUBSYSTEM=="misc",
+OPTIONS+="static_node=uinput", TAG+="uaccess"` — Steam's rule: the user logged in at the seat
+gets the node's ACL) plus `uinput` in `/usr/lib/modules-load.d/pulsar.conf`; postinst loads the
+module and re-triggers udev so it applies without a re-login. The AppImage installs nothing:
+its host toast's click runs one pkexec prompt that writes the same rule to
+`/etc/udev/rules.d/70-pulsar-uinput.rules` (+ `/etc/modules-load.d/pulsar-uinput.conf`) and
+re-triggers udev (skipped when a rule is already there). Headless hosts (only SSH, no seat
+login) do not get `uaccess`: the rule file's comment says how to grant a group instead.
+
 **Scaffolded / known gaps:** HW encode on
 the Wayland/gst path (software x264 only); media-over-the-session for
 symmetric-NAT (media is a direct UDP RTP flow today — fine for LAN/cone-NAT/
