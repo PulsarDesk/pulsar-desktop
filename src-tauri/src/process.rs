@@ -1806,52 +1806,123 @@ fn rkmpp_probe_ok(probe_stdout: &str) -> bool {
 	})
 }
 
-/// The Rockchip renderer to run instead of `pulsar-render`, decided once per app run:
-/// only when it is bundled, an MPP device node exists, and its own `--probe` decodes a canned
-/// keyframe on an rkmpp decoder (see [`rkmpp_probe_ok`]). x64, non-Rockchip arm64 boards, the
-/// Orange Pi image's `.deb` (built without it) and dev builds never get here past the file check.
+/// Parse `PULSAR_PREFER_SYSTEM_FFMPEG`: `Some(true)` for `1`/`on`/`true`, `Some(false)` for
+/// `0`/`off`/`false`, `None` (auto) otherwise.
+#[cfg(any(target_os = "linux", test))]
+fn prefer_system_ffmpeg(var: Option<&str>) -> Option<bool> {
+	match var.map(str::trim) {
+		Some("0") | Some("off") | Some("false") => Some(false),
+		Some("1") | Some("on") | Some("true") => Some(true),
+		_ => None,
+	}
+}
+
+/// The once-per-run renderer decision on Linux (see [`rkmpp_choice`]).
+#[cfg(target_os = "linux")]
+struct RkmppChoice {
+	/// The Rockchip variant to run instead of `pulsar-render`.
+	variant: Option<String>,
+	/// `(binary, --probe stdout)` of the renderer that WILL run, when the decision already
+	/// probed it — `caps::probe_decoders` reuses it instead of spawning the same probe again.
+	probe: Option<(String, String)>,
+}
+
+/// Run `bin --probe` the way the app runs the renderer (same lib env, 15 s cap). `None` when
+/// it could not run or timed out.
+#[cfg(target_os = "linux")]
+fn run_render_probe(bin: &str) -> Option<String> {
+	let mut cmd = std::process::Command::new(bin);
+	cmd.arg("--probe").stderr(std::process::Stdio::null());
+	apply_render_lib_env(&mut cmd);
+	match crate::caps::output_within(cmd, std::time::Duration::from_secs(15)) {
+		Ok(o) => Some(String::from_utf8_lossy(&o.stdout).into_owned()),
+		Err(e) => {
+			tracing::warn!(%bin, err = %e, "renderer: --probe did not complete");
+			None
+		}
+	}
+}
+
+/// Which renderer runs on Linux, decided once per app run. The Rockchip variant runs only
+/// when ALL of these hold (Auto, the default):
+///   1. it is bundled (generic linux-arm64 bundles; not x64, the Orange Pi image's `.deb`,
+///      dev builds);
+///   2. an MPP device node exists;
+///   3. `PULSAR_PREFER_SYSTEM_FFMPEG` is not explicitly on — the user asked for the generic
+///      renderer on the board's own ffmpeg;
+///   4. the GENERIC renderer's `--probe` (with its usual lib env, so a system libavcodec58
+///      with rkmpp counts) puts NO codec on a zero-copy `*_rkmpp` decoder — a setup that
+///      already decodes on rkmpp is never switched to the private stack;
+///   5. the variant's own `--probe` does (see [`rkmpp_probe_ok`]).
+///
+/// Whichever probe decided is kept for the caps probe, so startup probes at most twice (the
+/// generic renderer, then the variant) — the same as before the variant existed plus one.
+/// A transient failure (decoder busy at startup) keeps the generic renderer for this run.
+#[cfg(target_os = "linux")]
+fn rkmpp_choice(app: &AppHandle) -> &'static RkmppChoice {
+	static CHOICE: std::sync::OnceLock<RkmppChoice> = std::sync::OnceLock::new();
+	CHOICE.get_or_init(|| {
+		let none = RkmppChoice { variant: None, probe: None };
+		let mode = rkmpp_mode(std::env::var("PULSAR_RKMPP_RENDER").ok().as_deref());
+		if mode == RkmppMode::Off {
+			return none;
+		}
+		let bin = bundled_bin(app, RKMPP_RENDER);
+		if !std::path::Path::new(&bin).is_file() {
+			return none; // not bundled (x64, opi5 .deb, dev build): `bundled_bin` gave the bare name
+		}
+		if mode == RkmppMode::Force {
+			tracing::info!(%bin, "renderer: Rockchip variant forced (PULSAR_RKMPP_RENDER)");
+			return RkmppChoice { variant: Some(bin), probe: None };
+		}
+		if !RKMPP_DEVICES.iter().any(|d| std::path::Path::new(d).exists()) {
+			return none;
+		}
+		if prefer_system_ffmpeg(std::env::var("PULSAR_PREFER_SYSTEM_FFMPEG").ok().as_deref()) == Some(true) {
+			tracing::info!("renderer: PULSAR_PREFER_SYSTEM_FFMPEG set — keeping pulsar-render on the system ffmpeg");
+			return none;
+		}
+		let generic = bundled_bin(app, "pulsar-render");
+		let generic_probe = run_render_probe(&generic);
+		let keep_generic = |why: &str| {
+			tracing::info!(reason = why, "renderer: keeping pulsar-render");
+			RkmppChoice {
+				variant: None,
+				probe: generic_probe.clone().map(|out| (generic.clone(), out)),
+			}
+		};
+		if generic_probe.as_deref().is_some_and(rkmpp_probe_ok) {
+			return keep_generic("it already decodes on rkmpp (system ffmpeg)");
+		}
+		let variant_probe = run_render_probe(&bin).unwrap_or_default();
+		if rkmpp_probe_ok(&variant_probe) {
+			tracing::info!(%bin, probe = %variant_probe.trim(), "renderer: Rockchip MPP variant selected");
+			RkmppChoice { variant: Some(bin.clone()), probe: Some((bin, variant_probe)) }
+		} else {
+			tracing::warn!(%bin, probe = %variant_probe.trim(), "renderer: MPP device present but the Rockchip variant found no working rkmpp decoder");
+			keep_generic("the variant found no working rkmpp decoder")
+		}
+	})
+}
+
 #[cfg(target_os = "linux")]
 fn rkmpp_render_bin(app: &AppHandle) -> Option<String> {
-	static CHOICE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-	CHOICE
-		.get_or_init(|| {
-			let mode = rkmpp_mode(std::env::var("PULSAR_RKMPP_RENDER").ok().as_deref());
-			if mode == RkmppMode::Off {
-				return None;
-			}
-			let bin = bundled_bin(app, RKMPP_RENDER);
-			if !std::path::Path::new(&bin).is_file() {
-				return None; // not bundled (x64, opi5 .deb, dev build): `bundled_bin` gave the bare name
-			}
-			if mode == RkmppMode::Force {
-				tracing::info!(%bin, "renderer: Rockchip variant forced (PULSAR_RKMPP_RENDER)");
-				return Some(bin);
-			}
-			if !RKMPP_DEVICES.iter().any(|d| std::path::Path::new(d).exists()) {
-				return None;
-			}
-			let mut cmd = std::process::Command::new(&bin);
-			cmd.arg("--probe").stderr(std::process::Stdio::null());
-			apply_render_lib_env(&mut cmd);
-			let out = crate::caps::output_within(cmd, std::time::Duration::from_secs(15));
-			let stdout = out
-				.as_ref()
-				.map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-				.unwrap_or_default();
-			if rkmpp_probe_ok(&stdout) {
-				tracing::info!(%bin, probe = %stdout.trim(), "renderer: Rockchip MPP variant selected");
-				Some(bin)
-			} else {
-				tracing::warn!(
-					%bin,
-					probe = %stdout.trim(),
-					err = ?out.as_ref().err(),
-					"renderer: MPP device present but the Rockchip variant found no working rkmpp decoder — keeping pulsar-render"
-				);
-				None
-			}
-		})
-		.clone()
+	rkmpp_choice(app).variant.clone()
+}
+
+/// The `--probe` stdout of `render` (what [`render_bin`] returned) when the renderer choice
+/// already ran exactly that probe this run, so the caps probe does not repeat it.
+pub fn cached_render_probe(app: &AppHandle, render: &str) -> Option<String> {
+	#[cfg(target_os = "linux")]
+	{
+		let (bin, out) = rkmpp_choice(app).probe.as_ref()?;
+		return (bin == render).then(|| out.clone());
+	}
+	#[cfg(not(target_os = "linux"))]
+	{
+		let _ = (app, render);
+		None
+	}
 }
 
 /// The private lib dir a Rockchip renderer binary loads its ffmpeg-rockchip + MPP from, when
@@ -1926,13 +1997,10 @@ pub fn apply_render_lib_env(cmd: &mut std::process::Command) {
 		}
 		let appdir = std::env::var_os("APPDIR").filter(|d| !d.is_empty());
 		let mut dirs: Vec<std::ffi::OsString> = Vec::new();
-		let prefer_system = match std::env::var("PULSAR_PREFER_SYSTEM_FFMPEG").as_deref() {
-			Ok("0") | Ok("off") | Ok("false") => false,
-			Ok("1") | Ok("on") | Ok("true") => true,
+		let prefer_system = prefer_system_ffmpeg(std::env::var("PULSAR_PREFER_SYSTEM_FFMPEG").ok().as_deref())
 			// Auto: the documented RK3588 appliance case — inside an AppImage, on a
 			// Rockchip SoC, where the bundled ffmpeg is the rkmpp-less generic build.
-			_ => appdir.is_some() && std::path::Path::new("/dev/mpp_service").exists(),
-		};
+			.unwrap_or_else(|| appdir.is_some() && std::path::Path::new("/dev/mpp_service").exists());
 		if prefer_system {
 			// Debian/Ubuntu multiarch layout. The soname (`.58`) must match the ffmpeg major
 			// `pulsar-render` is linked against (ffmpeg-sys-next); if the host has a different
@@ -2063,7 +2131,20 @@ mod display_pick_tests {
 
 #[cfg(test)]
 mod rkmpp_render_tests {
-	use super::{rkmpp_lib_dir, rkmpp_mode, rkmpp_probe_ok, RkmppMode};
+	use super::{prefer_system_ffmpeg, rkmpp_lib_dir, rkmpp_mode, rkmpp_probe_ok, RkmppMode};
+
+	#[test]
+	fn prefer_system_parses_the_override() {
+		assert_eq!(prefer_system_ffmpeg(None), None);
+		assert_eq!(prefer_system_ffmpeg(Some("")), None);
+		assert_eq!(prefer_system_ffmpeg(Some("auto")), None);
+		for on in ["1", "on", "true", " 1 "] {
+			assert_eq!(prefer_system_ffmpeg(Some(on)), Some(true), "{on:?}");
+		}
+		for off in ["0", "off", "false"] {
+			assert_eq!(prefer_system_ffmpeg(Some(off)), Some(false), "{off:?}");
+		}
+	}
 
 	#[test]
 	fn mode_parses_the_override() {

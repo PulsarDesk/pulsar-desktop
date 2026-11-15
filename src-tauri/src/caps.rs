@@ -220,22 +220,29 @@ fn probe_decoders(app: &AppHandle, platform: &str) -> Vec<DecoderCap> {
 	// hardware), Linux decodes canned frames.
 	{
 		let render = crate::process::render_bin(app);
-		let mut cmd = std::process::Command::new(&render);
-		cmd.arg("--probe").stderr(std::process::Stdio::null());
-		// Probe with the SAME lib resolution the real renderer uses, so the reported
-		// decoder/tier match what will actually run (rkmpp HW on RK3588, not software).
-		crate::process::apply_render_lib_env(&mut cmd);
-		// Windows: the probe must never flash a console window (GUI host).
-		crate::process::no_window(&mut cmd);
-		// Bounded: a renderer probe that hangs (a wedged decoder init) must not hold the
-		// whole caps probe forever.
-		let out = output_within(cmd, std::time::Duration::from_secs(15));
-		let Ok(out) = out else {
-			// Renderer missing: software ffmpeg decode still exists inside it when present;
-			// report nothing rather than guessing.
-			return probe_unavailable(platform);
+		// Linux: choosing between `pulsar-render` and the Rockchip variant may already have
+		// run this very probe (process.rs `rkmpp_choice`) — reuse it, don't open MPP twice.
+		let text = match crate::process::cached_render_probe(app, &render) {
+			Some(text) => text,
+			None => {
+				let mut cmd = std::process::Command::new(&render);
+				cmd.arg("--probe").stderr(std::process::Stdio::null());
+				// Probe with the SAME lib resolution the real renderer uses, so the reported
+				// decoder/tier match what will actually run (rkmpp HW on RK3588, not software).
+				crate::process::apply_render_lib_env(&mut cmd);
+				// Windows: the probe must never flash a console window (GUI host).
+				crate::process::no_window(&mut cmd);
+				// Bounded: a renderer probe that hangs (a wedged decoder init) must not hold the
+				// whole caps probe forever.
+				let out = output_within(cmd, std::time::Duration::from_secs(15));
+				let Ok(out) = out else {
+					// Renderer missing: software ffmpeg decode still exists inside it when
+					// present; report nothing rather than guessing.
+					return probe_unavailable(platform);
+				};
+				String::from_utf8_lossy(&out.stdout).into_owned()
+			}
 		};
-		let text = String::from_utf8_lossy(&out.stdout);
 		let Ok(parsed) = serde_json::from_str::<serde_json::Value>(text.trim()) else {
 			return probe_unavailable(platform);
 		};
