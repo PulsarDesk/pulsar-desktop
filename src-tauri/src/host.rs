@@ -499,8 +499,9 @@ pub(crate) async fn bring_online(
 ) -> Result<String, String> {
 	// Shared mode: only the machine-wide host lease holder registers (one host per PC).
 	crate::shared_mode::lease::may_host()?;
-	// Remote input permission (Linux /dev/uinput, macOS Accessibility): a toast now, so the
-	// person here can fix it before anyone connects (input_notice.rs; rate-limited).
+	// Remote input permission (Linux /dev/uinput, macOS Accessibility): with unattended access
+	// on, a toast now, so the person here can fix it before anyone connects (input_notice.rs;
+	// once per process).
 	crate::input_notice::host_started(&app);
 	// Remove the virtual pads a killed Pulsar left behind (orphaned Duo HID devices, Duo /
 	// USB/IP pads whose creating process is gone), once per process and off this thread
@@ -1187,9 +1188,6 @@ pub(crate) async fn bring_online(
 						.insert(sid, (peer.clone(), out_tx.clone()));
 					None
 				};
-				// Input permission preflight (Linux /dev/uinput, macOS Accessibility): the client
-				// learns at once that its mouse / keyboard will not reach this desktop.
-				crate::input_notice::session_started(&app_h, &out_tx, approved_view_only);
 
 				// Media-over-session: a send-only session handle for the RTP forwarder
 				// tasks (they transmit concurrently with the serve loop's recv), and the
@@ -1622,8 +1620,10 @@ pub(crate) async fn bring_online(
 						u8,
 						(ResolvedTarget, Box<dyn VirtualGamepad>),
 					> = std::collections::HashMap::new();
+					// Opened on the first event that needs it; a failed open is retried at most
+					// every 5 s (input_notice::SessionNotice::open_due), so a permission fixed
+					// mid-session (the uinput rule) heals this session too.
 					let mut desktop: Option<sysinput::HostInput> = None;
-					let mut tried = false;
 					// PHASE 3B (same-host co-op): per-WINDOW input target. When THIS session captures
 					// a specific window (a launched game / picked app — Phase 2b stashed its HWND in
 					// `launched_hwnd`), its kb/mouse is delivered to THAT window's message pump via
@@ -2003,15 +2003,25 @@ pub(crate) async fn bring_online(
 								if routed_to_window {
 									return;
 								}
-								if !tried && !mock_capture() {
-									tried = true;
+								let now = std::time::Instant::now();
+								if desktop.is_none() && !mock_capture() && input_notice.open_due(now) {
 									match sysinput::HostInput::new() {
-										Ok(d) => desktop = Some(d),
+										Ok(d) => {
+											desktop = Some(d);
+											input_notice.opened();
+										}
 										Err(e) => {
 											tracing::warn!("desktop input unavailable: {e}");
-											input_notice.open_failed(&e);
+											input_notice.open_failed(&e, now);
 										}
 									}
+								}
+								// Input permission (Linux /dev/uinput, macOS Accessibility, where the
+								// injector opens without the grant and drops every event): the client
+								// hears it in its session loop (input_notice.rs; once while it passes,
+								// every minute while it fails).
+								if !mock_capture() {
+									input_notice.preflight(now);
 								}
 								// Windows: an elevated window in front swallows this input (UIPI) unless
 								// the SYSTEM helper injects; tell the client (rate-limited).

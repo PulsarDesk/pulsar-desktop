@@ -40,7 +40,7 @@
 					? 'keyboard'
 					: k === 'pad-off'
 						? 'gaming'
-						: k === 'input-off'
+						: k === 'input-off' || k === 'input-on'
 							? 'keyboard'
 							: k === 'chat-in'
 								? 'chat'
@@ -57,7 +57,7 @@
 				? t('toast.reveal')
 				: n.kind === 'kbd-perm'
 					? t('toast.kbd-perm-open')
-					: n.kind === 'pad-off' || n.kind === 'input-off'
+					: n.kind === 'pad-off' || n.kind === 'input-off' || n.kind === 'input-on'
 						? n.name
 						: n.kind === 'chat-in'
 							? t('toast.chat-open')
@@ -74,7 +74,7 @@
 					<div class="nm wrap">{n.name}</div>
 				{:else}
 					<div class="ttl">{t(`toast.${n.kind}`)}</div>
-					<div class="nm" class:wrap={n.kind === 'pad-off' || n.kind === 'input-off'}>{n.kind === 'kbd-perm' ? t('toast.kbd-perm-body') : n.name}</div>
+					<div class="nm" class:wrap={n.kind === 'pad-off' || n.kind === 'input-off' || n.kind === 'input-on'}>{n.kind === 'kbd-perm' ? t('toast.kbd-perm-body') : n.name}</div>
 					{#if n.peer}<div class="sub">{t('toast.from', { peer: n.peer })}</div>{/if}
 				{/if}
 			</div>

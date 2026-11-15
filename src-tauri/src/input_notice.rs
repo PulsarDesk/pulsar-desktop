@@ -2,17 +2,29 @@
 //! `input::permission`): the client's in-session notice ("Your mouse and keyboard do not
 //! reach the other side: …"), the host's toast, and when each is sent.
 //!
-//! * Host start ([`host_started`]) and session start ([`session_started`]): the preflight
-//!   (Linux `/dev/uinput`, macOS Accessibility). The client gets the notice at once instead of
-//!   finding out by clicking into a picture that does not react.
-//! * The desktop injector failing to open on the first input event ([`SessionNotice::open_failed`]).
-//! * Windows, live: an elevated window in front while the host is not elevated and the SYSTEM
-//!   helper is not connected (UIPI drops the input, `SendInput` still reports success)
+//! * Host start ([`host_started`], unattended access only, once per process): the preflight
+//!   (Linux `/dev/uinput`, macOS Accessibility) as a host toast, so an unattended host can be
+//!   fixed before anyone connects. Every Pulsar goes online as a host, so a client-only user
+//!   is not nagged on every launch.
+//! * In a session, on input that goes to the desktop injector while control is granted
+//!   ([`SessionNotice::preflight`]). The client only sends input from its session loop, which
+//!   shows the notice; a notice sent at accept time reached the client while it was still in
+//!   its caps / probe exchange, which drops everything else, and it also fired for
+//!   metadata-only connections (the mobile game-library fetch). A view-only session, or one
+//!   whose input all goes to a captured window, never gets here.
+//! * The desktop injector failing to open ([`SessionNotice::open_failed`]). It is retried at
+//!   most every [`OPEN_RETRY`] ([`SessionNotice::open_due`]), so a fix (the uinput rule) also
+//!   heals the running session.
+//! * Windows, live: the target window belongs to an elevated process while the host is not
+//!   elevated and the SYSTEM helper is not connected (UIPI drops the input, `SendInput` still
+//!   reports success) — keys: the foreground window, clicks / scrolls / pen / touch: the window
+//!   under the cursor — and the secure desktop (UAC prompt, lock screen)
 //!   ([`SessionNotice::check_window`]). No elevation flow is offered for it.
 //!
-//! Rate limits: the client gets each cause once per session start, and the Windows window
-//! notice once per newly blocked window, at most every [`WINDOW_REPEAT`]. The host toast is
-//! shown at most once per cause every [`TOAST_EVERY`] across all sessions.
+//! Rate limits: the client hears one cause at most every [`NOTICE_REPEAT`] (another cause at
+//! once), and the Windows window notice once per newly blocked window, at most every
+//! [`WINDOW_REPEAT`]. The host toast is shown at most once per cause every [`TOAST_EVERY`]
+//! across all sessions.
 //!
 //! Strings live in `lang/{tr,en}.json` (`input.*`); an unknown cause token (a newer host)
 //! falls back to the generic text.
@@ -23,14 +35,19 @@ use std::time::{Duration, Instant};
 
 use pulsar_core::input::InputFailure;
 use pulsar_core::service::DataMsg;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 /// The host toast for one cause at most this often (all sessions together).
 const TOAST_EVERY: Duration = Duration::from_secs(10 * 60);
+/// The client hears the same cause at most this often (a still-failing preflight, a failed
+/// injector open).
+const NOTICE_REPEAT: Duration = Duration::from_secs(60);
+/// A desktop injector that failed to open is retried at most this often (on input).
+const OPEN_RETRY: Duration = Duration::from_secs(5);
 /// Windows: the same blocked window is re-announced to the client at most this often.
 #[cfg_attr(not(windows), allow(dead_code))]
 const WINDOW_REPEAT: Duration = Duration::from_secs(60);
-/// Windows: the foreground window is looked at most this often (only on clicks / keys).
+/// Windows: the target window is looked at most this often (only on clicks / keys).
 #[cfg_attr(not(windows), allow(dead_code))]
 const WINDOW_POLL: Duration = Duration::from_millis(500);
 
@@ -39,18 +56,27 @@ fn reason_key(f: InputFailure, host: bool) -> &'static str {
 		(InputFailure::UinputDenied, false) => "input.client.uinput_denied",
 		(InputFailure::MacAccessibility, false) => "input.client.mac_accessibility",
 		(InputFailure::WinElevatedWindow, false) => "input.client.win_elevated",
+		(InputFailure::WinSecureDesktop, false) => "input.client.win_secure_desktop",
 		(InputFailure::AndroidControlOff, false) => "input.client.android_control_off",
+		(InputFailure::AndroidControlMissing, false) => "input.client.android_control_missing",
 		(InputFailure::Other, false) => "input.client.unavailable",
 		(InputFailure::UinputDenied, true) => "input.host.uinput_denied",
 		(InputFailure::MacAccessibility, true) => "input.host.mac_accessibility",
 		(InputFailure::WinElevatedWindow, true) => "input.host.win_elevated",
+		(InputFailure::WinSecureDesktop, true) => "input.host.win_secure_desktop",
 		(InputFailure::AndroidControlOff, true) => "input.host.android_control_off",
+		(InputFailure::AndroidControlMissing, true) => "input.host.android_control_missing",
 		(InputFailure::Other, true) => "input.host.unavailable",
 	}
 }
 
-/// The host's toast line (active language).
+/// The host's toast line (active language). Linux: when the uinput rule is already
+/// installed, a click cannot install it, so the line says what is wrong instead.
 pub(crate) fn host_text(f: InputFailure) -> String {
+	#[cfg(target_os = "linux")]
+	if f == InputFailure::UinputDenied && linux::rule_present().is_some() {
+		return crate::i18n::t("input.host.uinput_no_seat").to_string();
+	}
 	crate::i18n::t(reason_key(f, true)).to_string()
 }
 
@@ -76,7 +102,8 @@ fn toast_due(f: InputFailure, now: Instant) -> bool {
 }
 
 fn toast(app: &AppHandle, f: InputFailure) {
-	if toast_due(f, Instant::now()) {
+	// The secure desktop hides the toast anyway, and the person there sees the prompt.
+	if f != InputFailure::WinSecureDesktop && toast_due(f, Instant::now()) {
 		crate::toast::input_unavailable(app, f, host_text(f));
 	}
 }
@@ -91,10 +118,35 @@ fn tell_client(out: &tokio::sync::mpsc::Sender<DataMsg>, f: InputFailure) {
 	});
 }
 
-/// The host went online: run the preflight off the caller's thread and toast a problem, so
-/// the person at the host can fix it before anyone connects.
+/// Whether the client may hear about `f` now, given `told` (the last cause it heard, and
+/// when); records it if so. Another cause at once, the same one after [`NOTICE_REPEAT`].
+fn notice_due(told: &mut Option<(InputFailure, Instant)>, f: InputFailure, now: Instant) -> bool {
+	match *told {
+		Some((g, t)) if g == f && now.duration_since(t) < NOTICE_REPEAT => false,
+		_ => {
+			*told = Some((f, now));
+			true
+		}
+	}
+}
+
+/// The host went online: with unattended access on (a machine meant to be reached while
+/// nobody sits at it), run the preflight off the caller's thread and toast a problem, so it
+/// can be fixed before anyone connects. Once per process: every Pulsar goes online as a host
+/// (and the headless loop retries), so without the gate a client-only user would get the
+/// toast on every launch. Everyone else hears about it on a session's first input.
 pub(crate) fn host_started(app: &AppHandle) {
-	if crate::host::mock_capture() {
+	static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+	let unattended = app
+		.state::<crate::state::AppState>()
+		.config
+		.lock()
+		.unwrap_or_else(|e| e.into_inner())
+		.unattended_access;
+	if !unattended
+		|| crate::host::mock_capture()
+		|| DONE.swap(true, std::sync::atomic::Ordering::Relaxed)
+	{
 		return;
 	}
 	let app = app.clone();
@@ -107,26 +159,17 @@ pub(crate) fn host_started(app: &AppHandle) {
 		});
 }
 
-/// A session was accepted: tell its client (and the host) when input cannot reach this
-/// desktop. Skipped for a view-only session (its input is dropped on purpose anyway).
-pub(crate) fn session_started(
-	app: &AppHandle,
-	out: &tokio::sync::mpsc::Sender<DataMsg>,
-	view_only: bool,
-) {
-	if view_only || crate::host::mock_capture() {
-		return;
-	}
-	if let Some(f) = pulsar_core::input::permission::preflight() {
-		tell_client(out, f);
-		toast(app, f);
-	}
-}
-
 /// The session's live input notices (owned by its `on_input` closure).
 pub(crate) struct SessionNotice {
 	out: tokio::sync::mpsc::Sender<DataMsg>,
 	app: AppHandle,
+	/// The last cause the client heard, and when ([`notice_due`]).
+	told: Option<(InputFailure, Instant)>,
+	/// The preflight passed in this session (it is not run again).
+	preflight_ok: bool,
+	preflight_at: Option<Instant>,
+	/// The desktop injector's last failed open (retried after [`OPEN_RETRY`]).
+	open_failed_at: Option<Instant>,
 	#[cfg(windows)]
 	window: WindowWatch,
 }
@@ -136,13 +179,44 @@ impl SessionNotice {
 		Self {
 			out,
 			app,
+			told: None,
+			preflight_ok: false,
+			preflight_at: None,
+			open_failed_at: None,
 			#[cfg(windows)]
 			window: WindowWatch::default(),
 		}
 	}
 
-	/// The desktop injector could not be created (first input event of the session).
-	pub(crate) fn open_failed(&mut self, e: &std::io::Error) {
+	/// Tell the client (and toast the host) about `f`, unless the client heard the same cause
+	/// less than [`NOTICE_REPEAT`] ago.
+	fn notify(&mut self, f: InputFailure, now: Instant) {
+		if notice_due(&mut self.told, f, now) {
+			tell_client(&self.out, f);
+			toast(&self.app, f);
+		}
+	}
+
+	/// Whether to (re)try opening the desktop injector now: never tried, or the last failure
+	/// is [`OPEN_RETRY`] old (a fixed permission then heals the running session).
+	pub(crate) fn open_due(&self, now: Instant) -> bool {
+		self.open_failed_at
+			.is_none_or(|t| now.duration_since(t) >= OPEN_RETRY)
+	}
+
+	/// The desktop injector opened; after a failure the cause was fixed meanwhile.
+	pub(crate) fn opened(&mut self) {
+		if self.open_failed_at.take().is_some() {
+			tracing::info!("desktop input available again");
+			self.told = None;
+			self.preflight_ok = false;
+			self.preflight_at = None;
+		}
+	}
+
+	/// The desktop injector could not be created.
+	pub(crate) fn open_failed(&mut self, e: &std::io::Error, now: Instant) {
+		self.open_failed_at = Some(now);
 		let f = if cfg!(target_os = "linux")
 			&& matches!(
 				e.kind(),
@@ -152,36 +226,80 @@ impl SessionNotice {
 		} else {
 			InputFailure::Other
 		};
-		tell_client(&self.out, f);
-		toast(&self.app, f);
+		self.notify(f, now);
+	}
+
+	/// Input is about to go to the desktop injector with control granted: run the preflight
+	/// (Linux `/dev/uinput`; macOS Accessibility, where `DesktopInput::new` succeeds without the
+	/// grant and every event is dropped). Once it passes it is not run again; while it fails it
+	/// runs at most every [`NOTICE_REPEAT`].
+	pub(crate) fn preflight(&mut self, now: Instant) {
+		if self.preflight_ok
+			|| self
+				.preflight_at
+				.is_some_and(|t| now.duration_since(t) < NOTICE_REPEAT)
+		{
+			return;
+		}
+		self.preflight_at = Some(now);
+		match pulsar_core::input::permission::preflight() {
+			None => self.preflight_ok = true,
+			Some(f) => self.notify(f, now),
+		}
 	}
 
 	/// Windows: before a click / key / scroll / pen / touch through the desktop injector, see
-	/// whether an elevated window in front swallows it. `helper` = the SYSTEM helper injects
-	/// (it reaches every window, so nothing is blocked).
+	/// whether the window it goes to swallows it: keys follow the foreground window, pointer
+	/// input the window under the cursor (UIPI judges each by its target). `helper` = the
+	/// SYSTEM helper injects (it reaches every window and the secure desktop).
 	#[cfg(windows)]
 	pub(crate) fn check_window(&mut self, ev: &pulsar_core::service::InputEvent, helper: bool) {
-		use pulsar_core::service::InputEvent;
-		let discrete = match ev {
-			InputEvent::Key { down, .. } | InputEvent::PointerButton { down, .. } => *down,
-			InputEvent::Char(_)
-			| InputEvent::Scroll { .. }
-			| InputEvent::Pen(_)
-			| InputEvent::Touch(_) => true,
-			_ => false,
+		use pulsar_core::input::permission;
+		let Some(target) = window_target(ev) else {
+			return;
 		};
-		if !discrete || helper {
+		if helper {
 			return;
 		}
 		let now = Instant::now();
 		if !self.window.poll_due(now) {
 			return;
 		}
-		let blocked = pulsar_core::input::permission::foreground_window_blocked();
+		let blocked = match target {
+			Target::Foreground => permission::foreground_window_blocked(),
+			Target::Pointer => permission::pointer_target_blocked(),
+		};
 		if self.window.should_tell(blocked, now) {
-			tell_client(&self.out, InputFailure::WinElevatedWindow);
-			toast(&self.app, InputFailure::WinElevatedWindow);
+			let f = if blocked == Some(permission::SECURE_DESKTOP) {
+				InputFailure::WinSecureDesktop
+			} else {
+				InputFailure::WinElevatedWindow
+			};
+			tell_client(&self.out, f);
+			toast(&self.app, f);
 		}
+	}
+}
+
+/// Which window an injected event goes to (Windows UIPI judges it by that window).
+#[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(not(windows), allow(dead_code))]
+enum Target {
+	Foreground,
+	Pointer,
+}
+
+/// The window `ev` lands on, for the events worth a check (presses, not releases or moves).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn window_target(ev: &pulsar_core::service::InputEvent) -> Option<Target> {
+	use pulsar_core::service::InputEvent;
+	match ev {
+		InputEvent::Key { down: true, .. } | InputEvent::Char(_) => Some(Target::Foreground),
+		InputEvent::PointerButton { down: true, .. }
+		| InputEvent::Scroll { .. }
+		| InputEvent::Pen(_)
+		| InputEvent::Touch(_) => Some(Target::Pointer),
+		_ => None,
 	}
 }
 
@@ -206,8 +324,8 @@ impl WindowWatch {
 		true
 	}
 
-	/// `blocked` = the blocked foreground window (or `None`). Tell the client about a window
-	/// it was not told about, or the same one again after [`WINDOW_REPEAT`].
+	/// `blocked` = the blocked target window (or `None`). Tell the client about a window it
+	/// was not told about, or the same one again after [`WINDOW_REPEAT`].
 	fn should_tell(&mut self, blocked: Option<isize>, now: Instant) -> bool {
 		let Some(hwnd) = blocked else {
 			return false;
@@ -224,29 +342,42 @@ impl WindowWatch {
 
 /// The host toast was clicked: fix what can be fixed from here. macOS asks for the
 /// Accessibility grant (and opens the settings pane); Linux installs the uinput udev rule
-/// through pkexec (the AppImage, or a package install that predates the rule). Windows has
-/// nothing to offer (no elevation flow).
-pub(crate) fn fix(f: InputFailure) {
+/// through pkexec (the AppImage, or a package install that predates the rule) and toasts
+/// the result. Windows has nothing to offer (no elevation flow).
+pub(crate) fn fix(app: &AppHandle, f: InputFailure) {
 	match f {
 		InputFailure::MacAccessibility => crate::kbdhook::request_permission(),
 		#[cfg(target_os = "linux")]
 		InputFailure::UinputDenied => {
+			let app = app.clone();
 			let _ = std::thread::Builder::new()
 				.name("uinput-rule".into())
-				.spawn(linux::install_uinput_rule);
+				.spawn(move || linux::install_uinput_rule(&app));
 		}
-		_ => {}
+		_ => {
+			let _ = app;
+		}
 	}
 }
 
 #[cfg(target_os = "linux")]
 mod linux {
+	use pulsar_core::input::permission::preflight;
+
 	/// The same rule the .deb / .rpm ship (`linux/70-pulsar-uinput.rules`).
 	pub(super) const RULE: &str = include_str!("../linux/70-pulsar-uinput.rules");
 	const INSTALLED: [&str; 2] = [
 		"/usr/lib/udev/rules.d/70-pulsar-uinput.rules",
 		"/etc/udev/rules.d/70-pulsar-uinput.rules",
 	];
+
+	/// The installed rule file, if any.
+	pub(super) fn rule_present() -> Option<&'static str> {
+		INSTALLED
+			.iter()
+			.copied()
+			.find(|p| std::path::Path::new(p).exists())
+	}
 
 	/// The root script: write the rule + the boot-time module load, load the module, and
 	/// re-apply udev so the logged-in seat user gets the node's ACL now (no re-login).
@@ -263,22 +394,55 @@ mod linux {
 		)
 	}
 
-	pub(super) fn install_uinput_rule() {
-		if let Some(p) = INSTALLED.iter().find(|p| std::path::Path::new(p).exists()) {
-			// The rule is there, yet the node is not writable: usually no active local seat
-			// (uaccess grants the logged-in seat user only — SSH / headless sessions do not
-			// get it). A password prompt would not help; the docs say what to do.
-			tracing::warn!(
-				rule = p,
-				"uinput rule present but /dev/uinput not writable (no active seat session?)"
-			);
+	fn fixed(app: &tauri::AppHandle) {
+		// A running session's injector reopens on its next input (OPEN_RETRY).
+		crate::toast::input_note(
+			app,
+			true,
+			crate::i18n::t("input.host.uinput_fixed").to_string(),
+		);
+	}
+
+	/// The rule is there, yet the node is not writable: usually no active local seat
+	/// (uaccess grants the logged-in seat user only — SSH / headless sessions, a seat without
+	/// uaccess do not get it). A password prompt would not help: say what would.
+	fn no_seat(app: &tauri::AppHandle, rule: &str) {
+		tracing::warn!(
+			rule,
+			"uinput rule present but /dev/uinput not writable (no active seat session?)"
+		);
+		crate::toast::input_note(
+			app,
+			false,
+			crate::i18n::t("input.host.uinput_no_seat").to_string(),
+		);
+	}
+
+	pub(super) fn install_uinput_rule(app: &tauri::AppHandle) {
+		if preflight().is_none() {
+			// Fixed meanwhile (a re-login, a package install).
+			fixed(app);
+			return;
+		}
+		if let Some(p) = rule_present() {
+			no_seat(app, p);
 			return;
 		}
 		let status = std::process::Command::new("pkexec")
 			.args(["/bin/sh", "-c", &script()])
 			.status();
 		match status {
-			Ok(s) if s.success() => tracing::info!("uinput udev rule installed"),
+			Ok(s) if s.success() => {
+				tracing::info!("uinput udev rule installed");
+				// `udevadm trigger` applies the node's ACL asynchronously: give it a moment.
+				for _ in 0..10 {
+					if preflight().is_none() {
+						return fixed(app);
+					}
+					std::thread::sleep(std::time::Duration::from_millis(300));
+				}
+				no_seat(app, INSTALLED[1]);
+			}
 			Ok(s) => {
 				tracing::warn!(%s, "uinput udev rule not installed (cancelled or no polkit agent)")
 			}
@@ -291,26 +455,32 @@ mod linux {
 mod tests {
 	use super::*;
 
-	const ALL: [InputFailure; 5] = [
+	const ALL: [InputFailure; 7] = [
 		InputFailure::UinputDenied,
 		InputFailure::MacAccessibility,
 		InputFailure::WinElevatedWindow,
+		InputFailure::WinSecureDesktop,
 		InputFailure::AndroidControlOff,
+		InputFailure::AndroidControlMissing,
 		InputFailure::Other,
 	];
 
 	#[test]
 	fn every_reason_has_both_languages() {
+		let mut keys: Vec<&str> = Vec::new();
 		for f in ALL {
 			for host in [false, true] {
-				let k = reason_key(f, host);
-				assert_ne!(crate::i18n::t_in(k, false), k, "tr missing {k}");
-				assert_ne!(
-					crate::i18n::t_in(k, true),
-					crate::i18n::t_in(k, false),
-					"en missing {k}"
-				);
+				keys.push(reason_key(f, host));
 			}
+		}
+		keys.extend(["input.host.uinput_no_seat", "input.host.uinput_fixed"]);
+		for k in keys {
+			assert_ne!(crate::i18n::t_in(k, false), k, "tr missing {k}");
+			assert_ne!(
+				crate::i18n::t_in(k, true),
+				crate::i18n::t_in(k, false),
+				"en missing {k}"
+			);
 		}
 	}
 
@@ -345,6 +515,57 @@ mod tests {
 			InputFailure::AndroidControlOff,
 			t0 + TOAST_EVERY + Duration::from_secs(1)
 		));
+	}
+
+	#[test]
+	fn client_hears_a_cause_once_a_minute_and_another_cause_at_once() {
+		let mut told = None;
+		let t0 = Instant::now();
+		assert!(notice_due(&mut told, InputFailure::UinputDenied, t0));
+		// The failed injector open right after the preflight (same cause): not twice.
+		assert!(!notice_due(
+			&mut told,
+			InputFailure::UinputDenied,
+			t0 + Duration::from_secs(5)
+		));
+		assert!(notice_due(
+			&mut told,
+			InputFailure::Other,
+			t0 + Duration::from_secs(6)
+		));
+		assert!(notice_due(
+			&mut told,
+			InputFailure::UinputDenied,
+			t0 + Duration::from_secs(7)
+		));
+		assert!(notice_due(
+			&mut told,
+			InputFailure::UinputDenied,
+			t0 + Duration::from_secs(7) + NOTICE_REPEAT
+		));
+	}
+
+	#[test]
+	fn keys_follow_the_foreground_window_and_pointer_input_the_window_under_it() {
+		use pulsar_core::service::InputEvent;
+		let key = |down| InputEvent::Key { code: 30, down };
+		let btn = |down| InputEvent::PointerButton { button: 0, down };
+		assert_eq!(window_target(&key(true)), Some(Target::Foreground));
+		assert_eq!(window_target(&key(false)), None);
+		assert_eq!(
+			window_target(&InputEvent::Char('a')),
+			Some(Target::Foreground)
+		);
+		assert_eq!(window_target(&btn(true)), Some(Target::Pointer));
+		assert_eq!(window_target(&btn(false)), None);
+		assert_eq!(
+			window_target(&InputEvent::Scroll { dx: 0.0, dy: 1.0 }),
+			Some(Target::Pointer)
+		);
+		assert_eq!(
+			window_target(&InputEvent::PointerMotion { x: 0.5, y: 0.5 }),
+			None
+		);
 	}
 
 	#[test]

@@ -31,7 +31,7 @@ const LIFETIME: Duration = Duration::from_secs(7);
 /// (macOS: the input capture needs the Accessibility permission), `pad-off` (a client
 /// controller got no virtual pad here — `name` holds the cause), `input-off` (the client's
 /// mouse / keyboard cannot reach this host — `name` holds the cause, a click fixes what can be
-/// fixed: input_notice::fix); the file manager has no remote delete/rename yet, so
+/// fixed: input_notice::fix), `input-on` (that fix worked); the file manager has no remote delete/rename yet, so
 /// `file-del` / `file-mod` are reserved.
 #[derive(Clone, Serialize)]
 pub(crate) struct Toast {
@@ -97,6 +97,13 @@ pub(crate) fn pad_unavailable(app: &AppHandle, text: String) {
 /// (crate::input_notice::host_text). A click runs crate::input_notice::fix.
 pub(crate) fn input_unavailable(app: &AppHandle, f: pulsar_core::input::InputFailure, text: String) {
 	push_full(app, "input-off", text, String::new(), None, None, Some(f));
+}
+
+/// A remote-input note without a fix behind its click: `input-on` (the fix worked) or an
+/// `input-off` that nothing here can fix (e.g. the uinput rule is there but no local seat).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn input_note(app: &AppHandle, ok: bool, text: String) {
+	push(app, if ok { "input-on" } else { "input-off" }, text, String::new(), None);
 }
 
 fn push(app: &AppHandle, kind: &'static str, name: String, peer: String, path: Option<PathBuf>) {
@@ -248,7 +255,7 @@ pub(crate) fn toast_open(app: AppHandle, id: u64) {
 		crate::kbdhook::request_permission();
 	}
 	if let Some(f) = input {
-		crate::input_notice::fix(f);
+		crate::input_notice::fix(&app, f);
 	}
 	if kind == "chat-in" {
 		crate::connections::open_chat(&app, chat_peer);
