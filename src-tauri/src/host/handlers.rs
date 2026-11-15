@@ -3955,6 +3955,7 @@ pub(super) fn make_on_stream(
 							fresh_per_s = c.fresh_per_s,
 							rfi_recovered = c.rfi_recovered,
 							rfi_declined = c.rfi_declined,
+							hdr = c.hdr,
 							"native capture"
 						);
 					}
@@ -3976,6 +3977,13 @@ pub(super) fn make_on_stream(
 					};
 					#[cfg(not(windows))]
 					let label_now = label_enc.clone();
+					// The native capture streams real HDR10 right now (an HDR monitor, FEAT_HDR).
+					#[cfg(windows)]
+					let label_now = if cap_stats.as_ref().is_some_and(|c| c.snapshot().hdr) {
+						format!("{label_now} · HDR10")
+					} else {
+						label_now
+					};
 					if let Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) = stats_enc.try_send(
 						DataMsg::Stats(format!(
 							"{label_now} · {:.1} {}",

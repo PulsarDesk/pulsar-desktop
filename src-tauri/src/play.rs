@@ -954,9 +954,22 @@ pub(crate) async fn start_remote_play(
 	// Held copies so the session menu can re-request the stream at a new resolution.
 	let codec_h = codec.clone();
 	let encoder_h = encoder.clone();
-	// HDR: read from the UI setting persisted in stream_cfg. The PULSAR_HDR env var is a
-	// debug override that wins if set. The UI value is the normal production path.
-	let req_hdr = state.stream_cfg.lock().unwrap().hdr || std::env::var_os("PULSAR_HDR").is_some();
+	// HDR: the UI setting persisted in stream_cfg (Settings → Display). It is only ASKED for
+	// when it can work end to end (`hdr_possible`): the host streams real HDR10 (FEAT_HDR —
+	// a Windows NVENC host; it still sends SDR when its monitor is not in HDR mode), the codec
+	// has a 10-bit profile (HEVC / AV1) and this client's renderer decodes it (`ten_bit`) and
+	// can show it (HDR10 output on an HDR monitor, tone-mapped to SDR otherwise). The PULSAR_HDR
+	// env var is a debug override that asks regardless.
+	let hdr_pref = state.stream_cfg.lock().unwrap().hdr;
+	let hdr_ok = hdr_possible(
+		host_caps.features.iter().any(|f| f == pulsar_core::service::media::FEAT_HDR),
+		&codec,
+		probed_decoders.iter().any(|d| d.ok && d.ten_bit && d.codec == codec),
+	);
+	if hdr_pref && !hdr_ok {
+		tracing::info!(%codec, features = ?host_caps.features, "HDR asked in Settings but not possible end to end — SDR stream");
+	}
+	let req_hdr = (hdr_pref && hdr_ok) || std::env::var_os("PULSAR_HDR").is_some();
 	// Quality bias from the Settings â†’ Display 'VarsayÄ±lan kalite' control (ui.quality).
 	// "hq" â†’ Quality, "fast" â†’ Latency; "auto" (or absent) defers to the mode-natural default
 	// (game=Latency, remote=Quality). Also seeded into hold_session so re-requests (adaptive
@@ -2512,6 +2525,27 @@ pub(crate) fn resolve_codec(requested: &str, allowed: &[String]) -> String {
 		picked
 	} else {
 		requested.to_string()
+	}
+}
+
+/// Can this session be HDR10 end to end? The host says it streams HDR (`FEAT_HDR`), the
+/// codec has a 10-bit profile the host encodes (HEVC Main10 / AV1 10-bit; NVENC has no H.264
+/// High 10) and this client's renderer decodes + shows that codec's 10-bit stream.
+pub(crate) fn hdr_possible(host_hdr: bool, codec: &str, client_ten_bit: bool) -> bool {
+	host_hdr && matches!(codec, "h265" | "av1") && client_ten_bit
+}
+
+#[cfg(test)]
+mod hdr_tests {
+	use super::hdr_possible;
+
+	#[test]
+	fn hdr_is_asked_only_when_every_link_can_carry_it() {
+		assert!(hdr_possible(true, "h265", true));
+		assert!(hdr_possible(true, "av1", true));
+		assert!(!hdr_possible(false, "h265", true), "host without FEAT_HDR");
+		assert!(!hdr_possible(true, "h264", true), "no 10-bit H.264 on the host");
+		assert!(!hdr_possible(true, "h265", false), "client cannot decode 10-bit");
 	}
 }
 

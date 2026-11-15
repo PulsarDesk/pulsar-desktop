@@ -37,6 +37,11 @@ pub(crate) struct DecoderCap {
 	/// RK3588). The negotiator drops a host-encoder × this-decoder combo that lands here.
 	#[serde(default)]
 	pub incompatible_with: Vec<String>,
+	/// The renderer decodes this codec's 10-bit HDR10 profile (HEVC Main10 / AV1 10-bit) and
+	/// can show it — on an HDR monitor, or tone-mapped to SDR (`pulsar-render --probe`
+	/// `ten_bit`; Windows really decodes a canned HDR10 keyframe). Gates `StreamReq::hdr`.
+	#[serde(default)]
+	pub ten_bit: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -196,6 +201,8 @@ fn probe_unavailable(platform: &str) -> Vec<DecoderCap> {
 				hw: false,
 				tier: "software".into(),
 				incompatible_with: Vec::new(),
+				// The fallback players show no HDR: never ask for it unprobed.
+				ten_bit: false,
 			})
 			.collect();
 	}
@@ -209,6 +216,7 @@ fn probe_unavailable(platform: &str) -> Vec<DecoderCap> {
 		hw: true,
 		tier: "hwaccel".into(),
 		incompatible_with: Vec::new(),
+		ten_bit: false,
 	}]
 }
 
@@ -267,6 +275,7 @@ fn probe_decoders(app: &AppHandle, platform: &str) -> Vec<DecoderCap> {
 										.collect()
 								})
 								.unwrap_or_default(),
+							ten_bit: e.get("ten_bit").and_then(|v| v.as_bool()).unwrap_or(false),
 						})
 					})
 					.collect()

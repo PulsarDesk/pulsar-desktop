@@ -301,7 +301,7 @@
 	"settings.coopMissing": "Компонент не установлен — положите файлы ProtoInput в папку",
 	"settings.coopOpenDir": "Открыть папку",
 	"settings.hdr": "Транслировать HDR",
-	"settings.hdrDesc": "10-битный HDR-стриминг на поддерживаемых экранах.",
+	"settings.hdrDesc": "10-битный HDR, если на удалённом экране включён HDR (Windows с NVIDIA). На SDR-экране изображение адаптируется.",
 	"settings.audioQuality": "Качество звука",
 	"settings.audioQualityDesc": "Авто: в локальной сети «Без сжатия», иначе «Высокое». Есть и в меню сеанса.",
 	"settings.aq.auto": "Авто",
