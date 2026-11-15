@@ -2393,40 +2393,44 @@ pub(super) fn make_on_stream(
 			flag.store(false, std::sync::atomic::Ordering::SeqCst);
 		}
 
-		// Media destinations. Legacy: plain UDP straight to the client's ports.
-		// Media-over-session (client opted in + this host advertised `mos`): the
-		// encoders target LOCAL loopback intakes whose forwarders ship each datagram
-		// through the encrypted session — ONE external socket total. A re-stream
+		// Media destinations. Media-over-session (client opted in + this host advertised
+		// `mos`): the encoders target LOCAL loopback intakes whose forwarders ship each
+		// datagram through the encrypted session — ONE external socket total. A re-stream
 		// replaces the forwarders (fresh retransmit ring / NACK channel).
+		// SECURITY: it is the only encrypted media path. The legacy flow (plain UDP RTP
+		// straight to the client's ports) is never used any more: a request without
+		// `media_over_session` (a pre-mos client) or a forwarder that could not start gets
+		// NO stream and a stream-error line on the client, never plaintext media.
 		for h in fwd_slot.lock().unwrap().drain(..) {
 			h.abort();
 		}
 		*nack_slot.lock().unwrap() = None;
 		let lo = std::net::IpAddr::from([127, 0, 0, 1]);
-		let (vdest, adest) = if req.media_over_session {
-			match spawn_media_forwarders(
-				&media_tx,
-				&nack_slot,
-				&fwd_slot,
-				(req.fec || req.fec_rs).then(|| (req.fec_rs, fec_n.clone())),
-				pace_target_kbps.clone(),
-				pace_loss.clone(),
-				media_sent.clone(),
-			) {
-				Some((vp, ap)) => (
-					SocketAddr::new(lo, vp),
-					SocketAddr::new(lo, if req.audio_port > 0 { ap } else { 0 }),
-				),
-				None => (
-					SocketAddr::new(addr.ip(), req.port),
-					SocketAddr::new(addr.ip(), req.audio_port),
-				),
+		if !req.media_over_session {
+			tracing::warn!(%addr, "stream request without media-over-session — refusing a plaintext stream");
+			let msg = crate::i18n::t("host.plaintextRefused").to_string();
+			let _ = stats_out.try_send(DataMsg::Stats(format!("!{msg}")));
+			return;
+		}
+		let (vdest, adest) = match spawn_media_forwarders(
+			&media_tx,
+			&nack_slot,
+			&fwd_slot,
+			(req.fec || req.fec_rs).then(|| (req.fec_rs, fec_n.clone())),
+			pace_target_kbps.clone(),
+			pace_loss.clone(),
+			media_sent.clone(),
+		) {
+			Some((vp, ap)) => (
+				SocketAddr::new(lo, vp),
+				SocketAddr::new(lo, if req.audio_port > 0 { ap } else { 0 }),
+			),
+			None => {
+				tracing::error!("media forwarders failed to start — no stream (never plaintext)");
+				let msg = crate::i18n::t("host.mediaForwarderFailed").to_string();
+				let _ = stats_out.try_send(DataMsg::Stats(format!("!{msg}")));
+				return;
 			}
-		} else {
-			(
-				SocketAddr::new(addr.ip(), req.port),
-				SocketAddr::new(addr.ip(), req.audio_port),
-			)
 		};
 
 		// First stream request reveals this connection's mode: upgrade the connections

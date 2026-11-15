@@ -98,6 +98,33 @@ fn known_peer_key(app: &AppHandle, relay: &str, id: &DeviceId) -> Option<PublicK
 	Some(key)
 }
 
+/// Every key pinned on `relay`, mapped to its device id: lets the LAN list recognise a known
+/// host whose beacon withholds its id (unattended hosts, see `host::beacon_id`). The beacon's
+/// key is unverified, so this only feeds the list / presence dots; the connect still runs the
+/// pinned handshake.
+pub(crate) fn pinned_ids(app: &AppHandle, relay: &str) -> std::collections::HashMap<PublicKey, DeviceId> {
+	let prefix = format!("{}/", relay.trim().to_ascii_lowercase());
+	let Some(map) = std::fs::read_to_string(known_peers_path(app))
+		.ok()
+		.and_then(|raw| serde_json::from_str::<std::collections::HashMap<String, String>>(&raw).ok())
+	else {
+		return Default::default();
+	};
+	map.into_iter()
+		.filter_map(|(k, hex)| {
+			let id = DeviceId::new(k.strip_prefix(&prefix)?.parse().ok()?)?;
+			if hex.len() != 64 {
+				return None;
+			}
+			let mut key = [0u8; 32];
+			for (i, b) in key.iter_mut().enumerate() {
+				*b = u8::from_str_radix(hex.get(i * 2..i * 2 + 2)?, 16).ok()?;
+			}
+			Some((key, id))
+		})
+		.collect()
+}
+
 /// Remove the pinned key for `(relay, id)` from known_peers.json, so the next
 /// connect re-pins via TOFU. Called by the `forget_peer` Tauri command when the
 /// user confirms they want to accept a new identity behind a known relay ID (e.g.
@@ -319,7 +346,10 @@ async fn connect_target_inner(
 			.peers()
 			.await
 			.into_iter()
-			.find(|p| p.id == Some(id))
+			// An unattended host's beacon withholds its id (`host::beacon_id`): a host we
+			// connected to before is still recognised by its pinned key — and `connect_direct`
+			// below enforces that pin, so a spoofed beacon key gets nowhere.
+			.find(|p| p.id == Some(id) || (p.id.is_none() && pinned.is_some_and(|k| k == p.pubkey)))
 			.map(|p| p.addr)
 			.filter(|a| {
 				let overlay = pulsar_core::discovery::is_overlay_vpn_addr(a.ip());
@@ -912,6 +942,32 @@ pub(crate) fn announce_name(device_name: &str) -> String {
 	}
 }
 
+/// The name this device puts in its LAN discovery beacon, which is broadcast every 2 s to
+/// everyone on the network (a café, a hotel): a name the user CHOSE (Settings device name, a
+/// seat's display name), else nothing — never the OS user's real name, which
+/// [`announce_name`] falls back to for authenticated peers. Receivers show a generic label
+/// for an empty name. Capped at the receivers' 64-byte limit.
+pub(crate) fn beacon_name(device_name: &str) -> String {
+	if let Some(n) = crate::seat::announce_name() {
+		return cap_utf8(n.trim(), 64);
+	}
+	let n = device_name.trim();
+	let host = machine_hostname();
+	if n.is_empty() || n == "Pulsar Cihazı" || host.as_deref().is_some_and(|h| h.eq_ignore_ascii_case(n)) {
+		String::new()
+	} else {
+		cap_utf8(n, 64)
+	}
+}
+
+fn cap_utf8(s: &str, max: usize) -> String {
+	let mut end = s.len().min(max);
+	while !s.is_char_boundary(end) {
+		end -= 1;
+	}
+	s[..end].to_string()
+}
+
 pub(crate) fn machine_hostname() -> Option<String> {
 	#[cfg(windows)]
 	let h = std::env::var("COMPUTERNAME").ok();
@@ -926,4 +982,32 @@ pub(crate) fn machine_hostname() -> Option<String> {
 				.and_then(|o| String::from_utf8(o.stdout).ok())
 		});
 	h.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+#[cfg(test)]
+mod net_tests {
+	/// Every host packetizer caps its RTP packets at the same size: the native one
+	/// (pulsar-capture, which cannot see pulsar-core on every OS), and the core's (gst, the
+	/// ffmpeg CLI URL, libav here) — sized for a 1280-byte overlay / relay MTU.
+	#[test]
+	fn rtp_sizes_agree() {
+		assert_eq!(pulsar_capture::rtp::MTU, pulsar_core::service::media::RTP_MAX_PACKET);
+	}
+
+	/// The LAN beacon never carries a default name (it would fall back to the OS user's
+	/// real name); a chosen name is kept, capped at the receivers' 64 bytes on a char
+	/// boundary.
+	#[test]
+	fn beacon_name_is_only_a_chosen_name() {
+		assert_eq!(super::beacon_name(""), "");
+		assert_eq!(super::beacon_name("  "), "");
+		assert_eq!(super::beacon_name("Pulsar Cihazı"), "");
+		if let Some(h) = super::machine_hostname() {
+			assert_eq!(super::beacon_name(&h), "", "the default (hostname) name is not a choice");
+		}
+		assert_eq!(super::beacon_name("Salon PC"), "Salon PC");
+		let long = "ş".repeat(40); // 80 bytes
+		let capped = super::beacon_name(&long);
+		assert!(capped.len() <= 64 && capped.chars().all(|c| c == 'ş'), "{capped}");
+	}
 }

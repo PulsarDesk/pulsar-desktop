@@ -562,7 +562,9 @@ unsafe fn open_encoder(p: &Params, pix_fmt: ff::AVPixelFormat) -> Result<*mut ff
 }
 
 unsafe fn open_output(p: &Params, ec: *mut ff::AVCodecContext) -> Result<(*mut ff::AVFormatContext, *mut ff::AVStream), String> {
-	let url = format!("rtp://{}?pkt_size=1200", p.dest);
+	// Whole RTP packet capped so the session-framed datagram fits a 1280-byte overlay /
+	// relay MTU (pulsar-core `RTP_MAX_PACKET`).
+	let url = format!("rtp://{}?pkt_size={}", p.dest, pulsar_core::service::media::RTP_MAX_PACKET);
 	let mut octx: *mut ff::AVFormatContext = ptr::null_mut();
 	let url_c = cstr(&url);
 	// `null_mut` coerces to both the `*mut AVOutputFormat` (FFmpeg 4.4) and the `*const`

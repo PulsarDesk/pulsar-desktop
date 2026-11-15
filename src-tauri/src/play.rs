@@ -283,14 +283,26 @@ pub(crate) async fn start_remote_play(
 	// it â€” asked over the session (validated, hardware-only caps) BEFORE this client
 	// writes its decoder SDP, so the SDP and the stream the host starts can never
 	// disagree. Timeout/old host/empty caps â†’ H.264 (universally encodable).
-	let host_caps = tokio::time::timeout(
-		std::time::Duration::from_secs(2),
+	// SECURITY: no answer is NOT "empty caps". Defaulting used to drop the session to plain
+	// (unencrypted) RTP whenever the caps exchange went missing for 2 s — which an on-path
+	// attacker can force by dropping a few packets. Ask until the core gives up (~3 s of
+	// resends) and fail the connect instead.
+	let host_caps = match tokio::time::timeout(
+		std::time::Duration::from_secs(5),
 		pulsar_core::service::query_stream_caps(&mut sess),
 	)
 	.await
-	.ok()
-	.and_then(|r| r.ok())
-	.unwrap_or_default();
+	{
+		Ok(Ok(caps)) => caps,
+		Ok(Err(e)) => {
+			tracing::warn!(%e, "host caps query failed — refusing to stream without them");
+			return Err(crate::i18n::t("err.hostCaps").into());
+		}
+		Err(_) => {
+			tracing::warn!("host caps query timed out — refusing to stream without them");
+			return Err(crate::i18n::t("err.hostCaps").into());
+		}
+	};
 	tracing::info!(codecs = ?host_caps.codecs, encoders = ?host_caps.encoders, features = ?host_caps.features, "host caps received");
 	// Touchpad pinch: real gesture to hosts that inject it, Ctrl + wheel to the rest.
 	crate::kbdhook::set_host_pinch(
@@ -308,12 +320,14 @@ pub(crate) async fn start_remote_play(
 	// not also forward the mouse Windows synthesizes from them.
 	crate::kbdhook::set_host_pen_touch(host_pen, host_touch);
 	// Media-over-session: carry the RTP inside the encrypted session (ONE external
-	// socket â€” the same hole the control channel punched; symmetric NAT then works
-	// via the relay). Only when the host advertises it; old hosts stream direct.
-	let mos = host_caps
-		.features
-		.iter()
-		.any(|f| f == pulsar_core::service::media::FEAT_MOS);
+	// socket: the same hole the control channel punched; symmetric NAT then works
+	// via the relay). It is the only ENCRYPTED media path, so a host without it gets no
+	// stream at all (never the old plaintext direct RTP).
+	if !pulsar_core::service::media::encrypted_media(&host_caps.features) {
+		tracing::warn!(features = ?host_caps.features, "host does not offer encrypted media (mos) — refusing a plaintext stream");
+		return Err(crate::i18n::t("err.hostNoEncryptedMedia").into());
+	}
+	let mos = true;
 	let host_nack = host_caps
 		.features
 		.iter()
@@ -1094,9 +1108,19 @@ pub(crate) async fn start_remote_play(
 	// The memory is per peer AND per kind of path (LAN / internet / relay): the same host over
 	// the home LAN and over a tethered phone are different paths, and a LAN rate seeding a
 	// mobile session started it far above the link (the 2026-11-09 field collapse).
-	let path_class = crate::adapt_memory::PathClass::of(
+	// Overlay VPNs (ZeroTier / WireGuard / Tailscale) are classified `Wan` even with a
+	// private address (interface check + the measured round trip when the path choice ran).
+	let class_rtt = match sess.path_latency().await {
+		Some((d, r)) => match sess.transport() {
+			Transport::Direct => d,
+			Transport::Relay => r,
+		},
+		None => None,
+	};
+	let path_class = crate::adapt_memory::classify(
 		sess.transport(),
 		sess.peer_addr().await.map(|a| a.ip()),
+		class_rtt,
 	);
 	// The memory seeds 60 % of the last clean rate, but never under ~2 Mbit: one bad session
 	// (e.g. a host that couldn't keep up) must not start every later one at the floor.

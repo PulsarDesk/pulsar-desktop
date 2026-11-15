@@ -15,6 +15,19 @@ if command -v udevadm >/dev/null 2>&1; then
 	udevadm trigger --subsystem-match=platform --sysname-match='vhci_hcd.*' --action=add 2>/dev/null || true
 fi
 
+# UDP socket buffer limits (/usr/lib/sysctl.d/60-pulsar.conf): applied at every boot by
+# systemd-sysctl; load them now so the first session does not run with the stock 208 KiB cap.
+# Only ever RAISES the caps: a machine already tuned higher keeps its values.
+pulsar_sysctl() {
+	for k in net.core.rmem_max net.core.wmem_max; do
+		cur=$(sysctl -n "$k" 2>/dev/null) || continue
+		if [ "${cur:-0}" -lt 16777216 ] 2>/dev/null; then
+			sysctl -q -w "$k=16777216" >/dev/null 2>&1 || true
+		fi
+	done
+}
+pulsar_sysctl || true
+
 # Shared (machine-wide) mode default for a fresh machine, like Windows: ON when nobody decided
 # yet (no /var/lib/pulsar/mode.json) and no user has Pulsar data. Untested on Linux hardware.
 # >>> pulsar-machine shared-mode default (generated: pulsar_machine::postinst_shared_default)

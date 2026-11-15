@@ -14,7 +14,11 @@ pub fn run() -> i32 {
 	}
 	#[cfg(not(target_os = "linux"))]
 	{
-		println!("PASS selftest: nothing to check on this platform");
+		// Only the network check applies here (the media stack is checked on Linux).
+		match udp_buffers() {
+			Ok(d) => println!("PASS udp buffers: {d}"),
+			Err(e) => println!("WARN udp buffers: {e}"),
+		}
 		0
 	}
 }
@@ -168,6 +172,31 @@ mod linux {
 				},
 			);
 		}
+		// UDP socket buffers: a stock kernel caps them at 208 KiB and silently drops a
+		// stream's bursts (looks like network loss). Optional — the stream still runs.
+		r.line(false, "udp buffers", super::udp_buffers());
 		i32::from(r.failed)
+	}
+}
+
+/// What the session socket's kernel buffers get on this machine (pulsar-core `netpath`), plus
+/// the machine-wide receive-buffer drop counter where the kernel has one.
+fn udp_buffers() -> Result<String, String> {
+	use pulsar_core::netpath;
+	let r = netpath::udp_buffer_selfcheck().map_err(|e| format!("socket: {e}"))?;
+	let drops = netpath::udp_rcvbuf_errors()
+		.map(|n| format!(", UdpRcvbufErrors {n}"))
+		.unwrap_or_default();
+	let got = format!(
+		"recv {} KiB, send {} KiB (asked {} KiB{}){drops}",
+		r.recv / 1024,
+		r.send / 1024,
+		r.requested / 1024,
+		if r.forced { ", forced" } else { "" }
+	);
+	if r.ok() {
+		Ok(got)
+	} else {
+		Err(format!("{got} — under 1 MiB: {}", netpath::udp_buf_hint()))
 	}
 }

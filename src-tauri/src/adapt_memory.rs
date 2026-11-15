@@ -24,57 +24,17 @@ struct Entry {
 	at: u64,
 }
 
-/// What kind of network path a session runs on — the memory's second key.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PathClass {
-	/// Direct to a private / link-local / loopback address: a local network.
-	Lan,
-	/// Direct to a public address: the internet (incl. a punched mobile / CGNAT path).
-	Wan,
-	/// Relayed by the rendezvous server.
-	Relay,
-}
+/// What kind of network path a session runs on — the memory's second key. Shared with the
+/// mobile client (pulsar-core `netpath`): a ZeroTier / WireGuard / Tailscale path is `Wan`
+/// even with a private address, so an overlay session no longer shares (and starts from) the
+/// home-LAN rate, nor picks uncompressed audio.
+pub(crate) use pulsar_core::netpath::PathClass;
 
-impl PathClass {
-	pub(crate) fn as_str(self) -> &'static str {
-		match self {
-			PathClass::Lan => "lan",
-			PathClass::Wan => "wan",
-			PathClass::Relay => "relay",
-		}
-	}
-
-	/// Classify a live path: relayed, or direct to `peer` (its address; unknown → `wan`, the
-	/// cautious answer — a wrong `lan` would seed a thin path with a LAN rate).
-	pub(crate) fn of(transport: pulsar_core::Transport, peer: Option<IpAddr>) -> Self {
-		match transport {
-			pulsar_core::Transport::Relay => PathClass::Relay,
-			pulsar_core::Transport::Direct => match peer {
-				Some(ip) if is_local_ip(ip) => PathClass::Lan,
-				_ => PathClass::Wan,
-			},
-		}
-	}
-}
-
-/// Private (RFC 1918 / IPv6 unique-local), link-local or loopback. The CGNAT shared space
-/// (100.64/10) is NOT local: a direct path to it is a carrier network or an overlay VPN
-/// (Tailscale) that crosses the internet.
-fn is_local_ip(ip: IpAddr) -> bool {
-	match ip {
-		IpAddr::V4(v4) => v4.is_private() || v4.is_link_local() || v4.is_loopback(),
-		IpAddr::V6(v6) => {
-			if let Some(v4) = v6.to_ipv4_mapped() {
-				return is_local_ip(IpAddr::V4(v4));
-			}
-			let s0 = v6.segments()[0];
-			v6.is_loopback()
-				// fc00::/7 unique-local
-				|| (s0 & 0xfe00) == 0xfc00
-				// fe80::/10 link-local
-				|| (s0 & 0xffc0) == 0xfe80
-		}
-	}
+/// Classify a live path (see [`pulsar_core::netpath::classify`]): relayed, or direct to
+/// `peer` — `Lan` only for a private address that is not on an overlay VPN and, when the
+/// round trip is known, answers like a LAN.
+pub(crate) fn classify(transport: pulsar_core::Transport, peer: Option<IpAddr>, rtt_ms: Option<f32>) -> PathClass {
+	pulsar_core::netpath::classify(transport, peer, rtt_ms)
 }
 
 fn key(peer: &str, class: PathClass) -> String {
@@ -152,16 +112,22 @@ mod tests {
 
 	#[test]
 	fn classifies_the_path() {
-		assert_eq!(PathClass::of(Transport::Relay, ip("192.168.1.5")), PathClass::Relay);
-		assert_eq!(PathClass::of(Transport::Relay, None), PathClass::Relay);
+		assert_eq!(classify(Transport::Relay, ip("192.168.1.5"), None), PathClass::Relay);
+		assert_eq!(classify(Transport::Relay, None, None), PathClass::Relay);
+		// Local addresses (whether one is LAN here also depends on this machine's overlay
+		// interfaces, so only the address test is pinned).
 		for local in ["192.168.1.61", "10.0.0.2", "172.16.4.1", "169.254.3.3", "127.0.0.1", "::1", "fe80::1", "fd12::3", "::ffff:192.168.1.2"] {
-			assert_eq!(PathClass::of(Transport::Direct, ip(local)), PathClass::Lan, "{local}");
+			assert!(pulsar_core::netpath::is_local_ip(ip(local).unwrap()), "{local}");
 		}
+		assert_eq!(classify(Transport::Direct, ip("127.0.0.1"), Some(0.1)), PathClass::Lan);
 		for public in ["2.28.36.116", "100.72.1.1", "172.32.0.1", "2001:db8::1", "::ffff:8.8.8.8"] {
-			assert_eq!(PathClass::of(Transport::Direct, ip(public)), PathClass::Wan, "{public}");
+			assert_eq!(classify(Transport::Direct, ip(public), None), PathClass::Wan, "{public}");
 		}
+		// A private address with an internet round trip (an overlay the interface check
+		// missed) is not a LAN.
+		assert_eq!(classify(Transport::Direct, ip("10.8.0.3"), Some(14.0)), PathClass::Wan);
 		// Unknown address: the cautious class.
-		assert_eq!(PathClass::of(Transport::Direct, None), PathClass::Wan);
+		assert_eq!(classify(Transport::Direct, None, None), PathClass::Wan);
 	}
 
 	#[test]

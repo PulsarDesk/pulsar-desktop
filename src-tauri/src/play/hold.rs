@@ -795,6 +795,18 @@ pub(super) async fn hold_session(
 	// The kind of path the media runs on now (`adapt_memory` key): the last good rate is
 	// remembered under the class the session actually ran cleanly on.
 	let mut cur_class = path_class;
+	// The (transport, peer address) the class was last worked out for: the overlay check
+	// enumerates interfaces / asks the routing table, so it runs only when the path itself
+	// changed. Seeded with the session-start path, whose class `play.rs` also judged by the
+	// measured round trip.
+	let mut class_of: (pulsar_core::Transport, Option<std::net::IpAddr>) = (
+		sess.transport(),
+		if matches!(sess.transport(), pulsar_core::Transport::Direct) {
+			sess.peer_addr().await.map(|a| a.ip())
+		} else {
+			None
+		},
+	);
 	// The last pick shortfall told to the user, and when (see `shortfall_due`).
 	let mut shortfall_told: Option<(PointKey, PointKey)> = None;
 	let mut shortfall_told_at: Option<std::time::Instant> = None;
@@ -2008,7 +2020,7 @@ pub(super) async fn hold_session(
 				// On a change, the last good rate learned so far belongs to the OLD path: mark it
 				// as already remembered, so only a rate found clean on the new path is stored
 				// under the new class.
-				let class = crate::adapt_memory::PathClass::of(
+				let now_path = (
 					live,
 					if matches!(live, pulsar_core::Transport::Direct) {
 						sess.peer_addr().await.map(|a| a.ip())
@@ -2016,6 +2028,12 @@ pub(super) async fn hold_session(
 						None
 					},
 				);
+				let class = if now_path == class_of {
+					cur_class
+				} else {
+					class_of = now_path;
+					crate::adapt_memory::classify(now_path.0, now_path.1, None)
+				};
 				if class != cur_class {
 					tracing::info!(from = cur_class.as_str(), to = class.as_str(), "media path class changed");
 					cur_class = class;
