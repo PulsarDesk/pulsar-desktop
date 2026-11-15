@@ -88,6 +88,25 @@ VsOut vs_main(VsIn input) {
 float4 ps_main(VsOut input) : SV_TARGET {
     return tex.Sample(samp, input.uv) * input.color;
 }
+
+// HDR10 swapchain (an HDR10 stream on an HDR monitor, win/hdr.rs): the same colour re-encoded
+// from sRGB to PQ BT.2020 at SDR reference white (203 nits), still premultiplied — otherwise
+// the overlay's sRGB values would be read as PQ (white = 10 000 nits).
+float3 srgb_lin(float3 c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
+static const float3x3 BT709_TO_2020 = {
+    0.6274039, 0.3292830, 0.0433131,
+    0.0690973, 0.9195404, 0.0113623,
+    0.0163914, 0.0880133, 0.8955953 };
+float3 pq(float3 l) {
+    float3 p = pow(saturate(l), 0.1593017578125);
+    return pow((0.8359375 + 18.8515625 * p) / (1.0 + 18.6875 * p), 78.84375);
+}
+float4 ps_pq(VsOut input) : SV_TARGET {
+    float4 c = tex.Sample(samp, input.uv) * input.color;
+    if (c.a <= 0.0) return c;
+    float3 lin = mul(BT709_TO_2020, srgb_lin(saturate(c.rgb / c.a))) * (203.0 / 10000.0);
+    return float4(pq(lin) * c.a, c.a);
+}
 "#;
 
 #[repr(C)]
@@ -108,6 +127,9 @@ struct Texture {
 pub struct EguiPaint {
 	vs: ID3D11VertexShader,
 	ps: ID3D11PixelShader,
+	/// `ps` re-encoded to PQ for an HDR10 swapchain (`set_pq`).
+	ps_pq: ID3D11PixelShader,
+	pq: std::cell::Cell<bool>,
 	input_layout: ID3D11InputLayout,
 	sampler: ID3D11SamplerState,
 	blend: ID3D11BlendState,
@@ -158,9 +180,15 @@ fn blob_bytes(blob: &ID3DBlob) -> &[u8] {
 }
 
 impl EguiPaint {
+	/// The target swapchain is HDR10 (PQ BT.2020): paint through `ps_pq`.
+	pub fn set_pq(&self, on: bool) {
+		self.pq.set(on);
+	}
+
 	pub fn new(device: &ID3D11Device) -> Result<Self> {
 		let vs_blob = compile("vs_main", "vs_5_0")?;
 		let ps_blob = compile("ps_main", "ps_5_0")?;
+		let ps_pq_blob = compile("ps_pq", "ps_5_0")?;
 		let vs_bytes = blob_bytes(&vs_blob);
 		let ps_bytes = blob_bytes(&ps_blob);
 
@@ -170,6 +198,8 @@ impl EguiPaint {
 			device.CreateVertexShader(vs_bytes, None, Some(&mut vs))?;
 			device.CreatePixelShader(ps_bytes, None, Some(&mut ps))?;
 		}
+		let mut ps_pq: Option<ID3D11PixelShader> = None;
+		unsafe { device.CreatePixelShader(blob_bytes(&ps_pq_blob), None, Some(&mut ps_pq))? };
 		let vs = vs.unwrap();
 		let ps = ps.unwrap();
 
@@ -291,6 +321,8 @@ impl EguiPaint {
 		Ok(Self {
 			vs,
 			ps,
+			ps_pq: ps_pq.unwrap(),
+			pq: std::cell::Cell::new(false),
 			input_layout,
 			sampler,
 			blend,
@@ -429,7 +461,7 @@ impl EguiPaint {
 
 			ctx.VSSetShader(&self.vs, None);
 			ctx.VSSetConstantBuffers(0, Some(&[Some(self.constants.clone())]));
-			ctx.PSSetShader(&self.ps, None);
+			ctx.PSSetShader(if self.pq.get() { &self.ps_pq } else { &self.ps }, None);
 			ctx.PSSetSamplers(0, Some(&[Some(self.sampler.clone())]));
 
 			let blend_factor = [0.0f32; 4];

@@ -653,12 +653,16 @@ pub fn probe_json() -> String {
 					.collect::<Vec<_>>()
 					.join(",");
 				entries.push(format!(
-					r#"{{"codec":"{label}","ok":true,"decoder":"{}","tier":"{}","hw":{},"zero_copy":{},"incompatible_with":[{}]}}"#,
+					r#"{{"codec":"{label}","ok":true,"decoder":"{}","tier":"{}","hw":{},"zero_copy":{},"incompatible_with":[{}],"ten_bit":{}}}"#,
 					p.sel.name,
 					p.sel.tier.as_str(),
 					p.sel.tier != Tier::Software,
 					p.sel.zero_copy,
-					incompat
+					incompat,
+					// HEVC Main10 / AV1 10-bit (a host's HDR10 stream): libavcodec decodes both
+					// in software, a hwaccel reads back, and the presenter tone-maps PQ
+					// (video.rs `ten_bit_to_8`, `pq_fragment`). Untested on Linux hardware.
+					label != "h264"
 				));
 			}
 			None => entries.push(format!(r#"{{"codec":"{label}","ok":false}}"#)),

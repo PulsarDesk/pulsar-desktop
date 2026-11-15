@@ -36,6 +36,15 @@ impl Frame {
 		// SAFETY: a live pixel buffer.
 		unsafe { CVPixelBufferGetPixelFormatType(self.ptr()) }
 	}
+	/// The decoder attached SMPTE ST 2084 (PQ) as the transfer function (the stream's colour
+	/// description says HDR10).
+	pub fn is_pq(&self) -> bool {
+		// SAFETY: a live buffer; the attachment is a +0 CFString (or null) we only compare.
+		unsafe {
+			let t = CVBufferGetAttachment(self.ptr(), kCVImageBufferTransferFunctionKey, std::ptr::null_mut());
+			!t.is_null() && CFEqual(t, kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ) != 0
+		}
+	}
 	/// The colour matrix the decoder attached (from the stream's VUI / colour config); BT.709
 	/// when it says nothing — what Pulsar hosts encode.
 	pub fn matrix(&self) -> Matrix {
@@ -435,8 +444,11 @@ pub fn probe_json() -> String {
 		// SAFETY: plain query.
 		let hw = unsafe { VTIsHardwareDecodeSupported(codec_type(c)) } != 0;
 		let ok = hw || c != Codec::Av1;
+		// 10-bit (HDR10): VideoToolbox decodes HEVC Main10 / AV1 10-bit to P010 and the Metal
+		// pass tone-maps PQ (metal.rs). Untested on macOS hardware.
+		let ten_bit = ok && c != Codec::H264;
 		entries.push(format!(
-			"{{\"codec\":\"{name}\",\"ok\":{ok},\"decoder\":\"videotoolbox\",\"hw\":{hw},\"tier\":\"{}\",\"incompatible_with\":[]}}",
+			"{{\"codec\":\"{name}\",\"ok\":{ok},\"decoder\":\"videotoolbox\",\"hw\":{hw},\"tier\":\"{}\",\"incompatible_with\":[],\"ten_bit\":{ten_bit}}}",
 			if hw { "hwaccel" } else { "software" }
 		));
 	}

@@ -23,6 +23,7 @@ pub mod decode; // Media Foundation DXVA decode (Annex-B AU → NV12 ID3D11Textu
 pub mod egui_paint; // minimal D3D11 painter for the egui overlay
 pub mod present; // NV12 → swapchain RGB via ID3D11VideoProcessor (letterbox)
 mod fsr; // FSR 1 upscale (EASU + RCAS) after the VideoProcessor (present.rs)
+pub mod hdr; // HDR10 (P010) present: PQ pass-through on an HDR monitor, else tone-mapped (present.rs)
 mod pointer; // pen + touch (WM_POINTER) → `pen` / `touch` stdout lines while engaged
 
 // Shared (cross-backend) streaming types + RTP depacketizer.
@@ -1306,6 +1307,12 @@ struct Renderer {
 	// Frame-persistent overlay UI state (current page, chat composer, local file pane).
 	ov_ui: crate::overlay::UiState,
 	was_open: bool,
+	// HDR10 output (win/hdr.rs): the swapchain is R10G10B10A2 + the PQ BT.2020 colour space
+	// while an HDR10 stream plays on a monitor in HDR mode; B8G8R8A8 SDR otherwise.
+	hdr_swap: bool,
+	// Is the monitor this window is on in HDR mode (re-read at most every 2 s)?
+	display_hdr: bool,
+	display_hdr_at: Option<std::time::Instant>,
 }
 
 impl Renderer {
@@ -1450,6 +1457,9 @@ impl Renderer {
 			ostate,
 			ov_ui: Default::default(),
 			was_open: false,
+			hdr_swap: false,
+			display_hdr: false,
+			display_hdr_at: None,
 		};
 		r.make_rtv()?;
 		Ok(r)
@@ -2028,6 +2038,12 @@ impl Renderer {
 				}
 			}
 		}
+		// HDR10 picture (P010): HDR swapchain on an HDR monitor, else SDR (tone-mapped); an SDR
+		// picture always gets the SDR swapchain back.
+		self.update_hdr_swap(td.Format == windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_P010);
+		if let Some(p) = self.present.as_ref() {
+			p.set_hdr_output(self.hdr_swap);
+		}
 		let Some(back) = self.swap.GetBuffer::<ID3D11Texture2D>(0).ok() else {
 			return;
 		};
@@ -2260,7 +2276,7 @@ impl Renderer {
 		self.rtv = None;
 		if self
 			.swap
-			.ResizeBuffers(0, w, h, DXGI_FORMAT_B8G8R8A8_UNORM, Default::default())
+			.ResizeBuffers(0, w, h, self.swap_format(), Default::default())
 			.is_ok()
 		{
 			self.width = w;
@@ -2273,6 +2289,69 @@ impl Renderer {
 		}
 	}
 
+	/// The swapchain's pixel format for its current mode.
+	fn swap_format(&self) -> windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT {
+		if self.hdr_swap {
+			windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R10G10B10A2_UNORM
+		} else {
+			DXGI_FORMAT_B8G8R8A8_UNORM
+		}
+	}
+
+	/// Is the monitor this window is on in HDR mode? Re-read at most every 2 s through a fresh
+	/// DXGI factory (a factory caches outputs: an HDR switch toggled since would go unseen).
+	/// `PULSAR_HDR_OUT=0` forces SDR output (tone-mapped), `=1` HDR10 output.
+	unsafe fn display_is_hdr(&mut self) -> bool {
+		match std::env::var("PULSAR_HDR_OUT").as_deref() {
+			Ok("0") => return false,
+			Ok("1") => return true,
+			_ => {}
+		}
+		if self.display_hdr_at.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(2)) {
+			return self.display_hdr;
+		}
+		self.display_hdr_at = Some(std::time::Instant::now());
+		self.display_hdr = output_is_hdr(&self.swap);
+		self.display_hdr
+	}
+
+	/// Switch the swapchain between SDR and HDR10 for the picture about to be shown.
+	unsafe fn update_hdr_swap(&mut self, picture_hdr: bool) {
+		use windows::Win32::Graphics::Dxgi::Common::{
+			DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709,
+		};
+		use windows::Win32::Graphics::Dxgi::{IDXGISwapChain3, DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT};
+		let want = picture_hdr && self.display_is_hdr();
+		if want == self.hdr_swap {
+			return;
+		}
+		let Ok(s3) = self.swap.cast::<IDXGISwapChain3>() else { return };
+		let cs = if want { DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 } else { DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 };
+		let prev = self.hdr_swap;
+		self.hdr_swap = want;
+		self.rtv = None;
+		let ok = self.swap.ResizeBuffers(0, self.width, self.height, self.swap_format(), Default::default()).is_ok()
+			&& s3.CheckColorSpaceSupport(cs).is_ok_and(|f| f & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT.0 as u32 != 0)
+			&& s3.SetColorSpace1(cs).is_ok();
+		if !ok && want {
+			// The swapchain refused HDR10: stay SDR (tone-mapped) for this stream.
+			self.hdr_swap = false;
+			let _ = self.swap.ResizeBuffers(0, self.width, self.height, self.swap_format(), Default::default());
+			let _ = s3.SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+			self.display_hdr = false;
+		}
+		if self.hdr_swap != prev {
+			eprintln!(
+				"pulsar-render(win): {} output",
+				if self.hdr_swap { "HDR10 (PQ BT.2020)" } else { "SDR" }
+			);
+		}
+		if let Some(p) = self.painter.as_ref() {
+			p.set_pq(self.hdr_swap);
+		}
+		let _ = self.make_rtv();
+	}
+
 	/// Idle present: dark clear (shown before the first decoded frame arrives).
 	unsafe fn clear(&mut self) {
 		if let Some(rtv) = self.rtv.as_ref() {
@@ -2282,6 +2361,32 @@ impl Renderer {
 		self.paint_overlay(); // overlay still shows before the first frame (no-op unless OPEN)
 		let _ = self.swap.Present(0, Default::default());
 	}
+}
+
+/// The monitor `swap` is on is in HDR mode (its colour space is BT.2020 / PQ), looked up by
+/// name through a fresh factory.
+unsafe fn output_is_hdr(swap: &IDXGISwapChain1) -> bool {
+	use windows::Win32::Graphics::Dxgi::Common::DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+	use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1, IDXGIOutput6};
+	let Ok(name) = swap.GetContainingOutput().and_then(|o| o.GetDesc()).map(|d| d.DeviceName) else {
+		return false;
+	};
+	let Ok(f) = CreateDXGIFactory1::<IDXGIFactory1>() else { return false };
+	let mut a = 0;
+	while let Ok(ad) = f.EnumAdapters1(a) {
+		let mut o = 0;
+		while let Ok(out) = ad.EnumOutputs(o) {
+			if out.GetDesc().is_ok_and(|d| d.DeviceName == name) {
+				return out
+					.cast::<IDXGIOutput6>()
+					.and_then(|o6| o6.GetDesc1())
+					.is_ok_and(|d| d.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
+			}
+			o += 1;
+		}
+		a += 1;
+	}
+	false
 }
 
 pub fn run() {

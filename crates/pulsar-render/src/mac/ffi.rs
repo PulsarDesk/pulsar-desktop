@@ -291,6 +291,8 @@ extern "C" {
 	pub static kCVImageBufferYCbCrMatrix_ITU_R_601_4: CFStringRef;
 	pub static kCVImageBufferYCbCrMatrix_ITU_R_709_2: CFStringRef;
 	pub static kCVImageBufferYCbCrMatrix_ITU_R_2020: CFStringRef;
+	pub static kCVImageBufferTransferFunctionKey: CFStringRef;
+	pub static kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ: CFStringRef;
 	pub fn CVPixelBufferGetWidth(pb: CVPixelBufferRef) -> usize;
 	pub fn CVPixelBufferGetHeight(pb: CVPixelBufferRef) -> usize;
 	pub fn CVPixelBufferGetWidthOfPlane(pb: CVPixelBufferRef, plane: usize) -> usize;

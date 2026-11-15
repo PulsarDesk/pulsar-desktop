@@ -49,3 +49,14 @@ Commit the resulting non-empty fixture. Verify:
 cargo build --release -p pulsar-render
 target/release/pulsar-render --probe   # h265 entry should show "incompatible_with":["nvenc"] on rkmpp
 ```
+
+## HDR10 fixtures — `test-hdr10.{h265,av1.obu}`
+
+64×64 single 10-bit keyframes tagged BT.2020 / SMPTE 2084 / BT.2020 NCL. The Windows probe
+(`win/decode.rs`) decodes them to report `ten_bit` (the client may then ask a host for HDR),
+and its tests check the decoder hands out P010 flagged PQ. Regenerate with:
+
+```
+ffmpeg -f lavfi -i testsrc2=size=64x64:rate=30 -frames:v 1 -c:v libx265 -pix_fmt yuv420p10le -x265-params "keyint=1:repeat-headers=1:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc" -f hevc test-hdr10.h265
+ffmpeg -f lavfi -i testsrc2=size=64x64:rate=30 -frames:v 1 -c:v libaom-av1 -cpu-used 8 -pix_fmt yuv420p10le -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc -f obu test-hdr10.av1.obu
+```
