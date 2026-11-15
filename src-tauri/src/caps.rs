@@ -37,10 +37,16 @@ pub(crate) struct DecoderCap {
 	/// RK3588). The negotiator drops a host-encoder × this-decoder combo that lands here.
 	#[serde(default)]
 	pub incompatible_with: Vec<String>,
-	/// The renderer really decoded AND presented a 4:4:4 keyframe of this codec (its probe's
-	/// `yuv444`): only then may a session ask a host for 4:4:4 in it (`StreamReq::decode_yuv444`).
+	/// The renderer really decoded AND presented a 4:4:4 keyframe of this codec (its separate
+	/// `--probe-444`, run only when 4:4:4 is wanted — see `with_yuv444`): only then may a
+	/// session ask a host for 4:4:4 in it (`StreamReq::decode_yuv444`).
 	#[serde(default)]
 	pub yuv444: bool,
+	/// Highest session pixel rate (width × height × fps) the 4:4:4 decode keeps up with; 0 = no
+	/// known limit (a hardware decoder: Windows, macOS). Linux decodes 4:4:4 in software on one
+	/// thread and measures it (`pulsar-render --probe-444`): a session above it asks for 4:2:0.
+	#[serde(default)]
+	pub yuv444_max_px_s: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -172,7 +178,8 @@ pub(crate) fn probe_all(app: &AppHandle) -> LocalCaps {
 	// --- Decode: the renderer's own tiered probe (real canned-frame decodes). ---
 	let t_dec = std::time::Instant::now();
 	tracing::info!("caps probe: decoders");
-	let decoders = probe_decoders(app, &platform);
+	let mut decoders = probe_decoders(app, &platform);
+	with_yuv444(app, &mut decoders);
 	tracing::info!(ms = t_dec.elapsed().as_millis() as u64, n = decoders.len(), "caps probe: decoders done");
 
 	LocalCaps {
@@ -201,6 +208,7 @@ fn probe_unavailable(platform: &str) -> Vec<DecoderCap> {
 				tier: "software".into(),
 				incompatible_with: Vec::new(),
 				yuv444: false,
+				yuv444_max_px_s: 0,
 			})
 			.collect();
 	}
@@ -215,6 +223,7 @@ fn probe_unavailable(platform: &str) -> Vec<DecoderCap> {
 		tier: "hwaccel".into(),
 		incompatible_with: Vec::new(),
 		yuv444: false,
+		yuv444_max_px_s: 0,
 	}]
 }
 
@@ -273,13 +282,53 @@ fn probe_decoders(app: &AppHandle, platform: &str) -> Vec<DecoderCap> {
 										.collect()
 								})
 								.unwrap_or_default(),
-							yuv444: e.get("yuv444").and_then(|v| v.as_bool()).unwrap_or(false),
+							// Filled by `with_yuv444` (a separate, opt-in probe).
+							yuv444: false,
+							yuv444_max_px_s: 0,
 						})
 					})
 					.collect()
 			})
 			.unwrap_or_default()
 	}
+}
+
+/// 4:4:4 decode caps, merged into the 4:2:0 ones from `--probe`. Only when 4:4:4 is wanted
+/// (`PULSAR_YUV444`, opt-in): `pulsar-render --probe-444` creates a hardware D3D11 device and
+/// runs real decodes on Windows (a wedged GPU driver can hang there — the NVIDIA one does while
+/// another process is stuck in it) and times a software decode on Linux; nobody else should pay
+/// that at startup. Its own short timeout, and additive: a hang or a failure here leaves every
+/// codec at 4:2:0 and never touches the caps `--probe` reported.
+fn with_yuv444(app: &AppHandle, decoders: &mut [DecoderCap]) {
+	if std::env::var_os("PULSAR_YUV444").is_none() {
+		return;
+	}
+	let t0 = std::time::Instant::now();
+	let mut cmd = std::process::Command::new(crate::process::render_bin(app));
+	cmd.arg("--probe-444").stderr(std::process::Stdio::null());
+	crate::process::apply_render_lib_env(&mut cmd);
+	crate::process::no_window(&mut cmd);
+	let out = match output_within(cmd, std::time::Duration::from_secs(6)) {
+		Ok(o) => o,
+		Err(e) => {
+			tracing::warn!(%e, "caps probe: 4:4:4 probe failed — 4:2:0 only");
+			return;
+		}
+	};
+	let parsed = serde_json::from_slice::<serde_json::Value>(out.stdout.trim_ascii()).unwrap_or_default();
+	for e in parsed.as_array().map(Vec::as_slice).unwrap_or_default() {
+		let Some(codec) = e.get("codec").and_then(|v| v.as_str()) else { continue };
+		let max = e.get("max_px_s").and_then(|v| v.as_u64()).unwrap_or(0);
+		if let Some(d) = decoders.iter_mut().find(|d| d.ok && d.codec == codec) {
+			d.yuv444 = true;
+			d.yuv444_max_px_s = max;
+		}
+	}
+	tracing::info!(
+		ms = t0.elapsed().as_millis() as u64,
+		yuv444 = ?decoders.iter().filter(|d| d.yuv444).map(|d| (d.codec.as_str(), d.yuv444_max_px_s)).collect::<Vec<_>>(),
+		"caps probe: 4:4:4 decode"
+	);
 }
 
 /// Spawn the startup probe: runs in the background, stores the result in AppState and

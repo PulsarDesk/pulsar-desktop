@@ -405,22 +405,35 @@ pub fn probe_json() -> String {
 		("av1", MFVideoFormat_AV1),
 	] {
 		let sync_ok = unsafe { create_decoder_mft(subtype, false).is_ok() };
-		// `yuv444` (additive; older apps ignore it): this machine REALLY decoded the codec's
-		// 4:4:4 fixture and presented it. Only then may the app ask a host for 4:4:4.
-		let yuv444 = sync_ok
-			&& match name {
-				"h264" => unsafe { probe_yuv444(Codec::H264) },
-				"h265" => unsafe { probe_yuv444(Codec::H265) },
-				// No AV1 4:4:4 fixture: no host encoder we drive makes AV1 High (4:4:4).
-				_ => false,
-			};
 		entries.push(format!(
 			concat!(
 				"{{\"codec\":\"{}\",\"ok\":{},\"decoder\":\"mediafoundation\",",
-				"\"hw\":true,\"tier\":\"hwaccel\",\"yuv444\":{},\"incompatible_with\":[]}}"
+				"\"hw\":true,\"tier\":\"hwaccel\",\"incompatible_with\":[]}}"
 			),
-			name, sync_ok, yuv444
+			name, sync_ok
 		));
+	}
+	format!("[{}]", entries.join(","))
+}
+
+/// `--probe-444`: the codecs this machine REALLY decodes and presents in 4:4:4, as
+/// `[{"codec":"h265"}]`. A separate invocation from `--probe` on purpose: it creates a hardware
+/// D3D11 device and runs real decodes (a wedged driver can hang there), so the app runs it only
+/// when 4:4:4 is wanted (`PULSAR_YUV444`) and under its own timeout — a hang here can never cost
+/// the 4:2:0 caps `--probe` reports.
+pub fn probe_444_json() -> String {
+	unsafe {
+		MF_INIT.call_once(|| {
+			let _ = MFStartup(MF_VERSION, MFSTARTUP_FULL);
+		});
+	}
+	let mut entries = Vec::new();
+	// No AV1: no fixture, and no host encoder we drive makes AV1 High (4:4:4).
+	for (name, subtype, codec) in [("h264", MFVideoFormat_H264, Codec::H264), ("h265", MFVideoFormat_HEVC, Codec::H265)] {
+		let ok = unsafe { create_decoder_mft(subtype, false).is_ok() && probe_yuv444(codec) };
+		if ok {
+			entries.push(format!("{{\"codec\":\"{name}\"}}"));
+		}
 	}
 	format!("[{}]", entries.join(","))
 }

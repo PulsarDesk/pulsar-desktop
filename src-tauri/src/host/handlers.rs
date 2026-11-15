@@ -3509,6 +3509,16 @@ pub(super) fn make_on_stream(
 		if req.yuv444 && !yuv444 {
 			tracing::info!(?codec, decode_yuv444 = ?req.decode_yuv444, "4:4:4 asked for, but the client cannot show it in this codec: 4:2:0");
 		}
+		// Which encoders may encode it: ONLY the Windows native NVENC path
+		// (`CaptureConfig::yuv444` below; it checks the GPU's 4:4:4 caps and falls back to 4:2:0
+		// on the same path). The ffmpeg chain never gets 4:4:4 (`StreamPlan::yuv444` = false):
+		// AMF / VAAPI refuse `yuv444p` + `rext`, so the fallback chain ended on a CPU
+		// libx264/libx265 4:4:4 encode; on a Linux NVENC/X11 host it pushed the stream off the
+		// in-process libav path (live bitrate, keyframe on request, RFI) onto the ffmpeg CLI.
+		// The same latency trade the macOS host refuses — 4:2:0 in-process on every OS instead.
+		if yuv444 && !(cfg!(windows) && encoder == HwEncoder::Nvenc) {
+			tracing::info!(?encoder, "4:4:4 asked for, but only native NVENC (Windows) encodes it: 4:2:0");
+		}
 		let plan = StreamPlan {
 			encoder,
 			codec,
@@ -3530,7 +3540,8 @@ pub(super) fn make_on_stream(
 			gpu_zerocopy,
 			output_idx: ffmpeg_display_idx,
 			hdr: req.hdr,
-			yuv444,
+			// Never 4:4:4 on the ffmpeg chain (see above).
+			yuv444: false,
 			loss_recovery: req.loss_recovery,
 			// Off Windows: the window picked above (Windows' own window capture is WGC on the
 			// native path below; its ffmpeg fallback streams the monitor).
@@ -3838,16 +3849,11 @@ pub(super) fn make_on_stream(
 		} else {
 			format!("{}p", eff_h)
 		};
-		// "H.265 4:4:4" when the ffmpeg chain encodes 4:4:4; the native path tells what its
-		// encoder really got (`CaptureStats::yuv444`) in the reporter below.
-		let codec_part = if !native_started && plan.effective_hdr_yuv444().1 {
-			format!("{} 4:4:4", vcodec_label(codec))
-		} else {
-			vcodec_label(codec).to_string()
-		};
+		// A 4:4:4 stream is marked by the native path, from what its encoder really got
+		// (`CaptureStats::yuv444`), in the reporter below (the ffmpeg chain is always 4:2:0).
 		let base_label = format!(
 			"{} · {} · {} · {} · {} {}",
-			codec_part,
+			vcodec_label(codec),
 			encoder.label(),
 			res_part,
 			fps_part,

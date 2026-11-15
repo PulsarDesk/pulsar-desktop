@@ -108,6 +108,30 @@ fn yuv444_for(wanted: bool, codec: &str, decode_yuv444: &[String]) -> bool {
 	wanted && decode_yuv444.iter().any(|c| c == codec)
 }
 
+/// Does a 4:4:4 decode limited to `max_px_s` (0 = no known limit) keep up with a session whose
+/// top point is `(w, h, fps)`? An unknown size (0: the host's default) counts as too much for
+/// a limited decoder; an unknown fps as 60.
+fn yuv444_fits(max_px_s: u64, (w, h, fps): (u32, u32, u32)) -> bool {
+	if max_px_s == 0 {
+		return true;
+	}
+	let fps = if fps == 0 { 60 } else { fps };
+	w > 0 && h > 0 && u64::from(w) * u64::from(h) * u64::from(fps) <= max_px_s
+}
+
+/// The session codec: `resolve_codec`, except that with 4:4:4 wanted an "auto" pick is made
+/// among the codecs the renderer shows in 4:4:4 first — "auto" goes best-first (AV1 > HEVC >
+/// H.264), and an AV1 pick would stream 4:2:0 although HEVC 4:4:4 was there.
+fn pick_codec(requested: &str, allowed: &[String], decode_yuv444: &[String], yuv444_wanted: bool) -> String {
+	if yuv444_wanted && (requested.is_empty() || requested == "auto") {
+		let both: Vec<String> = allowed.iter().filter(|c| decode_yuv444.contains(c)).cloned().collect();
+		if !both.is_empty() {
+			return resolve_codec("auto", &both);
+		}
+	}
+	resolve_codec(requested, allowed)
+}
+
 /// Format the host's monitors for the renderer's `caps` line `displays=` field, as
 /// `idx:name:w:h:primary` comma-joined â€” NO spaces (the caps line is whitespace-tokenized,
 /// and session_cmds patches it token-wise, so a spaced value would corrupt both). The
@@ -387,18 +411,17 @@ pub(crate) async fn start_remote_play(
 		})
 		.cloned()
 		.collect();
-	let codec = resolve_codec(&codec, &allowed);
-	tracing::info!(%codec, ?allowed, "stream codec resolved");
 	// Codecs this renderer decodes AND presents in 4:4:4 (startup probe), within the negotiated
-	// set; travels in every request so the host encodes 4:4:4 only in one of them.
-	let decode_yuv444: Vec<String> = probed_decoders
+	// set; travels in every request so the host encodes 4:4:4 only in one of them. Narrowed to
+	// the session's pixel rate below (`yuv444_fits`) once that is known.
+	let mut decode_yuv444: Vec<String> = probed_decoders
 		.iter()
 		.filter(|d| d.ok && d.yuv444 && allowed.contains(&d.codec))
 		.map(|d| d.codec.clone())
 		.collect();
-	if std::env::var_os("PULSAR_YUV444").is_some() && !yuv444_request(&codec, &decode_yuv444) {
-		tracing::info!(%codec, ?decode_yuv444, "4:4:4 asked for (PULSAR_YUV444) but this client cannot show it in this codec — 4:2:0");
-	}
+	let yuv444_wanted = std::env::var_os("PULSAR_YUV444").is_some();
+	let codec = pick_codec(&codec, &allowed, &decode_yuv444, yuv444_wanted);
+	tracing::info!(%codec, ?allowed, "stream codec resolved");
 
 	// Same machine? (loopback P2P) â†’ control would feed back, so flag it.
 	let local = matches!(sess.transport(), Transport::Direct)
@@ -1358,7 +1381,16 @@ pub(crate) async fn start_remote_play(
 		"adaptive controller seeded"
 	);
 	let rfi_req = host_rfi && codec != "av1";
+	// 4:4:4 only where the decode keeps up with the session's top pixel rate (Linux decodes it
+	// in software on one thread and measured how fast — `DecoderCap::yuv444_max_px_s`).
+	decode_yuv444.retain(|c| {
+		let max = probed_decoders.iter().find(|d| &d.codec == c).map_or(0, |d| d.yuv444_max_px_s);
+		yuv444_fits(max, native_dims)
+	});
 	let req_yuv444 = yuv444_request(&codec, &decode_yuv444);
+	if yuv444_wanted && !req_yuv444 {
+		tracing::info!(%codec, ?decode_yuv444, ?native_dims, "4:4:4 asked for (PULSAR_YUV444) but this client cannot show it in this codec at this size/fps — 4:2:0");
+	}
 	let req = StreamReq {
 		port: video_port,
 		codec,
@@ -2546,6 +2578,36 @@ mod tests {
 
 	fn set(v: &[&str]) -> Vec<String> {
 		v.iter().map(|s| s.to_string()).collect()
+	}
+
+	#[test]
+	fn yuv444_auto_prefers_a_444_codec() {
+		use super::pick_codec;
+		let all = set(&["h264", "h265", "av1"]);
+		// Not wanted: the normal best-first pick.
+		assert_eq!(pick_codec("auto", &all, &set(&["h265"]), false), "av1");
+		// Wanted: HEVC 4:4:4 beats AV1 4:2:0.
+		assert_eq!(pick_codec("auto", &all, &set(&["h265"]), true), "h265");
+		assert_eq!(pick_codec("", &all, &set(&["h264", "h265"]), true), "h265");
+		// Nothing decodes 4:4:4: the normal order.
+		assert_eq!(pick_codec("auto", &all, &[], true), "av1");
+		// A codec picked by name stays.
+		assert_eq!(pick_codec("h264", &all, &set(&["h265"]), true), "h264");
+	}
+
+	#[test]
+	fn yuv444_within_the_decoders_pixel_rate() {
+		use super::yuv444_fits;
+		// No limit (hardware decode).
+		assert!(yuv444_fits(0, (3840, 2160, 120)));
+		assert!(yuv444_fits(0, (0, 0, 0)));
+		let max = 1920 * 1080 * 60;
+		assert!(yuv444_fits(max, (1920, 1080, 60)));
+		assert!(!yuv444_fits(max, (1920, 1080, 120)));
+		assert!(!yuv444_fits(max, (2560, 1440, 60)));
+		// Unknown size with a limit: 4:2:0. Unknown fps = 60.
+		assert!(!yuv444_fits(max, (0, 0, 60)));
+		assert!(yuv444_fits(max, (1920, 1080, 0)));
 	}
 
 	#[test]

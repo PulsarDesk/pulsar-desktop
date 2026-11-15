@@ -149,6 +149,14 @@ enum Upscaler {
 	Vendor,
 }
 
+/// `src` is a 4:4:4 decoder picture (`win/decode.rs` hands those over as AYUV).
+fn is_ayuv(src: &ID3D11Texture2D) -> bool {
+	let mut d = windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC::default();
+	// SAFETY: plain query on a live texture.
+	unsafe { src.GetDesc(&mut d) };
+	d.Format == windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_AYUV
+}
+
 fn pick(mode: u8, vendor: u32) -> Upscaler {
 	let ai = vendor == VENDOR_NVIDIA || vendor == VENDOR_INTEL;
 	match mode {
@@ -387,6 +395,12 @@ impl Present {
 		let (_, dst, crop) = self.blt_rects_crop();
 		let up = (dst.right - dst.left) as u32 > crop.0 || (dst.bottom - dst.top) as u32 > crop.1;
 		let mut which = pick(UPSCALE.load(std::sync::atomic::Ordering::Relaxed), self.vendor);
+		// The drivers' super resolution (RTX / Intel VSR) is documented and used (Moonlight) on
+		// NV12 / P010 input only, and was never verified on a 4:4:4 (AYUV) stream: FSR there,
+		// so the overlay never names an upscaler that may not be running.
+		if which == Upscaler::Vendor && is_ayuv(src) {
+			which = Upscaler::Fsr;
+		}
 		if !up || (matches!(which, Upscaler::Fsr | Upscaler::Sgsr) && self.fsr_failed.get()) {
 			which = Upscaler::None;
 		}

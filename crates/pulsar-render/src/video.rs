@@ -869,6 +869,13 @@ unsafe fn decode_once(sdp: &CString) {
 			// Decoders already tried on THIS stream (by name) — the zero-output fallback
 			// below re-runs the tier walk with them excluded.
 			let mut skip: Vec<String> = Vec::new();
+			// 4:4:4 wanted: validate the software 4:4:4 decoder now (cached per process), while
+			// no stream packet waits, so a 4:4:4 keyframe below only opens it.
+			if std::env::var_os("PULSAR_YUV444").is_some() {
+				let _ = crate::decode::yuv444_decoder(codec_id);
+			}
+			// The hardware decoder a 4:4:4 stream replaced with software (see the keyframe check).
+			let mut hw_before_444: Option<crate::decode::Selected> = None;
 			let mut sel = match crate::decode::select_skipping(codec_id, &skip) {
 				Some(s) => s.sel,
 				None => {
@@ -979,30 +986,44 @@ unsafe fn decode_once(sdp: &CString) {
 						seen_key = true;
 						SWITCHING.store(false, Ordering::Relaxed); // new stream live
 						SWITCH_DEADLINE_MS.store(0, Ordering::Relaxed); // switch completed
-						// A 4:4:4 stream (its SPS rides in-band on this keyframe): only the software
-						// decoder shows it (`decode::select_yuv444`) — switch to it before the first
-						// picture instead of letting a hardware decoder produce frames nothing can
-						// present until the zero-output fallback gives up on it.
-						if sel.tier != crate::decode::Tier::Software && keyframe_is_444(codec_id, pkt) {
-							if let Some(p) = crate::decode::select_yuv444(codec_id) {
-								let ndc = open_decoder(par, codec_id, &p.sel);
-								if !ndc.is_null() {
-									eprintln!("pulsar-render: 4:4:4 stream — decoding in software ({})", p.sel.name);
-									ff::avcodec_free_context(&mut dc);
-									dc = ndc;
-									sel = p.sel;
-									announce_decoder(&sel);
-									force_readback = !sel.zero_copy;
-									gen = DEC_GEN.fetch_add(1, Ordering::Relaxed) + 1;
-									map_failed = false;
-									au_since_open = 0;
-									frames_since_open = 0;
-								}
-							}
-						}
 					} else {
 						ff::av_packet_unref(pkt);
 						continue;
+					}
+				}
+				// Chroma of every keyframe (its SPS rides in-band): a 4:4:4 stream only the software
+				// decoder shows (`decode::yuv444_decoder`, validated once per process) — switch to it
+				// before the picture instead of letting a hardware decoder produce frames nothing
+				// can present until the zero-output fallback gives up on it. When the host's
+				// encoder later rebuilds in 4:2:0 (its 4:4:4 downgrade), go back to the hardware
+				// decoder this replaced. A keyframe without an SPS (`None`) changes nothing.
+				if is_video && (*pkt).flags & ff::AV_PKT_FLAG_KEY != 0 {
+					let chroma = keyframe_chroma(codec_id, pkt);
+					let next = if chroma == Some(3) && sel.tier != crate::decode::Tier::Software {
+						crate::decode::yuv444_decoder(codec_id).map(|s| (s, Some(sel.clone()), "4:4:4 stream — decoding in software"))
+					} else if chroma.is_some_and(|c| c != 3) && hw_before_444.is_some() {
+						hw_before_444.clone().map(|s| (s, None, "4:2:0 stream again — back to the hardware decoder"))
+					} else {
+						None
+					};
+					if let Some((nsel, before, why)) = next {
+						let ndc = open_decoder(par, codec_id, &nsel);
+						if !ndc.is_null() {
+							eprintln!("pulsar-render: {why} ({})", nsel.name);
+							ff::avcodec_free_context(&mut dc);
+							dc = ndc;
+							sel = nsel;
+							hw_before_444 = before;
+							announce_decoder(&sel);
+							force_readback = !sel.zero_copy;
+							gen = DEC_GEN.fetch_add(1, Ordering::Relaxed) + 1;
+							map_failed = false;
+							au_since_open = 0;
+							frames_since_open = 0;
+						} else {
+							// The way back failed: stay on the decoder that works.
+							hw_before_444 = None;
+						}
 					}
 				}
 				// Time the decode work for this packet (send + frame drain), EMA'd per frame into the
@@ -1245,23 +1266,19 @@ unsafe fn decode_once(sdp: &CString) {
 	}
 }
 
-/// Async-signal-safe stop request: ONLY stores the STOP atomic (no lock, no libav free), so it
-/// can be called from a SIGINT/SIGTERM handler. The decode loop checks STOP and exits; the actual
-/// drain+free (`stop_decode`) must be done from the main thread after the render loop ends, where
-/// MBX is not held — calling stop_decode() from the signal handler can deadlock on the MBX mutex
-/// the main thread holds every frame in `Presenter::draw`.
-/// The keyframe in `pkt` carries an SPS that says 4:4:4 (H.264 / HEVC Annex-B).
-unsafe fn keyframe_is_444(codec_id: ff::AVCodecID, pkt: *const ff::AVPacket) -> bool {
+/// `chroma_format_idc` of the SPS the keyframe in `pkt` carries (H.264 / HEVC Annex-B; 3 =
+/// 4:4:4). `None`: no in-band SPS (e.g. `PULSAR_LINUX_DEMUX=ffmpeg` keeps it in the SDP), AV1.
+unsafe fn keyframe_chroma(codec_id: ff::AVCodecID, pkt: *const ff::AVPacket) -> Option<u32> {
 	let codec = match codec_id {
 		ff::AVCodecID::AV_CODEC_ID_H264 => crate::stream::Codec::H264,
 		ff::AVCodecID::AV_CODEC_ID_HEVC => crate::stream::Codec::H265,
-		_ => return false,
+		_ => return None,
 	};
 	if (*pkt).data.is_null() || (*pkt).size <= 0 {
-		return false;
+		return None;
 	}
 	let data = std::slice::from_raw_parts((*pkt).data, (*pkt).size as usize);
-	crate::stream::chroma::au_is_444(codec, data)
+	crate::stream::chroma::au_chroma_format(codec, data)
 }
 
 /// Allocate + open a codec context for `sel` on the stream parameters `par` (the decoder the
@@ -1333,6 +1350,11 @@ fn announce_decoder(sel: &crate::decode::Selected) {
 		format!("{} ({})", sel.name, if hw == "hw" { "HW" } else { "SW" });
 }
 
+/// Async-signal-safe stop request: ONLY stores the STOP atomic (no lock, no libav free), so it
+/// can be called from a SIGINT/SIGTERM handler. The decode loop checks STOP and exits; the actual
+/// drain+free (`stop_decode`) must be done from the main thread after the render loop ends, where
+/// MBX is not held — calling stop_decode() from the signal handler can deadlock on the MBX mutex
+/// the main thread holds every frame in `Presenter::draw`.
 pub fn signal_stop() {
 	STOP.store(true, Ordering::Relaxed);
 }

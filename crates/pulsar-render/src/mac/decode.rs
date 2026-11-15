@@ -442,8 +442,7 @@ fn obu_payload(obu: &[u8]) -> Option<(usize, usize)> {
 
 /// Headless capability probe (main.rs `--probe`), the same JSON as the Windows / Linux
 /// probes: H.264 / HEVC decode everywhere (hardware or Apple's software decoder), AV1 only
-/// where VideoToolbox decodes it in hardware. `yuv444`: the canned 4:4:4 keyframe really
-/// decoded into a 4:4:4 picture — the app asks a host for 4:4:4 only then.
+/// where VideoToolbox decodes it in hardware. 4:4:4 is a separate probe (`probe_444_json`).
 pub fn probe_json() -> String {
 	register_av1();
 	let mut entries = Vec::new();
@@ -451,12 +450,23 @@ pub fn probe_json() -> String {
 		// SAFETY: plain query.
 		let hw = unsafe { VTIsHardwareDecodeSupported(codec_type(c)) } != 0;
 		let ok = hw || c != Codec::Av1;
-		let yuv444 = ok && decodes_444(c);
 		entries.push(format!(
-			"{{\"codec\":\"{name}\",\"ok\":{ok},\"decoder\":\"videotoolbox\",\"hw\":{hw},\"tier\":\"{}\",\"yuv444\":{yuv444},\"incompatible_with\":[]}}",
+			"{{\"codec\":\"{name}\",\"ok\":{ok},\"decoder\":\"videotoolbox\",\"hw\":{hw},\"tier\":\"{}\",\"incompatible_with\":[]}}",
 			if hw { "hwaccel" } else { "software" }
 		));
 	}
+	format!("[{}]", entries.join(","))
+}
+
+/// `--probe-444` (main.rs): the codecs whose canned 4:4:4 keyframe VideoToolbox really decodes
+/// into a 4:4:4 picture, as `[{"codec":"h265"}]`. Separate from `--probe` so the app runs these
+/// decodes only when 4:4:4 is wanted (`PULSAR_YUV444`), under their own timeout.
+pub fn probe_444_json() -> String {
+	let entries: Vec<String> = [(Codec::H264, "h264"), (Codec::H265, "h265")]
+		.into_iter()
+		.filter(|(c, _)| decodes_444(*c))
+		.map(|(_, name)| format!("{{\"codec\":\"{name}\"}}"))
+		.collect();
 	format!("[{}]", entries.join(","))
 }
 
