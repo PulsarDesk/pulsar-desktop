@@ -139,12 +139,31 @@ impl Encoder {
 		let kept_vdevice = vdevice.clone();
 		let kept_vcontext = vcontext.clone();
 
+		// HDR10 runs only where the FP16 frames already sit on the NVENC device (the hybrid
+		// bridge stages 8-bit BGRA through system memory).
+		if p.hdr.is_some() && bridge.is_some() {
+			return Err("HDR: the capture is not on the NVIDIA device (hybrid bridge is 8-bit)".into());
+		}
+		if p.hdr.is_some() && !super::hdr_conv::p010_render_supported(&kept_device) {
+			return Err("HDR: this GPU cannot render into P010".into());
+		}
+
 		// -- 1. ID3D11VideoProcessor for BGRA→NV12 (one GPU Blt/frame) on the NVENC device.
+		//    (Built for HDR too — unused there, but it keeps the struct one shape.)
 		let (vp_enum, vproc) = build_video_processor(&vdevice, cap_w, cap_h, w, h)?;
 
 		// -- 2. Allocate OUR own NV12 texture (Sunshine single-texture model) on the NVENC
 		//    device. NVENC has no hwframe pool — we Blt into THIS every frame, register once.
-		let nv12_tex = create_nv12_texture(&kept_device, w, h)?;
+		//    HDR: a P010 surface instead, filled by the scRGB → PQ shader passes (hdr_conv.rs).
+		let nv12_tex = if p.hdr.is_some() {
+			super::hdr_conv::create_p010_texture(&kept_device, w, h)?
+		} else {
+			create_nv12_texture(&kept_device, w, h)?
+		};
+		let hdr_conv = match p.hdr {
+			Some(_) => Some(super::hdr_conv::HdrConverter::new(&kept_device, &nv12_tex, w, h, p.rotation)?),
+			None => None,
+		};
 
 		// -- 3. Parse `p.dest` ("rtp://host:port") → SocketAddr; spawn the decoupled RTP
 		//    egress (sender thread owns the socket, so the blocking send never stalls the
@@ -212,6 +231,7 @@ impl Encoder {
 				low_latency: p.low_latency,
 				intra_refresh: p.intra_refresh,
 				rfi: p.rfi,
+				hdr: p.hdr.is_some(),
 			},
 		)?;
 		let super::nvsession::Configured {
@@ -236,7 +256,11 @@ impl Encoder {
 		reg.pitch = 0; // ignored for DirectX resources
 		reg.subResourceIndex = 0;
 		reg.resourceToRegister = nv12_tex.as_raw();
-		reg.bufferFormat = nvenc::NV_ENC_BUFFER_FORMAT_NV12;
+		reg.bufferFormat = if p.hdr.is_some() {
+			nvenc::NV_ENC_BUFFER_FORMAT_YUV420_10BIT
+		} else {
+			nvenc::NV_ENC_BUFFER_FORMAT_NV12
+		};
 		reg.bufferUsage = nvenc::NV_ENC_INPUT_IMAGE;
 		let reg_fn = fns
 			.nvEncRegisterResource
@@ -322,6 +346,8 @@ impl Encoder {
 			cached_output_view: None,
 			cached_input_src: ptr::null_mut(),
 			rotation_set: false,
+			hdr: p.hdr,
+			hdr_conv,
 		})
 	}
 }

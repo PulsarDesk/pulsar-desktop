@@ -637,6 +637,8 @@ pub fn run() {
 					crate::overlay::set_upscale_mode(m);
 				}
 				Some("hostname") => crate::overlay::set_host_name(&it.collect::<Vec<_>>().join(" ")),
+				// HDR10 tone-map reference from the host (SDR white, peak nits) — hdr_ref.rs.
+				Some("hdrref") => crate::hdr_ref::set_from_args(it),
 				// Session audio truth from the app (atx/amute/mic 0|1) so the overlay's
 				// Ses toggles highlight the real state.
 				Some("audio") => {

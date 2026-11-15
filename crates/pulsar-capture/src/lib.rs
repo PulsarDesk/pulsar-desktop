@@ -63,6 +63,12 @@ pub struct CaptureConfig {
 	/// The HWND is a raw window handle (`HWND.0 as isize`); the entire encode/RTP path is
 	/// identical either way. Has no effect on non-Windows (the native path is Windows-only).
 	pub window_hwnd: Option<isize>,
+	/// The client asked for HDR (`StreamReq::hdr`). Windows NVENC: a monitor in HDR mode is
+	/// captured as FP16 scRGB and streamed as HDR10 (P010 → HEVC Main10 / AV1 10-bit, BT.2020 /
+	/// PQ, mastering metadata) — only for HEVC / AV1 on a capture that sits on the NVIDIA GPU;
+	/// everything else (SDR monitor, H.264, the hybrid bridge, Media Foundation, macOS) streams
+	/// SDR exactly as before. Never an 8-bit picture labelled PQ.
+	pub hdr: bool,
 }
 
 /// Video codec selector. The native NVENC path implements all three (`H264`, `H265`,
@@ -78,6 +84,8 @@ pub enum Codec {
 /// Live capture-path numbers, refreshed about once a second by the capture thread.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CaptureStats {
+	/// The stream is HDR10 right now (FP16 capture of a monitor in HDR mode → 10-bit PQ).
+	pub hdr: bool,
 	/// `"dxgi"` (Desktop Duplication), `"wgc"` (whole monitor via Windows Graphics Capture),
 	/// `"wgc-window"` (one window) — all NVENC — or `"dxgi-mf"` (Desktop Duplication + the
 	/// display GPU's own encoder through Media Foundation); `"sck"` on macOS (ScreenCaptureKit +
@@ -117,6 +125,14 @@ pub struct LiveStats {
 	/// thread re-encodes the last surface on a static screen, so this keeps rising on a healthy
 	/// pipeline; a flat count means the thread is stuck (see [`ProgressWatch`]).
 	pub(crate) encoded: std::sync::atomic::AtomicU32,
+	/// The current build streams HDR10.
+	pub(crate) hdr: std::sync::atomic::AtomicBool,
+	/// HDR10 build: the captured monitor (HMONITOR as isize; 0 = unknown) and its peak (nits),
+	/// for [`LiveStats::hdr_reference`]. Windows only (no HDR capture elsewhere).
+	#[cfg_attr(not(windows), allow(dead_code))]
+	pub(crate) hdr_mon: std::sync::atomic::AtomicIsize,
+	#[cfg_attr(not(windows), allow(dead_code))]
+	pub(crate) hdr_peak_nits: std::sync::atomic::AtomicU32,
 }
 
 /// Tells how long a monotonic counter has been flat. The host feeds it the capture thread's
@@ -167,7 +183,28 @@ impl LiveStats {
 			rfi_recovered: self.rfi_ok.load(Relaxed),
 			rfi_declined: self.rfi_no.load(Relaxed),
 			encoded: self.encoded.load(Relaxed),
+			hdr: self.hdr.load(Relaxed),
 		}
+	}
+
+	/// While the stream is HDR10: `(SDR white, peak)` in nits — where the host's SDR content
+	/// sits on its HDR monitor (Windows "SDR content brightness", re-read now: the user can
+	/// move it mid-stream) and the monitor's peak. The client tone-maps around them
+	/// (`DataMsg::HdrMeta`). `None` for an SDR stream / off Windows. A GDI + display-config
+	/// lookup (no DXGI factory), cheap enough every few seconds.
+	pub fn hdr_reference(&self) -> Option<(u16, u16)> {
+		use std::sync::atomic::Ordering::Relaxed;
+		if !self.hdr.load(Relaxed) {
+			return None;
+		}
+		#[cfg(windows)]
+		{
+			let mon = windows::Win32::Graphics::Gdi::HMONITOR(self.hdr_mon.load(Relaxed) as *mut core::ffi::c_void);
+			let sdr = if mon.is_invalid() { 80.0 } else { unsafe { dxgi::hdr::monitor_sdr_white_nits(mon) } };
+			Some((sdr.round() as u16, self.hdr_peak_nits.load(Relaxed).min(u16::MAX as u32) as u16))
+		}
+		#[cfg(not(windows))]
+		None
 	}
 }
 
@@ -389,6 +426,9 @@ pub use window::{
 // pane): the platform-independent best-fit logic + the `xrandr` text parser (pure, unit-tested
 // everywhere) and the macOS CoreGraphics mode switch (FFI, cfg(target_os = "macos")).
 pub mod display_mode;
+// HDR10 metadata (SEI / AV1 OBUs) + the CPU reference of the scRGB → PQ P010 conversion; pure,
+// every OS. The Windows HDR capture + GPU conversion use it (dxgi/hdr.rs, encode/hdr_conv.rs).
+pub mod hdr;
 
 // ===========================================================================
 // Windows implementation
@@ -524,6 +564,20 @@ impl CapSource {
 			CapSource::Wgc(c) => c.rotation_deg(),
 		}
 	}
+	/// `Some(mastering data)` while the source delivers FP16 scRGB from an HDR monitor.
+	fn hdr(&self) -> Option<hdr::HdrMeta> {
+		match self {
+			CapSource::Dxgi(c) => c.hdr(),
+			CapSource::Wgc(c) => c.hdr(),
+		}
+	}
+	/// The monitor being captured now (for the HDR reference white).
+	fn hmonitor(&self) -> windows::Win32::Graphics::Gdi::HMONITOR {
+		match self {
+			CapSource::Dxgi(c) => c.hmonitor(),
+			CapSource::Wgc(c) => c.hmonitor(),
+		}
+	}
 	/// Forward the pacing loop to the underlying source. Both `run` implementations share the
 	/// exact signature (fps, draw_cursor, requested_output, stop, on_frame) and return `RunExit`.
 	unsafe fn run(
@@ -551,6 +605,13 @@ enum AnyEncoder {
 
 #[cfg(windows)]
 impl AnyEncoder {
+	/// The encoder converts FP16 scRGB to P010 PQ (an HDR10 build).
+	fn is_hdr(&self) -> bool {
+		match self {
+			AnyEncoder::Nv(e) => e.is_hdr(),
+			AnyEncoder::Mf(_) => false,
+		}
+	}
 	unsafe fn submit(&mut self, frame: &Frame, pts: i64, rtp_ts: u32) -> Result<(), String> {
 		match self {
 			AnyEncoder::Nv(e) => e.submit(frame, pts, rtp_ts),
@@ -702,6 +763,10 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 			// too it stays (the host tells the client — CaptureStats::encoded stays 0).
 			let mut dry_switched_on: Option<u32> = None;
 			let qpc = dxgi::platform::Qpc::new();
+			// HDR10 (CaptureConfig::hdr): only HEVC / AV1 have a 10-bit NVENC encode. Cleared
+			// for the rest of the session when an HDR encoder build fails (the stream then goes
+			// on in SDR instead of leaving the native path).
+			let mut hdr_ok = cfg.hdr && matches!(cfg.codec, Codec::H265 | Codec::Av1);
 			loop {
 				// Another monitor → plan again; a probe step / fallback may have picked the source.
 				if output_idx != plan_output {
@@ -741,16 +806,21 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 				// regardless of output_idx (no monitor switching). Otherwise the existing DXGI
 				// duplication on `output_idx`. Both produce the same BGRA Frame for the encoder.
 				let build_result = if let Some(hwnd) = cfg.window_hwnd {
-					wgc::WgcCaptureDevice::create(hwnd, output_idx, stop_t.clone(), fast_transient)
+					wgc::WgcCaptureDevice::create(hwnd, output_idx, hdr_ok, stop_t.clone(), fast_transient)
 						.map(CapSource::Wgc)
 				} else {
 					let build = |s: path::MonSource| match s {
-						path::MonSource::Dxgi | path::MonSource::DxgiMf => {
-							dxgi::CaptureDevice::create(output_idx, stop_t.clone(), fast_transient)
-								.map(CapSource::Dxgi)
-						}
+						// HDR is an NVENC-only path: the display GPU's own Media Foundation encoder
+						// (DxgiMf) keeps the SDR capture.
+						path::MonSource::Dxgi | path::MonSource::DxgiMf => dxgi::CaptureDevice::create(
+							output_idx,
+							hdr_ok && s != path::MonSource::DxgiMf,
+							stop_t.clone(),
+							fast_transient,
+						)
+						.map(CapSource::Dxgi),
 						path::MonSource::Wgc => {
-							wgc::WgcCaptureDevice::create_monitor(output_idx, stop_t.clone())
+							wgc::WgcCaptureDevice::create_monitor(output_idx, hdr_ok, stop_t.clone())
 								.map(CapSource::Wgc)
 						}
 					};
@@ -823,8 +893,10 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 					intra_refresh: cfg.intra_refresh,
 					rotation,
 					rfi: cfg.rfi,
+					hdr: None,
 				};
 				let mf_path = cfg.window_hwnd.is_none() && source.is_mf();
+				let params = encode::EncParams { hdr: if mf_path { None } else { cap.hdr() }, ..params };
 				let built = if mf_path {
 					encode::mf::MfEncoder::new(cap.device(), cap.context(), &params).map(AnyEncoder::Mf)
 				} else {
@@ -832,6 +904,14 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 				};
 				let mut enc = match built {
 					Ok(e) => e,
+					// An HDR encoder that cannot be built (no 10-bit encode, P010 not renderable…):
+					// rebuild this output in SDR and stay on the native path.
+					Err(e) if params.hdr.is_some() => {
+						encode_log(&format!("HDR encoder unavailable ({e}) — streaming SDR"));
+						hdr_ok = false;
+						drop(cap);
+						continue;
+					}
 					// The display GPU has no usable encoder for this codec: measure / use the next
 					// path (NVENC) instead — never a reason to leave the native path.
 					Err(e) if mf_path => {
@@ -868,6 +948,14 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 					break;
 				}
 				prev_good_output = output_idx;
+				stats_t.hdr.store(params.hdr.is_some(), Ordering::Relaxed);
+				if let Some(m) = params.hdr {
+					stats_t.hdr_mon.store(cap.hmonitor().0 as isize, Ordering::Relaxed);
+					stats_t.hdr_peak_nits.store(m.max_nits.round() as u32, Ordering::Relaxed);
+				}
+				if params.hdr.is_some() {
+					encode_log(&format!("HDR10 stream: {:?} {w}x{h} (FP16 scRGB → P010 PQ)", cfg.codec));
+				}
 				stats_t.source.store(
 					if cfg.window_hwnd.is_some() { 3 } else { source.code() },
 					Ordering::Relaxed,
@@ -985,6 +1073,15 @@ pub fn start_capture_encode(cfg: CaptureConfig) -> io::Result<CaptureHandle> {
 									}
 								}
 							}
+						}
+						// The frame must match the encoder's mode: FP16 scRGB for an HDR10 encoder,
+						// BGRA for an SDR one. A source that flipped HDR on its own (a reinit, a
+						// monitor toggle) without leaving the run loop would otherwise feed wrong,
+						// dim colours; rebuild capture + encoder for the monitor's new mode instead.
+						if enc.is_hdr() != (frame.format == windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R16G16B16A16_FLOAT) {
+							cap_log(&format!("build #{build_no}: frame format {:?} vs encoder hdr={} — rebuild", frame.format, enc.is_hdr()));
+							rebuild.store(true, Ordering::Relaxed);
+							return;
 						}
 						let enc_t0 = std::time::Instant::now();
 						// 90 kHz ticks since the capture thread started (wraps after ~13 h, as RTP does).
@@ -1114,6 +1211,19 @@ pub type DisplayDesc = (u32, String, u32, u32, bool);
 #[cfg(windows)]
 pub fn list_displays() -> Vec<DisplayDesc> {
 	unsafe { dxgi::CaptureDevice::list_outputs().unwrap_or_default() }
+}
+
+/// Per host monitor in [`list_displays`] order: is it in HDR mode right now (Windows "Use
+/// HDR" on — BT.2020 / PQ output colour space)? Feeds `DisplayInfo::hdr`. Empty off Windows.
+#[cfg(windows)]
+pub fn displays_hdr() -> Vec<bool> {
+	unsafe { dxgi::hdr::outputs_hdr() }
+}
+
+/// Off Windows no host capture delivers HDR (see `CaptureConfig::hdr`).
+#[cfg(not(windows))]
+pub fn displays_hdr() -> Vec<bool> {
+	Vec::new()
 }
 
 /// Non-Windows stub (see [`list_displays`]).

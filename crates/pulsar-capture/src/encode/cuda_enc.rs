@@ -230,6 +230,9 @@ impl NvencCuda {
 				low_latency: p.low_latency,
 				intra_refresh: p.intra_refresh,
 				rfi: p.rfi,
+				// No Linux capture delivers HDR pixels (x11grab / PipeWire hand over 8-bit), so
+				// the Linux SDK encoder stays 8-bit SDR (docs/agents/host-encode.md, HDR).
+				hdr: false,
 			},
 		)?;
 

@@ -61,6 +61,8 @@ fn main() {
 		rfi: false,
 		draw_mouse: true,
 		window_hwnd: None,
+		// PULSAR_BENCH_HDR=1 measures the HDR10 path (FP16 capture → P010 Main10) on an HDR monitor.
+		hdr: std::env::var("PULSAR_BENCH_HDR").is_ok_and(|v| v == "1"),
 	};
 	let h = pulsar_capture::start_capture_encode(cfg.clone()).expect("start_capture_encode");
 	let h2 = twice.then(|| {

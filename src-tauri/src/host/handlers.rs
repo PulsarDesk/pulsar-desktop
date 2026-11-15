@@ -2018,7 +2018,7 @@ pub(super) fn make_on_stream(
 	#[cfg(windows)] native_gen_arc: Arc<Mutex<Option<Arc<std::sync::atomic::AtomicU32>>>>,
 	// Publishes the HWND the CURRENT stream actually per-window (WGC) captures, for the input path
 	// (Bug 0). Set to the window target ONLY when the native NVENC per-window path started; cleared
-	// to `None` on every other outcome (whole-monitor ddagrab, ffmpeg fallback, HDR/4:4:4, or a
+	// to `None` on every other outcome (whole-monitor ddagrab, ffmpeg fallback, 4:4:4, or a
 	// capture-start error). `on_input` gates its per-window PostMessage routing on THIS — never on
 	// the raw `launched_hwnd`, which can point at a window the stream isn't actually showing.
 	// The id is per OS (HWND / X11 XID / CGWindowID), matching `pulsar_core::input::WindowInput`.
@@ -3582,12 +3582,12 @@ pub(super) fn make_on_stream(
 		#[cfg(windows)]
 		// The native (NVENC) path runs for the normal display capture (ddagrab) OR whenever a
 		// per-window WGC target is set — WGC is a separate capture SOURCE that does not need the
-		// ddagrab display-capture method, just NVENC. HDR / 4:4:4 still force the ffmpeg path (the
-		// native pipeline doesn't do them yet); a window target with HDR/444 falls back to ffmpeg
-		// (whole-monitor) for now — documented limit. PULSAR_FFMPEG_CAPTURE still forces ffmpeg.
+		// ddagrab display-capture method, just NVENC. HDR stays native (the capture streams HDR10
+		// from a monitor in HDR mode, SDR otherwise — `CaptureConfig::hdr`); 4:4:4 still forces
+		// the ffmpeg path, and a window target with 4:4:4 falls back to ffmpeg (whole-monitor) —
+		// documented limit. PULSAR_FFMPEG_CAPTURE still forces ffmpeg.
 		let native_started = if encoder == HwEncoder::Nvenc
 			&& (capture == CaptureMethod::Ddagrab || target_hwnd.is_some())
-			&& !req.hdr
 			&& !req.yuv444
 			&& std::env::var_os("PULSAR_FFMPEG_CAPTURE").is_none()
 		{
@@ -3636,6 +3636,12 @@ pub(super) fn make_on_stream(
 				// `output_idx` is then ignored by the capture crate (WGC tracks a window, not a
 				// monitor). `None` (no window target) => the full-monitor DXGI source, unchanged.
 				window_hwnd: target_hwnd.map(|h| h as isize),
+				// HDR10 only on the new `hdr10` opt-in (a new client sets it when this host
+				// advertised FEAT_HDR and its renderer decodes + shows the codec's 10-bit stream)
+				// and only while the monitor is in HDR mode; SDR otherwise (pulsar-capture decides
+				// per build). Never on the legacy `hdr` bit: old desktop clients and the mobile app
+				// set that from a setting alone and cannot all show 10-bit PQ.
+				hdr: req.hdr10,
 			}) {
 				Ok(h) => {
 					// Publish the confirmed capture monitor for the input path. Use
@@ -3684,14 +3690,15 @@ pub(super) fn make_on_stream(
 		// live bitrate, keyframe on request, live display switch — what the ffmpeg CLI cannot do.
 		// Taken when the resolved encoder is VideoToolbox; the ffmpeg avfoundation chain below
 		// stays the fallback (macOS < 12.3, no Screen Recording permission, a codec VideoToolbox
-		// refuses, HDR / 4:4:4). PULSAR_FFMPEG_CAPTURE=1 forces ffmpeg. Untested on macOS hardware.
+		// refuses, 4:4:4). An HDR request is streamed SDR here like on the ffmpeg path (neither
+		// captures HDR on macOS yet), so it no longer forces ffmpeg. PULSAR_FFMPEG_CAPTURE=1
+		// forces ffmpeg. Untested on macOS hardware.
 		#[cfg(target_os = "macos")]
 		let native_started = if encoder == HwEncoder::VideoToolbox
 			&& capture == CaptureMethod::AvFoundation
 			// A window pick streams through the ScreenCaptureKit window source + ffmpeg below.
 			&& plan.window.is_none()
 			&& codec != pipeline::VCodec::Av1
-			&& !req.hdr
 			&& !req.yuv444
 			&& std::env::var_os("PULSAR_FFMPEG_CAPTURE").is_none()
 		{
@@ -3720,6 +3727,9 @@ pub(super) fn make_on_stream(
 				rfi: req.rfi,
 				draw_mouse: true,
 				window_hwnd: None,
+				// macOS host: ScreenCaptureKit here is set up for 8-bit NV12, so the stream is SDR
+				// (no HDR capture on macOS yet — docs/agents/host-encode.md).
+				hdr: false,
 			}) {
 				Ok(h) => {
 					native_enc_us = Some(h.encode_us_arc());
@@ -3747,7 +3757,7 @@ pub(super) fn make_on_stream(
 		// Publish the per-window capture state for the input path (Bug 0): the current stream routes
 		// kb/mouse to WindowInput ONLY when it ACTUALLY WGC-captured a specific window — i.e. the
 		// native path started AND a window target was set. Every other outcome (whole-monitor
-		// ddagrab, ffmpeg fallback, HDR/4:4:4, or a start_capture_encode error) streams the whole
+		// ddagrab, ffmpeg fallback, 4:4:4, or a start_capture_encode error) streams the whole
 		// monitor, so the window must NOT be the input target even if `launched_hwnd` holds an HWND.
 		#[cfg(windows)]
 		{
@@ -3968,8 +3978,20 @@ pub(super) fn make_on_stream(
 							fresh_per_s = c.fresh_per_s,
 							rfi_recovered = c.rfi_recovered,
 							rfi_declined = c.rfi_declined,
+							hdr = c.hdr,
 							"native capture"
 						);
+					}
+					// HDR10 stream: tell the client where this host's SDR content sits (Windows "SDR
+					// content brightness") and the monitor's peak, so its SDR tone-map keeps the
+					// desktop as bright as on an SDR stream (DataMsg::HdrMeta). Every 2 s: the session
+					// transport is lossy and the slider can move mid-stream. Only Windows has an HDR
+					// capture (macOS / Linux hosts stream SDR — docs/agents/host-encode.md).
+					#[cfg(windows)]
+					if let Some((sdr_white_nits, peak_nits)) =
+						cap_stats.as_ref().filter(|_| ticks % 4 == 1).and_then(|c| c.hdr_reference())
+					{
+						let _ = stats_enc.try_send(DataMsg::HdrMeta { sdr_white_nits, peak_nits });
 					}
 					let us = enc_us.load(std::sync::atomic::Ordering::Relaxed);
 					if us == 0 {
@@ -3989,6 +4011,13 @@ pub(super) fn make_on_stream(
 					};
 					#[cfg(not(windows))]
 					let label_now = label_enc.clone();
+					// The native capture streams real HDR10 right now (an HDR monitor, FEAT_HDR).
+					#[cfg(windows)]
+					let label_now = if cap_stats.as_ref().is_some_and(|c| c.snapshot().hdr) {
+						format!("{label_now} · HDR10")
+					} else {
+						label_now
+					};
 					if let Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) = stats_enc.try_send(
 						DataMsg::Stats(format!(
 							"{label_now} · {:.1} {}",

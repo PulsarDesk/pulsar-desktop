@@ -653,12 +653,25 @@ pub fn probe_json() -> String {
 					.collect::<Vec<_>>()
 					.join(",");
 				entries.push(format!(
-					r#"{{"codec":"{label}","ok":true,"decoder":"{}","tier":"{}","hw":{},"zero_copy":{},"incompatible_with":[{}]}}"#,
+					r#"{{"codec":"{label}","ok":true,"decoder":"{}","tier":"{}","hw":{},"zero_copy":{},"incompatible_with":[{}],"ten_bit":{}}}"#,
 					p.sel.name,
 					p.sel.tier.as_str(),
 					p.sel.tier != Tier::Software,
 					p.sel.zero_copy,
-					incompat
+					incompat,
+					// HEVC Main10 / AV1 10-bit (a host's HDR10 stream): NOT advertised on Linux,
+					// so the client never asks for HDR. Every present path here would make the
+					// picture worse than the SDR stream, with no HDR benefit (the output is an
+					// 8-bit SDR GL surface): software decode and every readback (NVDEC's CUDA
+					// interop is NV12-only) go through a CPU 10 → 8-bit shift (ms per frame at
+					// 1080p, and 8-bit PQ bands worse than 8-bit sRGB); rkmpp / v4l2m2m hand
+					// 10-bit out as NV15 / AFBC with no import path, and the Orange Pi's KMS
+					// plane has no PQ handling. Only VAAPI's two-layer R16 + GR1616 dmabuf keeps
+					// 10 bits up to the tone-map, and that is unverified on hardware. The
+					// decode + tone-map code stays for a stream that is HDR anyway (PULSAR_HDR
+					// override, an old host). PULSAR_LINUX_TEN_BIT=1 advertises it for a hardware
+					// test of that path. See docs/agents/client-video.md.
+					label != "h264" && std::env::var("PULSAR_LINUX_TEN_BIT").is_ok_and(|v| v == "1")
 				));
 			}
 			None => entries.push(format!(r#"{{"codec":"{label}","ok":false}}"#)),

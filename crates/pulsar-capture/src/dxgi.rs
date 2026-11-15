@@ -17,6 +17,8 @@ mod cursor_shape;
 mod device;
 mod pacing;
 pub(crate) mod platform;
+// Monitor HDR state / mastering data / SDR white level (FP16 HDR capture, StreamCaps).
+pub(crate) mod hdr;
 
 // Re-export the public API at the original `crate::dxgi::*` paths. `lib.rs` uses
 // `dxgi::CaptureDevice`. The display keep-alive + TIME_CRITICAL priority are engaged

@@ -434,6 +434,24 @@ to `DefWindowProc` and the mouse hook forwards the synthesized mouse as before.
   `uv`, `tex`, `con0`) or translate it to Metal.
 - ABR: with an upscaler on, game mode uses `min_kbps_scale = 1.25` (gives resolution up earlier).
 
+## HDR10 on the client (2026-11-15, LOCAL branch `feat/hdr`)
+
+A host's HDR stream is HEVC Main10 / AV1 10-bit, BT.2020, SMPTE ST 2084 (PQ), limited range.
+Every renderer shows it with the same tone curve when the output is SDR: PQ → nits → BT.709 →
+identity up to 80 % of the reference white, a roll-off that puts the peak on 1.0 → sRGB
+(`win/hdr.rs::roll_off`, mirrored in MSL and GLSL). Reference white and peak are the HOST's SDR
+content brightness and monitor peak (`DataMsg::HdrMeta` → `hdrref <sdr> <peak>` stdin line →
+`hdr_ref.rs`), so the streamed desktop is as bright as on an SDR stream whatever the host's
+slider says; 203 nits (BT.2408) / 1000 nits until the host sends them. The probe field
+`ten_bit` gates the request per codec (see host-encode.md "HDR10"); it must mean "this
+renderer really decodes AND presents that codec's 10-bit stream without making it worse".
+
+| Client | Decode | Output | Status |
+| --- | --- | --- | --- |
+| Windows | MF picks P010 when the decoder lists it ahead of NV12; PQ from `MF_MT_TRANSFER_FUNCTION` (unset on 10-bit = PQ). Probe decodes `testdata/test-hdr10.*` on its own thread under a 4 s budget, after the MFT enumeration (a wedged driver only clears `ten_bit`, never the base caps). | P010 skips the VideoProcessor (its HDR colour-space support is optional per driver) → `win/hdr.rs` shader; a P010 picture the decoder does not flag PQ is drawn as BT.709 SDR (`ps_709`). Monitor in HDR mode (`IDXGIOutput6` colour space): checked at most every 500 ms with `MonitorFromWindow` + a cached factory's `IsCurrent()`, outputs re-walked only on a change; a swapchain that refuses HDR10 is latched SDR until the display setup changes (no ResizeBuffers retry hitch). HDR monitor: swapchain R10G10B10A2 + `RGB_FULL_G2084_NONE_P2020`, PQ passes through, egui re-encoded to PQ at 203 nits. SDR monitor: tone-mapped, then FSR / SGSR (the GPU's VSR is a VideoProcessor feature → FSR there; own failure flag, the overlay names the upscaler that really runs). | Real NVENC HDR10 stream decoded + tone-mapped on the Snapdragon laptop (ignored test `real_hdr10_stream_decodes_and_tone_maps`). HDR10 swapchain switch untested (no HDR monitor here; no windows opened). AV1 10-bit untested (no AV1 MFT on the test laptop). `PULSAR_HDR_OUT=0/1` forces SDR / HDR output, `PULSAR_DEC_10BIT=0` keeps NV12. |
+| macOS | VideoToolbox; a format description tagged PQ asks for x420 / xf20 first (8-bit first otherwise). PQ from `kCVImageBufferTransferFunctionKey`. Probe really decodes `testdata/test-hdr10.*`: `ten_bit` only for a 10-bit picture tagged PQ. | `video_fs` tone-maps every PQ-tagged frame (8 or 10 bit) to the 8-bit SDR layer. True HDR output (EDR: RGBA16Float `CAMetalLayer`, `wantsExtendedDynamicRangeContent`, PQ / extended-linear colour space) is not wired. | cargo check aarch64-apple-darwin only; MSL not compiled here. |
+| Linux | **`ten_bit` is reported false** (the client never asks for HDR): on every path but one the picture would be worse than the SDR stream with no HDR benefit (the output is 8-bit SDR anyway). Software decode and every hwaccel readback (NVDEC's CUDA interop is NV12-only) go through a single-threaded CPU 10 → 8-bit shift (`video.rs::ten_bit_to_8`; several ms per 1080p frame, and 8-bit PQ bands worse than 8-bit sRGB). rkmpp / v4l2m2m (Orange Pi, RK3588) hand 10-bit out as NV15 / AFBC dmabufs with no import path, and the kiosk's KMS plane has no PQ handling. Only VAAPI's two-layer R16 + GR1616 dmabuf keeps 10 bits to the tone-map; unverified on hardware → `PULSAR_LINUX_TEN_BIT=1` advertises HEVC / AV1 10-bit for that test. A stream that is HDR anyway (`PULSAR_HDR`, an old host) still shows right: readback copies the frame props (`av_frame_copy_props`, the PQ tag survives), PQ frames take tone-mapping twins of all four GL programs (`pq_fragment`, `hdr_ref` uniform), and the DRM-lease KMS plane declines PQ frames (`kms_lease::frame_ok`) so they take the GL path. The external-OES path only fixes the transfer (the driver's matrix converts YUV). X11 / EGL has no HDR output; Wayland colour management could take PQ — not wired. | Not compiled here (no Linux build on this machine), untested on hardware. |
+
 ## macOS renderer (`crates/pulsar-render/src/mac/`, 2026-11-14, UNTESTED on Mac hardware)
 
 Written and type-checked on Windows (`cargo check --target aarch64-apple-darwin -p
@@ -498,6 +516,7 @@ pulsar-render`); never run on a Mac. The macOS analogue of `win/`:
   to ~30 ms until the re-order runs (a short flicker); moving / dragging the app window makes the
   panel follow with ≥ 8 ms lag, because the window server is polled (no cross-process
   window-move notification exists without Accessibility permission).
-- **Not done / unverified:** HDR (PQ/HLG) is shown as SDR; every claim above is untested on
+- **Not done / unverified:** HDR10 (PQ) is tone-mapped to SDR (no EDR output; HLG is shown as
+  SDR — no Pulsar host sends it); every claim above is untested on
   hardware (window ordering against other apps, Spaces / full screen, Retina scale changes
   between displays, AV1 on M3, 10-bit HEVC, MetalFX on Apple silicon / its absence on Intel).

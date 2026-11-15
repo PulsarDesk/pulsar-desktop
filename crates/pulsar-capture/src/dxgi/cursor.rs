@@ -65,9 +65,31 @@ pub(super) struct CursorCompositor {
 
 impl CursorCompositor {
 	/// Compile the shaders + create the sampler & blend states. Called once.
-	unsafe fn create(device: &ID3D11Device) -> windows::core::Result<Self> {
+	///
+	/// `hdr_scale`: the desktop is captured as FP16 scRGB (an HDR monitor). The cursor bitmap
+	/// (sRGB-encoded 8-bit) is then linearised and scaled by this (= SDR white level / 80 nits)
+	/// so it shows at the brightness Windows gives SDR content on that monitor, not at 80 nits
+	/// with sRGB code values read as linear. The invert (I-beam) blend computes 1 − dest in
+	/// scRGB: white text background → black, dark background → 80-nit grey — still visible.
+	unsafe fn create(device: &ID3D11Device, hdr_scale: Option<f32>) -> windows::core::Result<Self> {
 		let vs_blob = compile_shader(CURSOR_SHADER_HLSL, b"main_vs\0", b"vs_5_0\0")?;
-		let ps_blob = compile_shader(CURSOR_SHADER_HLSL, b"main_ps\0", b"ps_5_0\0")?;
+		let ps_blob = match hdr_scale {
+			None => compile_shader(CURSOR_SHADER_HLSL, b"main_ps\0", b"ps_5_0\0")?,
+			Some(k) => {
+				// The SDR source without its NUL, plus the HDR entry point.
+				let base = &CURSOR_SHADER_HLSL[..CURSOR_SHADER_HLSL.len() - 1];
+				let mut src = base.to_vec();
+				src.extend_from_slice(
+					format!(
+						"float3 lin(float3 c) {{ return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }}\n\
+						 float4 main_ps_hdr(vertex_t i) : SV_Target {{ float4 c = cursor.Sample(samp, i.tex); \
+						 return float4(lin(saturate(c.rgb)) * {k:.4}, c.a); }}\n\0"
+					)
+					.as_bytes(),
+				);
+				compile_shader(&src, b"main_ps_hdr\0", b"ps_5_0\0")?
+			}
+		};
 
 		let mut vs: Option<ID3D11VertexShader> = None;
 		device.CreateVertexShader(blob_bytes(&vs_blob), None, Some(&mut vs))?;
@@ -480,7 +502,8 @@ impl CaptureDevice {
 		// cursor permanently (compositor_tried gate) and fall back to the clean desktop.
 		if self.compositor.is_none() && !self.compositor_tried {
 			self.compositor_tried = true;
-			match CursorCompositor::create(&self.device) {
+			let hdr_scale = self.hdr.map(|_| self.sdr_white_nits / 80.0);
+			match CursorCompositor::create(&self.device, hdr_scale) {
 				Ok(c) => self.compositor = Some(c),
 				Err(_) => return self.pool.as_ref(),
 			}

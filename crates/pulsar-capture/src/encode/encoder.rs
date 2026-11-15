@@ -138,6 +138,11 @@ pub struct Encoder {
 	pub(super) thin_budget: bool,
 	pub(super) two_pass: bool,
 	pub(super) preset_kf_scale: u8,
+	/// HDR10 stream (`EncParams::hdr`): its mastering data, sent with every keyframe
+	/// (`crate::hdr::with_hdr_metadata`). `nv12_tex` is then a P010 surface.
+	pub(super) hdr: Option<crate::hdr::HdrMeta>,
+	/// The FP16 scRGB → P010 passes that replace `blt_bgra_to_nv12` for an HDR stream.
+	pub(super) hdr_conv: Option<super::hdr_conv::HdrConverter>,
 }
 
 // The encoder lives entirely on the capture thread; the raw NVENC/COM pointers are

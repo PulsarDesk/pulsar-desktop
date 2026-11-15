@@ -49,12 +49,39 @@ vertex VOut video_vs(uint vid [[vertex_id]], constant Quad& q [[buffer(0)]]) {
 	return o;
 }
 
-struct Yuv { float4 range; float4 mat; };
+// tm.x = 1: the picture is HDR10 (BT.2020, SMPTE ST 2084): tone-map it to SDR sRGB for the
+// 8-bit drawable — the same curve as the Windows (win/hdr.rs `ps_sdr`) and Linux renderers:
+// PQ → nits → BT.709 → identity up to tm.z of reference white tm.y (nits), roll-off so the peak
+// tm.w (× reference white) lands on 1.0 → sRGB.
+struct Yuv { float4 range; float4 mat; float4 tm; };
+float3 pq_eotf(float3 e) {
+	float3 p = pow(saturate(e), float3(1.0 / 78.84375));
+	return 10000.0 * pow(max(p - 0.8359375, float3(0.0)) / (18.8515625 - 18.6875 * p), float3(1.0 / 0.1593017578125));
+}
+float3 tonemap(float3 e, float4 tm) {
+	float3 n = pq_eotf(e);
+	float3 l = float3(dot(float3(1.6604910, -0.5876411, -0.0728499), n),
+		dot(float3(-0.1245505, 1.1328999, -0.0083494), n),
+		dot(float3(-0.0181508, -0.1005789, 1.1187297), n));
+	l = max(l, float3(0.0)) / tm.y;
+	float m = max(max(l.r, l.g), l.b);
+	float ks = tm.z;
+	if (m > ks) {
+		float x = (m - ks) / (1.0 - ks);
+		float xw = max((tm.w - ks) / (1.0 - ks), 1.0);
+		l *= min(ks + (1.0 - ks) * x * (1.0 + x / (xw * xw)) / (1.0 + x), 1.0) / m;
+	}
+	l = saturate(l);
+	return select(1.055 * pow(l, float3(1.0 / 2.4)) - 0.055, l * 12.92, l <= float3(0.0031308));
+}
 fragment float4 video_fs(VOut i [[stage_in]], texture2d<float> ty [[texture(0)]], texture2d<float> tc [[texture(1)]],
 		sampler s [[sampler(0)]], constant Yuv& p [[buffer(0)]]) {
 	float y = ty.sample(s, i.uv).r * p.range.x + p.range.y;
 	float2 c = tc.sample(s, i.uv).rg * p.range.z + p.range.w;
 	float3 rgb = float3(y + p.mat.x * c.y, y - p.mat.y * c.x - p.mat.z * c.y, y + p.mat.w * c.x);
+	if (p.tm.x > 0.5) {
+		rgb = tonemap(saturate(rgb), p.tm);
+	}
 	return float4(saturate(rgb), 1.0);
 }
 
@@ -231,6 +258,8 @@ struct Quad {
 struct YuvParams {
 	range: [f32; 4],
 	mat: [f32; 4],
+	/// `[pq, reference white nits, knee, peak / reference white]` — see `video_fs`.
+	tm: [f32; 4],
 }
 
 #[repr(C)]
@@ -701,7 +730,15 @@ impl Gpu {
 			let (range, mat) = view::yuv_consts(v.frame.matrix(), if p010 { 10 } else { 8 }, full, p010);
 			let (iw, ih) = v.frame.size();
 			let uvs = view::quad_uvs(view::rotation(), iw as f32, ih as f32, v.src);
-			Some((v, y, c, YuvParams { range, mat }, uvs))
+			// HDR10 (P010 tagged PQ): tone-mapped to SDR in `video_fs`. The drawable stays an
+			// 8-bit SDR layer — an EDR / PQ CAMetalLayer (true HDR output on an XDR display) is
+			// not wired (see docs/agents/client-video.md).
+			// Keyed on the PQ tag alone: PQ code values need the same EOTF at 8 or 10 bits, so a
+			// Main10 picture VideoToolbox handed out as 8-bit is still tone-mapped (not shown
+			// washed out). Reference white / peak: the host's SDR white + monitor peak (hdr_ref.rs).
+			let (white, peak) = crate::hdr_ref::get();
+			let tm = [if v.frame.is_pq() { 1.0 } else { 0.0 }, white, crate::hdr_ref::KNEE, peak / white];
+			Some((v, y, c, YuvParams { range, mat, tm }, uvs))
 		});
 		let drew_video = pic.is_some();
 

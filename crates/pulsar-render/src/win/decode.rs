@@ -9,7 +9,9 @@
 //!     ID3D11Multithread::SetMultithreadProtected(true) on the immediate context)
 //!   IMFTransform::ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, manager)         (zero-copy bind)
 //!   SetInputType(MFVideoFormat_{H264,HEVC,AV1} + frame size/rate/progressive)
-//!   GetOutputAvailableType loop → pick MFVideoFormat_NV12 → SetOutputType
+//!   GetOutputAvailableType loop → pick MFVideoFormat_NV12 (8-bit) or MFVideoFormat_P010
+//!     (a 10-bit stream: HEVC Main10 / AV1 10-bit — HDR10 from a host's HDR monitor; the
+//!     decoder lists P010 ahead of NV12 for those) → SetOutputType
 //!   ProcessMessage(NOTIFY_BEGIN_STREAMING) + ProcessMessage(NOTIFY_START_OF_STREAM)
 //!   per AU: MFCreateSample(MFCreateMemoryBuffer(copy bytes)) → ProcessInput
 //!           → ProcessOutput loop:
@@ -29,12 +31,13 @@ use windows::Win32::Graphics::Direct3D11::{
 	D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_TEXTURE2D_DESC,
 	D3D11_USAGE_DEFAULT,
 };
-use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_NV12;
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_FORMAT_NV12, DXGI_FORMAT_P010};
 use windows::Win32::Media::MediaFoundation::{
 	IMFActivate, IMFDXGIBuffer, IMFDXGIDeviceManager, IMFSample, IMFTransform,
 	MFCreateDXGIDeviceManager, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
 	MFMediaType_Video, MFStartup, MFTEnumEx, MFVideoFormat_AV1, MFVideoFormat_H264,
-	MFVideoFormat_HEVC, MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFSTARTUP_FULL,
+	MFVideoFormat_HEVC, MFVideoFormat_NV12, MFVideoFormat_P010, MFVideoInterlace_Progressive,
+	MFSTARTUP_FULL,
 	MFT_CATEGORY_VIDEO_DECODER, MFT_ENUM_FLAG_ASYNCMFT, MFT_ENUM_FLAG_HARDWARE,
 	MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
 	MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
@@ -65,6 +68,12 @@ pub struct Decoder {
 	/// The picture's VISIBLE size (the stream's display aperture: 1920×1080 of a 1920×1088
 	/// surface — decoders pad to the macroblock grid). `None` until the MFT reports it.
 	visible: Option<(u32, u32)>,
+	/// The negotiated output: NV12 (8-bit) or P010 (10-bit). The decoded textures carry it.
+	out_format: DXGI_FORMAT,
+	/// The stream's transfer function is SMPTE ST 2084 (PQ): MF's `MF_MT_TRANSFER_FUNCTION`
+	/// from the bitstream's colour description; a 10-bit stream that does not say counts as PQ
+	/// (the only 10-bit streams a Pulsar host sends are HDR10 — see pulsar-capture `hdr.rs`).
+	pq: bool,
 	width: u32,
 	height: u32,
 	fps: u32,
@@ -140,8 +149,9 @@ impl Decoder {
 			input.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
 			transform.SetInputType(0, &input, 0)?;
 
-			// 4b. Output type: walk the available output types and pick NV12.
-			set_nv12_output(&transform)?;
+			// 4b. Output type: walk the available output types and pick NV12 (P010 for a
+			//     10-bit stream — re-decided on the stream change once the SPS is known).
+			let out_format = set_output(&transform)?;
 
 			// 5. Begin streaming.
 			transform.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)?;
@@ -154,6 +164,8 @@ impl Decoder {
 				_manager: manager,
 				subtype,
 				visible: None,
+				out_format,
+				pq: false,
 				width: w,
 				height: h,
 				fps,
@@ -214,8 +226,10 @@ impl Decoder {
 					break;
 				}
 				Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
-					// The decoder discovered the real stream geometry; renegotiate NV12 and retry.
-					set_nv12_output(&self.transform)?;
+					// The decoder discovered the real stream geometry (and bit depth);
+					// renegotiate NV12 / P010 and retry.
+					self.out_format = set_output(&self.transform)?;
+					self.pq = output_is_pq(&self.transform, self.out_format);
 					self.visible = visible_size(&self.transform);
 					continue;
 				}
@@ -243,9 +257,15 @@ impl Decoder {
 		src.GetDesc(&mut desc);
 		desc.ArraySize = 1;
 		desc.MipLevels = 1;
-		desc.Format = DXGI_FORMAT_NV12;
+		// NV12 for the VideoProcessor present; P010 is read by the HDR shader (hdr.rs) through
+		// two plane views, so it needs SHADER_RESOURCE only.
+		desc.Format = if desc.Format == DXGI_FORMAT_P010 { DXGI_FORMAT_P010 } else { DXGI_FORMAT_NV12 };
 		desc.Usage = D3D11_USAGE_DEFAULT;
-		desc.BindFlags = (D3D11_BIND_SHADER_RESOURCE.0 | D3D11_BIND_RENDER_TARGET.0) as u32;
+		desc.BindFlags = if desc.Format == DXGI_FORMAT_P010 {
+			D3D11_BIND_SHADER_RESOURCE.0 as u32
+		} else {
+			(D3D11_BIND_SHADER_RESOURCE.0 | D3D11_BIND_RENDER_TARGET.0) as u32
+		};
 		desc.CPUAccessFlags = 0;
 		desc.MiscFlags = 0;
 
@@ -265,6 +285,11 @@ impl Decoder {
 	/// The visible picture size (see `visible`), once the decoder knows it.
 	pub fn visible(&self) -> Option<(u32, u32)> {
 		self.visible
+	}
+
+	/// The stream is 10-bit PQ (HDR10): its pictures are P010 and need the HDR present.
+	pub fn is_hdr(&self) -> bool {
+		self.out_format == DXGI_FORMAT_P010 && self.pq
 	}
 }
 
@@ -378,28 +403,221 @@ unsafe fn create_decoder_mft(subtype: GUID, allow_async: bool) -> Result<IMFTran
 /// exists: `ok` requires a SYNCHRONOUS MFT (the drive model is ProcessInput→ProcessOutput;
 /// an async-only MFT accepts input forever and never emits a frame — the black-screen
 /// trap). JSON schema matches the Linux probe so the app's caps parser needs no changes.
+/// `ten_bit` (HEVC / AV1): a canned 10-bit HDR10 keyframe (`testdata/test-hdr10.*`) REALLY
+/// decodes to P010 on a hardware D3D11 device — the precondition for asking a host for HDR
+/// (the present path then shows it on an HDR monitor or tone-maps it, `win/hdr.rs`).
 pub fn probe_json() -> String {
 	unsafe {
 		MF_INIT.call_once(|| {
 			let _ = MFStartup(MF_VERSION, MFSTARTUP_FULL);
 		});
 	}
+	// 1. The base caps: MFT enumeration only (fast, no device), exactly as before HDR.
+	let codecs = [
+		("h264", MFVideoFormat_H264, Codec::H264, None),
+		("h265", MFVideoFormat_HEVC, Codec::H265, Some(TEST_HDR10_H265)),
+		("av1", MFVideoFormat_AV1, Codec::Av1, Some(TEST_HDR10_AV1)),
+	];
+	let sync: Vec<bool> = codecs.iter().map(|c| unsafe { create_decoder_mft(c.1, false).is_ok() }).collect();
+	// 2. The 10-bit checks need a hardware D3D11 device and real decodes. A wedged GPU driver
+	// can block D3D11CreateDevice for good (seen on an NVIDIA host, 2026-11-13); the app gives
+	// the whole probe 15 s and then drops to `probe_unavailable`, which would cost every
+	// session its real codec caps. So they run on their own thread under a short deadline: a
+	// hang or a slow driver only clears `ten_bit` (the process exits after printing, taking a
+	// stuck thread with it). Same adapter as the renderer (the default one, `Renderer::new`).
+	let want: Vec<(usize, Codec, &'static [u8])> = codecs
+		.iter()
+		.enumerate()
+		.filter_map(|(i, c)| c.3.filter(|_| sync[i]).map(|s| (i, c.2, s)))
+		.collect();
+	let (tx, rx) = std::sync::mpsc::channel();
+	std::thread::spawn(move || {
+		// Media Foundation / D3D on this thread: join the process MTA.
+		let _ = unsafe {
+			windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED)
+		};
+		for (i, codec, sample) in want {
+			let _ = tx.send((i, decodes_to_p010(codec, sample)));
+		}
+	});
+	let deadline = std::time::Instant::now() + TEN_BIT_PROBE_BUDGET;
+	let mut ten = [false; 3];
+	while let Ok((i, ok)) = rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+		ten[i] = ok;
+	}
 	let mut entries = Vec::new();
-	for (name, subtype) in [
-		("h264", MFVideoFormat_H264),
-		("h265", MFVideoFormat_HEVC),
-		("av1", MFVideoFormat_AV1),
-	] {
-		let sync_ok = unsafe { create_decoder_mft(subtype, false).is_ok() };
+	for (i, (name, ..)) in codecs.iter().enumerate() {
+		let (sync_ok, ten_bit) = (sync[i], ten[i]);
 		entries.push(format!(
 			concat!(
 				"{{\"codec\":\"{}\",\"ok\":{},\"decoder\":\"mediafoundation\",",
-				"\"hw\":true,\"tier\":\"hwaccel\",\"incompatible_with\":[]}}"
+				"\"hw\":true,\"tier\":\"hwaccel\",\"incompatible_with\":[],\"ten_bit\":{}}}"
 			),
-			name, sync_ok
+			name, sync_ok, ten_bit
 		));
 	}
 	format!("[{}]", entries.join(","))
+}
+
+/// How long the 10-bit decode checks may take in `--probe` before `ten_bit` is reported false.
+const TEN_BIT_PROBE_BUDGET: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// 64×64 HDR10 keyframes (HEVC Main10 / AV1 10-bit, BT.2020 PQ) for the `ten_bit` probe.
+const TEST_HDR10_H265: &[u8] = include_bytes!("../../testdata/test-hdr10.h265");
+const TEST_HDR10_AV1: &[u8] = include_bytes!("../../testdata/test-hdr10.av1.obu");
+
+/// A hardware D3D11 device with video support (what the renderer decodes on).
+fn probe_device() -> Option<ID3D11Device> {
+	use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0};
+	use windows::Win32::Graphics::Direct3D11::{
+		D3D11CreateDevice, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+		D3D11_SDK_VERSION,
+	};
+	let mut d = None;
+	unsafe {
+		D3D11CreateDevice(
+			None,
+			D3D_DRIVER_TYPE_HARDWARE,
+			Default::default(),
+			D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+			Some(&[D3D_FEATURE_LEVEL_11_0]),
+			D3D11_SDK_VERSION,
+			Some(&mut d),
+			None,
+			None,
+		)
+		.ok()?;
+	}
+	d
+}
+
+/// Decode one canned keyframe the way the renderer does; true when a picture comes out as
+/// P010 flagged PQ.
+fn decodes_to_p010(codec: Codec, sample: &[u8]) -> bool {
+	let Some(dev) = probe_device() else { return false };
+	decode_sample(&dev, codec, sample).is_some_and(|(fmt, pq)| fmt == DXGI_FORMAT_P010 && pq)
+}
+
+/// Feed `sample` as one access unit (then drain) and report the first picture's format.
+fn decode_sample(dev: &ID3D11Device, codec: Codec, sample: &[u8]) -> Option<(DXGI_FORMAT, bool)> {
+	use windows::Win32::Media::MediaFoundation::MFT_MESSAGE_COMMAND_DRAIN;
+	let mut d = Decoder::new_ex(dev, codec, 64, 64, 30, false).ok()?;
+	let au = AccessUnit { data: sample.to_vec(), pts_90k: 0, key: true, conceal: false };
+	let mut out = d.decode(&au).ok()?;
+	if out.is_empty() {
+		unsafe {
+			d.transform.ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0).ok()?;
+			out = d.drain().ok()?;
+		}
+	}
+	let tex = out.first()?;
+	let mut desc = D3D11_TEXTURE2D_DESC::default();
+	unsafe { tex.GetDesc(&mut desc) };
+	Some((desc.Format, d.pq))
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// Split an HEVC Annex B stream into access units (parameter sets / prefix SEI open a new
+	/// one after a picture; a slice with first_slice_segment_in_pic_flag starts a picture).
+	fn hevc_aus(bs: &[u8]) -> Vec<Vec<u8>> {
+		let mut starts = vec![];
+		let mut i = 0;
+		while i + 3 < bs.len() {
+			if bs[i..].starts_with(&[0, 0, 1]) {
+				let s = if i > 0 && bs[i - 1] == 0 { i - 1 } else { i };
+				starts.push((s, i + 3));
+				i += 3;
+			} else {
+				i += 1;
+			}
+		}
+		let mut aus: Vec<Vec<u8>> = vec![];
+		let mut cur: Vec<u8> = vec![];
+		let mut has_vcl = false;
+		for (k, &(s, h)) in starts.iter().enumerate() {
+			let end = starts.get(k + 1).map(|n| n.0).unwrap_or(bs.len());
+			let ty = (bs[h] >> 1) & 0x3F;
+			let vcl = ty < 32;
+			let first_slice = vcl && bs.get(h + 2).is_some_and(|b| b & 0x80 != 0);
+			if has_vcl && (matches!(ty, 32..=35 | 39) || first_slice) {
+				aus.push(std::mem::take(&mut cur));
+				has_vcl = false;
+			}
+			cur.extend_from_slice(&bs[s..end]);
+			has_vcl |= vcl;
+		}
+		if !cur.is_empty() {
+			aus.push(cur);
+		}
+		aus
+	}
+
+	/// A REAL HDR10 stream from the host path (pulsar-capture's ignored NVENC test writes one):
+	/// `PULSAR_HDR_STREAM=<file.h265> cargo test -p pulsar-render real_hdr10 -- --ignored`.
+	/// Every picture decodes to P010 PQ, and the tone-mapped SDR present of the last one is not
+	/// black and not one flat colour.
+	#[test]
+	#[ignore]
+	fn real_hdr10_stream_decodes_and_tone_maps() {
+		let path = std::env::var("PULSAR_HDR_STREAM").expect("PULSAR_HDR_STREAM");
+		let bs = std::fs::read(path).unwrap();
+		unsafe {
+			MF_INIT.call_once(|| {
+				let _ = MFStartup(MF_VERSION, MFSTARTUP_FULL);
+			});
+		}
+		let dev = probe_device().expect("device");
+		let mut d = Decoder::new_ex(&dev, Codec::H265, 1280, 720, 60, false).unwrap();
+		let mut pics = vec![];
+		for (n, au) in hevc_aus(&bs).into_iter().enumerate() {
+			let au = AccessUnit { data: au, pts_90k: n as u32 * 1500, key: n == 0, conceal: false };
+			pics.extend(d.decode(&au).unwrap());
+		}
+		assert!(pics.len() >= 20, "{} pictures", pics.len());
+		assert!(d.is_hdr(), "decoder: P010 + PQ");
+		let last = pics.last().unwrap();
+		let mut desc = D3D11_TEXTURE2D_DESC::default();
+		unsafe { last.GetDesc(&mut desc) };
+		assert_eq!(desc.Format, DXGI_FORMAT_P010);
+		let (w, h) = d.visible().unwrap_or((desc.Width, desc.Height));
+		let row = unsafe { super::super::hdr::tests_support::sdr_row(&dev, last, desc.Width, desc.Height, w, h) };
+		let lum: Vec<u32> = row.iter().map(|p| (p >> 8) & 0xFF).collect();
+		let (mn, mx) = (*lum.iter().min().unwrap(), *lum.iter().max().unwrap());
+		eprintln!("{} pictures {w}x{h}; tone-mapped row luma {mn}..{mx}", pics.len());
+		assert!(mx > 100 && mx - mn > 50, "a gradient, not black / flat: {mn}..{mx}");
+	}
+
+	#[test]
+	fn hdr10_samples_decode_to_p010_pq_and_sdr_stays_nv12() {
+		unsafe {
+			MF_INIT.call_once(|| {
+				let _ = MFStartup(MF_VERSION, MFSTARTUP_FULL);
+			});
+		}
+		let Some(dev) = probe_device() else {
+			eprintln!("skip: no hardware D3D11 device");
+			return;
+		};
+		// 8-bit stays NV12, not PQ.
+		let sdr = decode_sample(&dev, Codec::H265, include_bytes!("../../testdata/test.h265"));
+		eprintln!("8-bit HEVC → {sdr:?}");
+		if let Some((fmt, pq)) = sdr {
+			assert_eq!(fmt, DXGI_FORMAT_NV12);
+			assert!(!pq);
+		}
+		for (codec, s) in [(Codec::H265, TEST_HDR10_H265), (Codec::Av1, TEST_HDR10_AV1)] {
+			let got = decode_sample(&dev, codec, s);
+			eprintln!("10-bit {codec:?} → {got:?}");
+			// A machine without the codec's decoder (no HEVC extension / AV1) yields None.
+			if let Some((fmt, pq)) = got {
+				assert_eq!(fmt, DXGI_FORMAT_P010, "{codec:?}");
+				assert!(pq, "{codec:?}");
+			}
+		}
+	}
 }
 
 /// True if an activated MFT is asynchronous. All hardware MFTs are async; they must be unlocked
@@ -419,21 +637,29 @@ unsafe fn unlock_async_mft(t: &IMFTransform) {
 	}
 }
 
-/// Enumerate the MFT's available output types and `SetOutputType` to the first NV12 one.
-unsafe fn set_nv12_output(transform: &IMFTransform) -> Result<()> {
+/// Pick the output: P010 when the decoder lists it AHEAD of NV12 (its native format for a
+/// 10-bit stream — HEVC Main10 / AV1 10-bit), else NV12. Before the first stream change the
+/// decoder lists NV12 first (it does not know the depth yet); the change renegotiates.
+/// `PULSAR_DEC_10BIT=0` keeps NV12 whenever the decoder offers it (the decoder then dithers
+/// 10-bit down; colours stay PQ-encoded — diagnostics only).
+unsafe fn set_output(transform: &IMFTransform) -> Result<DXGI_FORMAT> {
+	let allow_p010 = std::env::var("PULSAR_DEC_10BIT").map(|v| v != "0").unwrap_or(true);
 	let mut i = 0u32;
-	loop {
-		match transform.GetOutputAvailableType(0, i) {
-			Ok(t) => {
-				let sub = t.GetGUID(&MF_MT_SUBTYPE);
-				if matches!(sub, Ok(s) if s == MFVideoFormat_NV12) {
-					transform.SetOutputType(0, &t, 0)?;
-					return Ok(());
-				}
-				i += 1;
+	let mut nv12 = None;
+	while let Ok(t) = transform.GetOutputAvailableType(0, i) {
+		match t.GetGUID(&MF_MT_SUBTYPE) {
+			Ok(s) if s == MFVideoFormat_P010 && allow_p010 && nv12.is_none() => {
+				transform.SetOutputType(0, &t, 0)?;
+				return Ok(DXGI_FORMAT_P010);
 			}
-			Err(_) => break, // ran out of available types
+			Ok(s) if s == MFVideoFormat_NV12 && nv12.is_none() => nv12 = Some(t),
+			_ => {}
 		}
+		i += 1;
+	}
+	if let Some(t) = nv12 {
+		transform.SetOutputType(0, &t, 0)?;
+		return Ok(DXGI_FORMAT_NV12);
 	}
 
 	// Fallback: explicitly request NV12 (some MFTs accept a constructed type even if they don't
@@ -441,5 +667,20 @@ unsafe fn set_nv12_output(transform: &IMFTransform) -> Result<()> {
 	let t = MFCreateMediaType()?;
 	t.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
 	t.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)?;
-	transform.SetOutputType(0, &t, 0)
+	transform.SetOutputType(0, &t, 0)?;
+	Ok(DXGI_FORMAT_NV12)
+}
+
+/// Is the negotiated output PQ? MF's `MF_MT_TRANSFER_FUNCTION` when the decoder copied the
+/// bitstream's colour description into it (`MFVideoTransFunc_2084` = 15; any other stated
+/// function = not PQ); unstated on a 10-bit output = PQ (see `Decoder::pq`).
+unsafe fn output_is_pq(transform: &IMFTransform, fmt: DXGI_FORMAT) -> bool {
+	use windows::Win32::Media::MediaFoundation::MF_MT_TRANSFER_FUNCTION;
+	if fmt != DXGI_FORMAT_P010 {
+		return false;
+	}
+	match transform.GetOutputCurrentType(0).and_then(|t| t.GetUINT32(&MF_MT_TRANSFER_FUNCTION)) {
+		Ok(0) | Err(_) => true, // MFVideoTransFunc_Unknown / not set
+		Ok(v) => v == 15,
+	}
 }

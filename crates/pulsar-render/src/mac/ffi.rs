@@ -220,6 +220,9 @@ extern "C" {
 		out: *mut CMFormatDescriptionRef,
 	) -> OSStatus;
 	pub fn CMVideoFormatDescriptionGetDimensions(d: CMFormatDescriptionRef) -> CMVideoDimensions;
+	/// +0 extension value (or null); its keys equal the CVImageBuffer attachment keys
+	/// (`kCMFormatDescriptionExtension_TransferFunction` == `kCVImageBufferTransferFunctionKey`).
+	pub fn CMFormatDescriptionGetExtension(d: CMFormatDescriptionRef, key: CFStringRef) -> CFTypeRef;
 	pub fn CMBlockBufferCreateWithMemoryBlock(
 		alloc: CFAllocatorRef,
 		memory: *mut c_void,
@@ -291,6 +294,8 @@ extern "C" {
 	pub static kCVImageBufferYCbCrMatrix_ITU_R_601_4: CFStringRef;
 	pub static kCVImageBufferYCbCrMatrix_ITU_R_709_2: CFStringRef;
 	pub static kCVImageBufferYCbCrMatrix_ITU_R_2020: CFStringRef;
+	pub static kCVImageBufferTransferFunctionKey: CFStringRef;
+	pub static kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ: CFStringRef;
 	pub fn CVPixelBufferGetWidth(pb: CVPixelBufferRef) -> usize;
 	pub fn CVPixelBufferGetHeight(pb: CVPixelBufferRef) -> usize;
 	pub fn CVPixelBufferGetWidthOfPlane(pb: CVPixelBufferRef, plane: usize) -> usize;

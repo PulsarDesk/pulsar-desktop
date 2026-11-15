@@ -592,7 +592,8 @@ pub(super) async fn hold_session(
 	// The kind of path the session started on (the memory's second key); followed live below.
 	path_class: crate::adapt_memory::PathClass,
 	cursor_external: bool,
-	req_hdr: bool,
+	// Decides hdr10 per codec (Settings, host FEAT_HDR, the 10-bit decoders, PULSAR_HDR).
+	hdr_neg: super::HdrNeg,
 	init_quality: QualityPref,
 	// The resolved audio quality the session started with, what "auto" resolved to (a menu
 	// pick of auto goes back to it), and whether the host can send Raw.
@@ -862,9 +863,11 @@ pub(super) async fn hold_session(
 	// (already resolved in play.rs: "hq"→Quality, "fast"→Latency, "auto"→mode default).
 	// The session overlay's quality picker (Restream::Quality) can override it live.
 	let mut cur_quality = init_quality;
-	// HDR preference from the UI toggle (Settings → Display). The PULSAR_HDR env var
-	// is a debug override: if set it wins regardless of the UI value.
-	let cur_hdr = req_hdr || std::env::var_os("PULSAR_HDR").is_some();
+	// HDR10 for the CURRENT codec (Settings → Display + host FEAT_HDR + this renderer's 10-bit
+	// decode of that codec; PULSAR_HDR is a debug override). Re-decided on every codec change:
+	// a switch to a codec whose decoder failed the 10-bit probe must drop HDR, and a session
+	// that started on H.264 gets HDR after a switch to HEVC.
+	let mut cur_hdr = hdr_neg.want(&cur_codec);
 	// Inbound file reassembly (file-manager downloads — the host streams an FsGet
 	// back as FileBegin/Chunk/End): Begin → state, Chunk → store BY INDEX,
 	// End → save in the received-files folder. The session transport is unordered UDP,
@@ -925,7 +928,9 @@ pub(super) async fn hold_session(
 				game_mode,
 				bitrate_kbps: cur_bitrate,
 				quality: cur_quality,
-				hdr: cur_hdr,
+				// Never the legacy bit (see play.rs); HDR10 only through hdr10.
+				hdr: false,
+				hdr10: cur_hdr,
 				yuv444: std::env::var_os("PULSAR_YUV444").is_some(),
 				decode_codecs: decode_codecs.clone(),
 				media_over_session: mos,
@@ -1380,6 +1385,15 @@ pub(super) async fn hold_session(
 									}
 								}
 								let _ = app_ev.emit("host-stats", PlayStats { id, label });
+							}
+							DataMsg::HdrMeta { sdr_white_nits, peak_nits } => {
+								// The HDR10 stream's brightness reference (host SDR content
+								// brightness + monitor peak): the renderer tone-maps PQ to SDR
+								// around the host's real SDR white instead of a fixed 203 nits.
+								use std::io::Write as _;
+								if let Some(si) = render_stdin.lock().unwrap().as_mut() {
+									let _ = writeln!(si, "hdrref {sdr_white_nits} {peak_nits}");
+								}
 							}
 							DataMsg::DisplayRotation(deg) => {
 								// Render the video upright for a rotated host display (vidsink
@@ -2281,6 +2295,8 @@ pub(super) async fn hold_session(
 							// The rungs' minimum bitrates follow the codec's efficiency.
 							ctl.set_codec(pulsar_core::adapt::codec_from_wire(&c));
 							cur_codec = c;
+							// HDR10 follows the codec (its decoder may not do 10-bit).
+							cur_hdr = hdr_neg.want(&cur_codec);
 						}
 						Restream::Fps(f) => {
 							manual_fps = f != 0;

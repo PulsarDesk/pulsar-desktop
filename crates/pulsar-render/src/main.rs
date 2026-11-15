@@ -11,6 +11,8 @@
 
 mod i18n;
 mod overlay;
+// HDR10 → SDR tone-map reference (host SDR white + peak), shared by every renderer.
+mod hdr_ref;
 
 /// `--lang tr|en` (from the app's `Config.language`) — picks the native UI language
 /// for the overlay/hints (the renderer can't share the webview's i18n tables; the

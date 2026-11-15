@@ -15,8 +15,9 @@
 //! every ~0.5 s from here — no GOP change needed in the encoder).
 //!
 //! Scope (`supported`): X11 capture, H.264/HEVC/AV1 with libx264/libx265/SVT-AV1, NVENC,
-//! VA-API or QSV via libavcodec, SDR 4:2:0. Everything else (Vulkan, HDR, 4:4:4, Windows and
-//! macOS) stays on the ffmpeg CLI path — the same library build is not bundled there yet.
+//! VA-API or QSV via libavcodec, SDR 4:2:0 (an HDR request is SDR on x11grab: 8-bit capture).
+//! Everything else (Vulkan, 4:4:4, Windows and macOS) stays on the ffmpeg CLI path — the same
+//! library build is not bundled there yet.
 //! A `lavfi testsrc` input (`Source::Test`) lets the engine run headless in tests.
 //!
 //! **VA-API / QSV (AMD / Intel hosts, 2026-11-15, untested on Linux hardware).** VA-API encodes
@@ -187,7 +188,9 @@ pub fn supported(plan: &StreamPlan) -> bool {
 	}
 	plan.capture == CaptureMethod::X11grab
 		&& matches!(plan.window, None | Some(WindowInput::X11 { .. }))
-		&& !plan.hdr
+		// An HDR request is SDR on every x11grab plan (8-bit capture — pulsar-core
+		// `effective_hdr_yuv444`), so it no longer pushes the stream onto the ffmpeg CLI.
+		&& !plan.effective_hdr_yuv444().0
 		&& !plan.yuv444
 		&& match plan.encoder {
 			HwEncoder::Software | HwEncoder::Nvenc => true,

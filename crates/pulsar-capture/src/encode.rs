@@ -97,6 +97,9 @@ pub(crate) mod cuda_enc;
 mod d3d;
 #[cfg(windows)]
 mod encoder;
+// FP16 scRGB → P010 (BT.2020 PQ) shader passes of the HDR stream.
+#[cfg(windows)]
+pub(crate) mod hdr_conv;
 // The display GPU's own hardware encoder via Media Foundation (measured against NVENC).
 #[cfg(windows)]
 pub(crate) mod mf;
@@ -118,6 +121,12 @@ pub use encoder::Encoder;
 /// accept in `nvEncOpenEncodeSessionEx`). 0x1002 = AMD, 0x8086 = Intel (display owners).
 #[cfg(windows)]
 const VENDOR_NVIDIA: u32 = 0x10DE;
+
+/// Is `device` on the NVIDIA adapter (NVENC can take its textures without a bridge)?
+#[cfg(windows)]
+pub(crate) fn device_is_nvidia(device: &windows::Win32::Graphics::Direct3D11::ID3D11Device) -> bool {
+	(unsafe { d3d::device_vendor_id(device) }) == Some(VENDOR_NVIDIA)
+}
 
 /// Which codecs THIS machine's NVENC can actually encode — asked of the NVENC SDK itself
 /// (open a session, enumerate its encode GUIDs, close). Empty = no usable NVENC at all.
@@ -271,6 +280,11 @@ pub struct EncParams {
 	/// Reference-frame invalidation (the client asked, `StreamReq::rfi`): keep a deep reference
 	/// buffer (`policy::rfi_dpb`) so a lost one can be skipped (`Encoder::invalidate_lost`).
 	pub rfi: bool,
+	/// HDR10 stream: the capture delivers FP16 scRGB from a monitor in HDR mode (its mastering
+	/// data here). NVENC then encodes P010 as HEVC Main10 / AV1 10-bit with BT.2020 / PQ VUI
+	/// and the metadata on every keyframe. `None` = the SDR NV12 path, unchanged. Only the
+	/// same-device NVENC path takes it (no hybrid bridge, not Media Foundation).
+	pub hdr: Option<crate::hdr::HdrMeta>,
 }
 
 /// The SEI NAL that tags an RFI recovery frame (user_data_unregistered with

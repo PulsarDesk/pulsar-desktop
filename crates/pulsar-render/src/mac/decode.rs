@@ -36,6 +36,15 @@ impl Frame {
 		// SAFETY: a live pixel buffer.
 		unsafe { CVPixelBufferGetPixelFormatType(self.ptr()) }
 	}
+	/// The decoder attached SMPTE ST 2084 (PQ) as the transfer function (the stream's colour
+	/// description says HDR10).
+	pub fn is_pq(&self) -> bool {
+		// SAFETY: a live buffer; the attachment is a +0 CFString (or null) we only compare.
+		unsafe {
+			let t = CVBufferGetAttachment(self.ptr(), kCVImageBufferTransferFunctionKey, std::ptr::null_mut());
+			!t.is_null() && CFEqual(t, kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ) != 0
+		}
+	}
 	/// The colour matrix the decoder attached (from the stream's VUI / colour config); BT.709
 	/// when it says nothing — what Pulsar hosts encode.
 	pub fn matrix(&self) -> Matrix {
@@ -231,8 +240,17 @@ impl Decoder {
 	fn make_session(&mut self) -> Result<(), String> {
 		let Some(format) = self.format.as_ref() else { return Err("no format".into()) };
 		// Any of the 4:2:0 bi-planar formats, Metal-compatible, IOSurface-backed (zero-copy into
-		// the CVMetalTextureCache). 8-bit first: a 10-bit stream still comes out as P010.
-		let fmts: Vec<Cf> = [PIX_420V, PIX_420F, PIX_X420, PIX_XF20].iter().map(|f| cf_i32(*f as i32)).collect();
+		// the CVMetalTextureCache). 8-bit first for an SDR stream (half the memory traffic of
+		// P010). An HDR10 stream (the parameter sets' colour description says PQ) lists the
+		// 10-bit formats first, so VideoToolbox does not hand 10-bit PQ out as 8-bit (banding);
+		// the Metal pass tone-maps PQ at either depth (metal.rs keys it on `Frame::is_pq`).
+		// SAFETY: live format description; the extension is +0 (or null) and only compared.
+		let pq = unsafe {
+			let t = CMFormatDescriptionGetExtension(format.ptr(), kCVImageBufferTransferFunctionKey);
+			!t.is_null() && CFEqual(t, kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ) != 0
+		};
+		let order = if pq { [PIX_X420, PIX_XF20, PIX_420V, PIX_420F] } else { [PIX_420V, PIX_420F, PIX_X420, PIX_XF20] };
+		let fmts: Vec<Cf> = order.iter().map(|f| cf_i32(*f as i32)).collect();
 		let fmt_arr = cf_array(&fmts.iter().collect::<Vec<_>>());
 		let iosurf = cf_dict(&[]);
 		// SAFETY: the statics are framework CFStrings; values are live CF objects.
@@ -435,10 +453,32 @@ pub fn probe_json() -> String {
 		// SAFETY: plain query.
 		let hw = unsafe { VTIsHardwareDecodeSupported(codec_type(c)) } != 0;
 		let ok = hw || c != Codec::Av1;
+		// 10-bit (HDR10): REALLY decode the canned HDR10 keyframe (`testdata/test-hdr10.*`) the
+		// way a session does; only a picture that comes out 10-bit (x420 / xf20) and tagged PQ
+		// counts (the Metal pass then tone-maps it, metal.rs). Like the Windows probe; an 8-bit
+		// or untagged result keeps HDR off. Unverified on macOS hardware.
+		let ten_bit = ok && decodes_hdr10(c);
 		entries.push(format!(
-			"{{\"codec\":\"{name}\",\"ok\":{ok},\"decoder\":\"videotoolbox\",\"hw\":{hw},\"tier\":\"{}\",\"incompatible_with\":[]}}",
+			"{{\"codec\":\"{name}\",\"ok\":{ok},\"decoder\":\"videotoolbox\",\"hw\":{hw},\"tier\":\"{}\",\"incompatible_with\":[],\"ten_bit\":{ten_bit}}}",
 			if hw { "hwaccel" } else { "software" }
 		));
 	}
 	format!("[{}]", entries.join(","))
+}
+
+/// 64×64 HDR10 keyframes (HEVC Main10 / AV1 10-bit, BT.2020 PQ) for the `ten_bit` probe.
+const TEST_HDR10_H265: &[u8] = include_bytes!("../../testdata/test-hdr10.h265");
+const TEST_HDR10_AV1: &[u8] = include_bytes!("../../testdata/test-hdr10.av1.obu");
+
+/// Decode the canned HDR10 keyframe of `c`: true when the picture is 10-bit and tagged PQ.
+fn decodes_hdr10(c: Codec) -> bool {
+	let sample = match c {
+		Codec::H265 => TEST_HDR10_H265,
+		Codec::Av1 => TEST_HDR10_AV1,
+		Codec::H264 => return false,
+	};
+	let mut d = Decoder::new(c);
+	let au = AccessUnit { data: sample.to_vec(), pts_90k: 0, key: true, conceal: false };
+	let out = d.decode(&au).unwrap_or_default();
+	out.first().is_some_and(|f| f.is_pq() && matches!(f.pixel_format(), PIX_X420 | PIX_XF20))
 }

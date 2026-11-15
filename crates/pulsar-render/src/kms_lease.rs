@@ -1855,8 +1855,14 @@ pub fn enabled() -> bool {
 }
 
 /// Whether a frame can go on a KMS plane as-is (single-layer DRM_PRIME, as rkmpp produces).
+/// Never an HDR10 (PQ) frame: the plane scans the dmabuf out untouched, with no PQ handling,
+/// so PQ code values would show as SDR (washed out). Those take the GL path, which
+/// tone-maps (`Presenter`, `pq_fragment`); the lease is released for them.
 pub unsafe fn frame_ok(f: *const ff::AVFrame) -> bool {
 	if f.is_null() || (*f).format != ff::AVPixelFormat::AV_PIX_FMT_DRM_PRIME as c_int {
+		return false;
+	}
+	if crate::video::frame_is_pq(f) {
 		return false;
 	}
 	let d = (*f).data[0] as *const ff::AVDRMFrameDescriptor;

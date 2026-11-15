@@ -80,10 +80,13 @@ pub fn host_displays() -> Vec<pulsar_core::service::DisplayInfo> {
 	#[cfg(windows)]
 	{
 		let raw = pulsar_capture::list_displays();
-		tracing::info!(count = raw.len(), ?raw, "host_displays (DXGI)");
+		// Which of them are in HDR mode now (same DXGI order); the HDR10 stream needs one.
+		let hdr = pulsar_capture::displays_hdr();
+		tracing::info!(count = raw.len(), ?raw, ?hdr, "host_displays (DXGI)");
 		return raw
 			.into_iter()
 			.map(|(idx, name, width, height, primary)| DisplayInfo {
+				hdr: hdr.get(idx as usize).copied().unwrap_or(false),
 				// `name` is the DXGI `DeviceName` (the GDI `\\.\DISPLAYn` trimmed of the
 				// `\\.\` prefix), so it doubles as the EnumDisplaySettings device name — and
 				// the iteration order matches `display_idx`. Advertise this monitor's available
@@ -117,6 +120,8 @@ pub fn host_displays() -> Vec<pulsar_core::service::DisplayInfo> {
 				// resolution presets (and screen adaptation is Windows-only anyway).
 				modes: Vec::new(),
 				refresh_hz: if primary { crate::util::host_panel_hz().unwrap_or(0) } else { 0 },
+				// No Linux host path captures HDR (x11grab / PipeWire are 8-bit).
+				hdr: false,
 			})
 			.collect();
 	}
@@ -145,6 +150,8 @@ fn core_displays() -> Vec<pulsar_core::service::DisplayInfo> {
 			primary: m.primary,
 			modes: m.modes,
 			refresh_hz: m.refresh_hz,
+			// No macOS / Wayland host path captures HDR yet (docs/agents/host-encode.md).
+			hdr: false,
 		})
 		.collect()
 }

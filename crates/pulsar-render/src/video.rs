@@ -335,6 +335,53 @@ pub fn set_pace_ceiling(n: usize) {
 
 /// Software formats the presenter can display: 3-plane 8-bit YUV (any subsampling)
 /// or 2-plane NV12 (what `av_hwframe_transfer_data` readback typically yields).
+/// A 10-bit 4:2:0 frame (a host's HDR10 stream: software decode = yuv420p10le, a hwaccel
+/// readback that refused NV12 = p010le) → the same picture in 8 bits (yuv420p / nv12), props
+/// (incl. the PQ transfer tag) kept, so the presenter's tone-mapping programs take it. The
+/// code values stay PQ; only the precision drops (the GL upload path is 8-bit). Null when the
+/// format is neither or allocation fails.
+pub(crate) unsafe fn ten_bit_to_8(src: *const ff::AVFrame) -> *mut ff::AVFrame {
+	use ff::AVPixelFormat::*;
+	let f = (*src).format;
+	let (out_fmt, planes, shift): (ff::AVPixelFormat, usize, u32) = if f == AV_PIX_FMT_YUV420P10LE as c_int {
+		(AV_PIX_FMT_YUV420P, 3, 2)
+	} else if f == AV_PIX_FMT_P010LE as c_int {
+		(AV_PIX_FMT_NV12, 2, 8)
+	} else {
+		return ptr::null_mut();
+	};
+	let mut dst = ff::av_frame_alloc();
+	if dst.is_null() {
+		return dst;
+	}
+	(*dst).format = out_fmt as c_int;
+	(*dst).width = (*src).width;
+	(*dst).height = (*src).height;
+	if ff::av_frame_get_buffer(dst, 0) < 0 || ff::av_frame_copy_props(dst, src) < 0 {
+		ff::av_frame_free(&mut dst);
+		return ptr::null_mut();
+	}
+	let (w, h) = ((*src).width.max(0) as usize, (*src).height.max(0) as usize);
+	for p in 0..planes {
+		// Samples per row / rows of this plane: luma full size; chroma half height, and half
+		// width per plane (planar) or full width of interleaved Cb,Cr pairs (P010).
+		let (sw, sh) = match (p, planes) {
+			(0, _) => (w, h),
+			(_, 3) => ((w + 1) / 2, (h + 1) / 2),
+			_ => (((w + 1) / 2) * 2, (h + 1) / 2),
+		};
+		let (sl, dl) = ((*src).linesize[p] as isize, (*dst).linesize[p] as isize);
+		for y in 0..sh {
+			let s = ((*src).data[p] as *const u8).offset(y as isize * sl) as *const u16;
+			let d = (*dst).data[p].offset(y as isize * dl);
+			for x in 0..sw {
+				*d.add(x) = (u16::from_le(std::ptr::read_unaligned(s.add(x))) >> shift).min(255) as u8;
+			}
+		}
+	}
+	dst
+}
+
 pub fn is_displayable_sw(f: c_int) -> bool {
 	is_planar_yuv(f) || f == ff::AVPixelFormat::AV_PIX_FMT_NV12 as c_int
 }
@@ -1034,7 +1081,12 @@ unsafe fn decode_once(sdp: &CString) {
 						// planar/NV12 → GL upload. Anything else is undisplayable → skip.
 						let f = (*frame).format;
 						let nf: *mut ff::AVFrame;
-						if f == ff::AVPixelFormat::AV_PIX_FMT_DRM_PRIME as c_int || is_displayable_sw(f)
+						let ten = ten_bit_to_8(frame);
+						if !ten.is_null() {
+							// 10-bit software decode (HDR10 stream): shifted to 8 bits, PQ kept.
+							ff::av_frame_unref(frame);
+							nf = ten;
+						} else if f == ff::AVPixelFormat::AV_PIX_FMT_DRM_PRIME as c_int || is_displayable_sw(f)
 						{
 							nf = ff::av_frame_alloc();
 							ff::av_frame_move_ref(nf, frame);
@@ -1082,12 +1134,28 @@ unsafe fn decode_once(sdp: &CString) {
 								// 3-plane branch, dereferencing P010's NULL data[2] → segfault. If
 								// the hwaccel refuses NV12, retry letting libav pick — and only
 								// queue the frame when the result is really displayable.
-								let sw = ff::av_frame_alloc();
+								let mut sw = ff::av_frame_alloc();
 								(*sw).format = ff::AVPixelFormat::AV_PIX_FMT_NV12 as c_int;
 								let mut ok = ff::av_hwframe_transfer_data(sw, frame, 0) >= 0;
 								if !ok {
 									ff::av_frame_unref(sw); // resets format to NONE → libav picks
 									ok = ff::av_hwframe_transfer_data(sw, frame, 0) >= 0;
+								}
+								// av_hwframe_transfer_data copies pixels only (FFmpeg's own
+								// ffmpeg_hw.c follows it with av_frame_copy_props): without this the
+								// readback loses color_trc / primaries / range, and an HDR10 (PQ)
+								// picture would be drawn with the BT.709 SDR program (washed out).
+								if ok {
+									ff::av_frame_copy_props(sw, frame);
+								}
+								// A P010 readback (the hwaccel refused NV12): shift it down here.
+								if ok && !is_displayable_sw((*sw).format) {
+									let ten = ten_bit_to_8(sw);
+									if !ten.is_null() {
+										let mut old = sw;
+										ff::av_frame_free(&mut old);
+										sw = ten;
+									}
 								}
 								if !ok || !is_displayable_sw((*sw).format) {
 									if ok && !readback_warned {
@@ -1476,6 +1544,13 @@ pub struct Presenter {
 	// Zero-copy multi-layer dmabuf (VAAPI NV12/P010: R8|R16 luma + GR88|GR1616 chroma
 	// layers, each its own EGLImage on a TEXTURE_2D) → NV12 shader reading UV from .rg.
 	rg_prog: glow::Program,
+	/// HDR10 twins of `prog` / `sw_prog` / `nv_prog` / `rg_prog` (same order): a frame tagged
+	/// SMPTE ST 2084 (a host's HDR stream) is BT.2020 PQ, so these decode it with the BT.2020
+	/// matrix and tone-map it to SDR sRGB (`FRAG_TONEMAP`) instead of showing PQ code values as
+	/// BT.709 gamma (washed out). See `pq_fragment` / docs/agents/client-video.md.
+	pq_progs: [glow::Program; 4],
+	/// The `hdr_ref` uniform value the `pq_progs` hold now (hdr_ref.rs; re-set on a change).
+	pq_ref: (f32, f32),
 	zc_tex: [glow::Texture; 2],
 	// CUDA↔GL interop targets (LUMINANCE + LUMINANCE_ALPHA) — the NV12 shader.
 	cuda_tex: [glow::Texture; 2],
@@ -1508,7 +1583,75 @@ const FRAG_YUV: &str = "precision mediump float;\nvarying vec2 uv;\nuniform samp
 const FRAG_NV12_RG: &str = "precision mediump float;\nvarying vec2 uv;\nuniform sampler2D ty;\nuniform sampler2D tuv;\nvoid main(){\n  float y = (texture2D(ty, uv).r - 0.0627) * 1.1644;\n  float u = texture2D(tuv, uv).r - 0.5;\n  float v = texture2D(tuv, uv).g - 0.5;\n  gl_FragColor = vec4(y + 1.5748*v, y - 0.1873*u - 0.4681*v, y + 1.8556*u, 1.0);\n}\n";
 const FRAG_NV12: &str = "precision mediump float;\nvarying vec2 uv;\nuniform sampler2D ty;\nuniform sampler2D tuv;\nvoid main(){\n  float y = (texture2D(ty, uv).r - 0.0627) * 1.1644;\n  float u = texture2D(tuv, uv).r - 0.5;\n  float v = texture2D(tuv, uv).a - 0.5;\n  gl_FragColor = vec4(y + 1.5748*v, y - 0.1873*u - 0.4681*v, y + 1.8556*u, 1.0);\n}\n";
 
+// HDR10 → SDR on the GL path (the Linux renderer outputs to an 8-bit SDR GL surface: X11 / EGL
+// has no HDR output; a Wayland compositor with the colour-management protocol could take PQ
+// directly — not wired, see client-video.md). Same maths as the Windows renderer's `ps_sdr`
+// (win/hdr.rs): PQ → nits → BT.709 → identity up to 80 % of the host's SDR reference white,
+// roll-off so the host monitor's peak lands on 1.0 → sRGB (hdr_ref.rs). highp where the GPU has it: PQ needs more than mediump.
+const FRAG_PQ_HEAD: &str = "#ifdef GL_FRAGMENT_PRECISION_HIGH\nprecision highp float;\n#else\nprecision mediump float;\n#endif\nvarying vec2 uv;\n";
+// `hdr_ref` = (SDR white, peak) in nits: the host's SDR content brightness and monitor peak
+// (hdr_ref.rs; 203 / 1000 until the host sends them), set by `Presenter::sync_hdr_ref`.
+const FRAG_TONEMAP: &str = "uniform vec2 hdr_ref;\n\
+vec3 pq_eotf(vec3 e){ vec3 p = pow(clamp(e, 0.0, 1.0), vec3(1.0/78.84375)); return 10000.0*pow(max(p-0.8359375, 0.0)/(18.8515625-18.6875*p), vec3(1.0/0.1593017578125)); }\n\
+vec3 tonemap(vec3 e){\n\
+  vec3 n = pq_eotf(e);\n\
+  vec3 l = vec3(dot(vec3(1.6604910,-0.5876411,-0.0728499), n), dot(vec3(-0.1245505,1.1328999,-0.0083494), n), dot(vec3(-0.0181508,-0.1005789,1.1187297), n));\n\
+  l = max(l, 0.0) / hdr_ref.x;\n\
+  float m = max(max(l.r, l.g), l.b);\n\
+  float ks = 0.8;\n\
+  if (m > ks) { float x = (m-ks)/(1.0-ks); float xw = max((hdr_ref.y/hdr_ref.x-ks)/(1.0-ks), 1.0); float mt = min(ks+(1.0-ks)*x*(1.0+x/(xw*xw))/(1.0+x), 1.0); l *= mt/m; }\n\
+  l = clamp(l, 0.0, 1.0);\n\
+  return mix(l*12.92, 1.055*pow(l, vec3(1.0/2.4))-0.055, step(vec3(0.0031308), l));\n\
+}\n\
+vec3 yuv2020(float y8, float u8, float v8){\n\
+  float y = (y8 - 0.0627) * 1.1644;\n\
+  float cb = (u8 - 0.5) * 1.1384;\n\
+  float cr = (v8 - 0.5) * 1.1384;\n\
+  float r = y + 1.4746*cr;\n\
+  float b = y + 1.8814*cb;\n\
+  return vec3(r, (y - 0.2627*r - 0.0593*b)/0.6780, b);\n\
+}\n";
+
+/// The HDR10 twin of one of the four video fragment shaders (`kind`: 0 = external OES, 1 =
+/// planar, 2 = NV12 LUMINANCE_ALPHA, 3 = dmabuf RG layers). Planar / NV12 / RG sample the
+/// limited-range code values themselves (an R16 / GR1616 P010 layer normalises to the same
+/// 0–1 scale as 8-bit); the external sampler has already converted to RGB with the driver's
+/// matrix, so only the transfer is fixed there (a small hue error on saturated colours).
+fn pq_fragment(kind: usize) -> String {
+	let body = match kind {
+		0 => "uniform samplerExternalOES tex;\nvoid main(){ gl_FragColor = vec4(tonemap(texture2D(tex, uv).rgb), 1.0); }\n",
+		1 => "uniform sampler2D ty;\nuniform sampler2D tu;\nuniform sampler2D tv;\nvoid main(){ gl_FragColor = vec4(tonemap(yuv2020(texture2D(ty, uv).r, texture2D(tu, uv).r, texture2D(tv, uv).r)), 1.0); }\n",
+		2 => "uniform sampler2D ty;\nuniform sampler2D tuv;\nvoid main(){ vec4 c = texture2D(tuv, uv); gl_FragColor = vec4(tonemap(yuv2020(texture2D(ty, uv).r, c.r, c.a)), 1.0); }\n",
+		_ => "uniform sampler2D ty;\nuniform sampler2D tuv;\nvoid main(){ vec4 c = texture2D(tuv, uv); gl_FragColor = vec4(tonemap(yuv2020(texture2D(ty, uv).r, c.r, c.g)), 1.0); }\n",
+	};
+	let ext = if kind == 0 { "#extension GL_OES_EGL_image_external : require\n" } else { "" };
+	format!("{ext}{FRAG_PQ_HEAD}{FRAG_TONEMAP}{body}")
+}
+
+/// Is this decoded frame HDR10 (SMPTE ST 2084 transfer from the bitstream's colour
+/// description; libav carries it through readback / DRM mapping / our 10→8-bit shift)?
+pub(crate) unsafe fn frame_is_pq(f: *const ff::AVFrame) -> bool {
+	(*f).color_trc == ff::AVColorTransferCharacteristic::AVCOL_TRC_SMPTE2084
+}
+
 impl Presenter {
+	/// Push the HDR10 tone-map reference (host SDR white, peak — hdr_ref.rs) into the four
+	/// tone-mapping programs when it changed. Called before a PQ frame's program is bound.
+	unsafe fn sync_hdr_ref(&mut self, gl: &glow::Context) {
+		use glow::HasContext;
+		let r = crate::hdr_ref::get();
+		if r == self.pq_ref {
+			return;
+		}
+		self.pq_ref = r;
+		for p in self.pq_progs {
+			gl.use_program(Some(p));
+			if let Some(loc) = gl.get_uniform_location(p, "hdr_ref") {
+				gl.uniform_2_f32(Some(&loc), r.0, r.1);
+			}
+		}
+	}
+
 	/// `get_proc` resolves EGL/GL functions (egl.get_proc_address). `dpy` = raw EGLDisplay.
 	pub unsafe fn new(
 		gl: &glow::Context,
@@ -1541,14 +1684,17 @@ impl Presenter {
 		let sw_prog = build(VERT, FRAG_YUV);
 		let nv_prog = build(VERT, FRAG_NV12);
 		let rg_prog = build(VERT, FRAG_NV12_RG);
+		let pq_progs = [0, 1, 2, 3].map(|k| build(VERT, &pq_fragment(k)));
 		// Bind the samplers to fixed texture units once — program state persists.
-		gl.use_program(Some(sw_prog));
-		for (i, name) in ["ty", "tu", "tv"].iter().enumerate() {
-			if let Some(loc) = gl.get_uniform_location(sw_prog, name) {
-				gl.uniform_1_i32(Some(&loc), i as i32);
+		for sp in [sw_prog, pq_progs[1]] {
+			gl.use_program(Some(sp));
+			for (i, name) in ["ty", "tu", "tv"].iter().enumerate() {
+				if let Some(loc) = gl.get_uniform_location(sp, name) {
+					gl.uniform_1_i32(Some(&loc), i as i32);
+				}
 			}
 		}
-		for p in [nv_prog, rg_prog] {
+		for p in [nv_prog, rg_prog, pq_progs[2], pq_progs[3]] {
 			gl.use_program(Some(p));
 			for (i, name) in ["ty", "tuv"].iter().enumerate() {
 				if let Some(loc) = gl.get_uniform_location(p, name) {
@@ -1625,6 +1771,8 @@ impl Presenter {
 			vid_dims: (0, 0),
 			sw_scratch: Vec::new(),
 			rg_prog,
+			pq_progs,
+			pq_ref: (0.0, 0.0),
 			zc_tex,
 			cuda_tex,
 			cuda: None,
@@ -1755,7 +1903,7 @@ impl Presenter {
 		self.release();
 		self.cuda = None;
 		self.reset();
-		for p in [self.prog, self.sw_prog, self.nv_prog, self.rg_prog] {
+		for p in [self.prog, self.sw_prog, self.nv_prog, self.rg_prog].into_iter().chain(self.pq_progs) {
 			gl.delete_program(p);
 		}
 		gl.delete_buffer(self.vbo);
@@ -2062,6 +2210,13 @@ impl Presenter {
 		let vh = (*cur).height;
 		let is_prime = (*cur).format == ff::AVPixelFormat::AV_PIX_FMT_DRM_PRIME as c_int;
 		let is_cuda = (*cur).format == ff::AVPixelFormat::AV_PIX_FMT_CUDA as c_int;
+		// HDR10 frame: each path below takes its tone-mapping twin program.
+		let pq = frame_is_pq(cur);
+		if pq {
+			self.sync_hdr_ref(gl);
+		}
+		let pq_progs = self.pq_progs;
+		let pick = move |sdr: glow::Program, kind: usize| if pq { pq_progs[kind] } else { sdr };
 
 		// Bind the right source: DRM_PRIME → zero-copy EGLImage(s); CUDA → interop copy into
 		// GL textures on the GPU; anything else → plane upload (readback, software decode).
@@ -2086,7 +2241,7 @@ impl Presenter {
 				if imgs.iter().any(|i| i.is_null()) {
 					return self.zero_copy_failed(&imgs, "multi-layer dmabuf import");
 				}
-				gl.use_program(Some(self.rg_prog));
+				gl.use_program(Some(pick(self.rg_prog, 3)));
 				for i in 0..2 {
 					gl.active_texture(glow::TEXTURE0 + i as u32);
 					gl.bind_texture(glow::TEXTURE_2D, Some(self.zc_tex[i]));
@@ -2100,7 +2255,7 @@ impl Presenter {
 				if imgs[0].is_null() {
 					return self.zero_copy_failed(&imgs, "dmabuf import");
 				}
-				gl.use_program(Some(self.prog));
+				gl.use_program(Some(pick(self.prog, 0)));
 				gl.active_texture(glow::TEXTURE0);
 				gl.bind_texture(GL_TEXTURE_EXTERNAL_OES, Some(self.tex));
 				(self.image_target)(GL_TEXTURE_EXTERNAL_OES, imgs[0]);
@@ -2110,7 +2265,7 @@ impl Presenter {
 			if !self.cuda_copy(gl, cur, vw, vh) {
 				return self.zero_copy_failed(&imgs, "CUDA-GL interop");
 			}
-			gl.use_program(Some(self.nv_prog));
+			gl.use_program(Some(pick(self.nv_prog, 2)));
 			for i in 0..2 {
 				gl.active_texture(glow::TEXTURE0 + i as u32);
 				gl.bind_texture(glow::TEXTURE_2D, Some(self.cuda_tex[i]));
@@ -2147,7 +2302,7 @@ impl Presenter {
 			if alloc {
 				self.sw_dims = (vw, vh, fmt);
 			}
-			gl.use_program(Some(self.nv_prog));
+			gl.use_program(Some(pick(self.nv_prog, 2)));
 			path = PresentPath::Nv12Upload;
 		} else {
 			// Planar YUV: full-res Y + per-format chroma planes (half for 4:2:0, full for
@@ -2168,7 +2323,7 @@ impl Presenter {
 			if alloc {
 				self.sw_dims = (vw, vh, fmt);
 			}
-			gl.use_program(Some(self.sw_prog));
+			gl.use_program(Some(pick(self.sw_prog, 1)));
 			// upload_plane left each plane bound on its unit (0/1/2), matching the sampler
 			// uniforms set at init.
 			path = PresentPath::YuvUpload;
@@ -2294,4 +2449,55 @@ fn now_s() -> f64 {
 
 fn bytemuck_cast(f: &[f32]) -> &[u8] {
 	unsafe { std::slice::from_raw_parts(f.as_ptr() as *const u8, f.len() * 4) }
+}
+
+#[cfg(test)]
+mod hdr_tests {
+	use super::*;
+
+	/// A P010 frame tagged SMPTE ST 2084 (what a hwaccel readback of a host's HDR10 stream gives
+	/// once its props are copied) keeps the PQ tag through the 10 → 8-bit shift, so the
+	/// presenter picks the tone-mapping program, and the code values are the top 8 bits.
+	#[test]
+	fn ten_bit_to_8_keeps_the_pq_tag() {
+		unsafe {
+			let mut src = ff::av_frame_alloc();
+			assert!(!src.is_null());
+			(*src).format = ff::AVPixelFormat::AV_PIX_FMT_P010LE as c_int;
+			(*src).width = 4;
+			(*src).height = 2;
+			assert!(ff::av_frame_get_buffer(src, 0) >= 0);
+			(*src).color_trc = ff::AVColorTransferCharacteristic::AVCOL_TRC_SMPTE2084;
+			(*src).color_primaries = ff::AVColorPrimaries::AVCOL_PRI_BT2020;
+			// Luma code 940 (10-bit) everywhere, chroma 512: P010 is MSB-aligned (code << 6).
+			for y in 0..2isize {
+				let row = (*src).data[0].offset(y * (*src).linesize[0] as isize) as *mut u16;
+				for x in 0..4 {
+					*row.add(x) = (940u16 << 6).to_le();
+				}
+			}
+			let crow = (*src).data[1] as *mut u16;
+			for x in 0..4 {
+				*crow.add(x) = (512u16 << 6).to_le();
+			}
+			// The readback branch: props copied from the hw frame onto the transferred one.
+			let mut sw = ff::av_frame_alloc();
+			(*sw).format = (*src).format;
+			(*sw).width = 4;
+			(*sw).height = 2;
+			assert!(ff::av_frame_get_buffer(sw, 0) >= 0);
+			assert!(ff::av_frame_copy(sw, src) >= 0);
+			assert!(ff::av_frame_copy_props(sw, src) >= 0);
+			let mut out = ten_bit_to_8(sw);
+			assert!(!out.is_null());
+			assert_eq!((*out).format, ff::AVPixelFormat::AV_PIX_FMT_NV12 as c_int);
+			assert!(frame_is_pq(out), "PQ tag lost in the 10 -> 8-bit shift");
+			assert_eq!((*out).color_primaries, ff::AVColorPrimaries::AVCOL_PRI_BT2020);
+			assert_eq!(*(*out).data[0], (940u16 >> 2) as u8);
+			assert_eq!(*(*out).data[1], (512u16 >> 2) as u8);
+			ff::av_frame_free(&mut out);
+			ff::av_frame_free(&mut sw);
+			ff::av_frame_free(&mut src);
+		}
+	}
 }

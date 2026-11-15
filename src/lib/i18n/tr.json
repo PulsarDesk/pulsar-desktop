@@ -301,7 +301,7 @@
 	"settings.coopMissing": "Bileşen kurulu değil — ProtoInput dosyalarını klasöre koy",
 	"settings.coopOpenDir": "Klasörü aç",
 	"settings.hdr": "HDR aktar",
-	"settings.hdrDesc": "Destekleyen ekranlarda 10-bit HDR akışı.",
+	"settings.hdrDesc": "Karşı ekranda HDR açıksa (NVIDIA'lı Windows) 10-bit HDR akışı. Bu ekran HDR değilse görüntü SDR'ye uyarlanır.",
 	"settings.audioQuality": "Ses kalitesi",
 	"settings.audioQualityDesc": "Otomatik: yerel ağda Ham, değilse Yüksek. Oturum menüsünden de değişir.",
 	"settings.aq.auto": "Otomatik",
