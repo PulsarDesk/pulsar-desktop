@@ -2161,6 +2161,7 @@ pub(super) fn make_on_stream(
 		apply_screen_adaptation(&req, &adapt_state);
 		// A restart the host itself ordered (failover.rs, the window watcher): no live fast path
 		// and no "unchanged bitrate step" absorb may swallow it.
+		#[cfg(windows)]
 		let forced = force_restart.swap(false, std::sync::atomic::Ordering::SeqCst);
 		#[cfg(not(windows))]
 		let forced = false;
