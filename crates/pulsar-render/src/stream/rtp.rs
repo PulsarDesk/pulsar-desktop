@@ -86,14 +86,25 @@ pub static NEED_IDR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 /// ~1 unrepaired loss/s fed this way overflowed the AU backlog and asked for an IDR ~5×/s, read
 /// then as a decoder stall. The RFI work the same day found the likelier cause: the reorder
 /// buffer holds every frame behind a hole for the whole repair window and releases them as one
-/// burst (~24 at 120 fps), which overflows the 8-AU queue. Not re-measured for IR since, so the
-/// Windows app still does not request intra refresh (play.rs `ir_capable`); it uses
-/// reference-frame invalidation (`RFI_MODE`) instead.
+/// burst (~24 at 120 fps), which overflows the 8-AU queue.
+///
+/// Re-measured 2026-11-15 (headless, Snapdragon X, x265 intra-refresh stream over a simulated
+/// tether): the Microsoft HEVC decoder MFT really does stop for good at the first missing
+/// reference — every later AU in, no picture out, a permanent freeze (the burst was a separate
+/// problem). H.264 conceals. Hence `HEVC_CONCEAL` / `hevc::Conceal` (stand-ins for the skipped
+/// pictures) and the decoder-stall keyframe request (`recovery::DecodeStall`).
 pub static IR_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// The decoder stops at a missing HEVC reference (the Windows Media Foundation decoder, set by
+/// its backend): an intra-refresh resume then hands it stand-ins for the skipped pictures
+/// (`hevc::Conceal`, taken with [`Depacketizer::take_stand_ins`]). Decoders that conceal a
+/// missing reference themselves (libavcodec, H.264 everywhere) leave it off.
+pub static HEVC_CONCEAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// The host heals a loss by reference-frame invalidation (the app writes `rfi 1` when the host
-/// streams with a deep reference buffer for us). A hole is reported to the host at once —
-/// `RFI_REPORT_AFTER` after the first packet behind it, while NACK repair still runs — so the
+/// streams with a deep reference buffer for us). A hole is reported to the host early —
+/// `RFI_REPORT_AFTER` after the first packet behind it, longer on a path that reorders
+/// (`Reorder::report_after`), while NACK repair still runs — so the
 /// host can still reach the lost frame in its reference buffer: it invalidates it and tags the
 /// next frame (predicted from an older, intact one) with a Pulsar SEI. If the repair fails,
 /// the depacketizer drops access units until that tag (or a keyframe) instead of waiting for
@@ -102,14 +113,34 @@ pub static IR_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 pub static RFI_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// Lost sequence range waiting to be sent to the host (the renderer prints `vidsink-rfi`).
 static RFI_REQ: std::sync::Mutex<Option<(u16, u16)>> = std::sync::Mutex::new(None);
-/// How long a hole must persist before it is reported (plain reordering heals faster).
+/// How long a hole must persist before it is reported, at least (plain reordering heals
+/// faster)…
 const RFI_REPORT_AFTER: Duration = Duration::from_millis(3);
-/// Waiting longer than this for a recovery frame → ask for a keyframe. The wait starts only
-/// when the repair window ran out, by which time a recovery frame (sent ~1 RTT after the
-/// early report) has normally arrived already; none = the host could not reach the frame.
-/// Every further hole seen while waiting restarts it: that hole was reported too, so a fresh
-/// recovery frame is on its way (the previous one may have been the frame the hole hit).
+/// …and while the path reorders, `REORDER_SLACK` × the recent reorder lateness
+/// (`Reorder::late_peak`), at most `RFI_REPORT_MAX` (a hole given up on is reported at once).
+/// The fixed 3 ms reported every late packet of a reordering path as lost: measured 2026-11-15
+/// (headless, 20 % of packets 5–60 ms late, NO loss) the host answered each report with a
+/// recovery frame, release-at-tag then skipped past packets still in flight — reordering
+/// turned into loss — and the picture ran at 11 fps with up to 1 s freezes.
+const REORDER_SLACK: f32 = 1.25;
+const RFI_REPORT_MAX: Duration = Duration::from_millis(100);
+/// How fast the reorder lateness peak decays (halves every this long without a new sample).
+const LATE_HALF_LIFE: Duration = Duration::from_secs(2);
+/// Waiting longer than this for a recovery frame → ask for a keyframe (`rfi_timeout`: at least
+/// this, more on a slow path). The wait starts only when the repair window ran out, by which
+/// time a recovery frame (sent ~1 RTT after the report) has normally arrived already; none =
+/// the host could not reach the frame. Every further hole seen while waiting restarts it: that
+/// hole was reported too, so a fresh recovery frame is on its way (the previous one may have
+/// been the frame the hole hit).
 const RFI_TIMEOUT: Duration = Duration::from_millis(150);
+
+/// The recovery wait for the current RTT: `RFI_TIMEOUT`, or 1.5 RTT + 50 ms when that is
+/// longer (a report can only be answered after a round trip; a mobile path's RTT reaches
+/// 0.5–1 s in a stall), never past `RFI_GIVE_UP`.
+fn rfi_timeout(rtt: Option<Duration>) -> Duration {
+	let by_rtt = rtt.map_or(Duration::ZERO, |r| r * 3 / 2 + Duration::from_millis(50));
+	RFI_TIMEOUT.max(by_rtt).min(RFI_GIVE_UP)
+}
 /// Upper bound on one recovery wait, however many holes keep restarting `RFI_TIMEOUT`.
 const RFI_GIVE_UP: Duration = Duration::from_millis(1000);
 /// `pulsar_core::service::media::RFI_RECOVERY_UUID` (this crate has no core dependency).
@@ -217,6 +248,10 @@ pub struct Reorder {
 	rtt_pin: Option<Duration>,
 	/// Counters since the last [`Reorder::take_stats`] (the pump's 2 s log line).
 	stats: ReorderStats,
+	/// How late packets arrive behind their successors on this path (ms, a peak that halves
+	/// every `LATE_HALF_LIFE`) and when it was last raised — sizes the RFI report delay.
+	late_peak: f32,
+	late_at: Option<Instant>,
 }
 
 /// What the reorder buffer did in one log window (see [`pump`]).
@@ -244,7 +279,31 @@ impl Reorder {
 			loss: -1.0,
 			rtt_pin: None,
 			stats: ReorderStats::default(),
+			late_peak: 0.0,
+			late_at: None,
 		}
+	}
+
+	/// The reorder lateness peak at `now` (ms, decayed).
+	fn late_ms(&self, now: Instant) -> f32 {
+		let Some(at) = self.late_at else { return 0.0 };
+		let half_lives = now.saturating_duration_since(at).as_secs_f32() / LATE_HALF_LIFE.as_secs_f32();
+		self.late_peak * 0.5f32.powf(half_lives)
+	}
+
+	/// A packet filled a hole `late` after a later packet had arrived.
+	fn note_late(&mut self, now: Instant, late: Duration) {
+		let ms = late.as_secs_f32() * 1000.0;
+		let cur = self.late_ms(now);
+		if ms >= cur {
+			self.late_peak = ms;
+			self.late_at = Some(now);
+		}
+	}
+
+	/// How long a hole waits before it is reported for RFI (see `REORDER_SLACK`).
+	fn report_after(&self, now: Instant) -> Duration {
+		Duration::from_secs_f32(self.late_ms(now) * REORDER_SLACK / 1000.0).clamp(RFI_REPORT_AFTER, RFI_REPORT_MAX)
 	}
 
 	/// The counters since the last call (and reset them).
@@ -351,6 +410,13 @@ impl Reorder {
 			Some(next) => {
 				self.note_arrival(seq);
 				let d = seq.wrapping_sub(next);
+				if d < 0x8000 && !self.buf.iter().any(|(s, _, _)| *s == seq) {
+					// A hole filled: how long after the first later packet did it come?
+					let after = self.buf.iter().filter(|(s, _, _)| s.wrapping_sub(next) > d).map(|(_, t, _)| *t).min();
+					if let Some(t) = after {
+						self.note_late(now, now.saturating_duration_since(t));
+					}
+				}
 				if d == 0 {
 					// The expected packet (possibly the retransmit that fills the hole).
 					self.next = Some(seq.wrapping_add(1));
@@ -404,23 +470,26 @@ impl Reorder {
 		let Some(tag) = self.buf.iter().find(|(_, _, p)| is_recovery_tag_packet(p)).map(|(s, _, _)| *s) else {
 			return;
 		};
-		while self.buf.iter().any(|(s, _, _)| *s == tag) {
+		// Only past holes reported as lost: a fresh one in front of the tag is most likely a
+		// packet still on its way (reordering) — the tag answers an older report.
+		while self.buf.iter().any(|(s, _, _)| *s == tag) && self.next.is_some_and(|n| self.reported.contains(&n)) {
 			self.skip(out);
 		}
 	}
 
-	/// RFI: report every hole in front of a held packet that has persisted `RFI_REPORT_AFTER`
-	/// (`force` = report now, before giving up on it), once each.
-	fn report_holes(&mut self, now: Instant, force: bool) {
+	/// RFI: report every hole in front of a held packet that has persisted `report_after`
+	/// (`force_head` = report the head hole now, it is being given up on), once each.
+	fn report_holes(&mut self, now: Instant, force_head: bool) {
 		if !RFI_MODE.load(AtomicOrdering::Relaxed) {
 			return;
 		}
 		let Some(mut expect) = self.next else { return };
 		let next = expect;
 		self.reported.retain(|s| s.wrapping_sub(next) < 0x8000);
+		let wait = self.report_after(now);
 		for (s, t, _) in &self.buf {
 			if *s != expect
-				&& (force || now.duration_since(*t) >= RFI_REPORT_AFTER)
+				&& ((force_head && expect == next) || now.duration_since(*t) >= wait)
 				&& !self.reported.contains(&expect)
 			{
 				self.reported.push(expect);
@@ -455,6 +524,7 @@ impl Reorder {
 			if let Some(next) = self.next {
 				self.stats.holes_skipped += 1;
 				self.stats.seqs_skipped += s.wrapping_sub(next) as u32;
+				super::framelog(format_args!("h {} {} {}", next, s.wrapping_sub(next), self.buf.len()));
 			}
 			self.next = Some(*s);
 			self.drain(out);
@@ -504,6 +574,11 @@ pub struct Depacketizer {
 	// An access unit has been delivered (the stream was live): a wait from here on is a
 	// mid-stream freeze (`WAITING`), not the session start.
 	delivered: bool,
+	// HEVC stand-ins for pictures an intra-refresh resume skipped (`HEVC_CONCEAL`): the tracker,
+	// "a gap since the last delivered AU", and the stand-ins for the caller to take.
+	conceal: super::hevc::Conceal,
+	conceal_gap: bool,
+	stand_ins: Vec<AccessUnit>,
 }
 
 impl Depacketizer {
@@ -522,6 +597,9 @@ impl Depacketizer {
 			gap_ts: None,
 			rfi_fallback: false,
 			delivered: false,
+			conceal: super::hevc::Conceal::new(),
+			conceal_gap: false,
+			stand_ins: Vec::new(),
 		}
 	}
 
@@ -568,6 +646,7 @@ impl Depacketizer {
 				self.awaiting_idr = true;
 				NEED_IDR.store(true, std::sync::atomic::Ordering::Relaxed);
 				self.drop_partial();
+				self.conceal.reset();
 				self.last_seq = Some(seq);
 			// fwd==1: consecutive (normal). fwd==0: duplicate. fwd>=0x8000: backward/reorder/late.
 			} else if fwd == 0 || fwd >= 0x8000 {
@@ -594,6 +673,7 @@ impl Depacketizer {
 					// Intra-refresh stream: no keyframe is coming. Skip the AU this packet
 					// belongs to (its head may be in the gap) and resume with the next one.
 					self.skip_ts = Some(ts);
+					self.conceal_gap = true;
 				} else if RFI_MODE.load(std::sync::atomic::Ordering::Relaxed)
 					&& !self.awaiting_idr
 					&& self.codec != Codec::Av1
@@ -735,10 +815,11 @@ impl Depacketizer {
 			data,
 			pts_90k: self.cur_ts,
 			key,
+			conceal: false,
 		})
 	}
 
-	// ---- HEVC (RFC 7798) -------------------------------------------------------------------
+	// ---- HEVC (RFC 7798)-------------------------------------------------------------------
 
 	fn push_h265(&mut self, pl: &[u8], marker: bool) -> Option<AccessUnit> {
 		if pl.len() < 2 {
@@ -824,6 +905,19 @@ impl Depacketizer {
 			return None;
 		}
 		self.delivered = true;
+		if HEVC_CONCEAL.load(AtomicOrdering::Relaxed) {
+			// Stand-ins for the pictures an intra-refresh resume skipped (see `hevc::Conceal`);
+			// the parameter sets are tracked all the time (they come with the IDR only).
+			let gap = std::mem::take(&mut self.conceal_gap) && IR_MODE.load(AtomicOrdering::Relaxed);
+			for au in self.conceal.deliver(&nals, self.cur_ts, gap) {
+				let mut data = Vec::new();
+				for n in &au {
+					data.extend_from_slice(&START_CODE);
+					data.extend_from_slice(n);
+				}
+				self.stand_ins.push(AccessUnit { data, pts_90k: self.cur_ts, key: false, conceal: true });
+			}
+		}
 		let mut data = Vec::new();
 		for n in &nals {
 			data.extend_from_slice(&START_CODE);
@@ -833,7 +927,14 @@ impl Depacketizer {
 			data,
 			pts_90k: self.cur_ts,
 			key,
+			conceal: false,
 		})
+	}
+
+	/// Stand-ins queued by the last [`Depacketizer::push`] that returned an access unit: feed them
+	/// to the decoder BEFORE that unit (they fill the picture order counts in front of it).
+	pub fn take_stand_ins(&mut self) -> Vec<AccessUnit> {
+		std::mem::take(&mut self.stand_ins)
 	}
 
 	/// RFI: may this access unit be decoded? Yes unless waiting for a recovery frame and it is
@@ -847,7 +948,7 @@ impl Depacketizer {
 			self.awaiting_recovery = None;
 			return true;
 		}
-		if last.elapsed() >= RFI_TIMEOUT || first.elapsed() >= RFI_GIVE_UP {
+		if last.elapsed() >= rfi_timeout(rtt()) || first.elapsed() >= RFI_GIVE_UP {
 			self.awaiting_recovery = None;
 			self.awaiting_idr = true;
 			self.rfi_fallback = true;
@@ -935,6 +1036,7 @@ impl Depacketizer {
 			data,
 			pts_90k: self.cur_ts,
 			key,
+			conceal: false,
 		})
 	}
 }
@@ -1176,6 +1278,7 @@ pub fn pump(
 				}
 				for p in reorder.push(buf[..n].to_vec(), Instant::now(), max_delay()) {
 					if let Some(au) = depacketizer.push(&p) {
+						depacketizer.take_stand_ins().into_iter().for_each(&mut sink);
 						sink(au);
 					}
 				}
@@ -1186,6 +1289,7 @@ pub fn pump(
 				std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => {
 					for p in reorder.poll(Instant::now(), max_delay()) {
 						if let Some(au) = depacketizer.push(&p) {
+							depacketizer.take_stand_ins().into_iter().for_each(&mut sink);
 							sink(au);
 						}
 					}
@@ -1539,6 +1643,115 @@ mod tests {
 		assert_eq!(got, vec![0, 4, 5]);
 		assert!(!NEED_IDR.load(std::sync::atomic::Ordering::Relaxed));
 		RFI_MODE.store(false, std::sync::atomic::Ordering::Relaxed);
+	}
+
+	/// Intra refresh + HEVC on a decoder that stops at a missing reference: the AU after the
+	/// resume comes with stand-ins (decode-only) for every picture the hole skipped.
+	#[test]
+	fn intra_refresh_hevc_resume_brings_stand_ins_for_the_skipped_pictures() {
+		use super::super::hevc::gen::{pps, slice, sps, W};
+		let _g = IR_LOCK.lock().unwrap();
+		IR_MODE.store(true, std::sync::atomic::Ordering::Relaxed);
+		HEVC_CONCEAL.store(true, std::sync::atomic::Ordering::Relaxed);
+		let mut idr = W::new([19 << 1, 1]);
+		idr.u(1, 1);
+		idr.u(1, 0);
+		idr.ue(0);
+		idr.ue(2);
+		idr.u(8, 0x5a);
+		let idr = idr.done();
+		let p = |poc| slice(true, 0, poc, 8, &[0x11, 0x22]);
+		let mut d = Depacketizer::new(Codec::H265);
+		assert!(d.push(&rtp(1, 0, false, &sps(8))).is_none());
+		assert!(d.push(&rtp(2, 0, false, &pps(false))).is_none());
+		assert!(d.push(&rtp(3, 0, true, &idr)).is_some_and(|a| a.key));
+		assert!(d.push(&rtp(4, 1, true, &p(1))).is_some());
+		assert!(d.take_stand_ins().is_empty());
+		// seq 5 (POC 2) lost; 6 (POC 3) is the AU the resume skips.
+		assert!(d.push(&rtp(6, 3, true, &p(3))).is_none());
+		let au = d.push(&rtp(7, 4, true, &p(4))).expect("resumes");
+		assert!(!au.conceal);
+		let ins = d.take_stand_ins();
+		assert_eq!(ins.len(), 2, "POC 2 and 3");
+		for (s, poc) in ins.iter().zip([2u32, 3]) {
+			assert!(s.conceal && !s.key);
+			assert_eq!(s.data, [&START_CODE[..], &p(poc)].concat(), "picture 1's slice re-numbered");
+		}
+		// No stand-ins once the stream flows again, nor without the switch.
+		assert!(d.push(&rtp(8, 5, true, &p(5))).is_some() && d.take_stand_ins().is_empty());
+		HEVC_CONCEAL.store(false, std::sync::atomic::Ordering::Relaxed);
+		assert!(d.push(&rtp(10, 7, true, &p(7))).is_none());
+		assert!(d.push(&rtp(11, 8, true, &p(8))).is_some() && d.take_stand_ins().is_empty());
+		IR_MODE.store(false, std::sync::atomic::Ordering::Relaxed);
+	}
+
+	fn seqs_of(v: Vec<Vec<u8>>) -> Vec<u16> {
+		v.iter().filter_map(|p| Reorder::seq_of(p)).collect()
+	}
+
+	/// RFI on a reordering path: a hole is reported only once it has waited out the lateness
+	/// the path showed (else every late packet was "lost": a recovery frame each, 11 fps).
+	#[test]
+	fn rfi_report_waits_out_the_paths_reordering() {
+		let _g = IR_LOCK.lock().unwrap();
+		RFI_MODE.store(true, std::sync::atomic::Ordering::Relaxed);
+		let _ = take_rfi_request();
+		let md = Duration::from_millis(200);
+		let t0 = Instant::now();
+		let ms = |m: u64| t0 + Duration::from_millis(m);
+		let p = [0x41u8, 9];
+		let mut r = Reorder::new(64);
+		r.push(rtp(1, 0, true, &p), ms(0), md);
+		r.push(rtp(3, 0, true, &p), ms(0), md);
+		assert_eq!(take_rfi_request(), None);
+		r.poll(ms(4), md);
+		assert_eq!(take_rfi_request(), Some((2, 2)), "no reordering seen yet: reported after 3 ms");
+		// 2 was only late (40 ms): the path reorders.
+		assert_eq!(seqs_of(r.push(rtp(2, 0, true, &p), ms(40), md)), vec![2, 3]);
+		r.push(rtp(5, 0, true, &p), ms(100), md);
+		r.poll(ms(130), md);
+		assert_eq!(take_rfi_request(), None, "40 ms late packets: a 30 ms old hole is reordering");
+		r.poll(ms(151), md);
+		assert_eq!(take_rfi_request(), Some((4, 4)), "reported after 1.25 × the lateness");
+		// The lateness fades: half after LATE_HALF_LIFE.
+		assert!((r.late_ms(ms(40) + LATE_HALF_LIFE) - 20.0).abs() < 0.5);
+		RFI_MODE.store(false, std::sync::atomic::Ordering::Relaxed);
+	}
+
+	/// RFI: the recovery tag releases past the reported hole only — a fresh hole in front of
+	/// it is a packet still on its way, not one the host was told about.
+	#[test]
+	fn release_at_the_tag_skips_reported_holes_only() {
+		let _g = IR_LOCK.lock().unwrap();
+		RFI_MODE.store(true, std::sync::atomic::Ordering::Relaxed);
+		let _ = take_rfi_request();
+		let md = Duration::from_millis(200);
+		let t0 = Instant::now();
+		let ms = |m: u64| t0 + Duration::from_millis(m);
+		let p = [0x41u8, 9];
+		let mut tag = vec![0x06u8, 0x05, 0x10];
+		tag.extend_from_slice(b"PULSAR-RFI-RECOV");
+		tag.push(0x80);
+		let mut r = Reorder::new(64);
+		r.push(rtp(1, 0, true, &p), ms(0), md);
+		r.push(rtp(3, 1, true, &p), ms(0), md);
+		r.push(rtp(4, 2, true, &p), ms(5), md);
+		assert_eq!(take_rfi_request(), Some((2, 2)), "2 reported");
+		// 5 is late (reordering), the host's answer to the report arrives behind it.
+		assert!(r.push(rtp(6, 3, true, &p), ms(50), md).is_empty());
+		assert_eq!(seqs_of(r.push(rtp(7, 4, false, &tag), ms(51), md)), vec![3, 4], "past the reported hole");
+		assert!(r.push(rtp(8, 4, true, &p), ms(51), md).is_empty(), "the fresh hole at 5 still waits");
+		assert_eq!(seqs_of(r.push(rtp(5, 2, true, &p), ms(53), md)), vec![5, 6, 7, 8], "late packet kept");
+		assert_eq!(take_rfi_request(), None, "and never reported");
+		RFI_MODE.store(false, std::sync::atomic::Ordering::Relaxed);
+	}
+
+	#[test]
+	fn the_recovery_wait_grows_with_a_slow_round_trip() {
+		assert_eq!(rfi_timeout(None), RFI_TIMEOUT);
+		assert_eq!(rfi_timeout(Some(Duration::from_millis(40))), RFI_TIMEOUT);
+		assert_eq!(rfi_timeout(Some(Duration::from_millis(300))), Duration::from_millis(500));
+		assert_eq!(rfi_timeout(Some(Duration::from_secs(2))), RFI_GIVE_UP);
 	}
 
 	/// RFI: a recovery frame a hole ran through is not accepted.

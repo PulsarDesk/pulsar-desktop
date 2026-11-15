@@ -6,8 +6,22 @@
 
 #![allow(dead_code)]
 
+pub mod hevc; // HEVC intra-refresh loss concealment (stand-ins for skipped pictures)
 pub mod recovery; // loss hold + AU backlog bound (Linux renderer policy, pure)
 pub mod rtp; // RTP receive + depacketize (→ Annex-B / OBU access units)
+
+/// DEBUG knob (env-gated, default off): `PULSAR_FRAMELOG=1` prints one stderr line per AU
+/// handed to the decoder queue (`fl a <pts> <key>`), per decode (`fl d <pts> <pictures out>`),
+/// per picture put on screen (`fl s`) and per hole the reorder buffer gives up on
+/// (`fl h <first seq> <seqs> <held>`), each ending in µs since the first line. A headless
+/// harness measures the longest gap between presented pictures from it (freezes, objectively).
+pub fn framelog(line: std::fmt::Arguments) {
+	use std::sync::OnceLock;
+	static ON: OnceLock<Option<std::time::Instant>> = OnceLock::new();
+	if let Some(t0) = ON.get_or_init(|| std::env::var_os("PULSAR_FRAMELOG").map(|_| std::time::Instant::now())) {
+		eprintln!("fl {} {}", line, t0.elapsed().as_micros());
+	}
+}
 
 /// Video codec of the stream (from the SDP rtpmap). Drives depacketization + the decoder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,6 +39,8 @@ pub struct AccessUnit {
 	pub data: Vec<u8>,
 	pub pts_90k: u32,
 	pub key: bool,
+	/// A stand-in for a picture the stream lost (`hevc::Conceal`): decode it, never show it.
+	pub conceal: bool,
 }
 
 /// Parse the host SDP (`pulsar-<port>.sdp`, written by `spawn.rs::write_sdp`) for the UDP

@@ -133,6 +133,49 @@ pub fn bound_backlog(q: &mut VecDeque<AccessUnit>, soft: usize, hard: usize) -> 
 	}
 }
 
+/// A decoder that produced pictures and then takes this many access units in a row…
+pub const STALL_AUS: u32 = 6;
+/// …over at least this long (ms) without one more picture has stalled.
+pub const STALL_MS: u64 = 250;
+/// While it stays stalled, the keyframe is asked for again after this long (ms).
+pub const STALL_REASK_MS: u64 = 1_000;
+
+/// Mid-stream decoder stall watch (Windows renderer). The Microsoft HEVC decoder MFT stops
+/// producing pictures for good once a reference is missing (it accepts every later access unit
+/// and outputs nothing until an IDR) — a frozen picture with the stream still flowing. On an
+/// intra-refreshed stream no IDR ever comes and nothing asked for one: measured 2026-11-15 as a
+/// permanent freeze after the first unrepaired hole. `hevc::Conceal` keeps the references whole;
+/// this is the safety net for whatever it misses: ask for a keyframe once the decoder has
+/// swallowed `STALL_AUS` access units over `STALL_MS` without a picture. Before the first
+/// picture it stays quiet (the startup watchdog's job).
+#[derive(Debug, Default)]
+pub struct DecodeStall {
+	last_out: Option<u64>,
+	zero_run: u32,
+	asked: Option<u64>,
+}
+
+impl DecodeStall {
+	/// One decode call at `now` (ms) that produced a picture (`out`) or not. True = ask the
+	/// host for a keyframe now.
+	pub fn on_decode(&mut self, now: u64, out: bool) -> bool {
+		if out {
+			*self = Self { last_out: Some(now), ..Self::default() };
+			return false;
+		}
+		self.zero_run = self.zero_run.saturating_add(1);
+		let Some(last) = self.last_out else { return false };
+		if self.zero_run < STALL_AUS || now.saturating_sub(last) < STALL_MS {
+			return false;
+		}
+		if self.asked.is_some_and(|t| now.saturating_sub(t) < STALL_REASK_MS) {
+			return false;
+		}
+		self.asked = Some(now);
+		true
+	}
+}
+
 /// AU-backlog overflow reports, at most one line per [`OVERFLOW_LOG_EVERY`] with what happened
 /// since the last one (Windows and Linux renderers). Every overflow used to print its own line:
 /// a Windows renderer that decoded nothing (its D3D device gone while the display was off)
@@ -359,7 +402,7 @@ mod tests {
 	}
 
 	fn au(key: bool) -> AccessUnit {
-		AccessUnit { data: vec![0, 0, 0, 1, 0x41], pts_90k: 0, key }
+		AccessUnit { data: vec![0, 0, 0, 1, 0x41], pts_90k: 0, key, conceal: false }
 	}
 
 	fn queue(keys: &[bool]) -> VecDeque<AccessUnit> {
@@ -472,5 +515,30 @@ mod tests {
 	fn failing_rebuilds_log_once_a_minute() {
 		let logged: Vec<u32> = (1..=400).filter(|&n| rebuild_fail_logged(n)).collect();
 		assert_eq!(logged, vec![1, 120, 240, 360]);
+	}
+
+	#[test]
+	fn a_decoder_that_stops_producing_pictures_asks_for_a_keyframe() {
+		let mut s = DecodeStall::default();
+		assert!(!s.on_decode(0, true));
+		// 60 fps: AU every ~17 ms, none producing a picture.
+		let asks: Vec<u64> = (1..=120u64).map(|i| i * 17).filter(|&t| s.on_decode(t, false)).collect();
+		assert_eq!(asks.first(), Some(&255), "after STALL_MS with at least STALL_AUS swallowed");
+		assert!(asks.windows(2).all(|w| w[1] - w[0] >= STALL_REASK_MS), "re-asked at most once a second");
+		assert_eq!(asks.len(), 2);
+		// A picture resets it.
+		assert!(!s.on_decode(3000, true));
+		assert!(!s.on_decode(3017, false));
+	}
+
+	#[test]
+	fn no_stall_before_the_first_picture_or_for_a_short_run() {
+		let mut s = DecodeStall::default();
+		assert!((1..=100u64).all(|i| !s.on_decode(i * 17, false)), "startup: never produced a picture");
+		let mut s = DecodeStall::default();
+		s.on_decode(0, true);
+		// A decoder that buffers a few AUs (latency) is not a stall.
+		assert!((1..=5u64).all(|i| !s.on_decode(i * 100, false)));
+		assert!(!s.on_decode(600, true));
 	}
 }

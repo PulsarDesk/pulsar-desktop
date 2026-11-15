@@ -1188,6 +1188,9 @@ struct Renderer {
 	au_since_dec: u32,
 	dec_frames: u64,
 	dec_rebuilt: bool,
+	// Mid-stream decoder stall watch (stream::recovery::DecodeStall) and its ms clock.
+	dec_stall: crate::stream::recovery::DecodeStall,
+	dec_clock: std::time::Instant,
 	// The child window is created HIDDEN and shown on the first decoded frame (see
 	// `event_loop`): until then the app's connecting/loading screen must stay visible.
 	shown: bool,
@@ -1341,6 +1344,8 @@ impl Renderer {
 			au_since_dec: 0,
 			dec_frames: 0,
 			dec_rebuilt: false,
+			dec_stall: Default::default(),
+			dec_clock: std::time::Instant::now(),
 			shown: false,
 			last_vrect: (-1.0, -1.0, -1.0, -1.0),
 			last_ovbtn: None,
@@ -1776,6 +1781,9 @@ impl Renderer {
 				Ok(d) => {
 					self.decoder = Some(d);
 					self.au_since_dec = 0;
+					// The fresh decoder starts at a keyframe — ask for one: an intra-refreshed
+					// stream never sends one by itself (the session stayed black).
+					crate::stream::rtp::NEED_IDR.store(true, Ordering::Relaxed);
 				}
 				Err(e) => {
 					eprintln!("pulsar-render(win): sync-only decoder rebuild failed: {e}");
@@ -1795,6 +1803,11 @@ impl Renderer {
 		self.dec_ms_acc += dec_t0.elapsed().as_secs_f32() * 1000.0;
 		self.dec_n += 1;
 		self.dec_frames = self.dec_frames.saturating_add(texs.len() as u64);
+		crate::stream::framelog(format_args!("d {} {}", au.pts_90k, texs.len()));
+		self.note_output(!texs.is_empty());
+		if au.conceal {
+			return; // a stand-in for a lost picture (stream::hevc): it keeps the references whole
+		}
 		if !show {
 			if let Some(t) = texs.into_iter().last() {
 				self.held_back = Some(t);
@@ -1809,6 +1822,16 @@ impl Renderer {
 		// (micro-stutter). In steady state this is exactly one frame, so the loop is a no-op there.
 		for nv12 in texs {
 			self.deliver(nv12);
+		}
+	}
+
+	/// One decode call produced a picture (`out`) or not: a decoder that stopped producing them
+	/// mid-stream gets a keyframe asked for (see `DecodeStall`).
+	fn note_output(&mut self, out: bool) {
+		let now = self.dec_clock.elapsed().as_millis() as u64;
+		if self.dec_stall.on_decode(now, out) {
+			eprintln!("pulsar-render(win): decoder stalled (access units in, no picture out) — asking for a keyframe");
+			crate::stream::rtp::NEED_IDR.store(true, Ordering::Relaxed);
 		}
 	}
 
@@ -1869,6 +1892,7 @@ impl Renderer {
 
 	/// Present one decoded NV12 texture onto the swapchain via the VideoProcessor.
 	unsafe fn show_frame(&mut self, nv12: &ID3D11Texture2D) {
+		crate::stream::framelog(format_args!("s"));
 		// Source dims from the decoded texture.
 		let mut td = windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC::default();
 		nv12.GetDesc(&mut td);
@@ -2315,6 +2339,9 @@ unsafe fn event_loop(
 	const AU_HARD_CAP: usize = 64;
 	let mut overflow_log = stream::recovery::OverflowLog::new("pulsar-render(win)");
 	let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+	// The Media Foundation HEVC decoder stops at a missing reference: an intra-refresh resume
+	// feeds it stand-ins for the skipped pictures (stream::hevc).
+	stream::rtp::HEVC_CONCEAL.store(true, Ordering::Relaxed);
 	{
 		let q = queue.clone();
 		let stop2 = stop.clone();
@@ -2366,6 +2393,7 @@ unsafe fn event_loop(
 							}
 						}
 					}
+					stream::framelog(format_args!("a {} {}", au.pts_90k, au.key as u8));
 					g.push_back(au);
 				},
 				&stop2,
