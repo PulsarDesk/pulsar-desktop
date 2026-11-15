@@ -308,10 +308,10 @@ mod linux {
 
 	fn open_in_installer(file: &Path) -> Result<String, String> {
 		let dir: PathBuf = file.parent().map(Path::to_path_buf).unwrap_or_default();
-		std::process::Command::new("xdg-open")
-			.arg(file)
-			.current_dir(dir)
-			.spawn()
+		let mut c = std::process::Command::new("xdg-open");
+		c.arg(file).current_dir(dir);
+		pulsar_prio::unboost_command(&mut c); // the installer must not keep a session boost
+		c.spawn()
 			.map(|_| "opened".to_string())
 			.map_err(|e| format!("xdg-open: {e}"))
 	}

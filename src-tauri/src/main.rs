@@ -2,9 +2,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-	// The async runtime with the session-priority worker hook (crates/pulsar-prio) — first, before
-	// any path below touches `tauri::async_runtime`.
-	pulsar_tauri::install_runtime();
 	// Linux AppImage: swap in the host's libva before anything loads a VA driver.
 	#[cfg(target_os = "linux")]
 	appimage_host_libva();

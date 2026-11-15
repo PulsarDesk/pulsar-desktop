@@ -1543,7 +1543,13 @@ pub fn spawn_shell(cmd: &str) {
 		let _ = c.spawn();
 	}
 	#[cfg(not(windows))]
-	let _ = std::process::Command::new("sh").args(["-c", cmd]).spawn();
+	{
+		let mut c = std::process::Command::new("sh");
+		c.args(["-c", cmd]);
+		// Linux: never hand a session-boosted nice value to a user command (pulsar-prio).
+		pulsar_prio::unboost_command(&mut c);
+		let _ = c.spawn();
+	}
 }
 
 /// Launch a host game: its start hook, then the program/command itself. Returns the PID of
@@ -1578,6 +1584,9 @@ fn spawn_program_pid(path: &str, args: &str) -> Option<u32> {
 		cmd.arg(a);
 	}
 	no_window(&mut cmd);
+	// Linux: the game is launched from the session's async code on a boosted worker and would
+	// inherit its nice value for its whole life, next to the encoder (pulsar-prio).
+	pulsar_prio::unboost_command(&mut cmd);
 	cmd.stdout(std::process::Stdio::null());
 	cmd.stderr(std::process::Stdio::null());
 	let child = cmd.spawn().ok()?;
@@ -1610,6 +1619,7 @@ fn spawn_shell_pid(cmd_str: &str) -> Option<u32> {
 		c
 	};
 	no_window(&mut c);
+	pulsar_prio::unboost_command(&mut c); // see spawn_program_pid
 	let child = c.spawn().ok()?;
 	#[cfg(windows)]
 	crate::job::assign(&child);

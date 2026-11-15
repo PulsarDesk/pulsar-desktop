@@ -269,7 +269,11 @@ pub(crate) fn reveal_in_folder(path: &Path) {
 			.unwrap_or(false);
 		if !shown {
 			if let Some(dir) = path.parent() {
-				let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+				let mut c = std::process::Command::new("xdg-open");
+				c.arg(dir);
+				// A file manager must not keep a session boost (pulsar-prio).
+				pulsar_prio::unboost_command(&mut c);
+				let _ = c.spawn();
 			}
 		}
 	}

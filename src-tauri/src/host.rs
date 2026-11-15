@@ -129,8 +129,11 @@ use handlers::{make_on_audio, make_on_file, make_on_stream};
 /// the same reason. Back to NORMAL when the last session ends. (Child encoders don't inherit
 /// it — `pulsar_prio::boost_child` raises them to ABOVE_NORMAL; the WebView2 UI is separate
 /// processes.) macOS / Linux have no process-wide class an unprivileged app may raise: there the
-/// session's threads are raised one by one (crates/pulsar-prio: QoS / nice via rtkit), and the
-/// per-session `pulsar_prio::session()` guard covers the async workers on every OS.
+/// session's threads are raised one by one (crates/pulsar-prio: QoS / nice via setpriority or
+/// rtkit), and the per-session `pulsar_prio::session()` guard covers the async workers on every
+/// OS. Linux caveat: nice only weighs threads inside one CPU cgroup / autogroup, so where the
+/// desktop puts the game in its own systemd scope it does not put the host above the game
+/// (see the crate docs).
 fn hosting_priority(on: bool) {
 	#[cfg(windows)]
 	{

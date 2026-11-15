@@ -431,22 +431,35 @@ pub fn rumble_selftest() {
 /// host's video forwarder + wire pacer, the session read loop and the client's receive loop are
 /// tokio tasks, and while a session runs (`pulsar_prio::session()`) the workers run raised
 /// (hidden-gaps 1.13 / 1.14). The runtime lives for the whole process (tauri requires that).
+/// The start / stop hooks track every runtime thread (Linux: a thread started from a boosted
+/// worker inherits its nice value and drops back with the session; stale thread ids are
+/// forgotten). Called by `run()` and the headless host modes only — not at the top of `main`:
+/// the short CLI modes (`--probe-nvenc` on every encoder probe, `--selftest`, `--firewall-*`,
+/// `--relay` with its own runtime) need no runtime, and `main` still calls `set_var` and may
+/// re-exec (AppImage) while the process is single-threaded. Idempotent.
 pub fn install_runtime() {
-	match tokio::runtime::Builder::new_multi_thread()
-		.enable_all()
-		.on_thread_unpark(pulsar_prio::on_worker_unpark)
-		.build()
-	{
-		Ok(rt) => {
-			tauri::async_runtime::set(rt.handle().clone());
-			std::mem::forget(rt);
+	static ONCE: std::sync::Once = std::sync::Once::new();
+	ONCE.call_once(|| {
+		match tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.on_thread_start(pulsar_prio::on_thread_start)
+			.on_thread_stop(pulsar_prio::on_thread_stop)
+			.on_thread_unpark(pulsar_prio::on_worker_unpark)
+			.build()
+		{
+			Ok(rt) => {
+				tauri::async_runtime::set(rt.handle().clone());
+				std::mem::forget(rt);
+			}
+			// Leave tauri to build its default runtime (no worker boost).
+			Err(e) => eprintln!("pulsar: own tokio runtime failed ({e}); using tauri's default"),
 		}
-		// Leave tauri to build its default runtime (no worker boost).
-		Err(e) => eprintln!("pulsar: own tokio runtime failed ({e}); using tauri's default"),
-	}
+	});
 }
 
 pub fn run() {
+	// Before anything below touches `tauri::async_runtime` (crates/pulsar-prio worker hooks).
+	install_runtime();
 	logging::init();
 	tracing::info!(version = env!("CARGO_PKG_VERSION"), "Pulsar starting");
 	// An update to a newer build is being installed right now (Windows: the NSIS
