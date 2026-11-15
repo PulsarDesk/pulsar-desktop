@@ -66,6 +66,34 @@ Part of the pulsar-desktop agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
   - **NVENC there goes through the NVENC SDK** (2026-11-14, untested on Linux hardware):
     `pulsar_capture::NvencCuda` (`crates/pulsar-capture/src/encode/cuda_enc.rs`) instead of
     libavcodec's `h264_nvenc`. See "Linux NVENC SDK" below.
+- **Linux X11 with a GStreamer-only HW encoder** (RK3588 / Orange Pi 5: `mpph26Xenc`; also
+  gst VA-API/NVENC when ffmpeg has none) — `handlers.rs` "x11 gst" branch. Two runners
+  (2026-11-15, untested on the Pi):
+  - **In-process** (`pulsar_core::capture::start_pipeline`, core `capture/live.rs`) for every
+    `ximagesrc` pipeline (whole screen / monitor region / one window): the description runs
+    inside the app, held in the session's `cap_slot`. ABR steps set `bps` on the running
+    encoder, `MediaNack([0])` forces a key unit, a recovery flip toggles the 500 ms forced
+    key-unit timer — all live, no restart (`last_x11_gst_req` fast path). The encode meter is
+    pad probes on the encoder: frames out (the no-first-frame watchdog) and the real per-frame
+    time inside it (`pipeline::gst::EncodeTimer`), not the frame gap the `-v` meter reads. The
+    RGA >4G watchdog has an in-process twin (`spawn_x11_gst_rga_watchdog`). Falls back to the
+    child when the in-process gst can't build the pipeline (missing element — e.g. an
+    AppImage's bundled gst without the system's Rockchip plugin) or it never reaches PLAYING;
+    a pipeline that died before its first frame turns the in-process runner off for the
+    process (`X11_GST_INPROC_BROKEN`). `PULSAR_GST_INPROC=0` forces the child.
+  - **`gst-launch` child** for **KMS** (`kmssrc` zero-copy, game mode / `cursor_external`)
+    and the fallback above. KMS must stay a child: reading the scanout FB needs
+    `CAP_SYS_ADMIN`, carried only by the user-made `~/pulsar-gst-launch` copy, and the app
+    itself never gets that capability. gst-launch has no control channel, so a bitrate-only
+    step is **absorbed** when small (−30 % / +40 %) or within 6 s of the child's start
+    (`gst_child_absorbs`, same rule as the ffmpeg CLI on Windows/macOS) and the pacer keeps the
+    child's real rate; a large step / recovery flip / dead child restarts it. A real live
+    control for KMS would need the privileged child to only capture and hand DMABufs to an
+    in-process encoder (`unixfdsink`/`unixfdsrc`, gst ≥ 1.24) — the Pi's gst 1.20 has no such
+    element. KMS also stays primary-CRTC only (a non-primary monitor takes `ximagesrc`).
+  - Windows / macOS: not applicable — no GStreamer host path there (native NVENC / MF /
+    VideoToolbox capture with their own live controls, ffmpeg CLI fallback with the same
+    absorb rule).
 - **Windows (non-NVENC) / macOS fallback** (and the Linux fallback) — ffmpeg CLI (`ddagrab`/
   `gdigrab`/`avfoundation`/`x11grab` → HW encode or libx264 → RTP). Arg builders are pure
   functions in pulsar-core `pipeline/` (unit-tested); spawning is here (`process.rs`, `host/`).
