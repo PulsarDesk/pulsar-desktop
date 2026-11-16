@@ -91,16 +91,18 @@ jobs:
     runs-on: ubuntu-22.04
     permissions:
       contents: read
-      checks: write # audit-check posts its result as a check run
     steps:
       - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@v2
+      # cargo-audit directly: rustsec/audit-check@v2 failed with "Not Found" while updating its
+      # check run even when no vulnerability was found. Fails only on vulnerabilities, not warnings.
+      - uses: taiki-e/install-action@v2
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          # zip 4.6.1, pulled in only by tauri-plugin-updater — every 2.x (2.14.0 latest) still
-          # requires zip ^4; the fix (zip >= 9) exists only in updater 3.0 (alpha). Not reachable
-          # here: the advisories (0367-0369, 0429 = symlink-size abort) are in ZipArchive::extract, which the updater calls only
-          # for a Windows `.zip` update and only AFTER the minisign signature check — we ship
-          # `-setup.exe` (extract_exe path). Our own zip use (pulsar-setup) is on zip 9.
-          # REMOVE when tauri-plugin-updater ships zip >= 9 (re-run `cargo audit` to confirm).
-          ignore: RUSTSEC-2026-0367,RUSTSEC-2026-0368,RUSTSEC-2026-0369,RUSTSEC-2026-0429
+          tool: cargo-audit
+      - name: cargo audit
+        # zip 4.6.1, pulled in only by tauri-plugin-updater — every 2.x (2.14.0 latest) still
+        # requires zip ^4; the fix (zip >= 9) exists only in updater 3.0 (alpha). Not reachable
+        # here: the advisories (0367-0369, 0429 = symlink-size abort) are in ZipArchive::extract, which the updater calls only
+        # for a Windows `.zip` update and only AFTER the minisign signature check — we ship
+        # `-setup.exe` (extract_exe path). Our own zip use (pulsar-setup) is on zip 9.
+        # REMOVE when tauri-plugin-updater ships zip >= 9 (re-run `cargo audit` to confirm).
+        run: cargo audit --ignore RUSTSEC-2026-0367 --ignore RUSTSEC-2026-0368 --ignore RUSTSEC-2026-0369 --ignore RUSTSEC-2026-0429
