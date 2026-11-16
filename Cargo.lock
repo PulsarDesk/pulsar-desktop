@@ -188,7 +188,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "parking_lot 0.12.5",
  "percent-encoding",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
  "wl-clipboard-rs",
  "x11rb",
 ]
@@ -1404,7 +1404,7 @@ version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab8ecd87370524b461f8557c119c405552c396ed91fc0a8eec68679eab26f94a"
 dependencies = [
- "libloading 0.7.4",
+ "libloading 0.8.9",
 ]
 
 [[package]]
@@ -1802,7 +1802,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2297,7 +2297,7 @@ dependencies = [
  "gobject-sys 0.22.9",
  "libc",
  "system-deps 9.0.0",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4925,7 +4925,7 @@ dependencies = [
 [[package]]
 name = "pulsar-core"
 version = "0.1.0-dev.27"
-source = "git+https://github.com/PulsarDesk/pulsar-core#fa70a8c6e3eb9526f46db887869c052a87b1ebdf"
+source = "git+https://github.com/PulsarDesk/pulsar-core#9879055e1960a87dc3fd7e1d42c0ac8a5bab4576"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -4956,6 +4956,7 @@ dependencies = [
  "sha2 0.11.1",
  "socket2",
  "spake2",
+ "sys-locale",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -5285,7 +5286,7 @@ dependencies = [
 [[package]]
 name = "reed-solomon-erasure"
 version = "6.0.0"
-source = "git+https://github.com/PulsarDesk/pulsar-core#fa70a8c6e3eb9526f46db887869c052a87b1ebdf"
+source = "git+https://github.com/PulsarDesk/pulsar-core#9879055e1960a87dc3fd7e1d42c0ac8a5bab4576"
 dependencies = [
  "libm",
  "lru",
@@ -5479,7 +5480,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5535,7 +5536,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6250,6 +6251,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sys-locale"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8eab9a99a024a169fe8a903cf9d4a3b3601109bcc13bd9e3c6fff259138626c4"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "system-configuration"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6667,10 +6677,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.5",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7339,7 +7349,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vigem-client"
 version = "0.1.4"
-source = "git+https://github.com/PulsarDesk/pulsar-core#fa70a8c6e3eb9526f46db887869c052a87b1ebdf"
+source = "git+https://github.com/PulsarDesk/pulsar-core#9879055e1960a87dc3fd7e1d42c0ac8a5bab4576"
 dependencies = [
  "winapi",
 ]
@@ -7873,7 +7883,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
