@@ -21,13 +21,13 @@
 //! session played only with a gamepad — or only watched — was cut off at the display timeout
 //! (2-5 min on battery): pad input never resets the OS idle timer, and the evdev grab hides
 //! Linux keyboard/mouse input from it too. The hold lasts [`client_hold`] after the last real
-//! input, gamepad included (Settings → Genel → "Ekranı uyanık tut": 30 min by default, 2 h,
+//! input, gamepad included (Settings → General → "Keep the screen awake": 30 min by default, 2 h,
 //! always or off; `PULSAR_CLIENT_AWAKE_MIN` overrides it, 0 = off); then the normal idle
 //! timeout applies again, so a laptop left connected overnight still turns its display off and
 //! ends the session (the 2026-11-14 field case `power_watch.rs` describes). A display request
 //! also holds back the screen saver and its idle LOCK: while the hold is on, a client whose
 //! policy locks it after N idle minutes stays unlocked — hence the focus condition, the expiry
-//! and "Kapalı" for machines that must lock on time.
+//! and "Off" for machines that must lock on time.
 //!
 //! Only IDLE sleep is held back. A sleep the user asks for (lid, power button, Start → Sleep,
 //! locking the screen) still happens, and `power_watch` ends the viewed sessions on it — on
@@ -97,7 +97,7 @@ const CLIENT_HOLD_DEFAULT_MIN: u64 = 30;
 /// "Always" (no input expiry): the hold then ends only with focus, lock or the session.
 const ALWAYS: u64 = u64::MAX;
 
-/// Settings → Genel → "Ekranı uyanık tut" (`set_client_awake`), in minutes (0 = off,
+/// Settings → General → "Keep the screen awake" (`set_client_awake`), in minutes (0 = off,
 /// [`ALWAYS`]). The UI syncs it at startup and on every change.
 static SETTING_MIN: AtomicU64 = AtomicU64::new(CLIENT_HOLD_DEFAULT_MIN);
 

@@ -70,7 +70,7 @@ pub struct Arm {
 	pub mouse: bool,
 	/// Remote-desktop mode (absolute mouse). `false` = game mode (relative mouse).
 	pub remote: bool,
-	/// "Serbest imleç" setting (only acts in remote mode).
+	/// "Free cursor" setting (only acts in remote mode).
 	pub free_cursor: bool,
 }
 

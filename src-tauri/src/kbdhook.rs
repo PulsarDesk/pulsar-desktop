@@ -31,7 +31,7 @@ pub fn mouse_sensitivity() -> f32 {
 	f32::from_bits(MOUSE_SENS.load(std::sync::atomic::Ordering::Relaxed))
 }
 
-/// "Serbest imleç" (Settings → Görüntü + the session menu's Görüntü view, default OFF): in a
+/// "Free cursor" (Settings → Display + the session menu's Display view, default OFF): in a
 /// REMOTE-mode session the cursor is not trapped in the video. Leaving the video hands the
 /// mouse and keyboard back to this PC, coming back over it takes control again (Parsec's
 /// handover, issue #3). Game mode always keeps the confine, and so does a host pointer lock.
@@ -57,7 +57,7 @@ pub fn set_session_remote(remote: bool) {
 	SESSION_REMOTE.store(remote, std::sync::atomic::Ordering::SeqCst);
 }
 
-/// "Karşı tarafın imlecini göster" (Settings → Görüntü + session menu, default ON, remote
+/// "Show the other side's cursor" (Settings → Display + session menu, default ON, remote
 /// mode only): the renderer marks the host's pointer while the person at the host uses it.
 static HOST_CURSOR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 

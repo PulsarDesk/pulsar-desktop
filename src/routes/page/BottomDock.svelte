@@ -1,6 +1,6 @@
 <script lang="ts">
 	// Bottom navigation dock for gaming mode — replaces the left sidebar. The gaming
-	// personality is a pure client (no host), so the dock carries only Bağlan + Ayarlar
+	// personality is a pure client (no host), so the dock carries only Connect + Settings
 	// (no Devices / Connections), an identity+status chip, and a live controller count.
 	import { onMount, onDestroy, tick } from 'svelte';
 	import Icon from '#lib/Icon.svelte';

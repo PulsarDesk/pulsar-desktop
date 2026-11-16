@@ -621,12 +621,12 @@ export class SessionManager {
 		// deduped. NOTE: different mode (remote vs game) or different gameId are NOT deduped —
 		// those are legitimately distinct sessions to the same host. A split-pane connect that
 		// carries an explicit `displayIdx` is ALSO never deduped: it's a deliberate second pane
-		// to the same (host,mode,game) — e.g. two "Masaüstü" panes (gameId '') — that must
+		// to the same (host,mode,game) — e.g. two "Desktop" panes (gameId '') — that must
 		// become two real sessions on different monitors, not collapse onto the first. An
 		// explicit `windowHwnd` (the "Pencere" picker) opts out of de-dup the same way — a
 		// pane capturing a specific host window is its own session even on a shared monitor.
 		const want = target.id.replace(/\s/g, '');
-		// Settings → "Aynı cihaza birden fazla oturum": every connect is a new session.
+		// Settings → "Several sessions to one device": every connect is a new session.
 		if (want && !ui.duplicateSessions && !opts.newSession && opts.displayIdx === undefined && opts.windowHwnd === undefined) {
 			const existing = this.sessions.find(
 				(s) =>

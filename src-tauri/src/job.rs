@@ -4,7 +4,7 @@
 //! Why: on Windows a child does NOT die when its parent dies. Pulsar kills its ffmpeg
 //! children on normal session teardown (lib.rs: re-stream and `tokio::select!` end),
 //! but those paths do not run when the process dies abnormally — a crash, an external
-//! `taskkill`, or the tray "Çıkış" (`app.exit(0)` calls `std::process::exit`, which does
+//! `taskkill`, or the tray "Quit" (`app.exit(0)` calls `std::process::exit`, which does
 //! not unwind the tokio task holding the procs). The encoders then leak: each keeps an
 //! NVENC session open, so the GPU sits at ~100% and the consumer-GeForce NVENC-session
 //! limit fills up — the next connection's encoder fails to open and the client gets no

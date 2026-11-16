@@ -33,7 +33,7 @@ const H: f64 = CARD_H;
 /// Set once the main window has been revealed (by the UI or the fallback).
 static DONE: AtomicBool = AtomicBool::new(false);
 /// The splash's own language (the UI's), fixed at launch.
-static ENGLISH: AtomicBool = AtomicBool::new(false);
+static ENGLISH: AtomicBool = AtomicBool::new(true);
 
 /// A splash string in the splash's language.
 fn tr(key: &str) -> &'static str {
@@ -169,11 +169,12 @@ pub(crate) fn show(app: &AppHandle) {
 	// which can differ from config.json's).
 	let hint = std::fs::read_to_string(hint_path(app)).unwrap_or_default();
 	let english = match hint.split_whitespace().find_map(|w| w.strip_prefix("lang=")) {
-		Some(l) => l == "en",
-		None => matches!(
-			pulsar_core::config::Config::load(crate::util::config_path(app)).language,
-			pulsar_core::config::Language::En
-		),
+		Some(l) => l != "tr",
+		None => {
+			let path = crate::util::config_path(app);
+			let cfg = pulsar_core::config::Config::load(&path);
+			!matches!(crate::i18n::config_language(&cfg, &path), pulsar_core::config::Language::Tr)
+		}
 	};
 	ENGLISH.store(english, Ordering::Relaxed);
 	let (dark, game) = read_hint(app);

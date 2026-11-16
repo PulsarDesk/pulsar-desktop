@@ -58,7 +58,7 @@ static HOST_ENC: std::sync::Mutex<String> = std::sync::Mutex::new(String::new())
 /// synced via stdin `statshud 0|1` and flippable from the overlay row).
 static STATS_HUD: AtomicBool = AtomicBool::new(false);
 /// "Show my pointer with my name on the host" (remote mode; synced via stdin `curlabel 0|1`
-/// and the caps line, flippable from the Yayın row). Default ON, like the app's config.
+/// and the caps line, flippable from the Streaming row). Default ON, like the app's config.
 static CUR_LABEL: AtomicBool = AtomicBool::new(true);
 /// Parsec-style overlay-open button while the overlay is closed (default ON;
 /// frontend-persisted, synced via stdin `ovbtn 0|1`).
@@ -617,7 +617,7 @@ pub fn run() {
 						video::request_reopen(p);
 					}
 				}
-				// View-fit mode (overlay Görüntü section / frontend persisted value).
+				// View-fit mode (overlay Display section / frontend persisted value).
 				Some("fit") => {
 					if let Some(v) = it.next() {
 						video::set_fit(v);
@@ -635,7 +635,7 @@ pub fn run() {
 				// and the user's switch.
 				Some("hostptr") => crate::overlay::host_ptr_line(&it.collect::<Vec<_>>().join(" ")),
 				Some("hostptrshow") => crate::overlay::set_host_ptr_show(it.next() == Some("1")),
-				// Picture upscaling (Settings → Görüntü): FSR in the GL presenter (gl_fsr.rs).
+				// Picture upscaling (Settings → Display): FSR in the GL presenter (gl_fsr.rs).
 				// What this machine runs (the app decides per OS / GPU): the menu row offers only these.
 				Some("upscalers") => crate::overlay::set_upscale_modes(it.next().unwrap_or("")),
 				Some("upscale") => {
@@ -1942,7 +1942,7 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 		}
 
 		// Live stats from the video presenter ([fps, mbit, max_gap_ms]). Previously only fps +
-		// mbps were fed, so the overlay's "Gecikme ms" + "Çözme ms" tiles were stuck at 0.
+		// mbps were fed, so the overlay's "Latency ms" + "Decode ms" tiles were stuck at 0.
 		{
 			let s = *video::FPS.lock().unwrap();
 			if s[0] > 0.0 {

@@ -11,7 +11,7 @@
 		online: boolean;
 		connecting: boolean;
 		connError: string;
-		/** Active inbound (host) connections — shown as a badge on "Bağlantılar". */
+		/** Active inbound (host) connections — shown as a badge on "Connections". */
 		hostCount?: number;
 		onView: (v: View) => void;
 		onGoOnline: () => void;
@@ -131,7 +131,7 @@
 		color: var(--accent-ink);
 		background: var(--accent-soft);
 	}
-	/* live-connection count pill on "Bağlantılar" (only rendered when ≥1) */
+	/* live-connection count pill on "Connections" (only rendered when ≥1) */
 	.navbadge {
 		margin-left: auto;
 		min-width: 18px;

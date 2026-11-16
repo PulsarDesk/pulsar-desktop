@@ -19,6 +19,10 @@
 	let { onStream }: Props = $props();
 
 	const typeLabel = (ty: GameType) => t('type.' + ty);
+	// The built-in Desktop entry keeps its default title as data ("Desktop", or "Desktop"
+	// saved by older versions); show it in the UI language unless the user renamed it.
+	const gameTitle = (g: Game) =>
+		isBuiltin(g.id) && (g.title === 'Desktop' || g.title === 'Masaüstü') ? t('gaming.desktop') : g.title;
 
 	// Opened by the add / edit buttons; the modal + its state live in <GameForm>.
 	let openForm = $state<(g?: Game) => void>(() => {});
@@ -47,8 +51,8 @@
 </div>
 
 <!-- Detected controllers (forwarded to the host while streaming) -->
-<!-- The host stream defaults (resolution/fps/bitrate) live in Settings → Görüntü
-     ("Yayın varsayılanları"), not here — this screen is purely the game library. -->
+<!-- The host stream defaults (resolution/fps/bitrate) live in Settings → Display
+     ("Stream defaults"), not here — this screen is purely the game library. -->
 <div style="margin-bottom:22px"><Controllers /></div>
 
 <!-- Games -->
@@ -64,10 +68,10 @@
 		{#each gameStore.games as g (g.id)}
 			<div class="game">
 				<span class="cover" style={g.image ? `background-image:url(${g.image});background-size:cover` : ''}>
-					{#if !g.image}{initials(g.title)}{/if}
+					{#if !g.image}{initials(gameTitle(g))}{/if}
 				</span>
 				<div class="gmeta">
-					<div class="gtitle">{g.title}</div>
+					<div class="gtitle">{gameTitle(g)}</div>
 					<div class="gtype mono">{typeLabel(g.type)}</div>
 				</div>
 				<div class="gactions">

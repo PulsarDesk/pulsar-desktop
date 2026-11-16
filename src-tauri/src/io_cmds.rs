@@ -52,7 +52,7 @@ pub(crate) async fn host_send_chat(
 		.unwrap()
 		.get(&sid)
 		.map(|(peer, tx)| (peer.clone(), tx.clone()));
-	let (peer, tx) = entry.ok_or_else(|| "cihaz bağlı değil".to_string())?;
+	let (peer, tx) = entry.ok_or_else(|| crate::i18n::t("err.notConnected").to_string())?;
 	tx.send(DataMsg::Chat(text.clone()))
 		.await
 		.map_err(|_| crate::i18n::t("err.message").to_string())?;
@@ -121,7 +121,7 @@ pub(crate) async fn send_file(
 }
 
 /// Client → host: send a local file by its HOME-relative path (the file panel's
-/// "gönder" action). Unlike `send_file`, the webview never reads the bytes — Rust
+/// "send" action). Unlike `send_file`, the webview never reads the bytes — Rust
 /// streams them straight from disk with the same chunker the host's FsGet reply
 /// uses, jailed to HOME exactly like the `local_ls` listing the path came from.
 #[tauri::command]
@@ -155,7 +155,7 @@ pub(crate) async fn mic_start(
 	if slot.is_some() {
 		return Ok(()); // already on
 	}
-	// The capture thread picks the device (session menu → Mikrofon cihazı), falls back to
+	// The capture thread picks the device (session menu → Microphone device), falls back to
 	// the system default and retries on its own (`mic_capture`).
 	let mic = crate::mic_capture::start(tx, ffmpeg_bin(&app))
 		.map_err(|_| crate::i18n::t("err.micRecorder").to_string())?;
@@ -210,7 +210,7 @@ fn with_clipboard<R>(
 
 /// Read the OS clipboard app-side. The webview's `navigator.clipboard.readText()`
 /// silently fails on the Linux native-video path (occluded/unfocused WebKitGTK), so
-/// the overlay's "Panoyu karşıya gönder" reads here instead.
+/// the overlay's "Send clipboard to the other side" reads here instead.
 #[tauri::command]
 pub(crate) fn read_clipboard_text() -> Result<String, String> {
 	with_clipboard(|c| c.get_text())
@@ -504,7 +504,7 @@ pub(crate) async fn kbd_capture_start(
 		.map(|p| (p.input_tx.clone(), p.game_mode));
 	match tx {
 		Some((tx, game_mode)) => {
-			// Free cursor (Settings → Görüntü) applies to remote-mode sessions only.
+			// Free cursor (Settings → Display) applies to remote-mode sessions only.
 			kbdhook::set_session_remote(!game_mode);
 			// `mouse` = also capture the mouse (native-renderer mode, no canvas).
 			// Compute the desired suspend state from the authoritative overlay set (the

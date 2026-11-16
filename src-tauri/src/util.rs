@@ -33,7 +33,7 @@ pub(crate) static AUTO_CONNECT: std::sync::OnceLock<Option<AutoConnect>> =
 
 /// The dir holding Pulsar's data files (config, identity, pairings, pins, saved creds): the
 /// per-user app config dir, or `%ProgramData%\Pulsar\shared` in shared mode
-/// (`shared_mode.rs`, Settings → Genel → "Kullanıcılar arası ortak Pulsar").
+/// (`shared_mode.rs`, Settings → General → "Shared Pulsar for all users").
 pub(crate) fn data_dir(app: &AppHandle) -> PathBuf {
 	// Pulsar Split seat host: the per-seat dir the service made (`--data-dir`); never the
 	// per-user or shared dir (and never resolve shared mode as SYSTEM).
@@ -844,7 +844,7 @@ fn display_rotation_detect(_device_name: Option<&str>) -> u32 {
 /// Host: the primary display's refresh rate in Hz, or `None` if unknown. Used to NEGOTIATE the
 /// stream fps so the host never encodes faster than its own panel can scan out — a client that
 /// asks for 120 fps on a 60 Hz host gets capped to 60 (no point encoding duplicate frames; and the
-/// extra load was the user-visible "120 seçtim, değişmiyor" symptom). `PULSAR_HOST_HZ` forces a
+/// extra load was the user-visible "I picked 120, nothing changes" symptom). `PULSAR_HOST_HZ` forces a
 /// value (override if the auto-detect is wrong, or to test). Windows reads `dmDisplayFrequency`
 /// (same DEVMODE the rotation detect uses); Linux parses the active `xrandr` mode's `*` rate;
 /// other host OSes return `None` and the caller leaves the requested fps as-is.
@@ -991,6 +991,12 @@ mod conn_error_tests {
 /// The core's default device name is the machine HOSTNAME, so every Windows account on one PC
 /// (or two Duo sessions) used to show up as the same "DESKTOP-AB12CD"; a hostname-equal name
 /// counts as "not chosen" and the signed-in user's name is shown instead.
+/// The core's placeholder device name: "Pulsar Device", or "Pulsar Device" in configs saved
+/// by older versions. Either counts as "not chosen".
+pub(crate) fn is_placeholder_name(n: &str) -> bool {
+	matches!(n, "Pulsar Device" | "Pulsar Cihazı")
+}
+
 pub(crate) fn announce_name(device_name: &str) -> String {
 	// Seat host: the seat display name, verbatim (unique per machine already).
 	if let Some(n) = crate::seat::announce_name() {
@@ -998,7 +1004,7 @@ pub(crate) fn announce_name(device_name: &str) -> String {
 	}
 	let n = device_name.trim();
 	let host = machine_hostname();
-	if n.is_empty() || n == "Pulsar Cihazı" || host.as_deref().is_some_and(|h| h.eq_ignore_ascii_case(n)) {
+	if n.is_empty() || is_placeholder_name(n) || host.as_deref().is_some_and(|h| h.eq_ignore_ascii_case(n)) {
 		pulsar_core::discovery::os_display_name()
 	} else {
 		n.to_string()
@@ -1026,7 +1032,7 @@ pub(crate) fn beacon_name(device_name: &str) -> String {
 fn beacon_name_from(device_name: &str, host: Option<&str>, real_name: &str) -> String {
 	let n = device_name.trim();
 	let real = real_name.trim();
-	let chosen = !n.is_empty() && n != "Pulsar Cihazı" && !(!real.is_empty() && n == real);
+	let chosen = !n.is_empty() && !is_placeholder_name(n) && !(!real.is_empty() && n == real);
 	cap_utf8(if chosen { n } else { host.unwrap_or("").trim() }, 64)
 }
 
@@ -1073,6 +1079,7 @@ mod net_tests {
 		assert_eq!(f("", Some("DESKTOP-1"), "Ada Lovelace"), "DESKTOP-1");
 		assert_eq!(f("  ", Some("DESKTOP-1"), "Ada Lovelace"), "DESKTOP-1");
 		assert_eq!(f("Pulsar Cihazı", Some("DESKTOP-1"), "Ada Lovelace"), "DESKTOP-1");
+		assert_eq!(f("Pulsar Device", Some("DESKTOP-1"), "Ada Lovelace"), "DESKTOP-1");
 		assert_eq!(f("Ada Lovelace", Some("DESKTOP-1"), "Ada Lovelace"), "DESKTOP-1");
 		assert_eq!(f("Ada Lovelace", None, "Ada Lovelace"), "");
 		assert_eq!(f("", None, "Ada Lovelace"), "");

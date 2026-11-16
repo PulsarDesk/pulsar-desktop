@@ -93,7 +93,7 @@ static JITTER_DMS: std::sync::atomic::AtomicU32 =
 /// Always-on mini stats HUD while the overlay is closed (`statshud 0|1` / caps seed).
 static STATS_HUD: AtomicBool = AtomicBool::new(false);
 /// "Show my pointer with my name on the host" (remote mode; synced via stdin `curlabel 0|1`
-/// and the caps line, flippable from the Yayın row). Default ON, like the app's config.
+/// and the caps line, flippable from the Streaming row). Default ON, like the app's config.
 static CUR_LABEL: AtomicBool = AtomicBool::new(true);
 /// Parsec-style overlay-open button while closed (`ovbtn 0|1` / caps seed). Default ON
 /// like linux.rs — the frontend only sends `ovbtn` when the user turned it OFF.

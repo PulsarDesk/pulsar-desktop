@@ -1,6 +1,6 @@
 //! A relay server run INSIDE this app.
 //!
-//! Settings → Ağ has a toggle: turn it on and this device stops using a remote rendezvous
+//! Settings → Network has a toggle: turn it on and this device stops using a remote rendezvous
 //! server and runs one itself, which the app then registers with automatically. There is
 //! no address to type — the relay is local by definition, so `go_online` points at
 //! `127.0.0.1:<port>` and the relay-address field is ignored while the toggle is on. Other

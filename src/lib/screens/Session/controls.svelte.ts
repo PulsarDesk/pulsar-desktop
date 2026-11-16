@@ -84,7 +84,7 @@ export class SessionControls {
 		// The saved bitrate / resolution / fps picks are applied by start_remote_play itself
 		// (see sessions.svelte.ts → `savedStreamPicks`), so the first request already carries them.
 
-		// "Otomatik ayar" changed elsewhere (Settings → Görüntü while this session runs): apply it
+		// "Automatic adjustment" changed elsewhere (Settings → Display while this session runs): apply it
 		// here too. The session started with the saved value, so only a change is sent.
 		$effect(() => {
 			const on = ui.autoAdjust !== false;

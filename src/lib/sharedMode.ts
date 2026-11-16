@@ -1,4 +1,4 @@
-// "Kullanıcılar arası ortak Pulsar" (shared_mode.rs): which i18n key a backend error code maps
+// "Shared Pulsar for all users" (shared_mode.rs): which i18n key a backend error code maps
 // to. Windows needs an elevated Pulsar; Linux/macOS need admin-group membership plus the
 // system password prompt (pkexec / the macOS administrator dialog), so the copy differs.
 

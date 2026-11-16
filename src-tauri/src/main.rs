@@ -124,7 +124,7 @@ fn main() {
 	// Windows: re-launch ELEVATED (UAC) before the GUI starts, so this machine can act as a full
 	// host — injecting keyboard/mouse into elevated app windows (Task Manager, installers, any
 	// "Run as administrator" window) is blocked for a non-elevated process (UIPI). Controlled by
-	// the `request_admin` setting (default ON; user can disable it in Settings → Güvenlik);
+	// the `request_admin` setting (default ON; user can disable it in Settings → Security);
 	// `PULSAR_NO_ELEVATE=1` bypasses for dev. Done HERE — before `run()` takes the single-instance
 	// mutex — so the unelevated process exits cleanly and the elevated one acquires the lock.
 	#[cfg(windows)]
@@ -233,7 +233,7 @@ fn appimage_host_libva() {
 /// (the Config default) when the file/field is absent, so a fresh install elevates by default.
 #[cfg(windows)]
 fn request_admin_pref() -> bool {
-	// "Kullanıcılar arası ortak Pulsar": the shared files are admin-only, so always elevate.
+	// "Shared Pulsar for all users": the shared files are admin-only, so always elevate.
 	if pulsar_tauri::shared_mode_requires_admin() {
 		return true;
 	}

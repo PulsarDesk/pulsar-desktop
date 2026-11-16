@@ -2,8 +2,9 @@
 //! `lang/en.json` (compiled in via `include_str!`), keyed lookups via [`t`]. The
 //! renderer is a separate process, so the webview's i18n tables can't be shared —
 //! the app passes its `Config.language` as `--lang tr|en` and [`set_english`]
-//! selects the catalog. Missing keys fall back to Turkish (the app default), then
-//! to the key itself so a typo is visible instead of silent.
+//! selects the catalog. English is the default (no `--lang`, or anything but `tr`);
+//! missing keys fall back to English, then to the key itself so a typo is visible
+//! instead of silent.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,9 +13,9 @@ use std::sync::OnceLock;
 static TR_JSON: &str = include_str!("../lang/tr.json");
 static EN_JSON: &str = include_str!("../lang/en.json");
 
-static ENGLISH: AtomicBool = AtomicBool::new(false);
+static ENGLISH: AtomicBool = AtomicBool::new(true);
 
-/// `--lang en` → English; anything else stays Turkish (the app default).
+/// `--lang tr` → Turkish; anything else (or no `--lang`) stays English.
 pub fn set_english(en: bool) {
 	ENGLISH.store(en, Ordering::Relaxed);
 }
@@ -44,14 +45,14 @@ fn en() -> &'static HashMap<&'static str, &'static str> {
 	T.get_or_init(|| parse(EN_JSON))
 }
 
-/// Localized string for `key` in the active language (EN → TR fallback → the key).
+/// Localized string for `key` in the active language (TR → EN fallback → the key).
 pub fn t(key: &str) -> &'static str {
-	if ENGLISH.load(Ordering::Relaxed) {
-		if let Some(s) = en().get(key) {
+	if !ENGLISH.load(Ordering::Relaxed) {
+		if let Some(s) = tr().get(key) {
 			return s;
 		}
 	}
-	if let Some(s) = tr().get(key) {
+	if let Some(s) = en().get(key) {
 		return s;
 	}
 	// Visible-but-safe fallback for a missing key.

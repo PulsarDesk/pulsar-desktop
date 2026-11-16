@@ -1,7 +1,7 @@
 <script lang="ts">
-	// "Nasıl bölünsün?" — the split-layout chooser shown when the user presses the split
+	// "How to split?" — the split-layout chooser shown when the user presses the split
 	// button. Three layouts (2 side-by-side, 2 stacked, 2×2) → enterSplit(layout). While
-	// already split it also offers a "böl modundan çık" affordance to leave split mode.
+	// already split it also offers a "leave split mode" affordance to leave split mode.
 	import { onMount, onDestroy } from 'svelte';
 	import Icon from '#lib/Icon.svelte';
 	import { t } from '#lib/i18n.svelte.js';

@@ -105,7 +105,7 @@ function parse(raw: string | null): Peer[] {
 
 const peers = $state<Peer[]>(load());
 
-/** Shared mode ("Kullanıcılar arası ortak Pulsar"): the list lives in a machine-wide file so
+/** Shared mode ("Shared Pulsar for all users"): the list lives in a machine-wide file so
  * every Windows user's Pulsar sees the same saved devices. Set once `loadSharedPeers` found it. */
 let shared = false;
 

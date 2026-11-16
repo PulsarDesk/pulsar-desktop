@@ -49,7 +49,7 @@ pub struct OverlayState {
 	/// Always-on mini stats HUD while the overlay is CLOSED (user toggle, persisted
 	/// by the frontend; synced over stdin `statshud 0|1`).
 	pub stats_hud: bool,
-	/// Let the host show this device's pointer with its name (remote mode, the Yayın row;
+	/// Let the host show this device's pointer with its name (remote mode, the Streaming row;
 	/// synced over stdin `curlabel 0|1`).
 	pub cur_label: bool,
 	/// Parsec-style always-visible overlay-open button (Pulsar mark, top-center)
@@ -392,7 +392,7 @@ pub fn set_audio_quality(v: &str) {
 	}
 }
 
-/// Relative-mouse sensitivity for the Görüntü view (`msens <x>` from the app; a pick mirrors
+/// Relative-mouse sensitivity for the Display view (`msens <x>` from the app; a pick mirrors
 /// it). Same one-value-for-every-backend model as [`AUDIO_QUALITY`].
 static MOUSE_SENS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(3);
 const MOUSE_SENSES: [&str; 7] = ["0.25", "0.5", "0.75", "1", "1.25", "1.5", "2"];
@@ -416,7 +416,7 @@ pub fn mouse_sens() -> &'static str {
 	MOUSE_SENSES[(MOUSE_SENS.load(std::sync::atomic::Ordering::Relaxed) as usize).min(MOUSE_SENSES.len() - 1)]
 }
 
-/// "Serbest imleç" (remote mode, `ptrfree 0|1` from the app; the Görüntü toggle flips it
+/// "Free cursor" (remote mode, `ptrfree 0|1` from the app; the Display toggle flips it
 /// optimistically and emits `ov set ptrfree on|off`, which the app persists + applies).
 static PTR_FREE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -428,7 +428,7 @@ pub fn ptr_free() -> bool {
 	PTR_FREE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// "Otomatik ayar" (the Yayın section; `autoadj 0|1` from the app, which owns it): on = the
+/// "Automatic adjustment" (the Streaming section; `autoadj 0|1` from the app, which owns it): on = the
 /// adaptive controller moves the bitrate / resolution / fps with the link; off = the picks stay
 /// fixed (an automatic bitrate = the measured good rate, shown on the bitrate row). The row flips
 /// it optimistically and emits `ov set autoadj on|off`, which the app saves and applies.
@@ -447,7 +447,7 @@ pub fn auto_adj() -> bool {
 /// position is unknown) and `hostptr 0` when it goes idle; `hostname <name>` labels it. The
 /// backends map the position onto the video and call [`draw_host_pointer`], and show the
 /// local cursor meanwhile so both pointers are visible. `hostptrshow 0|1` = the user's switch
-/// ("Karşı tarafın imlecini göster", default on); the Görüntü row emits `ov set hostptr`.
+/// ("Show the other side's cursor", default on); the Display row emits `ov set hostptr`.
 struct HostPtr {
 	pos: Option<(f32, f32)>,
 	active: bool,
@@ -1231,7 +1231,7 @@ pub fn draw(ctx: &egui::Context, st: &OverlayState, ui_state: &mut UiState) -> V
 				ui_state.pending = None;
 			}
 			// Moving the row cursor DISCARDS any staged-but-unconfirmed value (revert) —
-			// "başka yere geçerse onaylamadan geri alınmalı". Confirm is A/activate (handled
+			// "moving away without confirming must revert it". Confirm is A/activate (handled
 			// inside choice_row), which is not up/down so it survives.
 			if nav.up || nav.down {
 				ui_state.pending = None;
@@ -2008,7 +2008,7 @@ fn draw_display(
 		cmds.push(OverlayCmd::Set("fit", v));
 	}
 	row += 1;
-	// Picture upscaling (same setting as Settings → Görüntü → Görüntü iyileştirme): applied here
+	// Picture upscaling (same setting as Settings → Display → Picture upscaling): applied here
 	// at once and forwarded so the app saves it.
 	let up = [
 		("off", t("upscale.off")),
@@ -2085,7 +2085,7 @@ fn pending_note(ui: &mut egui::Ui, deferred: &[(&'static str, String)]) {
 
 /// Audio section: voice call / host transmit / host speakers / mic to host / quality.
 ///
-/// "Sesli görüşme" = both directions at once (host audio here + our mic there); the host already
+/// "Voice call" = both directions at once (host audio here + our mic there); the host already
 /// plays inbound mic audio, so it's a paired toggle. SEMANTIC (must match the backends' `call`
 /// handler): turning the call ON enables BOTH mic and host audio; OFF drops ONLY the mic and
 /// leaves host audio as the user had it — so its on/off derives from `mic_on` ALONE.
@@ -2258,7 +2258,7 @@ fn draw_chat(
 	let send_now = st.chat_enter && !input.trim().is_empty();
 	// The composer: one rounded well (the same as the menu's value wells) holding the text and
 	// a round send button — it was a black single-line box with its text stuck to the top edge
-	// and a plain gray "Gönder" button beside it.
+	// and a plain gray "Send" button beside it.
 	let h = row_h(ui.ctx());
 	let empty = input.trim().is_empty();
 	let mut clicked = false;

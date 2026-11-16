@@ -795,5 +795,6 @@
 	"settings.pairedRevokeTitle": "Remove pairing",
 	"settings.pairedRevokeConfirm": "Remove the pairing with {name}? It will need a password again next time it connects.",
 	"settings.pairedSince": "Paired: {d}",
-	"settings.pairedLastSeen": "Last connected: {d}"
+	"settings.pairedLastSeen": "Last connected: {d}",
+	"gaming.numpad": "Keypad"
 }

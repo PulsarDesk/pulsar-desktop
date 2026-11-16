@@ -77,7 +77,7 @@
 		// a childList mutation INSIDE the gaming-mode navContainer subtree, which fired its
 		// MutationObserver → a full forced-layout re-scan of the whole Settings panel every
 		// 10 s. On opi5/WebKitGTK (software paint, no forced-layout batching) that was a
-		// recurring hitch ("Settings donmaya başlıyor"); skipping the no-op reassign stops it.
+		// recurring hitch ("Settings starts freezing"); skipping the no-op reassign stops it.
 		if (next.length !== audioSources.length || next.some((s, i) => s !== audioSources[i])) {
 			audioSources = next;
 		}

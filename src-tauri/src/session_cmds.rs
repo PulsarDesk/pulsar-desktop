@@ -468,8 +468,8 @@ async fn respawn_render_for_codec(
 				// Re-assert the INPUT routing too, not just the renderer's draw state — mirror
 				// set_overlay's open path. Without this, after a codec switch the keyboard/mouse hook
 				// resumed forwarding to the HOST even though the overlay was still open, so the user's
-				// keys/clicks landed in the remote session instead of the menu ("oturuma klavye mouse
-				// gidiyor ama overlay açık"). Suspend forwarding + release the grab again.
+				// keys/clicks landed in the remote session instead of the menu ("keyboard and mouse go
+				// to the session but the overlay is open"). Suspend forwarding + release the grab again.
 				kbdhook::overlay_suspend(true);
 				kbdhook::release(app);
 				#[cfg(all(unix, not(target_os = "macos")))]
@@ -575,8 +575,8 @@ pub(crate) async fn set_play_bitrate(
 	Ok(())
 }
 
-/// Client: "Otomatik ayar" on/off for an active session (Settings → Görüntü / the native menu's
-/// Yayın row). Off = the bitrate / resolution / fps stay as picked (an automatic bitrate uses the
+/// Client: "Automatic adjustment" on/off for an active session (Settings → Display / the native menu's
+/// Streaming row). Off = the bitrate / resolution / fps stay as picked (an automatic bitrate uses the
 /// rate the link proved); on = the adaptive controller resumes from the current rate. The hold
 /// loop applies it and mirrors it to the renderer (`autoadj 0|1`).
 #[tauri::command]
@@ -1017,7 +1017,7 @@ pub(crate) async fn set_overlay_button(
 }
 
 /// Client: let the host show (or stop showing) this device's pointer with its name on the
-/// host screen (Pulsar menu → Yayın). Saved as the default for later sessions, sent to the
+/// host screen (Pulsar menu → Streaming). Saved as the default for later sessions, sent to the
 /// host of session `id` (`DataMsg::CursorLabel`) and mirrored to its overlay row.
 #[tauri::command]
 pub(crate) async fn set_cursor_label(
@@ -1446,7 +1446,7 @@ pub(crate) async fn set_overlay(
 						"host-stats",
 						crate::events::PlayStats {
 							id,
-							label: "Video yok — mpv yeniden başlatılamadı".to_string(),
+							label: crate::i18n::t("session.mpvRespawnFailed").to_string(),
 						},
 					);
 				}
@@ -1511,7 +1511,7 @@ pub(crate) async fn set_mouse_sensitivity(value: f32) -> Result<(), String> {
 	Ok(())
 }
 
-/// Client: Settings → "Touchpad hareketlerini gönder" (default on): 3 / 4-finger touchpad
+/// Client: Settings → "Send touchpad gestures" (default on): 3 / 4-finger touchpad
 /// swipes and taps go to the host while control is engaged (`crate::gesture`).
 #[tauri::command]
 pub(crate) async fn set_touchpad_gestures(on: bool) -> Result<(), String> {
@@ -1530,14 +1530,14 @@ pub(crate) async fn set_audio_devices(mic: String, speaker: String) -> Result<()
 	Ok(())
 }
 
-/// Client: Kumandalar panel → "DS4 kulaklık girişi" (experimental, USB).
+/// Client: Controllers panel → "DS4 headset jack" (experimental, USB).
 #[tauri::command]
 pub(crate) async fn set_ds4_headset(on: bool) -> Result<(), String> {
 	crate::ds4_headset::set_enabled(on);
 	Ok(())
 }
 
-/// Client: "Karşı tarafın imlecini göster" (Settings / session menu). Process-wide; pushed to
+/// Client: "Show the other side's cursor" (Settings / session menu). Process-wide; pushed to
 /// every running renderer at once.
 #[tauri::command]
 pub(crate) async fn set_host_cursor(state: State<'_, AppState>, on: bool) -> Result<(), String> {
@@ -1553,7 +1553,7 @@ pub(crate) async fn set_host_cursor(state: State<'_, AppState>, on: bool) -> Res
 	Ok(())
 }
 
-/// Client: the "Serbest imleç" switch (Settings / session menu). Process-wide; a live
+/// Client: the "Free cursor" switch (Settings / session menu). Process-wide; a live
 /// engagement follows it at once.
 #[tauri::command]
 pub(crate) async fn set_pointer_free(on: bool) -> Result<(), String> {
@@ -1561,13 +1561,13 @@ pub(crate) async fn set_pointer_free(on: bool) -> Result<(), String> {
 	Ok(())
 }
 
-/// The picture upscalers this machine can run (Settings → Görüntü iyileştirme lists only these).
+/// The picture upscalers this machine can run (Settings → Display → Picture upscaling lists only these).
 #[tauri::command]
 pub(crate) fn upscale_modes() -> Vec<&'static str> {
 	crate::native_view::upscale_modes()
 }
 
-/// Picture upscaling mode (Settings → Görüntü): stored for new renderers and pushed live to
+/// Picture upscaling mode (Settings → Display): stored for new renderers and pushed live to
 /// every open session's renderer (`upscale <mode>`).
 #[tauri::command]
 pub(crate) async fn set_upscale(state: State<'_, AppState>, mode: String) -> Result<(), String> {
@@ -1636,7 +1636,7 @@ pub(crate) async fn fs_list(
 	data_sender(&state, id)?
 		.send(DataMsg::FsList { path })
 		.await
-		.map_err(|_| "klasör listelenemedi".to_string())
+		.map_err(|_| crate::i18n::t("err.fsList").to_string())
 }
 
 /// Client: ask the host to send the file at this HOME-relative path (file panel's
@@ -1651,5 +1651,5 @@ pub(crate) async fn fs_get(
 	data_sender(&state, id)?
 		.send(DataMsg::FsGet { path })
 		.await
-		.map_err(|_| "dosya istenemedi".to_string())
+		.map_err(|_| crate::i18n::t("err.fsGet").to_string())
 }

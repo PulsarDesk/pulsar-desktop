@@ -233,7 +233,7 @@ pub(crate) async fn set_view_only(
 	Ok(())
 }
 
-/// Sidebar "Bağlantılar" button → reveal/focus the (possibly hidden) window.
+/// Sidebar "Connections" button → reveal/focus the (possibly hidden) window.
 #[tauri::command]
 pub(crate) async fn show_connections(app: AppHandle) -> Result<(), String> {
 	open_or_update(&app, Surface::Forward);

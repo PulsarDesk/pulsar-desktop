@@ -1,5 +1,5 @@
 //! Picture upscaling for the Linux GL presenter (`video.rs`) — the "picture upscaling" setting
-//! (Settings → Görüntü → Görüntü iyileştirme; stdin `upscale off|auto|fsr|ai|sgsr`). Linux has
+//! (Settings → Display → Picture upscaling; stdin `upscale off|auto|fsr|ai|sgsr`). Linux has
 //! no vendor AI upscaler, so `auto` / `fsr` / `ai` are AMD FidelityFX Super Resolution 1 (EASU
 //! upscale + RCAS sharpen) and `sgsr` is Snapdragon Game Super Resolution 1 (one pass,
 //! `sgsr1.glsl`, the GLSL ES port of the Windows `win/sgsr1.hlsl`).

@@ -165,7 +165,7 @@ export interface AuthPrompt {
 	retry: boolean;
 }
 
-/** Settings → Güvenlik 2FA enrollment (`totp_begin`). */
+/** Settings → Security 2FA enrollment (`totp_begin`). */
 export interface TotpSetup {
 	/** Base32 secret — saved to `Config.totp_secret` once a code verifies it. */
 	secret: string;
@@ -184,7 +184,7 @@ export interface LocalCaps {
 }
 
 /** Per-device credential badges (`device_creds`): a saved password / paired with it. */
-/** `shared_mode_status` — Settings → Genel → "Kullanıcılar arası ortak Pulsar". */
+/** `shared_mode_status` — Settings → General → "Shared Pulsar for all users". */
 export interface SharedModeStatus {
 	/** The setting exists on this OS (Windows only). */
 	supported: boolean;
@@ -215,7 +215,7 @@ export interface PairOutcome {
 	reason: string;
 }
 
-/** A client this HOST trusts (Settings → Güvenlik → Eşleşmiş cihazlar). */
+/** A client this HOST trusts (Settings → Security → Paired devices). */
 export interface PairedDevice {
 	/** Hex public key — what `revoke_paired_device` takes. */
 	key: string;

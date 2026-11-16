@@ -3,7 +3,7 @@
 //! While the user controls a remote session, a 3- or 4-finger swipe or tap on the local
 //! touchpad goes to the host as `InputEvent::Gesture { fingers, kind }`; the host does what
 //! ITS user configured for that gesture (pulsar-core `input::gesture`). Only hosts that
-//! advertise `FEAT_GESTURE` get it, and only while the setting "Touchpad hareketlerini gönder"
+//! advertise `FEAT_GESTURE` get it, and only while the setting "Send touchpad gestures"
 //! is on.
 //!
 //! The capture paths that feed [`Recognizer`]:
@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The connected host performs touchpad gestures (`FEAT_GESTURE`); set per session by play.rs.
 static HOST_GESTURE: AtomicBool = AtomicBool::new(false);
-/// Settings → "Touchpad hareketlerini gönder" (default on).
+/// Settings → "Send touchpad gestures" (default on).
 static ENABLED: AtomicBool = AtomicBool::new(true);
 
 pub fn set_host_gesture(on: bool) {

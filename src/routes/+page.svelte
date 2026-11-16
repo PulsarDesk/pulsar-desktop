@@ -156,7 +156,7 @@
 		ui.appMode = next;
 		saveUi();
 	}
-	// Split mode: the "nasıl bölünsün?" layout chooser is shown when the user presses the
+	// Split mode: the "how to split?" layout chooser is shown when the user presses the
 	// chrome split button. The actual split state (layout / panes / focus) lives on the
 	// SessionManager (sm.splitMode / sm.panes / sm.focusedPane).
 	let showSplitPicker = $state(false);
@@ -489,7 +489,7 @@
 			selfPw = '';
 			const msg = e instanceof Error ? e.message : String(e);
 			// v4 relay auth: the relay wants a credential (RELAY_AUTH_REQUIRED:<pw>:<totp>)
-			// or rejected the one we sent (RELAY_AUTH_FAILED). Surface it in Settings → Ağ,
+			// or rejected the one we sent (RELAY_AUTH_FAILED). Surface it in Settings → Network,
 			// where the password / 2FA inputs live, and don't spin the auto-retry loop.
 			// v5 relay auth: the relay wants a credential we don't hold. Ask for it in a
 			// PROMPT, right now — not as a permanent field in Settings. What the user
@@ -502,7 +502,7 @@
 				connecting = false;
 				return;
 			}
-			// Shared mode ("Kullanıcılar arası ortak Pulsar"): another Windows session's Pulsar
+			// Shared mode ("Shared Pulsar for all users"): another Windows session's Pulsar
 			// is this PC's host. Keep retrying quietly — the `shared-host` event brings this one
 			// online the moment its session takes the host over.
 			if (msg.startsWith('SHARED_STANDBY')) {
@@ -570,7 +570,7 @@
 
 	// Unattended hosts must come online without a human: a machine that boots before
 	// its network is up (or loses the relay) would otherwise stay offline until someone
-	// clicks "Çevrimiçi ol". While offline and not mid-attempt, retry go_online on a
+	// clicks "Go online". While offline and not mid-attempt, retry go_online on a
 	// capped backoff (3s → 12s); each attempt surfaces via the normal connecting state.
 	let retryDelay = 0;
 	$effect(() => {
@@ -728,7 +728,7 @@
 			if (online) selfId = id;
 		});
 		// The relay we registered with advertises E2E as required (v4 policy). Pulsar always
-		// encrypts, so this only lights the "relay forces E2E" lock badge in Settings → Ağ.
+		// encrypts, so this only lights the "relay forces E2E" lock badge in Settings → Network.
 		onRelayE2e((required) => {
 			relayAuth.e2eRequired = required;
 		});
@@ -1073,7 +1073,7 @@
 			if (el && (el.isContentEditable || /^(input|textarea|select)$/i.test(el.tagName))) return;
 			if (e.key === 'F11') {
 				// Guard auto-repeat: holding F11 fired a keydown EVERY frame → toggled fullscreen
-				// over and over ("sürekli fullscreen"). One toggle per physical press. Also stop the
+				// over and over ("constant fullscreen"). One toggle per physical press. Also stop the
 				// event so WebKitGTK/the WM never ALSO acts on F11 (its own fullscreen binding fought
 				// ours, which is why F11 behaved differently). SAME action as the button.
 				e.preventDefault();
@@ -1151,7 +1151,7 @@
 		api.setPointerFree(ui.pointerFree).catch(() => {});
 	});
 
-	// Picture upscaling (Settings → Görüntü) follows the setting.
+	// Picture upscaling (Settings → Display) follows the setting.
 	$effect(() => {
 		if (isPopup) return;
 		api.setUpscale(ui.upscale).catch(() => {});

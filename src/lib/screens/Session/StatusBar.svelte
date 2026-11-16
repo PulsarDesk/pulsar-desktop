@@ -1,5 +1,5 @@
 <script lang="ts" module>
-	/** Fields the session status bar can show (Settings → Görüntü picks which, in this order). */
+	/** Fields the session status bar can show (Settings → Display picks which, in this order). */
 	export const STATUS_FIELDS = ['conn', 'res', 'fps', 'codec', 'encoder', 'decoder', 'latency', 'decode', 'bitrate', 'loss'] as const;
 	export type StatusField = (typeof STATUS_FIELDS)[number];
 	/** Quick audio toggles the bar can carry (issue #9): host audio here, my mic to the host,

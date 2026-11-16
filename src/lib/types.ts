@@ -11,7 +11,7 @@ export interface Config {
 	/** Durable per-relay access keys (relay address → key), issued by the relay after a
 	 * successful password/2FA prompt. Never a password: that is prompted and discarded. */
 	relay_keys: Record<string, string>;
-	/** Run the relay inside this app and register against it (Settings → Ağ toggle). */
+	/** Run the relay inside this app and register against it (Settings → Network toggle). */
 	use_local_relay: boolean;
 	network_mode: NetworkMode;
 	/** Map Pulsar's UDP port on the router (NAT-PMP / UPnP) for direct P2P (default on). */

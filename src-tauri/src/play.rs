@@ -250,7 +250,7 @@ pub(crate) async fn start_remote_play(
 	// The audio-quality preference (`auto`/`standard`/`high`/`raw`, Settings / session menu);
 	// None = auto. Resolved after the bandwidth probe (`audio_quality_for`).
 	audio_quality: Option<String>,
-	// "Otomatik ayar" (Settings → Görüntü / the session menu): false = no adaptive bitrate /
+	// "Automatic adjustment" (Settings → Display / the session menu): false = no adaptive bitrate /
 	// resolution / fps — the picks (or the measured good rate for an automatic bitrate) stay
 	// fixed, Moonlight-like. None = on.
 	auto_adjust: Option<bool>,

@@ -1,5 +1,5 @@
 //! Host side of device pairing: the trust store of paired client keys, the auth decision
-//! that consults it, the `PairRequest` / `Unpair` handler and the Settings → Güvenlik
+//! that consults it, the `PairRequest` / `Unpair` handler and the Settings → Security
 //! commands that list and revoke paired devices.
 //!
 //! A paired client is identified by its STATIC X25519 public key (`Session::peer_pubkey`) —
@@ -9,7 +9,7 @@
 //! Allow, pre-authorized, unattended) first gets a pairing-specific Allow/Deny popup.
 //!
 //! A paired key skips the password and the Allow/Deny popup on later connections. It does
-//! NOT skip the host's 2FA: with Settings → Güvenlik → 2FA on, a paired device still sends
+//! NOT skip the host's 2FA: with Settings → Security → 2FA on, a paired device still sends
 //! the authenticator code (the safer default — pairing replaces the first factor, not both).
 
 use std::path::{Path, PathBuf};
@@ -302,7 +302,7 @@ fn parse_key(hex: &str) -> Option<[u8; 32]> {
 	Some(k)
 }
 
-/// Settings → Güvenlik → Eşleşmiş cihazlar.
+/// Settings → Security → Paired devices.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PairedView {

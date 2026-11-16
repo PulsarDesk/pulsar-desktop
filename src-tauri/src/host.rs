@@ -682,7 +682,7 @@ pub(crate) async fn bring_online(
 	// session ended left the host output muted. Unmute iff our marker says we set it
 	// (never touches a mute the user set independently). No-op for a clean exit.
 	handlers::restore_stale_mute_fallback();
-	// Relay selection. With the in-app relay toggled on (Settings → Ağ) we run one
+	// Relay selection. With the in-app relay toggled on (Settings → Network) we run one
 	// ourselves and register against it on loopback — the configured address is ignored,
 	// because a local relay has no address for the user to type. Starting it here (rather
 	// than only from the toggle) also covers launch: the setting is persisted, so the
@@ -702,9 +702,9 @@ pub(crate) async fn bring_online(
 	let local: SocketAddr = "0.0.0.0:0".parse().unwrap();
 	// Identity advertised on the network: the user's chosen device name, or — when
 	// it's the generic default — the OS user's name, so relay-less peers are still
-	// recognizable ("Jane Doe" instead of "Pulsar Cihazı").
+	// recognizable ("Jane Doe" instead of "Pulsar Device").
 	let announce_name = crate::util::announce_name(&cfg.device_name);
-	// Port policy: an explicitly configured port (Settings → Ağ) is binding — if it's
+	// Port policy: an explicitly configured port (Settings → Network) is binding — if it's
 	// already taken, FAIL with a clear error instead of silently sliding to another
 	// port (the user pinned it for a firewall rule / port-forward; a silent ephemeral
 	// fallback made those rules quietly useless). Unset (0) = a RANDOM ephemeral port
@@ -792,7 +792,7 @@ pub(crate) async fn bring_online(
 		Err(e) => return Err(e.to_string()),
 	};
 
-	// Settings → Ağ → router port mapping (NAT-PMP / UPnP), done on the first register().
+	// Settings → Network → router port mapping (NAT-PMP / UPnP), done on the first register().
 	node.set_port_mapping(cfg.port_mapping);
 
 	// Start LAN discovery BEFORE registering so it works even when the relay is
@@ -972,13 +972,13 @@ pub(crate) async fn bring_online(
 				// the host's Allow/Deny popup AND the client's password prompt appear
 				// at the SAME time; accept on whichever lands first (so the host can
 				// approve passwordlessly). Unattended hosts auto-allow. The persistent
-				// connect password (Settings → Güvenlik) is accepted alongside the
+				// connect password (Settings → Security) is accepted alongside the
 				// one-time password; wrong attempts are rate-limited per peer, and a
 				// locked-out peer is rejected up front WITHOUT an Allow/Deny popup
 				// (otherwise repeated connects could spam attention-grabbing windows).
 				//
 				// Read unattended_access LIVE from the current config so a toggle in
-				// Settings → Güvenlik takes effect immediately — without needing a
+				// Settings → Security takes effect immediately — without needing a
 				// go_offline/go_online cycle.  go_online only set require_auth once at
 				// startup; if the user disabled unattended access while online the
 				// captured bool would be stale and new connections would still bypass
@@ -1028,7 +1028,7 @@ pub(crate) async fn bring_online(
 				let mut approved_view_only = false;
 				// The host USER clicked Allow (vs. a password / unattended let it in).
 				let mut by_operator = false;
-				// Paired device (Settings → Güvenlik → Eşleşmiş cihazlar): its static key is in the
+				// Paired device (Settings → Security → Paired devices): its static key is in the
 				// trust store, so no password and no popup — the same no-MITM-safe pubkey identity
 				// as the pre-auth above. 2FA still applies (see `pairing::needs_totp`).
 				let paired = require_auth
@@ -1063,7 +1063,7 @@ pub(crate) async fn bring_online(
 						// Distinguish the two credentials: the ONE-TIME password (`host_pw`)
 						// is single-use and must be rotated the moment it authenticates a
 						// connection, so the same code never unlocks a second one. The
-						// persistent connect password (Settings → Güvenlik) is intentionally
+						// persistent connect password (Settings → Security) is intentionally
 						// reusable and is NEVER rotated.
 						// For the OTP, use try_consume_otp which atomically matches AND
 						// rotates under one lock, eliminating the read→compare→rotate TOCTOU
@@ -1122,7 +1122,7 @@ pub(crate) async fn bring_online(
 				} else {
 					true
 				};
-				// Optional 2FA (Settings → Güvenlik): a connection a password or unattended
+				// Optional 2FA (Settings → Security): a connection a password or unattended
 				// access let in must also send the authenticator code. One the host user
 				// approved on the popup doesn't (a human already vouched for it), and a 2nd
 				// pane of an already-authorized device is pre-authorized.
@@ -1620,7 +1620,7 @@ pub(crate) async fn bring_online(
 					let launched_hwnd = launched_hwnd.clone();
 					move |id: String| {
 						// Match by id first, then tolerantly by title (case-insensitive) so a
-						// CLI `--app <name>` works. An unmatched app (incl. "Desktop"/"Masaüstü")
+						// CLI `--app <name>` works. An unmatched app (incl. "Desktop"/"Desktop")
 						// launches nothing — the host still streams the whole desktop.
 						let found = {
 							let g = games.lock().unwrap();

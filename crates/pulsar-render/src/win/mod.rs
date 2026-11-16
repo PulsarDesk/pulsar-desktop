@@ -105,7 +105,7 @@ static JITTER_DMS: std::sync::atomic::AtomicU32 =
 /// Always-on mini stats HUD while the overlay is closed (`statshud 0|1` / caps seed).
 static STATS_HUD: AtomicBool = AtomicBool::new(false);
 /// "Show my pointer with my name on the host" (remote mode; synced via stdin `curlabel 0|1`
-/// and the caps line, flippable from the Yayın row). Default ON, like the app's config.
+/// and the caps line, flippable from the Streaming row). Default ON, like the app's config.
 static CUR_LABEL: AtomicBool = AtomicBool::new(true);
 /// Parsec-style overlay-open button while closed (`ovbtn 0|1` / caps seed). Default ON
 /// like linux.rs — the frontend only sends `ovbtn` when the user turned it OFF.
@@ -1265,7 +1265,7 @@ struct Renderer {
 	// Newest picture of an AU burst decoded without presenting (`on_access_unit(.., false)`);
 	// the render loop presents it once the burst is through. Owned texture, like `last_nv12`.
 	held_back: Option<ID3D11Texture2D>,
-	// Frame pacing (`PACE`, Menu → Yayın → "Kare eşitleme"): decoded pictures wait here and
+	// Frame pacing (`PACE`, Menu → Streaming → "Frame pacing"): decoded pictures wait here and
 	// leave ONE per display refresh, oldest first (see `pace_tick`).
 	pace_q: std::collections::VecDeque<ID3D11Texture2D>,
 	// The compositor refresh the last paced picture went out on (`DWM_TIMING_INFO::cRefresh`).

@@ -336,7 +336,7 @@ pub(crate) async fn pair_device(app: AppHandle, state: State<'_, AppState>, targ
 
 /// Forget the pairing: always locally, and on the host too when it can be reached right now
 /// (`true` = the host confirmed). An unreachable host keeps trusting this key until its user
-/// revokes it in Settings → Güvenlik.
+/// revokes it in Settings → Security.
 #[tauri::command]
 pub(crate) async fn unpair_device(app: AppHandle, state: State<'_, AppState>, target: String) -> Result<bool, String> {
 	let relay = relay(&state);

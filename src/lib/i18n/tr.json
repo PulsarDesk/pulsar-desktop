@@ -795,5 +795,6 @@
 	"settings.pairedRevokeTitle": "Eşleşmeyi kaldır",
 	"settings.pairedRevokeConfirm": "{name} eşleşmesi kaldırılsın mı? Bu cihaz bir sonraki bağlantıda yine şifre isteyecek.",
 	"settings.pairedSince": "Eşleşme: {d}",
-	"settings.pairedLastSeen": "Son bağlantı: {d}"
+	"settings.pairedLastSeen": "Son bağlantı: {d}",
+	"gaming.numpad": "Tuş takımı"
 }

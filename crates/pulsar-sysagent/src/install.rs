@@ -21,9 +21,9 @@ use windows_sys::Win32::System::Services::{
 
 use crate::AgentOpts;
 
-const DISPLAY_NAME: &str = "Pulsar Sistem Aracısı";
+const DISPLAY_NAME: &str = "Pulsar System Agent";
 const DESCRIPTION: &str =
-	"Pulsar uzak masaüstü: UAC onayı, kilit ekranı ve güvenli masaüstünde uzaktan klavye ve fare girişini sağlar.";
+	"Pulsar remote desktop: remote keyboard and mouse input on UAC prompts, the lock screen and the secure desktop.";
 
 struct Sc(SC_HANDLE);
 

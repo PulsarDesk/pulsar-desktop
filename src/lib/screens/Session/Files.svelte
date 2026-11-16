@@ -60,7 +60,7 @@
 		}
 		// Step 3: structural guard — must be a single normal path component.
 		// Treat empty, '.', and '..' as invalid (mirrors Path::components check).
-		if (!cleaned || cleaned === '.' || cleaned === '..') return 'dosya';
+		if (!cleaned || cleaned === '.' || cleaned === '..') return 'file';
 		// Step 4: Windows-only escape_reserved — trim trailing dots/spaces, prefix
 		// reserved device names.
 		if (onWindows) {

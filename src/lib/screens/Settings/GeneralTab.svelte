@@ -69,7 +69,7 @@
 			.catch(() => {});
 	}
 
-	// "Kullanıcılar arası ortak Pulsar": one device ID / config / pairings for the whole PC
+	// "Shared Pulsar for all users": one device ID / config / pairings for the whole PC
 	// (machine-wide, admin-only files) instead of one per Windows user. Changing it restarts
 	// Pulsar; other users' Pulsar follows on its next start.
 	let shared = $state<SharedModeStatus | null>(null);
@@ -106,8 +106,8 @@
 
 	// Display name defaults: an unset name falls back to the OS user's name on the
 	// wire (host.rs/play.rs already do this), so the input mirrors that — the OS
-	// name is the PLACEHOLDER, and a value equal to it (or the legacy "Pulsar
-	// Cihazı" default) renders as empty instead of looking like a custom choice.
+	// name is the PLACEHOLDER, and a value equal to it (or the core's placeholder
+	// "Pulsar Device", saved by older versions in Turkish) renders as empty instead of looking like a custom choice.
 	// A name equal to the machine HOSTNAME is replaced by the OS name on the wire too
 	// (util::announce_name), so it must not show as a custom value either — it did, and the
 	// field said "desktop-ab12cd" while peers saw the user's real name.
@@ -118,7 +118,7 @@
 	const shownName = $derived.by(() => {
 		const v = (config?.device_name ?? '').trim();
 		const isHost = !!hostName && v.toLowerCase() === hostName.toLowerCase();
-		return v === userName || v === 'Pulsar Cihazı' || isHost ? '' : v;
+		return v === userName || v === 'Pulsar Device' || v === 'Pulsar Cihazı' || isHost ? '' : v;
 	});
 	// Identity image preview: what peers will actually receive for the chosen mode.
 	let avatarPrev = $state<string | null>(null);

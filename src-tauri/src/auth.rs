@@ -584,8 +584,8 @@ pub(crate) async fn race_host_auth(
 						// cap above still applies regardless.
 						idle_deadline.as_mut().reset(tokio::time::Instant::now() + IDLE);
 						// Either the rotating one-time password or the persistent
-						// connect password (Settings → Güvenlik) unlocks the session.
-						// Reusable persistent connect password (Settings → Güvenlik):
+						// connect password (Settings → Security) unlocks the session.
+						// Reusable persistent connect password (Settings → Security):
 						// a snapshot compare is fine since it is NEVER rotated. Exclude
 						// the OTP snapshot (`one_time_pw`) here — the OTP is consumed
 						// atomically below against the LIVE store.

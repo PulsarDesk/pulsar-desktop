@@ -33,7 +33,7 @@ export const api = {
 			relayTotp: relayTotp.trim() ? relayTotp.trim() : null
 		}),
 	connect: (target: string) => invoke<ConnInfo>('connect', { target }),
-	/** Run the relay inside this app (Settings → Ağ). While on, registration goes to
+	/** Run the relay inside this app (Settings → Network). While on, registration goes to
 	 * loopback and the configured relay address is ignored. */
 	setLocalRelay: (enabled: boolean) =>
 		invoke<{ running: boolean; port: number; lanAddr: string }>('set_local_relay', { enabled }),
@@ -243,7 +243,7 @@ export const api = {
 		encoder: string,
 		gamepad: boolean,
 		gameMode = false,
-		/** 'auto' | 'hq' | 'fast' — from Settings → Display 'Varsayılan kalite'. */
+		/** 'auto' | 'hq' | 'fast' — from Settings → Display 'Default quality'. */
 		quality?: string,
 		/** Treat the DS4/DS5 touchpad as a mouse (pointer / two-finger scroll / click; all desktop OSes). */
 		touchpadAsMouse = true,
@@ -376,7 +376,7 @@ export const api = {
 	/** Relative-mouse sensitivity multiplier (process-wide; 1 = unchanged). */
 	setMouseSensitivity: (value: number) => invoke<void>('set_mouse_sensitivity', { value }),
 	setPointerFree: (on: boolean) => invoke<void>('set_pointer_free', { on }),
-	/** Settings → "Touchpad hareketlerini gönder" (process-wide). */
+	/** Settings → "Send touchpad gestures" (process-wide). */
 	setTouchpadGestures: (on: boolean) => invoke<void>('set_touchpad_gestures', { on }),
 	setHostCursor: (on: boolean) => invoke<void>('set_host_cursor', { on }),
 	setDs4Headset: (on: boolean) => invoke<void>('set_ds4_headset', { on }),
@@ -482,7 +482,7 @@ export const api = {
 	sendFile: (id: number, name: string, data: number[]) =>
 		invoke<void>('send_file', { id, name, data }),
 	/** Client → host: send a local file by its HOME-relative path (file panel's
-	 * "gönder" — Rust streams it from disk, the webview never reads the bytes). */
+	 * "send" — Rust streams it from disk, the webview never reads the bytes). */
 	sendFilePath: (id: number, path: string) => invoke<void>('send_file_path', { id, path }),
 	/** Client → host: list a host directory ("" = the host user's HOME). The reply
 	 * arrives asynchronously as the `fs-entries` event (see onFsEntries). */
@@ -504,10 +504,10 @@ export const api = {
 	/** Background controller input (Settings → General): the pad keeps driving the host
 	 * while another app is focused. Off = the host gets a released pad. */
 	setPadBackground: (enabled: boolean) => invoke<void>('set_pad_background', { enabled }),
-	/** "Ekranı uyanık tut" (Settings → General): how long a viewed session keeps this
+	/** "Keep the screen awake" (Settings → General): how long a viewed session keeps this
 	 * machine's display awake after the last input. */
 	setClientAwake: (mode: ClientAwake) => invoke<void>('set_client_awake', { mode }),
-	/** "Kullanıcılar arası ortak Pulsar" (Settings → Genel): machine-wide identity + host. */
+	/** "Shared Pulsar for all users" (Settings → General): machine-wide identity + host. */
 	sharedModeStatus: () => invoke<import('./api.types').SharedModeStatus>('shared_mode_status'),
 	/** Turn the machine-wide setting on/off; the app restarts itself on success. Rejects with
 	 * `SHARED_ELEVATION` when Pulsar isn't running as administrator. */
@@ -515,7 +515,7 @@ export const api = {
 	/** Shared mode: the machine-wide saved-devices list (JSON), `null` when per-user. */
 	sharedPeersGet: () => invoke<string | null>('shared_peers_get'),
 	sharedPeersSet: (json: string) => invoke<void>('shared_peers_set', { json }),
-	/** Settings → Güvenlik 2FA: a fresh TOTP secret + its QR for the enrollment dialog. */
+	/** Settings → Security 2FA: a fresh TOTP secret + its QR for the enrollment dialog. */
 	totpBegin: () => invoke<import('./api.types').TotpSetup>('totp_begin'),
 	/** Saved-password / paired badges for these device targets (Devices list). */
 	deviceCreds: (targets: string[]) =>
@@ -528,11 +528,11 @@ export const api = {
 		invoke<void>('set_device_password', { target, password }),
 	/** Drop a device's saved password + paired flag (device removed / id changed). */
 	forgetDeviceCreds: (target: string) => invoke<void>('forget_device_creds', { target }),
-	/** Ask the host at `target` to trust this client (Eşleştir). */
+	/** Ask the host at `target` to trust this client (Pair). */
 	pairDevice: (target: string) => invoke<import('./api.types').PairOutcome>('pair_device', { target }),
 	/** Unpair: always local; `true` = the host confirmed it forgot us too. */
 	unpairDevice: (target: string) => invoke<boolean>('unpair_device', { target }),
-	/** Host: the clients paired with this device (Settings → Güvenlik). */
+	/** Host: the clients paired with this device (Settings → Security). */
 	listPairedDevices: () => invoke<import('./api.types').PairedDevice[]>('list_paired_devices'),
 	/** Host: stop trusting a paired client; it is asked for a password again. */
 	revokePairedDevice: (key: string) => invoke<boolean>('revoke_paired_device', { key }),

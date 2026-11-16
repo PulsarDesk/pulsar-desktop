@@ -142,7 +142,7 @@
 
 	const connLabel = $derived(conn === 'relay' ? 'Relay' : 'P2P');
 
-	// Status bar under the video (Settings → Görüntü). Not in split panes or the Linux
+	// Status bar under the video (Settings → Display). Not in split panes or the Linux
 	// single-surface mode (the video there is not positioned over `.screen`), and in fullscreen
 	// only when asked to (fullscreen gives the video the whole screen, issue #10). Hidden there,
 	// its menu button goes back onto the video (`ovbtnShown`).
@@ -957,19 +957,19 @@
 				case 'fps': controls.setFps(val as 'auto' | '30' | '60' | '120'); break;
 				case 'display': controls.setMonitor(Number(val) || 0); break;
 				case 'bitrate': controls.setBitrate(Number(val) || 0); break;
-				// "Otomatik ayar" row (Yayın): the same switch as Settings → Görüntü.
+				// "Automatic adjustment" row (Streaming): the same switch as Settings → Display.
 				case 'autoadj': controls.setAutoAdjust(val === 'on' || val === '1' || val === 'true'); break;
 				case 'quality': controls.setQuality(val as 'latency' | 'quality'); break;
 				case 'pace': controls.setFramePacing(val === 'on' || val === '1' || val === 'true'); break;
 				case 'statshud': controls.setStatsHud(val === 'on' || val === '1' || val === 'true'); break;
-				// Picture upscaling picked in the native menu: the same setting as Settings → Görüntü.
+				// Picture upscaling picked in the native menu: the same setting as Settings → Display.
 				case 'upscale':
 					if (val === 'off' || val === 'auto' || val === 'fsr' || val === 'ai' || val === 'sgsr') {
 						ui.upscale = val;
 						saveUi();
 					}
 					break;
-				// "Show my name on my pointer" (Yayın row): saved + sent to the host Rust-side.
+				// "Show my name on my pointer" (Streaming row): saved + sent to the host Rust-side.
 				case 'curlabel': api.setCursorLabel(playId, val === 'on').catch(() => {}); break;
 				case 'ovbtn': controls.setOverlayButton(val === 'on' || val === '1' || val === 'true'); break;
 				// Renderer-side button drag (Windows: the webview hotspot is buried under
@@ -997,13 +997,13 @@
 					}
 					break;
 				}
-				// Görüntü → "Karşı tarafın imlecini göster": the same switch as in Settings.
+				// Display → "Show the other side's cursor": the same switch as in Settings.
 				case 'hostptr': {
 					ui.hostCursor = val === 'on';
 					saveUi();
 					break;
 				}
-				// Görüntü → "Serbest imleç": the same switch as Settings → Görüntü.
+				// Display → "Free cursor": the same switch as Settings → Display.
 				case 'ptrfree': {
 					ui.pointerFree = val === 'on';
 					saveUi();
@@ -1013,7 +1013,7 @@
 					if (['auto', 'standard', 'high', 'raw'].includes(val)) controls.setAudioQuality(val as AudioQuality);
 					break;
 				case 'mic': if ((val === 'on') !== sidechan.micOn) sidechan.toggleMic(); break;
-				// Ses → Mikrofon cihazı / Ses çıkışı: already applied Rust-side (render_stats
+				// Audio → Microphone device / Audio output: already applied Rust-side (render_stats
 				// decodes the name); saved here so the next start and session use it too.
 				case 'micdev':
 					ui.micDevice = val;

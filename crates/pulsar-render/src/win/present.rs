@@ -144,7 +144,7 @@ pub fn fit_rects(
 	}
 }
 
-/// Picture upscaling (Settings → Görüntü → Görüntü iyileştirme), stdin `upscale <mode>`:
+/// Picture upscaling (Settings → Display → Picture upscaling), stdin `upscale <mode>`:
 /// 0 off · 1 auto (the GPU's AI upscaler if it has one, else FSR) · 2 FSR · 3 AI (NVIDIA RTX
 /// Video Super Resolution / Intel VSR; FSR where the GPU has none) · 4 Snapdragon GSR (any GPU;
 /// only when picked by name — see `pick`).

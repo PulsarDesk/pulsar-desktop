@@ -545,7 +545,7 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, star
 		// Mouse buttons currently held (forwarded down, not yet up). Tracked so a disengage flush
 		// releases ONLY genuinely-held buttons — the old `for button in 0..3` blindly sent a
 		// RIGHT+MIDDLE button-UP every flush → a phantom right-click/context-menu on the host
-		// whenever the overlay opened or control was released (the "Ctrl+Shift sends a right-tık").
+		// whenever the overlay opened or control was released (the "Ctrl+Shift sends a right-click").
 		let mut held_buttons: std::collections::HashSet<u8> = std::collections::HashSet::new();
 		// Active-layout keyboard state for WYSIWYG char resolution (None → raw-keycode VK fallback).
 		let mut xkb_state = build_xkb_state();

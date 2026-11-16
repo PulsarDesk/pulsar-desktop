@@ -38,7 +38,7 @@ pub fn sanitize_filename(name: &str) -> String {
 	if single_normal {
 		escape_reserved(cleaned)
 	} else {
-		"dosya".into()
+		"file".into()
 	}
 }
 

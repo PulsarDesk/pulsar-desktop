@@ -1,4 +1,4 @@
-//! Settings → Güvenlik → two-factor auth for incoming connections (RustDesk-style TOTP).
+//! Settings → Security → two-factor auth for incoming connections (RustDesk-style TOTP).
 //!
 //! Enrolling: `totp_begin` mints a secret and renders its QR / manual code; the user adds
 //! it to an authenticator app and proves it with one code (`totp_verify`); only then the UI

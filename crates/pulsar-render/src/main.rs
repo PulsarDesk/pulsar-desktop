@@ -20,13 +20,14 @@ mod colour;
 
 /// `--lang tr|en` (from the app's `Config.language`) — picks the native UI language
 /// for the overlay/hints (the renderer can't share the webview's i18n tables; the
-/// catalogs live in `lang/tr.json` + `lang/en.json`, see `i18n.rs`).
+/// catalogs live in `lang/tr.json` + `lang/en.json`, see `i18n.rs`). Only `tr` selects
+/// Turkish; anything else, or no flag, is English.
 fn apply_lang() {
 	let mut args = std::env::args();
 	while let Some(a) = args.next() {
 		if a == "--lang" {
 			if let Some(v) = args.next() {
-				i18n::set_english(v.starts_with("en"));
+				i18n::set_english(!v.starts_with("tr"));
 			}
 		}
 	}

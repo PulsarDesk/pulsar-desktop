@@ -1,5 +1,5 @@
-//! Streaming client: the session's audio through headphones in the pad's jack ("Kolun
-//! kulaklık girişi", PS5 gibi). Pure logic in `pulsar_core::input::ds5::headset`; design in
+//! Streaming client: the session's audio through headphones in the pad's jack ("Controller
+//! headset jack", like a PS5). Pure logic in `pulsar_core::input::ds5::headset`; design in
 //! pulsar-core `docs/dualsense.md` ("Headset jack").
 //!
 //! - The pad thread (`client.rs`) owns a [`PadHeadset`]: it reads the jack bits from every
@@ -730,11 +730,11 @@ mod tests {
 		assert_eq!(notice_key(Switch::RouteOff { restore: false }, true), None);
 		assert_eq!(notice_key(Switch::Plugged, false), None);
 		for k in ["ds5.headset.on", "ds5.headset.off", "ds5.headset.player"] {
-			assert_ne!(crate::i18n::t(k), k, "{k} missing from lang/tr.json");
+			assert_ne!(crate::i18n::t_in(k, true), k, "{k} missing from lang/en.json");
 			assert_ne!(
 				crate::i18n::t_in(k, true),
-				crate::i18n::t(k),
-				"{k} missing from lang/en.json"
+				crate::i18n::t_in(k, false),
+				"{k} missing from lang/tr.json"
 			);
 		}
 		assert_eq!(

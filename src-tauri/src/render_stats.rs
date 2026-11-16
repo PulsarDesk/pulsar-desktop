@@ -351,7 +351,7 @@ pub(crate) fn start_render_reader(
 										}
 									}
 								}
-								// "Dosya gönder" from the egui overlay Tools box: the click
+								// "Send file" from the egui overlay Tools box: the click
 								// happened in the renderer process, so there is no webview
 								// user-activation and both WebView2 and WebKitGTK silently
 								// block a programmatic <input type=file>.click(). Open the

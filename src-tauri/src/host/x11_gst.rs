@@ -225,7 +225,7 @@ pub(super) fn retire(
 /// about once a second; `try_send` never blocks it.
 fn encode_ms_reporter(stats: tokio::sync::mpsc::Sender<DataMsg>, label: String) -> pulsar_core::capture::EncodeMsFn {
 	Box::new(move |ms: f32| {
-		let _ = stats.try_send(DataMsg::Stats(format!("{label} · {ms:.1} {}", crate::i18n::t("stream.msEncode"))));
+		let _ = stats.try_send(DataMsg::Stats(format!("{label} · {ms:.1} {}", crate::i18n::wire("stream.msEncode"))));
 	})
 }
 
@@ -262,7 +262,7 @@ impl X11GstChild {
 		}
 		let (stats, label) = (self.stats.clone(), self.label.clone());
 		let (pid, ticked) = spawn_gst_paced_locked(&mut g, desc, move |ms| {
-			let _ = stats.try_send(DataMsg::Stats(format!("{label} · {ms:.1} {}", crate::i18n::t("stream.msEncode"))));
+			let _ = stats.try_send(DataMsg::Stats(format!("{label} · {ms:.1} {}", crate::i18n::wire("stream.msEncode"))));
 		})
 		.ok()?;
 		drop(g);
@@ -303,7 +303,7 @@ impl X11GstChild {
 				if let Ok((new_pid, _)) = spawn_gst_paced_locked(&mut g, &fb_pipeline, move |ms| {
 					let _ = stats_fb.try_send(DataMsg::Stats(format!(
 						"{label_fb} · {ms:.1} {}",
-						crate::i18n::t("stream.msEncode")
+						crate::i18n::wire("stream.msEncode")
 					)));
 				}) {
 					pid_cell.store(new_pid, Ordering::Relaxed);
@@ -446,7 +446,7 @@ impl X11InProcStart {
 							kind: "stream".into(),
 							peer: self.peer.clone(),
 							sid: self.sid,
-							detail: format!("{}{}", self.detail, crate::i18n::t("host.gstFailed")),
+							detail: format!("{}{}", self.detail, crate::i18n::wire("host.gstFailed")),
 						},
 					);
 				}
@@ -552,7 +552,7 @@ fn spawn_gst_paced_locked(
 			procs.push(child);
 			Ok((pid, ticked))
 		}
-		Err(e) => Err(format!("gst-launch-1.0 {}: {e}", crate::i18n::t("err.spawn"))),
+		Err(e) => Err(format!("gst-launch-1.0 {}: {e}", crate::i18n::wire("err.spawn"))),
 	}
 }
 
@@ -581,6 +581,6 @@ fn spawn_gst_tracked_locked(procs: &mut Vec<Child>, pipeline: &str) -> Result<u3
 			procs.push(child);
 			Ok(pid)
 		}
-		Err(e) => Err(format!("gst-launch-1.0 {}: {e}", crate::i18n::t("err.spawn"))),
+		Err(e) => Err(format!("gst-launch-1.0 {}: {e}", crate::i18n::wire("err.spawn"))),
 	}
 }

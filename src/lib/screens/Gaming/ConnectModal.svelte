@@ -1,6 +1,6 @@
 <script lang="ts">
 	// Gaming-mode connect pop-up: the ID box + on-screen numpad (type with a controller or
-	// the keyboard, Enter/Bağlan to continue). It ONLY collects the host id — the fetched
+	// the keyboard, Enter/Connect to continue). It ONLY collects the host id — the fetched
 	// games are then shown on a separate in-stage screen (GamesScreen), not in this pop-up.
 	// Fully pad-navigable: the modal root carries `data-navmodal` so GamepadNav confines
 	// focus to it, and it pushes its close handler so B / Esc dismiss the pop-up.

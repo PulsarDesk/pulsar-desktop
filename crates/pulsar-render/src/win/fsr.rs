@@ -1,5 +1,5 @@
 //! AMD FidelityFX Super Resolution 1 (EASU upscale + RCAS sharpen) as two D3D11 pixel-shader
-//! passes — the "FSR" picture-upscaling option (Settings → Görüntü → Görüntü iyileştirme).
+//! passes — the "FSR" picture-upscaling option (Settings → Display → Picture upscaling).
 //!
 //! The VideoProcessor first converts (and crops / rotates) the decoded NV12 frame into `src`
 //! at its own resolution; EASU scales `src` to the on-screen size into `mid`; RCAS sharpens

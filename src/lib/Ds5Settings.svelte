@@ -1,6 +1,6 @@
 <script lang="ts">
 	// DualSense passthrough settings (part of the controllers area): the master switch,
-	// per-feature Otomatik / Açık / Kapalı, automatic feature shedding on a weak Bluetooth
+	// per-feature Auto / On / Off, automatic feature shedding on a weak Bluetooth
 	// link, and the advanced jitter buffer. Every change is saved locally and pushed to Rust
 	// (`set_ds5_settings`), which applies it live to running pads.
 	import { api } from '#lib/api.js';

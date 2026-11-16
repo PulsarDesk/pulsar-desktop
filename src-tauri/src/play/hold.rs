@@ -168,14 +168,9 @@ fn shortfall_due(
 	}
 }
 
-/// The shortfall notice text (Turkish unless the UI runs in English). Inline rather than in
-/// `lang/*.json`: it carries two runtime labels and is the only stream notice built here.
+/// The shortfall notice text in the UI language (`stream.shortfall`, English unless Turkish).
 fn shortfall_text(picked: &str, current: &str, english: bool) -> String {
-	if english {
-		format!("The connection can't carry {picked} — using {current}")
-	} else {
-		format!("Bağlantı {picked} taşımıyor — {current} kullanılıyor")
-	}
+	crate::i18n::t_in("stream.shortfall", english).replace("{picked}", picked).replace("{current}", current)
 }
 
 /// Hold the control session open full-duplex: forward input + side-channel data,
@@ -488,7 +483,7 @@ pub(super) async fn hold_session(
 	// frames go on). Flipped live by `Restream::AutoAdjust`.
 	let mut auto_on = fixed_kbps.is_none();
 	let _ = (base_kbps, cap_kbps);
-	// Quality bias: seeded from the Settings → Display 'Varsayılan kalite' control
+	// Quality bias: seeded from the Settings → Display 'Default quality' control
 	// (already resolved in play.rs: "hq"→Quality, "fast"→Latency, "auto"→mode default).
 	// The session overlay's quality picker (Restream::Quality) can override it live.
 	let mut cur_quality = init_quality;
@@ -1883,7 +1878,7 @@ pub(super) async fn hold_session(
 								cur_w = p.width;
 								cur_h = p.height;
 								cur_fps = p.fps;
-								tracing::info!(on, kbps = cur_bitrate, point = %p.label(), "automatic adjustment (Otomatik ayar) toggled");
+								tracing::info!(on, kbps = cur_bitrate, point = %p.label(), "automatic adjustment toggled");
 								use std::io::Write as _;
 								if let Some(si) = render_stdin.lock().unwrap().as_mut() {
 									let _ = writeln!(si, "autoadj {}", u8::from(auto_on));

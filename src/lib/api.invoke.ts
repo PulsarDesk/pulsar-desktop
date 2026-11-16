@@ -14,8 +14,8 @@ const DEFAULT_CONFIG: Config = {
 	use_local_relay: false,
 	network_mode: 'auto',
 	port_mapping: true,
-	device_name: 'Bu Cihaz',
-	language: 'tr',
+	device_name: 'This Device',
+	language: 'en',
 	unattended_access: false,
 	connect_password: '',
 	totp_secret: '',
@@ -35,7 +35,7 @@ let mockConfig: Config = { ...DEFAULT_CONFIG };
 
 // Browser-mock credential + pairing stores (the real ones live in Rust files).
 const mockCreds = new Map<string, { pw: string; paired: boolean }>();
-/** Browser mock of the machine-wide "Kullanıcılar arası ortak Pulsar" setting. */
+/** Browser mock of the machine-wide "Shared Pulsar for all users" setting. */
 let mockShared = true;
 let mockPaired: { key: string; fingerprint: string; name: string; id: string; pairedAt: number; lastSeen: number }[] = [
 	{ key: 'ab'.repeat(32), fingerprint: 'abab abab abab abab', name: 'Salon Laptopu', id: '641 724 395', pairedAt: 1_762_000_000_000, lastSeen: 0 }

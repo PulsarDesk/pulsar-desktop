@@ -57,7 +57,7 @@ type Inputs = {
 	streamW: () => number;
 	streamH: () => number;
 	fitMode: () => 'fit' | 'stretch' | 'original';
-	/** "Serbest imleç" applies (setting on + remote mode): no confine, hover in/out hands
+	/** "Free cursor" applies (setting on + remote mode): no confine, hover in/out hands
 	 * control over (Linux/macOS canvas path; Windows does it in the native hook). */
 	pointerFree: () => boolean;
 	/** Hovering must not take control now (session menu open, stream stopped). */

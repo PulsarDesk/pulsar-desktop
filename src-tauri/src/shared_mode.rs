@@ -1,4 +1,4 @@
-//! "Kullanıcılar arası ortak Pulsar" (Settings → Genel): one Pulsar per PC instead of one per
+//! "Shared Pulsar for all users" (Settings → General): one Pulsar per PC instead of one per
 //! Windows user.
 //!
 //! - **ON (shared):** one device identity / ID, config, pairings, TOFU pins, saved device

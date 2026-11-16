@@ -88,5 +88,10 @@
 	"input.host.unavailable": "Remote mouse and keyboard cannot reach this computer",
 	"input.host.uinput_no_seat": "The uinput rule is installed but /dev/uinput is not writable: this session is not local (SSH / headless). Add the user to the input group",
 	"input.host.uinput_fixed": "uinput rule installed; remote mouse and keyboard work now",
-	"fw.macPrompt": "Pulsar wants to allow itself and its streaming programs through the firewall so remote connections can reach it."
+	"fw.macPrompt": "Pulsar wants to allow itself and its streaming programs through the firewall so remote connections can reach it.",
+	"session.mpvRespawnFailed": "No video — mpv could not be restarted",
+	"err.fsList": "could not list the folder",
+	"err.notConnected": "device not connected",
+	"stream.shortfall": "The connection can't carry {picked} — using {current}",
+	"err.fsGet": "could not request the file"
 }

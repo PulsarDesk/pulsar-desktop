@@ -26,7 +26,7 @@ mod spawn;
 #[cfg(all(unix, not(target_os = "macos")))]
 pub use ipc::*;
 
-/// Picture upscaling (Settings → Görüntü → Görüntü iyileştirme): "off" | "auto" | "fsr" | "ai".
+/// Picture upscaling (Settings → Display → Picture upscaling): "off" | "auto" | "fsr" | "ai".
 /// pulsar-render gets it as `upscale <mode>` (Windows: FSR / NVIDIA RTX VSR / Intel VSR;
 /// Linux: FSR in the GL presenter); mpv (macOS, the Linux mpv fallback) loads the FSR shader
 /// for any mode but "off".
@@ -40,7 +40,7 @@ pub fn set_upscale_mode(mode: &str) {
 	*UPSCALE.lock().unwrap() = supported_or_nearest(m, &upscale_modes()).to_string();
 }
 
-/// The picture upscalers this machine can run, in menu order — Settings → Görüntü iyileştirme
+/// The picture upscalers this machine can run, in menu order — Settings → Display → Picture upscaling
 /// and the in-session menu offer only these (an option that silently ran something else was
 /// confusing: "Snapdragon GSR" on a Mac ran FSR).
 /// - Windows: off · auto · FSR · AI (the driver's super resolution: NVIDIA / Intel GPUs only) · SGSR

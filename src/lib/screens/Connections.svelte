@@ -150,7 +150,7 @@
 			: t('host.elapsedHour', { h: Math.floor(m / 60), m: m % 60 });
 	}
 
-	// "Mesaj gönder" MODAL: per-DEVICE chat history (inbound via host-chat above + every
+	// "Send message" MODAL: per-DEVICE chat history (inbound via host-chat above + every
 	// line we sent), keyed by `peer` so a device's panes share one conversation. The modal
 	// is OPENED from a row, so we keep that row's `sid` to route the reply to the exact
 	// session (host_send_chat takes a sid now). Sending reuses the host→client chat channel
@@ -235,7 +235,7 @@
 	});
 	// A failed send (session gone, channel closed) must be VISIBLE: only a confirmed
 	// send lands in the history; on failure the composer gets the text back and the
-	// modal shows the backend's reason (e.g. "cihaz bağlı değil").
+	// modal shows the backend's reason (e.g. "device not connected").
 	let sendErr = $state<string | null>(null);
 	function sendMsg(r: Row) {
 		const text = msgText.trim();

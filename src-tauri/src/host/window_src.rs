@@ -35,7 +35,7 @@ pub(crate) fn blocking<R>(f: impl FnOnce() -> R) -> R {
 
 /// The window picker's entries for this host (answers `QueryWindows`).
 pub(super) fn list() -> Vec<WindowInfo> {
-	blocking(|| entries(wc::backend(), wc::list(), crate::i18n::t("host.windowPortalPick")))
+	blocking(|| entries(wc::backend(), wc::list(), crate::i18n::wire("host.windowPortalPick")))
 }
 
 /// [`list`] for a given backend and window list (pure, for tests).

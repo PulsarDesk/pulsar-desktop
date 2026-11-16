@@ -69,7 +69,7 @@ mod headless;
 pub mod headless_host;
 // Pulsar Split seat host (`--split-seat`): seat context, control pipe protocol 1.
 mod seat;
-// "Kullanıcılar arası ortak Pulsar": machine-wide identity/config + one host per PC.
+// "Shared Pulsar for all users": machine-wide identity/config + one host per PC.
 mod shared_mode;
 mod pad_wake;
 mod link_hint;
@@ -534,7 +534,7 @@ pub fn run() {
 		instance_unix::signal_existing_instance();
 		return;
 	}
-	// Per-user or machine-wide ("Kullanıcılar arası ortak Pulsar") data — decided before any
+	// Per-user or machine-wide ("Shared Pulsar for all users") data — decided before any
 	// path is resolved; may set up %ProgramData%\Pulsar on an elevated first launch.
 	let _ = shared_mode::resolved();
 	// A per-user pulsar-setup install left behind by the first in-app update (the updater
@@ -552,7 +552,10 @@ pub fn run() {
 
 			// Load persisted config (relay endpoint, network mode, etc.) FIRST: the host core
 			// needs it even when no window can be created (locked session, see ui_start.rs).
-			let cfg = pulsar_core::config::Config::load(util::config_path(app.handle()));
+			let path = util::config_path(app.handle());
+			let mut cfg = pulsar_core::config::Config::load(&path);
+			// A new install (no config yet): the OS language when it is Turkish, else English.
+			cfg.language = crate::i18n::config_language(&cfg, &path);
 			tracing::info!(relay = %cfg.relay, "config loaded");
 			crate::i18n::set_lang(&cfg.language);
 			*app.state::<AppState>().config.lock().unwrap() = cfg;
@@ -714,7 +717,7 @@ pub fn run() {
 		})
 		.on_window_event(|window, event| match event {
 			// Closing the window hides Pulsar to the tray rather than quitting, so a
-			// single launch stays resident until the tray's "Çıkış" is chosen — UNLESS
+			// single launch stays resident until the tray's "Quit" is chosen — UNLESS
 			// the user has turned off "Run in system tray" (ui.tray = false), in which
 			// case the window close actually quits.
 			WindowEvent::CloseRequested { api, .. } => {

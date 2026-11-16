@@ -27,7 +27,7 @@
 	}
 </script>
 
-<div class="numpad" role="group" aria-label="Tuş takımı">
+<div class="numpad" role="group" aria-label={t('gaming.numpad')}>
 	{#each KEYS as k (k)}
 		<button class="key" use:navItem onclick={() => press(k)} aria-label={k}>{k}</button>
 	{/each}

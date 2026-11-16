@@ -17,7 +17,7 @@ export type Ds5Mode = 'auto' | 'on' | 'off';
 /** DualSense passthrough settings (Settings → Kumandalar → DualSense), pushed to Rust with
  *  `set_ds5_settings` (`pulsar_core::input::ds5::degrade::Ds5Prefs`, same JSON names). */
 export interface Ds5Settings {
-	/** Master switch ("DualSense özelliklerini kullan"). Off = plain gamepad forwarding.
+	/** Master switch ("Use DualSense features"). Off = plain gamepad forwarding.
 	 *  Applies from the next connection. */
 	enabled: boolean;
 	triggers: Ds5Mode;
@@ -26,7 +26,7 @@ export interface Ds5Settings {
 	mic: Ds5Mode;
 	leds: Ds5Mode;
 	rumble: Ds5Mode;
-	/** "Kolun kulaklık girişi": headphones in the pad's jack get the session audio and this
+	/** "Controller headset jack": headphones in the pad's jack get the session audio and this
 	 *  device stays silent (PS5 gibi). Shed last. */
 	headset: Ds5Mode;
 	/** Shed `auto` features (speaker → mic → HD haptics → headset jack) while Bluetooth is weak. */
@@ -98,7 +98,7 @@ export interface UiSettings {
 	bitrate: number;
 	/** "Otomatik ayar": true = the adaptive controller adapts bitrate / resolution / fps to the
 	 *  link; false = the picks stay fixed (Moonlight-like; an automatic bitrate = the measured
-	 *  good rate). Settings → Görüntü and the session menu; applied live and on connect. */
+	 *  good rate). Settings → Display and the session menu; applied live and on connect. */
 	autoAdjust: boolean;
 	/** Stream resolution picked in the session menu ('auto', a preset like '1080p', or 'WxH'),
 	 *  applied on the next connect. */
@@ -147,10 +147,10 @@ export interface UiSettings {
 	 * while headphones are in. Off by default; untested on hardware. */
 	ds4Headset: boolean;
 	/** Client microphone sent to the host, by device name ('' = system default). Picked in the
-	 * in-session menu (Ses → Mikrofon cihazı); falls back to the default while unplugged. */
+	 * in-session menu (Audio → Microphone device); falls back to the default while unplugged. */
 	micDevice: string;
 	/** Client output the session audio plays on, by device name ('' = system default). Picked
-	 * in the in-session menu (Ses → Ses çıkışı); falls back to the default while unplugged. */
+	 * in the in-session menu (Audio → Audio output); falls back to the default while unplugged. */
 	speakerDevice: string;
 	hdr: boolean;
 	unattended: boolean;
@@ -197,7 +197,7 @@ export interface UiSettings {
 	 * 'medium'. */
 	controllerRumble: Record<string, RumbleStrength>;
 	/** DualSense headphone level per pad uuid (0-100, default 100) while the session audio
-	 *  plays through the pad's headset jack ("Kolun kulaklık girişi"). Set from the in-session
+	 *  plays through the pad's headset jack ("Controller headset jack"). Set from the in-session
 	 *  menu's bars (`ov set hpvol`) or here; pushed with `set_ds5_headset_volume`. */
 	headsetVolume: Record<string, number>;
 	/** Per-controller DISABLED flag keyed by uuid hex (true = off). A disabled pad isn't
@@ -225,35 +225,24 @@ export interface UiSettings {
 	ds5: Ds5Settings;
 }
 
+// Labels are brand names shown verbatim; the `auto` / `software` labels are only English
+// fallbacks — the UI shows them through i18n (`codec.auto`, `enc.auto`, `enc.software`).
 export const CODECS: { value: VideoCodec; label: string }[] = [
-	{ value: 'auto', label: 'Otomatik' },
+	{ value: 'auto', label: 'Automatic' },
 	{ value: 'h264', label: 'H.264' },
 	{ value: 'h265', label: 'H.265' },
 	{ value: 'av1', label: 'AV1' }
 ];
 
 export const ENCODERS: { value: Encoder; label: string }[] = [
-	{ value: 'auto', label: 'Otomatik (en iyi donanım)' },
+	{ value: 'auto', label: 'Automatic (best hardware)' },
 	{ value: 'nvenc', label: 'NVIDIA NVENC' },
 	{ value: 'qsv', label: 'Intel QuickSync' },
 	{ value: 'amf', label: 'AMD AMF' },
 	{ value: 'videotoolbox', label: 'Apple VideoToolbox' },
 	{ value: 'vaapi', label: 'VA-API (Linux)' },
 	{ value: 'rkmpp', label: 'Rockchip MPP' },
-	{ value: 'software', label: 'Yazılım (CPU)' }
-];
-
-export const EMULATION_TARGETS = [
-	{ value: 'auto', label: 'Otomatik' },
-	{ value: 'xbox', label: 'Xbox 360' },
-	{ value: 'ds4', label: 'DualShock 4' }
-] as const;
-
-export const RUMBLE_LEVELS: { value: RumbleStrength; label: string }[] = [
-	{ value: 'off', label: 'Kapalı' },
-	{ value: 'weak', label: 'Zayıf' },
-	{ value: 'medium', label: 'Orta' },
-	{ value: 'strong', label: 'Güçlü' }
+	{ value: 'software', label: 'Software (CPU)' }
 ];
 
 /** Per-platform encoder families: a platform shows ONLY its own backends (foreign

@@ -247,7 +247,7 @@ pub fn wait_frame(seen: u64, timeout: std::time::Duration) -> u64 {
 /// decode thread can poke it without taking the FPS lock the presenter owns.
 static VBYTES: AtomicU64 = AtomicU64::new(0);
 /// EMA of per-frame decode time in microseconds — how long `avcodec_receive_frame` takes to
-/// hand us a decoded frame. Drives the overlay's "Çözme ms" tile (was hardcoded 0 before).
+/// hand us a decoded frame. Drives the overlay's "Decode ms" tile (was hardcoded 0 before).
 pub static DEC_US: AtomicU64 = AtomicU64::new(0);
 pub static FPS: Mutex<[f32; 3]> = Mutex::new([0.0; 3]); // fps, mbit, ms (filled by main on present)
 /// True while the stream is stalled (no fresh frame for ≥ STALL_SECS) and video was
@@ -299,7 +299,7 @@ pub static VIDEO_SRC: Mutex<[i32; 2]> = Mutex::new([0; 2]);
 /// View-fit mode for presenting the video in the window (AnyDesk-style): 0 = FIT
 /// (letterbox, keep aspect — default), 1 = STRETCH (fill the window, may distort),
 /// 2 = ORIGINAL (1:1 source pixels, centered; larger streams crop). Set by the
-/// overlay's Görüntü section / the frontend over stdin (`fit fit|stretch|original`).
+/// overlay's Display section / the frontend over stdin (`fit fit|stretch|original`).
 static FIT_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 pub fn set_fit(mode: &str) {
@@ -1093,7 +1093,7 @@ unsafe fn decode_once(sdp: &CString) {
 					}
 				}
 				// Time the decode work for this packet (send + frame drain), EMA'd per frame into the
-				// overlay's "Çözme ms" tile. rkmpp is async HW: timing avcodec_receive_frame alone
+				// overlay's "Decode ms" tile. rkmpp is async HW: timing avcodec_receive_frame alone
 				// reads ~0 (the frame is already decoded), so span the whole send→drain instead.
 				let dec_t0 = if is_video {
 					// Tally received video bytes for the HUD bitrate (presenter reads this 1×/s).

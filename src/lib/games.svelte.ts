@@ -72,7 +72,7 @@ function desktopEntry(): Game {
 	// out of the client's fetched game list, which pins its own Desktop card.
 	return {
 		id: DESKTOP_ID,
-		title: 'Masaüstü',
+		title: 'Desktop', // shown through i18n (`gaming.desktop`), see Games.svelte
 		type: 'command',
 		path: '',
 		args: '',

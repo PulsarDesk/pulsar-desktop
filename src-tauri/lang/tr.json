@@ -88,5 +88,10 @@
 	"input.host.unavailable": "Uzaktan fare ve klavye bu bilgisayara iletilemiyor",
 	"input.host.uinput_no_seat": "uinput kuralı kurulu ama /dev/uinput yazılamıyor: bu oturum yerel değil (SSH / ekransız). Kullanıcıyı input grubuna ekle",
 	"input.host.uinput_fixed": "uinput kuralı kuruldu; uzaktan fare ve klavye artık çalışıyor",
-	"fw.macPrompt": "Pulsar, uzak bağlantıların gelebilmesi için güvenlik duvarında kendine ve yayın programlarına izin vermek istiyor."
+	"fw.macPrompt": "Pulsar, uzak bağlantıların gelebilmesi için güvenlik duvarında kendine ve yayın programlarına izin vermek istiyor.",
+	"session.mpvRespawnFailed": "Video yok — mpv yeniden başlatılamadı",
+	"err.fsList": "klasör listelenemedi",
+	"err.notConnected": "cihaz bağlı değil",
+	"stream.shortfall": "Bağlantı {picked} taşımıyor — {current} kullanılıyor",
+	"err.fsGet": "dosya istenemedi"
 }

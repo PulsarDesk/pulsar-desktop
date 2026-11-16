@@ -58,9 +58,11 @@ export async function loadLang(l: Lang): Promise<void> {
 
 /** System language if we ship it, otherwise English. Honors the OS preference
  * ORDER (`navigator.languages`) — the first shipped language a user prefers wins. */
-function detect(): Lang {
-	if (typeof navigator === 'undefined') return 'en';
-	const langs = [navigator.language, ...(navigator.languages ?? [])];
+export function detect(
+	langs: readonly unknown[] = typeof navigator === 'undefined'
+		? []
+		: [navigator.language, ...(navigator.languages ?? [])]
+): Lang {
 	for (const l of langs) {
 		if (typeof l !== 'string') continue;
 		const p = l.toLowerCase();

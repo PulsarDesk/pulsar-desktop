@@ -1,6 +1,6 @@
 # Pulsar machine-wide ("shared mode") plumbing for Linux and macOS.
 #
-# "Kullanıcılar arası ortak Pulsar" (src-tauri/src/shared_mode.rs) keeps ONE device
+# "Shared Pulsar for all users" (src-tauri/src/shared_mode.rs) keeps ONE device
 # identity / config / pairings for the whole machine. On Windows that lives in
 # %ProgramData%\Pulsar\shared (protected DACL, DPAPI machine scope) and is implemented in
 # shared_mode.rs itself. This crate is the Unix side: the root-owned machine dir and its

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, beforeAll } from 'vitest';
-import { t, i18n, setLang, cycleLang, LANGS, loadLang, i18nReady } from './i18n.svelte';
+import { t, i18n, setLang, cycleLang, LANGS, loadLang, i18nReady, detect } from './i18n.svelte';
 
 describe('i18n', () => {
 	// Dictionaries load lazily (per-language JSON chunks). Preload every language the
@@ -43,5 +43,12 @@ describe('i18n', () => {
 		expect(i18n.lang).toBe('kk');
 		cycleLang();
 		expect(i18n.lang).toBe('tr');
+	});
+
+	it('defaults a new install to English unless the OS language is shipped', () => {
+		expect(detect(['de-DE', 'fr-FR'])).toBe('en');
+		expect(detect([])).toBe('en');
+		expect(detect(['tr-TR'])).toBe('tr');
+		expect(detect(['de-DE', 'tr'])).toBe('tr');
 	});
 });

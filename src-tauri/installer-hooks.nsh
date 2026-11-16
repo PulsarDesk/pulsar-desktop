@@ -39,12 +39,12 @@
   Push $5
   ; Interception — keyboard capture below the OS hook layer (works under ASTER).
   IfFileExists "$INSTDIR\resources\interception\install-interception.exe" 0 +3
-    DetailPrint "Pulsar: Interception klavye sürücüsü kuruluyor..."
+    DetailPrint "Pulsar: installing the Interception keyboard driver..."
     ExecWait '"$INSTDIR\resources\interception\install-interception.exe" /install'
 
   ; ViGEmBus — virtual Xbox gamepad on the host.
   IfFileExists "$INSTDIR\resources\ViGEmBus_Setup.exe" 0 +3
-    DetailPrint "Pulsar: ViGEmBus gamepad sürücüsü kuruluyor..."
+    DetailPrint "Pulsar: installing the ViGEmBus gamepad driver..."
     ExecWait '"$INSTDIR\resources\ViGEmBus_Setup.exe" /quiet /norestart'
 
   ; usbip-win2 — the host's virtual wired DualSense (pulsar_core::input::ds5::attach runs
@@ -73,12 +73,12 @@
   ${VersionCompare} "$1" "${USBIP_VERSION}" $2
   StrCmp $2 "2" usbip_install usbip_present
   usbip_install:
-    DetailPrint "Pulsar: usbip-win2 ${USBIP_VERSION} (sanal DualSense sürücüsü) kuruluyor..."
+    DetailPrint "Pulsar: installing usbip-win2 ${USBIP_VERSION} (virtual DualSense driver)..."
     ExecWait '"$0" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /NOICONS /COMPONENTS=main,client /TASKS=vcredist' $3
-    DetailPrint "Pulsar: usbip-win2 kurulumu bitti (çıkış kodu $3)."
+    DetailPrint "Pulsar: usbip-win2 install finished (exit code $3)."
     Goto usbip_done
   usbip_present:
-    DetailPrint "Pulsar: usbip-win2 zaten kurulu ($1) — atlandı."
+    DetailPrint "Pulsar: usbip-win2 already installed ($1), skipped."
   usbip_done:
 
   ; Virtual Audio Driver — a sinkless render endpoint we redirect the default
@@ -139,14 +139,14 @@
     ${EndIf}
     IfFileExists "$INSTDIR\resources\virtual-audio-driver\VirtualAudioDriver.inf" 0 vad_done
     IfFileExists "$0" 0 vad_done
-      DetailPrint "Pulsar: Sanal ses sürücüsü (sessiz host yayını) kuruluyor..."
+      DetailPrint "Pulsar: installing the virtual audio driver (silent host streaming)..."
       ; --no-duplicates makes the node create idempotent: an upgrade re-run won't
       ; spawn a SECOND ROOT\VirtualAudioDriver device node.
       ExecWait '"$0" --create-device-node --hardware-id "ROOT\VirtualAudioDriver" --class-name "MEDIA" --class-guid "4d36e96c-e325-11ce-bfc1-08002be10318" --no-duplicates'
       ExecWait '"$0" --install-driver --inf-path "$INSTDIR\resources\virtual-audio-driver\VirtualAudioDriver.inf"'
     Goto vad_done
   vad_skip:
-    DetailPrint "Pulsar: Mevcut sanal ses aygıtı bulundu ($2) — sürücü kurulumu atlandı."
+    DetailPrint "Pulsar: existing virtual audio device found ($2), driver install skipped."
   vad_done:
 
   ; The app loads interception.dll from next to its exe at runtime.
@@ -164,7 +164,7 @@
   ; Windows does not ask once per program on first use. The app does it (firewall.rs); the
   ; installer is already elevated. Same paths on update → a quick no-op.
   IfFileExists "$INSTDIR\pulsar.exe" 0 +3
-    DetailPrint "Pulsar: güvenlik duvarı izinleri ekleniyor..."
+    DetailPrint "Pulsar: adding firewall rules..."
     ExecWait '"$INSTDIR\pulsar.exe" --firewall-setup'
 
   ; In-app updates (the updater passes /UPDATE → Tauri's $UpdateMode) run the installer in
@@ -173,7 +173,7 @@
   ; /SD IDOK: a scripted `/S` install (no /UPDATE) must not wait on this box either — it is
   ; invisible there (e.g. over SSH) and the installer would hang forever (2026-11-10).
   ${If} $UpdateMode <> 1
-    MessageBox MB_OK|MB_ICONINFORMATION "Pulsar kuruldu. Klavye/gamepad ve sanal ses sürücülerinin etkinleşmesi için bilgisayarı bir kez yeniden başlatın." /SD IDOK
+    MessageBox MB_OK|MB_ICONINFORMATION "Pulsar is installed. Restart the computer once so the keyboard/gamepad and virtual audio drivers take effect." /SD IDOK
   ${EndIf}
 !macroend
 

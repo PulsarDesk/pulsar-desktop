@@ -432,7 +432,9 @@ fn run_headless() -> i32 {
 	let _ = crate::shared_mode::resolved();
 	run_app(|app| {
 		use tauri::Manager;
-		let cfg = pulsar_core::config::Config::load(crate::util::config_path(app));
+		let path = crate::util::config_path(app);
+		let mut cfg = pulsar_core::config::Config::load(&path);
+		cfg.language = crate::i18n::config_language(&cfg, &path);
 		tracing::info!(relay = %cfg.relay, "config loaded");
 		crate::i18n::set_lang(&cfg.language);
 		*app.state::<crate::state::AppState>().config.lock().unwrap() = cfg;

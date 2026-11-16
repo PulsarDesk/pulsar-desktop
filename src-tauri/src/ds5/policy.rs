@@ -1,13 +1,13 @@
-//! Per-pad DualSense settings + automatic feature shedding ("otomatik kısma") on the
+//! Per-pad DualSense settings + automatic feature shedding ("automatic shedding") on the
 //! streaming client. The policy itself is pure and lives in
 //! `pulsar_core::input::ds5::degrade`; this wires it to one pad thread (`client.rs`).
 //!
-//! - `Kapalı` (Off) = the feature is off.
+//! - `Off` = the feature is off.
 //! - `Otomatik` (Auto) = on, sheddable while the Bluetooth link is weak (speaker → mic →
 //!   HD haptics; shed haptics keep the motors going as classic rumble).
-//! - `Açık` (On) = always on, never shed.
+//! - `On` = always on, never shed.
 //!
-//! The headset route ("Kolun kulaklık girişi", `headset.rs`) is shed last, after speaker,
+//! The headset route ("Controller headset jack", `headset.rs`) is shed last, after speaker,
 //! mic and haptics. Shed, the session audio goes silent; it never falls back to the client
 //! output while the headphones are in (maintainer's rule: no sound anywhere else). Note that
 //! with the route on, shedding speaker or haptics does not shrink the BT reports (the Opus
@@ -250,7 +250,7 @@ mod tests {
 		for f in [Shed::Speaker, Shed::Mic, Shed::Haptics, Shed::Headset] {
 			for shed in [true, false] {
 				let t = notice_text(Change { feature: f, shed });
-				assert!(t.starts_with("Bluetooth"), "{t}");
+				assert!(t.contains("Bluetooth"), "{t}");
 			}
 		}
 	}

@@ -757,7 +757,7 @@ fn spawn_host_pointer_watch(
 #[cfg(target_os = "macos")]
 fn notify_screen_permission(app_h: &AppHandle, out: &tokio::sync::mpsc::Sender<DataMsg>) {
 	let _ = tauri::Emitter::emit(app_h, "host-screen-permission", false);
-	let msg = crate::i18n::t("host.screenPermission").to_string();
+	let msg = crate::i18n::wire("host.screenPermission").to_string();
 	let _ = out.try_send(DataMsg::Stats(format!("!{msg}")));
 }
 
@@ -2341,7 +2341,7 @@ pub(super) fn make_on_stream(
 		// or baseline bookkeeping, so it leaves the running stream's state untouched.
 		if !req.media_over_session {
 			tracing::warn!(%addr, "stream request without media-over-session — refusing a plaintext stream");
-			let msg = crate::i18n::t("host.plaintextRefused").to_string();
+			let msg = crate::i18n::wire("host.plaintextRefused").to_string();
 			let _ = stats_out.try_send(DataMsg::Stats(format!("!{msg}")));
 			return;
 		}
@@ -2707,7 +2707,7 @@ pub(super) fn make_on_stream(
 			),
 			None => {
 				tracing::error!("media forwarders failed to start — no stream (never plaintext)");
-				let msg = crate::i18n::t("host.mediaForwarderFailed").to_string();
+				let msg = crate::i18n::wire("host.mediaForwarderFailed").to_string();
 				let _ = stats_out.try_send(DataMsg::Stats(format!("!{msg}")));
 				// The running encode (if any) now feeds dead loopback intakes: forget every
 				// live-restream baseline so the client's next request takes the full restart
@@ -2873,7 +2873,7 @@ pub(super) fn make_on_stream(
 			// Encode summary for the client's stats panel (the Wayland path never sent
 			// one before, so the panel showed nothing).
 			let fps_part = if eff_fps != req_fps {
-				format!("{}fps ({} {})", fps, crate::i18n::t("stream.fpsRequested"), req_fps)
+				format!("{}fps ({} {})", fps, crate::i18n::wire("stream.fpsRequested"), req_fps)
 			} else {
 				format!("{}fps", fps)
 			};
@@ -2883,7 +2883,7 @@ pub(super) fn make_on_stream(
 				genc.label(),
 				fps_part,
 				(bitrate as f32 / 1000.0).round() as u32,
-				crate::i18n::t("stream.mbitTarget")
+				crate::i18n::wire("stream.mbitTarget")
 			)));
 			// Per-window capture (the client's "Pencere" pick, or the game this session
 			// launched): Wayland gives no program other programs' windows, so the portal
@@ -2974,7 +2974,7 @@ pub(super) fn make_on_stream(
 				HwEncoder::Nvenc.label(),
 				fps_part,
 				(bitrate as f32 / 1000.0).round() as u32,
-				crate::i18n::t("stream.mbitTarget")
+				crate::i18n::wire("stream.mbitTarget")
 			);
 			// AppImage: an encoder that only validated on the system gst runs there.
 			let system_gst = crate::process::gst_on_system(genc, gcodec);
@@ -3114,7 +3114,7 @@ pub(super) fn make_on_stream(
 							}
 						}
 						tracing::error!("wayland capture pipeline died mid-stream");
-						let msg = crate::i18n::t("host.captureStopped").to_string();
+						let msg = crate::i18n::wire("host.captureStopped").to_string();
 						let _ = stats_task.try_send(DataMsg::Stats(format!("!{msg}")));
 						let _ = app_h_task.emit(
 							"session",
@@ -3132,7 +3132,7 @@ pub(super) fn make_on_stream(
 						tracing::error!(err = %e, "wayland capture::start failed");
 						// And tell the CLIENT ("!" = stream error, see on_failed below): the
 						// viewer otherwise waited on a black screen with no hint why.
-						let msg = format!("{}: {e}", crate::i18n::t("host.captureFailed"));
+						let msg = format!("{}: {e}", crate::i18n::wire("host.captureFailed"));
 						let _ = stats_task.try_send(DataMsg::Stats(format!("!{msg}")));
 						let _ = app_h_task.emit(
 							"session",
@@ -3235,8 +3235,8 @@ pub(super) fn make_on_stream(
 		};
 		let req_fps = if req.fps > 0 { req.fps } else { cfg.fps };
 		// Negotiate against the host panel: encoding above the host's own refresh just
-		// produces duplicate frames at extra cost (the user-visible "120 seçtim,
-		// değişmiyor" was a 120-req on a slower panel), so clamp to it when known.
+		// produces duplicate frames at extra cost (the user-visible "I picked 120,
+		// nothing changes" was a 120-req on a slower panel), so clamp to it when known.
 		let panel_hz = crate::util::host_panel_hz();
 		let eff_fps = match panel_hz {
 			Some(hz) => req_fps.min(hz),
@@ -3622,7 +3622,7 @@ pub(super) fn make_on_stream(
 							format!(
 								"{}fps ({} {})",
 								eff_fps,
-								crate::i18n::t("stream.fpsRequested"),
+								crate::i18n::wire("stream.fpsRequested"),
 								req_fps
 							)
 						} else {
@@ -3635,7 +3635,7 @@ pub(super) fn make_on_stream(
 							format!(
 								"{}p ({} {}p)",
 								eff_h,
-								crate::i18n::t("stream.fpsRequested"),
+								crate::i18n::wire("stream.fpsRequested"),
 								req.height
 							)
 						} else {
@@ -3649,7 +3649,7 @@ pub(super) fn make_on_stream(
 							res_part,
 							fps_part,
 							(eff_bitrate as f32 / 1000.0).round() as u32,
-							crate::i18n::t("stream.mbitTarget")
+							crate::i18n::wire("stream.mbitTarget")
 						);
 						// The `gst-launch` child runner: the `encpace`-metered description (built with
 						// the request's recovery GOP — a child restarts on every recovery flip) and,
@@ -3750,7 +3750,7 @@ pub(super) fn make_on_stream(
 								peer: peer.clone(),
 								sid,
 								detail: format!("{} · {}p", genc.label(), eff_h)
-									+ if started { "" } else { crate::i18n::t("host.gstFailed") },
+									+ if started { "" } else { crate::i18n::wire("host.gstFailed") },
 							},
 						);
 						return;
@@ -4275,10 +4275,10 @@ pub(super) fn make_on_stream(
 		// Reflect the RESOLVED codec (after `resolve_codec` fallback), not the request —
 		// the client uses this to pick its decoder, so it must match what we actually send.
 		// The fps part is the overlay's FPS-combo "Aktif:" truth line (overlay.rs act(3)).
-		// When the host clamped the request to its panel, surface BOTH so "120 seçtim,
-		// değişmiyor" reads as a negotiation, not a bug: "60fps (istenen 120)".
+		// When the host clamped the request to its panel, surface BOTH so "I picked 120,
+		// nothing changes" reads as a negotiation, not a bug: "60fps (requested 120)".
 		let fps_part = if eff_fps != req_fps {
-			format!("{}fps ({} {})", eff_fps, crate::i18n::t("stream.fpsRequested"), req_fps)
+			format!("{}fps ({} {})", eff_fps, crate::i18n::wire("stream.fpsRequested"), req_fps)
 		} else {
 			format!("{}fps", eff_fps)
 		};
@@ -4287,7 +4287,7 @@ pub(super) fn make_on_stream(
 		// "Aktif:" line reads as a negotiation ("1080p (istenen 1440p)"), not a bug —
 		// same pattern as `fps_part` above.
 		let res_part = if req.height > 0 && req.height != eff_h {
-			format!("{}p ({} {}p)", eff_h, crate::i18n::t("stream.fpsRequested"), req.height)
+			format!("{}p ({} {}p)", eff_h, crate::i18n::wire("stream.fpsRequested"), req.height)
 		} else {
 			format!("{}p", eff_h)
 		};
@@ -4306,7 +4306,7 @@ pub(super) fn make_on_stream(
 			res_part,
 			fps_part,
 			(eff_bitrate as f32 / 1000.0).round() as u32,
-			crate::i18n::t("stream.mbitTarget")
+			crate::i18n::wire("stream.mbitTarget")
 		);
 		// encode_command always yields ("ffmpeg", args); run the bundled
 		// ffmpeg binary directly rather than relying on a system ffmpeg.
@@ -4422,7 +4422,7 @@ pub(super) fn make_on_stream(
 							let key = "host.captureNoFramesMac";
 							#[cfg(not(target_os = "macos"))]
 							let key = "host.captureNoFrames";
-							let msg = crate::i18n::t(key).to_string();
+							let msg = crate::i18n::wire(key).to_string();
 							let _ = stats_enc.try_send(DataMsg::Stats(format!("!{msg}")));
 						}
 					}
@@ -4487,7 +4487,7 @@ pub(super) fn make_on_stream(
 						DataMsg::Stats(format!(
 							"{label_now} · {:.1} {}",
 							us as f32 / 1000.0,
-							crate::i18n::t("stream.msEncode")
+							crate::i18n::wire("stream.msEncode")
 						)),
 					) {
 						break;
@@ -4589,7 +4589,7 @@ pub(super) fn make_on_stream(
 				let l = label_ms.lock().unwrap().clone();
 				let _ = stats_enc.try_send(DataMsg::Stats(format!(
 					"{l} · {ms:.1} {}",
-					crate::i18n::t("stream.msEncode")
+					crate::i18n::wire("stream.msEncode")
 				)));
 			};
 			let stats_settle = stats_out.clone();
@@ -4621,7 +4621,7 @@ pub(super) fn make_on_stream(
 					res_settle,
 					fps_settle,
 					mbit_settle,
-					crate::i18n::t("stream.mbitTarget")
+					crate::i18n::wire("stream.mbitTarget")
 				);
 				*label_settle.lock().unwrap() = new_label.clone();
 				let _ = stats_settle.try_send(DataMsg::Stats(new_label));
@@ -4637,7 +4637,7 @@ pub(super) fn make_on_stream(
 			let peer_fail = peer.clone();
 			let stats_fail = stats_out.clone();
 			let on_failed = move || {
-				let msg = format!("{} ({tried})", crate::i18n::t("host.encodeFailed"));
+				let msg = format!("{} ({tried})", crate::i18n::wire("host.encodeFailed"));
 				// A leading "!" marks a stream ERROR on the Stats channel — the one host→client
 				// text path every peer already speaks, so no wire change: a current client
 				// shows it as the session's video error (and on its renderer banner), an
@@ -4732,7 +4732,7 @@ pub(super) fn make_on_stream(
 				peer: peer.clone(),
 				sid,
 				detail: format!("{} · {}p", encoder.label(), eff_h)
-					+ if started { "" } else { crate::i18n::t("host.ffmpegFailed") },
+					+ if started { "" } else { crate::i18n::wire("host.ffmpegFailed") },
 			},
 		);
 	}
@@ -4979,7 +4979,7 @@ pub(super) fn make_on_file(app_h: AppHandle, peer: String, sid: u64) -> impl FnM
 				// Peer is overshooting the sane transfer ceiling — drop the whole
 				// transfer so the buffer can't grow unbounded. Emit file-recv{ok:false}
 				// BEFORE removing so the client learns the transfer was rejected rather
-				// than silently showing 'gönderildi' for a file the host never saved.
+				// than silently showing 'sent' for a file the host never saved.
 				if let Some(r) = xfers.remove(&id) {
 					let _ = app_h.emit(
 						"file-recv",

@@ -1,4 +1,4 @@
-//! Machine-wide ("shared mode", "Kullanıcılar arası ortak Pulsar") plumbing for Linux and
+//! Machine-wide ("shared mode", "Shared Pulsar for all users") plumbing for Linux and
 //! macOS. The Windows side lives in `src-tauri/src/shared_mode.rs`; this crate gives the Unix
 //! side the same guarantees with the tools those systems have:
 //!

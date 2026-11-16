@@ -1,5 +1,5 @@
 <script lang="ts">
-	// Settings → Güvenlik → two-factor auth for incoming connections (RustDesk-style TOTP).
+	// Settings → Security → two-factor auth for incoming connections (RustDesk-style TOTP).
 	// On = `config.totp_secret` is set. Turning it on opens the enrollment: a QR + manual code
 	// for an authenticator app, then one code to prove it; only a verified secret is saved.
 	// A connection a password or unattended access lets in must then also send the current

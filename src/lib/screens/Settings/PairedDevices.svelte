@@ -1,5 +1,5 @@
 <script lang="ts">
-	// Settings → Güvenlik → Eşleşmiş cihazlar: the clients this HOST trusts by key (they
+	// Settings → Security → Paired devices: the clients this HOST trusts by key (they
 	// connect without a password or the Allow/Deny popup; 2FA still applies). Removing one
 	// makes it ask for a password again.
 	import { onMount } from 'svelte';

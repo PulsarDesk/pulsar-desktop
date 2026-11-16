@@ -40,7 +40,7 @@ tracing-appender = { workspace = true }
 libloading = "0.9"
 # OS clipboard read/write from Rust. The webview's navigator.clipboard is DEAD on the
 # Linux native-video path (the occluded/unfocused WebKitGTK denies DOM clipboard access),
-# so the session's clipboard push ("Panoyu karşıya gönder") and the inbound apply must
+# so the session's clipboard push ("Send clipboard to the other side") and the inbound apply must
 # run app-side (io_cmds.rs read/write_clipboard_text).
 arboard = { version = "3", default-features = false }
 # Local UDP(RTP) → WebSocket relay that feeds the webview's WebCodecs decoder.
@@ -56,7 +56,7 @@ base64 = "0.23"
 # with subtle's constant-time `ct_eq` (digesting also hides the secret length).
 sha2 = { workspace = true }
 subtle = "2"
-# Native OS file-picker dialog: used when the egui overlay's "Dosya gönder" button
+# Native OS file-picker dialog: used when the egui overlay's "Send file" button
 # fires from the renderer process — a cross-process event can never carry webview
 # user-activation, so the webview's <input type=file>.click() is silently blocked
 # by WebView2/WebKitGTK. rfd opens the picker Rust-side (no activation needed),
@@ -93,6 +93,7 @@ pulsar-prio = { path = "../crates/pulsar-prio" }
 pulsar-sysagent = { path = "../crates/pulsar-sysagent" }
 windows-sys = { version = "0.61", features = [
 	"Win32_Foundation",
+	"Win32_Globalization", # i18n: GetUserDefaultUILanguage (a new config's language)
 	"Win32_Graphics_Gdi",
 	"Win32_Graphics_Dwm", # io_cmds: kill the 1px border + rounded corners on the frameless fullscreen cover
 	"Win32_UI_WindowsAndMessaging",
