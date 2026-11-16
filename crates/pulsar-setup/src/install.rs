@@ -76,17 +76,17 @@ pub fn default_install_dir() -> PathBuf {
 pub fn install(dir: &Path, desktop_shortcut: bool, drivers: bool, tx: &Sender<Msg>) {
 	let r = (|| -> Result<(), String> {
 		if !have_payload() {
-			return Err("bu kurulum dosyasında uygulama paketi yok (geliştirme derlemesi)".into());
+			return Err("this installer has no app package (development build)".into());
 		}
 		kill_running();
-		std::fs::create_dir_all(dir).map_err(|e| format!("klasör oluşturulamadı: {e}"))?;
+		std::fs::create_dir_all(dir).map_err(|e| format!("could not create the folder: {e}"))?;
 
 		let mut zip =
-			zip::ZipArchive::new(Cursor::new(PAYLOAD)).map_err(|e| format!("paket bozuk: {e}"))?;
+			zip::ZipArchive::new(Cursor::new(PAYLOAD)).map_err(|e| format!("package is corrupt: {e}"))?;
 		let total = zip.len();
 		let _ = tx.send(Msg::Total(total));
 		for i in 0..total {
-			let mut entry = zip.by_index(i).map_err(|e| format!("paket okunamadı: {e}"))?;
+			let mut entry = zip.by_index(i).map_err(|e| format!("could not read the package: {e}"))?;
 			let Some(rel) = entry.enclosed_name() else { continue };
 			// zip 9: the stored name is a fallible decode; only used for progress/errors here.
 			let name = entry
@@ -259,19 +259,19 @@ pub fn watch_update(old_pid: u32, tx: &Sender<UpdMsg>) {
 		}
 		if !saw_installer && !old_alive && start.elapsed() > Duration::from_secs(40) {
 			let _ = tx.send(UpdMsg::Failed(
-				"Kurulum başlamadı. Yönetici izni verilmemiş olabilir; Pulsar'ı açıp güncellemeyi tekrar dene.".into(),
+				crate::i18n::t("update.notStarted").into(),
 			));
 			return;
 		}
 		if saw_installer && !installer {
 			let at = *gone_at.get_or_insert_with(Instant::now);
 			if at.elapsed() > Duration::from_secs(20) {
-				let _ = tx.send(UpdMsg::Failed("Kurulum bitti ama Pulsar açılmadı.".into()));
+				let _ = tx.send(UpdMsg::Failed(crate::i18n::t("update.notOpened").into()));
 				return;
 			}
 		}
 		if start.elapsed() > Duration::from_secs(300) {
-			let _ = tx.send(UpdMsg::Failed("Güncelleme çok uzun sürdü.".into()));
+			let _ = tx.send(UpdMsg::Failed(crate::i18n::t("update.tooLong").into()));
 			return;
 		}
 	}
@@ -372,9 +372,9 @@ pub fn install_webview2() -> Result<(), String> {
 			return Ok(());
 		}
 		match status.code() {
-			Some(1001) => Err("indirme başarısız".to_string()),
+			Some(1001) => Err("download failed".to_string()),
 			Some(c) => Err(format!("0x{:08X}", c as u32)),
-			None => Err("bilinmeyen hata".to_string()),
+			None => Err("unknown error".to_string()),
 		}
 	}
 	#[cfg(not(windows))]

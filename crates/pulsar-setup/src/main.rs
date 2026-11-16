@@ -13,12 +13,13 @@
 //!                   Combine with --uninstall or the --mock-* flags (see mock.rs) to reach
 //!                   every screen. `PULSAR_SETUP_MOCK=1` does the same as --mock.
 //!
-//! The look follows the "Pulsar Kurulum" design (ui.rs): a frameless 520 × 380 window, light or
+//! The look follows the "Pulsar Setup" design (ui.rs): a frameless 520 × 380 window, light or
 //! dark by the Windows app theme, and no animation.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod drivers;
 mod firewall;
+mod i18n;
 mod install;
 mod mock;
 mod ui;
@@ -70,11 +71,11 @@ fn main() {
 		at: args.iter().find_map(|a| a.strip_prefix("--mock-at=")).and_then(mock::At::parse),
 	});
 	let title = if uninstall {
-		"Pulsar Kaldırma"
+		i18n::t("title.uninstall")
 	} else if updating.is_some() {
-		"Pulsar Güncelleme"
+		i18n::t("title.update")
 	} else {
-		"Pulsar Kurulum"
+		i18n::t("title.install")
 	};
 	// One setup window at a time: a second double-click (or a second copy of the installer)
 	// used to open another window that raced the first over the same files. The later one
@@ -152,7 +153,9 @@ fn single_instance() -> Option<SingleInstance> {
 #[cfg(windows)]
 fn focus_existing() {
 	use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE};
-	for t in ["Pulsar Kurulum", "Pulsar Kaldırma", "Pulsar Güncelleme"] {
+	// Every language's titles: another run may have picked the other language.
+	let titles = [i18n::all("title.install"), i18n::all("title.uninstall"), i18n::all("title.update")];
+	for t in titles.into_iter().flatten() {
 		let w: Vec<u16> = t.encode_utf16().chain(std::iter::once(0)).collect();
 		// SAFETY: plain Win32 calls with a NUL-terminated title.
 		let hwnd = unsafe { FindWindowW(std::ptr::null(), w.as_ptr()) };
@@ -244,7 +247,7 @@ struct SetupApp {
 	wv2_rx: Option<Receiver<Result<(), String>>>,
 	/// The version a previous install registered: the welcome screen becomes an update.
 	update_from: Option<String>,
-	/// The folder the user picked with "Değiştir" can't be written (shown under the box).
+	/// The folder the user picked with "Change" can't be written (shown under the box).
 	dir_err: Option<String>,
 	/// Pulsar is running (an update closes it first — the welcome screen says so).
 	running: bool,
@@ -263,14 +266,14 @@ struct SetupApp {
 }
 
 impl SetupApp {
-	/// "Değiştir": pick the install folder. A picked folder not named Pulsar gets a `Pulsar`
+	/// "Change": pick the install folder. A picked folder not named Pulsar gets a `Pulsar`
 	/// subfolder (installers install INTO a folder you choose the parent of). The choice must be
 	/// writable without admin rights — this installer is per user (no UAC); Program Files is not.
 	fn pick_dir(&mut self) {
 		#[cfg(windows)]
 		{
 			let start = self.dir.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| self.dir.clone());
-			let Some(picked) = rfd::FileDialog::new().set_title("Pulsar'ın kurulacağı klasörü seç").set_directory(&start).pick_folder()
+			let Some(picked) = rfd::FileDialog::new().set_title(i18n::t("dir.pickTitle")).set_directory(&start).pick_folder()
 			else {
 				return;
 			};
@@ -290,9 +293,7 @@ impl SetupApp {
 					self.dir_err = None;
 				}
 				Err(e) => {
-					self.dir_err = Some(format!(
-						"Bu klasöre yazılamıyor ({e}). Yönetici izni gerektirmeyen bir yer seç, örneğin kullanıcı klasörün."
-					));
+					self.dir_err = Some(i18n::t("dir.notWritable").replace("{e}", &e));
 				}
 			}
 		}
@@ -365,7 +366,7 @@ impl SetupApp {
 		std::thread::spawn(move || {
 			if mock {
 				std::thread::sleep(std::time::Duration::from_secs(8));
-				let _ = tx.send(install::UpdMsg::Failed("Deneme: kurulum başlamadı.".into()));
+				let _ = tx.send(install::UpdMsg::Failed(i18n::t("update.mockFailed").into()));
 			} else {
 				install::watch_update(old_pid, &tx);
 			}
@@ -549,16 +550,16 @@ impl SetupApp {
 		let ver = install::version();
 		let mut acts = Vec::new();
 
-		let launch = Btn::new("Pulsar'ı Başlat", Kind::Ghost);
+		let launch = Btn::new(i18n::t("btn.launch"), Kind::Ghost);
 		let sc = match &self.phase {
 			Phase::Welcome if !self.have_payload => Screen {
 				glow: true,
 				neutral: false,
-				title: "Pulsar'ı kur".into(),
-				sub: "Uzak masaüstü · oyun akışı".into(),
+				title: i18n::t("welcome.install").into(),
+				sub: i18n::t("welcome.tagline").into(),
 				pill: Pill::Dev,
 				note: None,
-				buttons: vec![(Btn::new("Kapat", Kind::Ghost), Act::Close)],
+				buttons: vec![(Btn::new(i18n::t("btn.close"), Kind::Ghost), Act::Close)],
 				closable: true,
 			},
 			Phase::Welcome => {
@@ -566,24 +567,24 @@ impl SetupApp {
 				Screen {
 					glow: true,
 					neutral: false,
-					title: if upd { "Pulsar'ı güncelle" } else { "Pulsar'ı kur" }.into(),
-					sub: "Uzak masaüstü · oyun akışı".into(),
+					title: i18n::t(if upd { "welcome.update" } else { "welcome.install" }).into(),
+					sub: i18n::t("welcome.tagline").into(),
 					pill: match &self.update_from {
 						Some(old) => Pill::Update(format!("v{old}"), format!("v{ver}")),
 						None => Pill::Version(format!("v{ver}")),
 					},
-					note: Some((Icon::User, "Yalnızca bu kullanıcı için · yönetici izni gerekmez")),
-					buttons: vec![(Btn::new(if upd { "Güncelle" } else { "Kur" }, Kind::Primary), Act::Install)],
+					note: Some((Icon::User, i18n::t("welcome.perUser"))),
+					buttons: vec![(Btn::new(i18n::t(if upd { "btn.update" } else { "btn.install" }), Kind::Primary), Act::Install)],
 					closable: true,
 				}
 			}
 			Phase::Installing => Screen {
 				glow: true,
 				neutral: false,
-				title: "Kuruluyor…".into(),
-				sub: format!("Pulsar v{ver} · birkaç saniye sürer"),
+				title: i18n::t("installing.title").into(),
+				sub: i18n::t("installing.sub").replace("{ver}", ver),
 				pill: Pill::None,
-				note: Some((Icon::Lock, "Kurulum bitene kadar pencere kapatılamaz.")),
+				note: Some((Icon::Lock, i18n::t("installing.noClose"))),
 				buttons: vec![],
 				closable: false,
 			},
@@ -591,35 +592,35 @@ impl SetupApp {
 				None => Screen {
 					glow: true,
 					neutral: false,
-					title: "Pulsar hazır".into(),
-					sub: format!("v{ver} kuruldu"),
+					title: i18n::t("done.title").into(),
+					sub: i18n::t("done.sub").replace("{ver}", ver),
 					pill: Pill::None,
 					note: None,
 					buttons: vec![
-						(Btn::new("Kapat", Kind::Quiet), Act::Close),
-						(Btn::new("Pulsar'ı Başlat", Kind::Primary).icon_after(Icon::Arrow), Act::Launch),
+						(Btn::new(i18n::t("btn.close"), Kind::Quiet), Act::Close),
+						(Btn::new(i18n::t("btn.launch"), Kind::Primary).icon_after(Icon::Arrow), Act::Launch),
 					],
 					closable: true,
 				},
 				Some(w) => Screen {
 					glow: true,
 					neutral: false,
-					title: "Bir adım kaldı".into(),
-					sub: "Pulsar kuruldu · WebView2 gerekli".into(),
+					title: i18n::t("wv2.title").into(),
+					sub: i18n::t("wv2.sub").into(),
 					pill: Pill::None,
 					note: None,
 					buttons: match w {
 						Wv2::Missing => vec![
 							(launch, Act::Launch),
-							(Btn::new("WebView2'yi indir ve kur", Kind::Primary).icon(Icon::Down), Act::GetWebview2),
+							(Btn::new(i18n::t("btn.getWebview2"), Kind::Primary).icon(Icon::Down), Act::GetWebview2),
 						],
 						Wv2::Downloading => vec![
 							(launch.enabled(false), Act::Launch),
-							(Btn::new("İndiriliyor…", Kind::Primary).icon(Icon::Down).enabled(false), Act::GetWebview2),
+							(Btn::new(i18n::t("btn.downloading"), Kind::Primary).icon(Icon::Down).enabled(false), Act::GetWebview2),
 						],
 						Wv2::Failed(_) => vec![
 							(launch, Act::Launch),
-							(Btn::new("Tekrar dene", Kind::Primary).icon(Icon::Retry), Act::Retry),
+							(Btn::new(i18n::t("btn.retry"), Kind::Primary).icon(Icon::Retry), Act::Retry),
 						],
 					},
 					closable: !matches!(w, Wv2::Downloading),
@@ -628,61 +629,61 @@ impl SetupApp {
 			Phase::Updating => Screen {
 				glow: true,
 				neutral: false,
-				title: "Güncelleniyor…".into(),
+				title: i18n::t("update.title").into(),
 				sub: if self.upd_version.is_empty() {
-					"Pulsar · birkaç saniye sürer".into()
+					i18n::t("update.sub").into()
 				} else {
-					format!("Pulsar v{} · birkaç saniye sürer", self.upd_version)
+					i18n::t("installing.sub").replace("{ver}", &self.upd_version)
 				},
 				pill: Pill::None,
-				note: Some((Icon::Lock, "Bitince Pulsar kendiliğinden açılır.")),
+				note: Some((Icon::Lock, i18n::t("update.reopens"))),
 				buttons: vec![],
 				closable: false,
 			},
 			Phase::UpdateFailed(_) => Screen {
 				glow: false,
 				neutral: true,
-				title: "Güncelleme tamamlanamadı".into(),
-				sub: "Pulsar'ı açıp tekrar deneyebilirsin".into(),
+				title: i18n::t("update.failedTitle").into(),
+				sub: i18n::t("update.failedSub").into(),
 				pill: Pill::None,
 				note: None,
 				buttons: vec![
-					(Btn::new("Kapat", Kind::Quiet), Act::Close),
-					(Btn::new("Pulsar'ı aç", Kind::Primary).icon_after(Icon::Arrow), Act::Reopen),
+					(Btn::new(i18n::t("btn.close"), Kind::Quiet), Act::Close),
+					(Btn::new(i18n::t("btn.open"), Kind::Primary).icon_after(Icon::Arrow), Act::Reopen),
 				],
 				closable: true,
 			},
 			Phase::Failed(_) => Screen {
 				glow: false,
 				neutral: true,
-				title: "Kurulum tamamlanamadı".into(),
-				sub: format!("Pulsar v{ver} kurulamadı"),
+				title: i18n::t("failed.title").into(),
+				sub: i18n::t("failed.sub").replace("{ver}", ver),
 				pill: Pill::None,
 				note: None,
 				buttons: vec![
-					(Btn::new("Kapat", Kind::Quiet), Act::Close),
-					(Btn::new("Tekrar dene", Kind::Primary).icon(Icon::Retry), Act::Retry),
+					(Btn::new(i18n::t("btn.close"), Kind::Quiet), Act::Close),
+					(Btn::new(i18n::t("btn.retry"), Kind::Primary).icon(Icon::Retry), Act::Retry),
 				],
 				closable: true,
 			},
 			Phase::ConfirmUninstall => Screen {
 				glow: false,
 				neutral: false,
-				title: "Pulsar kaldırılsın mı?".into(),
-				sub: format!("v{} · bu kullanıcı için kurulu", install::registered_version().unwrap_or_else(|| ver.to_string())),
+				title: i18n::t("uninstall.title").into(),
+				sub: i18n::t("uninstall.sub").replace("{ver}", &install::registered_version().unwrap_or_else(|| ver.to_string())),
 				pill: Pill::None,
 				note: None,
-				buttons: vec![(Btn::new("Vazgeç", Kind::Ghost), Act::Close), (Btn::new("Kaldır", Kind::Danger), Act::Uninstall)],
+				buttons: vec![(Btn::new(i18n::t("btn.cancel"), Kind::Ghost), Act::Close), (Btn::new(i18n::t("btn.uninstall"), Kind::Danger), Act::Uninstall)],
 				closable: true,
 			},
 			Phase::Uninstalled => Screen {
 				glow: false,
 				neutral: true,
-				title: "Pulsar kaldırıldı".into(),
-				sub: "Bu pencereyi kapatabilirsin.".into(),
+				title: i18n::t("uninstalled.title").into(),
+				sub: i18n::t("uninstalled.sub").into(),
 				pill: Pill::None,
 				note: None,
-				buttons: vec![(Btn::new("Kapat", Kind::Primary), Act::Close)],
+				buttons: vec![(Btn::new(i18n::t("btn.close"), Kind::Primary), Act::Close)],
 				closable: true,
 			},
 		};
@@ -701,11 +702,11 @@ impl SetupApp {
 			ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
 		}
 		let win_title = if matches!(self.phase, Phase::ConfirmUninstall | Phase::Uninstalled) {
-			"Pulsar Kaldırma"
+			i18n::t("title.uninstall")
 		} else if self.upd_app.is_some() || matches!(self.phase, Phase::Updating | Phase::UpdateFailed(_)) {
-			"Pulsar Güncelleme"
+			i18n::t("title.update")
 		} else {
-			"Pulsar Kurulum"
+			i18n::t("title.install")
 		};
 		p.text(at(PAD, 20.0), Align2::LEFT_CENTER, win_title, ui::semibold(12.0), t.muted);
 		let close_rect = Rect::from_min_size(at(W - 6.0 - 32.0, 6.0), Vec2::new(32.0, 28.0));
@@ -721,7 +722,7 @@ impl SetupApp {
 			}
 		} else {
 			ui::icon(&p, Icon::Close, close_rect.center() - Vec2::splat(8.0), 16.0, t.border_strong, 1.4);
-			close.on_hover_text("Kurulum sürerken kapatılamaz");
+			close.on_hover_text(i18n::t("installing.noCloseHover"));
 		}
 
 		// ── Hero ───────────────────────────────────────────────────────────────────
@@ -776,15 +777,15 @@ impl SetupApp {
 					t,
 					Tone::Warn,
 					Icon::Warn,
-					Some("Uygulama paketi yok"),
-					"Bu derleme, içine gömülü uygulama paketi olmadan oluşturulmuş (geliştirme sürümü). Bu dosyayla kurulum yapılamaz.",
+					Some(i18n::t("welcome.noPayloadTitle")),
+					i18n::t("welcome.noPayload"),
 				);
 			}
 			Phase::Welcome => {
 				if let Some(old) = &self.update_from {
-					let mut s = format!("v{old} kurulu. Aynı klasöre güncellenecek.");
+					let mut s = i18n::t("welcome.updateFrom").replace("{old}", old);
 					if self.running {
-						s.push_str(" Açık olan Pulsar, kurulum başlarken kapatılır.");
+						s.push_str(i18n::t("welcome.running"));
 					}
 					y += ui::banner(&p, at(PAD, y), bw, t, Tone::Info, Icon::Info, None, &s) + gap;
 				}
@@ -809,7 +810,7 @@ impl SetupApp {
 				}
 				y += gap;
 				let (_, clicked) =
-					ui::checkbox(ui, at(PAD, y), t, "Masaüstüne kısayol ekle", self.desktop_shortcut, ui.scope_id().with("desktop"));
+					ui::checkbox(ui, at(PAD, y), t, i18n::t("welcome.desktopShortcut"), self.desktop_shortcut, ui.scope_id().with("desktop"));
 				if clicked {
 					self.desktop_shortcut = !self.desktop_shortcut;
 				}
@@ -817,25 +818,25 @@ impl SetupApp {
 			Phase::Installing => {
 				let (label, counter, frac, file) = if self.driver {
 					(
-						"Sanal DualSense sürücüsü (usbip-win2)…",
+						i18n::t("installing.driver"),
 						format!("{0} / {0}", self.total),
 						1.0,
-						"Yönetici izni istenirse onayla.".to_string(),
+						i18n::t("installing.approveAdmin").to_string(),
 					)
 				} else if self.finishing {
 					(
-						"Kısayollar ve kayıt…",
+						i18n::t("installing.shortcuts"),
 						format!("{0} / {0}", self.total),
 						1.0,
 						if self.desktop_shortcut {
-							"Başlat Menüsü · Masaüstü · Programlar ve Özellikler".to_string()
+							i18n::t("installing.shortcutsDesktop").to_string()
 						} else {
-							"Başlat Menüsü · Programlar ve Özellikler".to_string()
+							i18n::t("installing.shortcutsNoDesktop").to_string()
 						},
 					)
 				} else {
 					(
-						"Dosyalar çıkarılıyor",
+						i18n::t("installing.extracting"),
 						format!("{} / {}", self.done_entries, self.total.max(1)),
 						if self.total > 0 { self.done_entries as f32 / self.total as f32 } else { 0.0 },
 						self.current.clone(),
@@ -849,14 +850,14 @@ impl SetupApp {
 				};
 				match &self.wv2 {
 					None => {
-						y += ok(&p, y, "Uygulama dosyaları", Some(format!(" · {} dosya", self.total))) + 7.0;
+						y += ok(&p, y, i18n::t("done.appFiles"), Some(i18n::t("done.fileCount").replace("{n}", &self.total.to_string()))) + 7.0;
 						let shortcuts =
-							if self.desktop_shortcut { "Başlat Menüsü ve masaüstü kısayolu" } else { "Başlat Menüsü kısayolu" };
+							i18n::t(if self.desktop_shortcut { "done.shortcutBoth" } else { "done.shortcutStart" });
 						y += ok(&p, y, shortcuts, None) + 7.0;
-						ok(&p, y, "Programlar ve Özellikler kaydı", None);
+						ok(&p, y, i18n::t("done.registration"), None);
 					}
 					Some(w) => {
-						y += ok(&p, y, &format!("Pulsar v{ver} kuruldu"), None) + gap;
+						y += ok(&p, y, &i18n::t("done.installed").replace("{ver}", ver), None) + gap;
 						match w {
 							Wv2::Missing => {
 								ui::banner(
@@ -866,8 +867,8 @@ impl SetupApp {
 									t,
 									Tone::Warn,
 									Icon::Warn,
-									Some("WebView2 çalışma zamanı bulunamadı"),
-									"Pulsar'ın arayüzü için gerekli. Microsoft'tan indirip kurmak için internet bağlantısı gerekir.",
+									Some(i18n::t("wv2.missingTitle")),
+									i18n::t("wv2.missing"),
 								);
 							}
 							Wv2::Downloading => {
@@ -878,8 +879,8 @@ impl SetupApp {
 									t,
 									Tone::Info,
 									Icon::Down,
-									Some("WebView2 indiriliyor…"),
-									"Microsoft sunucularından alınıyor. İnternet hızına göre bir dakika kadar sürebilir.",
+									Some(i18n::t("wv2.downloadingTitle")),
+									i18n::t("wv2.downloading"),
 								);
 							}
 							Wv2::Failed(code) => {
@@ -890,8 +891,8 @@ impl SetupApp {
 									t,
 									Tone::Danger,
 									Icon::Warn,
-									Some("WebView2 indirilemedi"),
-									&format!("İnternet bağlantını kontrol edip tekrar dene. ({code})"),
+									Some(i18n::t("wv2.failedTitle")),
+									&i18n::t("wv2.failed").replace("{code}", code),
 								);
 							}
 						}
@@ -903,7 +904,7 @@ impl SetupApp {
 				// typical install time, so the bar keeps moving without claiming to be done.
 				let s = self.upd_started.elapsed().as_secs_f32();
 				let frac = 0.95 * (1.0 - (-s / 9.0).exp());
-				ui::progress(&p, at(PAD, y), bw, t, "Dosyalar kuruluyor", "", frac, "Yönetici izni istenirse onayla.");
+				ui::progress(&p, at(PAD, y), bw, t, i18n::t("installing.files"), "", frac, i18n::t("installing.approveAdmin"));
 			}
 			Phase::UpdateFailed(e) => {
 				let e = e.clone();
@@ -916,7 +917,7 @@ impl SetupApp {
 					&p,
 					at(PAD, y),
 					ui::text_job(
-						"Dosya başka bir program tarafından kullanılıyor olabilir. Pulsar açıksa kapatıp tekrar dene.",
+						i18n::t("failed.hint"),
 						ui::regular(12.5),
 						t.muted,
 						18.0,
@@ -930,15 +931,15 @@ impl SetupApp {
 				y += ui::draw_job(
 					&p,
 					at(PAD, y),
-					ui::text_job("Bu bilgisayardan şunlar silinecek:", ui::regular(13.0), t.muted, 19.0, bw, 0, false),
+					ui::text_job(i18n::t("uninstall.willRemove"), ui::regular(13.0), t.muted, 19.0, bw, 0, false),
 				)
 				.y + 10.0;
 				let rm = |p: &egui::Painter, y: f32, text: &str, suffix: Option<(&str, egui::FontId)>| {
 					ui::list_row(p, at(PAD, y), bw, Icon::Minus, t.danger_text, text, t.text, suffix, t.muted)
 				};
-				y += rm(&p, y, "Uygulama dosyaları", Some(("  %LOCALAPPDATA%\\Programs\\Pulsar", ui::mono(11.0)))) + 7.0;
-				y += rm(&p, y, "Başlat Menüsü ve masaüstü kısayolları", None) + 7.0;
-				rm(&p, y, "Programlar ve Özellikler kaydı", None);
+				y += rm(&p, y, i18n::t("done.appFiles"), Some(("  %LOCALAPPDATA%\\Programs\\Pulsar", ui::mono(11.0)))) + 7.0;
+				y += rm(&p, y, i18n::t("uninstall.shortcuts"), None) + 7.0;
+				rm(&p, y, i18n::t("done.registration"), None);
 			}
 			Phase::Uninstalled => {
 				ui::list_row(
@@ -947,7 +948,7 @@ impl SetupApp {
 					bw,
 					Icon::Check,
 					t.muted,
-					"Uygulama dosyaları, kısayollar ve kayıt silindi.",
+					i18n::t("uninstalled.body"),
 					t.muted,
 					None,
 					t.muted,
@@ -1006,7 +1007,7 @@ impl SetupApp {
 		acts
 	}
 
-	/// The error box: header strip ("HATA AYRINTISI" + Copy) and the selectable, scrollable
+	/// The error box: header strip ("ERROR DETAILS" + Copy) and the selectable, scrollable
 	/// monospace detail (4 lines at most). Returns its height.
 	fn error_box(&self, ui: &mut egui::Ui, top_left: Pos2, width: f32, t: &Tok, e: &str, acts: &mut Vec<Act>) -> f32 {
 		let p = ui.painter().clone();
@@ -1016,15 +1017,15 @@ impl SetupApp {
 		let rect = Rect::from_min_size(top_left, Vec2::new(width, h));
 		p.rect_filled(rect, CornerRadius::same(8), t.sunken);
 		p.rect_stroke(rect, CornerRadius::same(8), Stroke::new(1.0, t.border), StrokeKind::Inside);
-		let mut head = ui::text_job("HATA AYRINTISI", ui::mono(10.5), t.faint, 14.0, width, 1, false);
+		let mut head = ui::text_job(i18n::t("failed.details"), ui::mono(10.5), t.faint, 14.0, width, 1, false);
 		head.sections[0].format.extra_letter_spacing = 0.8;
 		ui::draw_job(&p, top_left + Vec2::new(12.0, 8.0), head);
 		p.line_segment(
 			[top_left + Vec2::new(0.0, 30.0), top_left + Vec2::new(width, 30.0)],
 			Stroke::new(1.0, t.border),
 		);
-		// "Kopyala" mini button.
-		let label = if self.copied { "Kopyalandı" } else { "Kopyala" };
+		// "Copy" mini button.
+		let label = i18n::t(if self.copied { "btn.copied" } else { "btn.copy" });
 		let lw = ui::text_width(&p, label, ui::semibold(12.0));
 		let mr = Rect::from_min_size(top_left + Vec2::new(width - 6.0 - (8.0 + 13.0 + 6.0 + lw + 8.0), 3.0), Vec2::new(8.0 + 13.0 + 6.0 + lw + 8.0, 24.0));
 		let r = ui.interact(mr, ui.scope_id().with("copy"), Sense::click());

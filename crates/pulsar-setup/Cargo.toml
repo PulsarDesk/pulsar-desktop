@@ -35,12 +35,15 @@ eframe = { version = "0.37", default-features = false, features = ["glow", "defa
 zip = { version = "9", default-features = false, features = ["deflate"] }
 # The window handle for the DWM rounded-corner request (the same 0.6 eframe uses).
 raw-window-handle = "0.6"
+# The EN / TR string catalogs (`lang/*.json`, see src/i18n.rs).
+serde_json.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-# The "Değiştir" folder picker on the welcome screen (the same rfd the app uses).
+# The "Change" folder picker on the welcome screen (the same rfd the app uses).
 rfd = "0.17"
 windows-sys = { version = "0.61", features = [
 	"Win32_Foundation",
+	"Win32_Globalization", # i18n: GetUserDefaultUILanguage (no saved app language yet)
 	"Win32_Graphics_Dwm",
 	"Win32_System_Registry",
 	"Win32_System_Threading",

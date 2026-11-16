@@ -1,5 +1,5 @@
 //! The installer's look: design tokens, fonts and the hand-drawn pieces (icons, the Pulsar
-//! mark, buttons, boxes). Source: the "Pulsar Kurulum" design (Pulsar DS, converted to sRGB
+//! mark, buttons, boxes). Source: the "Pulsar Setup" design (Pulsar DS, converted to sRGB
 //! for egui). Light and dark follow the Windows app theme. No animation anywhere.
 
 use std::sync::Arc;
@@ -466,7 +466,7 @@ impl<'a> Btn<'a> {
 
 /// "Kurulum yeri" + the path box.
 pub fn path_box(p: &Painter, top_left: Pos2, width: f32, t: &Tok, path: &str) -> f32 {
-	let lh = draw_job(p, top_left, text_job("Kurulum yeri", semibold(12.0), t.muted, 16.0, width, 1, false)).y;
+	let lh = draw_job(p, top_left, text_job(crate::i18n::t("dir.label"), semibold(12.0), t.muted, 16.0, width, 1, false)).y;
 	let y0 = top_left.y + lh + 6.0;
 	let inner_w = width - 24.0 - 16.0 - 10.0;
 	let job = text_job(path, mono(12.0), t.text, 17.0, inner_w, 2, true);
@@ -480,7 +480,7 @@ pub fn path_box(p: &Painter, top_left: Pos2, width: f32, t: &Tok, path: &str) ->
 	y0 + h - top_left.y
 }
 
-/// `path_box` with a "Değiştir" button at its right edge (fresh installs; an update keeps the
+/// `path_box` with a "Change" button at its right edge (fresh installs; an update keeps the
 /// registered folder, so it passes `editable = false` and the button is not drawn).
 /// Returns (height, change clicked).
 pub fn path_box_edit(ui: &mut Ui, top_left: Pos2, width: f32, t: &Tok, path: &str, editable: bool, id: egui::Id) -> (f32, bool) {
@@ -488,9 +488,9 @@ pub fn path_box_edit(ui: &mut Ui, top_left: Pos2, width: f32, t: &Tok, path: &st
 		return (path_box(ui.painter(), top_left, width, t, path), false);
 	}
 	let p = ui.painter().clone();
-	let label = "Değiştir";
+	let label = crate::i18n::t("dir.change");
 	let bw = text_width(&p, label, semibold(12.5)) + 20.0;
-	let lh = draw_job(&p, top_left, text_job("Kurulum yeri", semibold(12.0), t.muted, 16.0, width, 1, false)).y;
+	let lh = draw_job(&p, top_left, text_job(crate::i18n::t("dir.label"), semibold(12.0), t.muted, 16.0, width, 1, false)).y;
 	let y0 = top_left.y + lh + 6.0;
 	let inner_w = width - 24.0 - 16.0 - 10.0 - bw - 8.0;
 	let job = text_job(path, mono(12.0), t.text, 17.0, inner_w, 2, true);

@@ -142,9 +142,9 @@ pub fn install_usbip(installer: &Path) -> Result<(), String> {
 			.map_err(|e| e.to_string())?;
 		match status.code() {
 			Some(0) => Ok(()),
-			Some(1223) => Err("yönetici izni verilmedi".to_string()),
-			Some(c) => Err(format!("çıkış kodu {c}")),
-			None => Err("bilinmeyen hata".to_string()),
+			Some(1223) => Err("admin rights were declined".to_string()),
+			Some(c) => Err(format!("exit code {c}")),
+			None => Err("unknown error".to_string()),
 		}
 	}
 	#[cfg(not(windows))]

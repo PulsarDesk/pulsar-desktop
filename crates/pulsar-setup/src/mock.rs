@@ -11,7 +11,7 @@ use crate::install::Msg;
 /// Which mock path to walk (each a `--mock-*` flag).
 #[derive(Clone, Copy)]
 pub struct Mock {
-	/// `--mock-fail`: fail half way through the extract (the "Kurulum tamamlanamadı" screen).
+	/// `--mock-fail`: fail half way through the extract (the "The install couldn't finish" screen).
 	pub fail: bool,
 	/// `--mock-no-webview2`: report WebView2 as missing on the done screen.
 	pub no_webview2: bool,
@@ -58,7 +58,7 @@ impl At {
 
 /// The error `--mock-fail` / `--mock-at=failed` shows.
 pub const ERROR: &str =
-	r"(mock) Dosya yazılamadı: C:\Users\kullanici\AppData\Local\Programs\Pulsar\resources\ffmpeg.exe — erişim engellendi (os error 5)";
+	r"(mock) could not write C:\Users\user\AppData\Local\Programs\Pulsar\resources\ffmpeg.exe: Access is denied. (os error 5)";
 
 /// The fake WebView2 download: a couple of seconds, then success (or `--mock-wv2-fail`).
 pub fn install_webview2(m: Mock) -> Result<(), String> {

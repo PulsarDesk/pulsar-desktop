@@ -40,7 +40,7 @@ pub fn run_elevated(dir: &Path, flag: &str) -> Result<(), String> {
 		const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 		let exe = dir.join("pulsar.exe");
 		if !exe.is_file() {
-			return Err("pulsar.exe yok".into());
+			return Err("pulsar.exe is missing".into());
 		}
 		let script = format!(
 			"try {{ $p = Start-Process -Wait -PassThru -WindowStyle Hidden -Verb RunAs -FilePath '{}' -ArgumentList '{}' }} catch {{ exit 1223 }}; exit $p.ExitCode",
@@ -54,9 +54,9 @@ pub fn run_elevated(dir: &Path, flag: &str) -> Result<(), String> {
 			.map_err(|e| e.to_string())?;
 		match status.code() {
 			Some(0) => Ok(()),
-			Some(1223) => Err("yönetici izni verilmedi".into()),
-			Some(c) => Err(format!("çıkış kodu {c}")),
-			None => Err("bilinmeyen hata".into()),
+			Some(1223) => Err("admin rights were declined".into()),
+			Some(c) => Err(format!("exit code {c}")),
+			None => Err("unknown error".into()),
 		}
 	}
 	#[cfg(not(windows))]
