@@ -9,7 +9,7 @@ register→ID→P2P→relay-fallback + relay-down survival, E2E crypto, one-time
 auth (`unattended_access` skips), Approve/view-only consent flow, controller
 detection/normalization + virtual pads (uinput + ViGEmBus), capture/encode paths
 above, native render + overlay, **side channels — clipboard, file transfer (+
-file browser `fs_browse.rs` + Files window), chat, mic, voice call**
+file browser `fs_browse.rs` + Files window), chat, mic, phone-style voice calls (`call.rs`, audio.md)**
 (`Session/sidechannels.svelte.ts`), multi-session **tabs + split view**
 (`sessions.svelte.ts`), 4-language i18n, LAN discovery UI (`Home/LanDevices`),
 Games library + folder scan, gamepad-driven UI nav (`gamepadNav.svelte.ts`),

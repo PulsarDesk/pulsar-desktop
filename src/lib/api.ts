@@ -41,6 +41,7 @@ export {
 	onDataClip,
 	onFileRecv,
 	onToasts,
+	onCallState,
 	onFileBegin,
 	onFsEntries,
 	onPeerAvatar,

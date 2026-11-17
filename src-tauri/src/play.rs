@@ -623,6 +623,7 @@ pub(crate) async fn start_remote_play(
 									for l in crate::audio_devices::seed_lines() {
 										let _ = writeln!(si, "{l}");
 									}
+									let _ = writeln!(si, "{}", crate::call::seed_line(id));
 								}
 								*caps_line.lock().unwrap() = line;
 								render_seed.lock().unwrap().audio = Some((true, game_mode, false));
@@ -934,6 +935,7 @@ pub(crate) async fn start_remote_play(
 										for l in crate::audio_devices::seed_lines() {
 											let _ = writeln!(si, "{l}");
 										}
+										let _ = writeln!(si, "{}", crate::call::seed_line(id));
 									}
 									*caps_line.lock().unwrap() = line;
 									render_seed.lock().unwrap().audio =
@@ -2259,6 +2261,8 @@ pub(crate) async fn start_remote_play(
 		// Name first (tiny, instant); the avatar may take a blocking decode.
 		let _ = tx.try_send(DataMsg::PeerName(name));
 		let _ = tx.try_send(DataMsg::CursorLabel(cur_label));
+		// Voice calls: say we take them (the host's menu offers calling only then).
+		crate::call::session_up(&app, crate::call::CallKey::Client(id));
 		// Then our device ID, so a direct-connect host shows "641 724 395", not ip:port.
 		if let Some(id) = self_dev_id {
 			let _ = tx.try_send(DataMsg::PeerId(id.grouped()));
@@ -2473,6 +2477,7 @@ pub(crate) async fn stop_stream(
 	// Shown in a detached tab window: its video goes back under the main window first (a
 	// Linux resident container must outlive that window).
 	crate::tabwin::play_stopped(&app, id);
+	crate::call::session_gone(&app, crate::call::CallKey::Client(id));
 	let play = state.plays.lock().unwrap().remove(&id);
 	// Drop this session's per-id monitor-picker debounce entry so the map doesn't
 	// accumulate stale entries across reconnects.

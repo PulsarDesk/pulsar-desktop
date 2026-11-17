@@ -51,7 +51,6 @@
 	"display.adapt": "Screen adaptation",
 	"info.adapt": "Screen adaptation: automatically switches the host's resolution to the mode that best fits this pane (Parsec-style) and reverts it on exit. Useful for split panes.",
 	"info.pacing": "Frame pacing: paces frames evenly to the display refresh (Moonlight-style) to reduce stutter — may add a little latency.",
-	"audio.call": "Voice call",
 	"audio.host": "Host audio",
 	"audio.speakers": "Host speakers",
 	"audio.mic": "Microphone",
@@ -95,7 +94,6 @@
 	"hint.click": "Click the screen to take control",
 	"info.pacing": "Frame pacing: buffers 1-2 frames to smooth network/decode jitter and presents at a steady cadence. On = smoother (adds a little latency), Off = lowest latency.",
 	"info.quality": "Low latency: the encoder favors speed (for gaming). Quality: better picture at the same bandwidth, slightly more latency.",
-	"info.call": "Voice call: opens your microphone to the host and the host's audio to you (two-way audio).",
 	"info.statshud": "Shows a small fps/latency strip at the top of the screen even while the overlay is closed.",
 	"info.ovbtn": "A small draggable button on the video that opens the overlay (Parsec-style).",
 	"active": "Active:",
@@ -121,5 +119,12 @@
 	"controllers.lockOn": "Locked",
 	"controllers.lockOff": "Free",
 	"hint.rows": "Arrows: select and change · Enter / A: confirm · Esc / B: back",
-	"hint.options": "Arrows: move · Enter / A: pick · Esc / B: cancel"
+	"hint.options": "Arrows: move · Enter / A: pick · Esc / B: cancel",
+	"call.host": "Host",
+	"call.start": "Voice call — call the host",
+	"call.calling": "Calling {name}… — cancel",
+	"call.answer": "{name} is calling — answer",
+	"call.decline": "Decline",
+	"call.hangup": "In call {time} — hang up",
+	"call.na": "Voice call — the host's Pulsar is too old"
 }

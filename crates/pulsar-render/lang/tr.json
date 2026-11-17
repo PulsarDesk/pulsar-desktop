@@ -51,7 +51,6 @@
 	"display.adapt": "Ekran uyarlama",
 	"info.adapt": "Ekran uyarlama: host'un çözünürlüğünü bu pencereye en uygun moda otomatik geçirir (Parsec gibi), çıkışta eski haline döndürür. Bölünmüş ekranlarda işe yarar.",
 	"info.pacing": "Kare eşitleme: kareleri ekran yenileme hızına göre düzgün aralıklarla gösterir (Moonlight tarzı), takılmayı azaltır ama biraz gecikme ekleyebilir.",
-	"audio.call": "Sesli görüşme",
 	"audio.host": "Host sesi",
 	"audio.speakers": "Host hoparlörü",
 	"audio.mic": "Mikrofon",
@@ -95,7 +94,6 @@
 	"hint.click": "Kontrolü almak için ekrana tıklayın",
 	"info.pacing": "Kare eşitleme: ağ/çözme titremesini yumuşatmak için 1-2 kare tamponlar ve düzenli tempoda gösterir. Açık = daha akıcı (biraz gecikme ekler), Kapalı = en düşük gecikme.",
 	"info.quality": "Düşük gecikme: encoder hızı önceler (oyun için). Kalite: aynı bant genişliğinde daha iyi görüntü, biraz daha gecikme.",
-	"info.call": "Sesli görüşme: mikrofonunu karşıya, karşının sesini sana açar (iki yönlü ses).",
 	"info.statshud": "Overlay kapalıyken de ekranın üstünde küçük bir fps/gecikme şeridi gösterir.",
 	"info.ovbtn": "Videonun köşesinde overlay'i açan sürüklenebilir küçük düğme (Parsec tarzı).",
 	"active": "Aktif:",
@@ -121,5 +119,12 @@
 	"controllers.lockOn": "Kilitli",
 	"controllers.lockOff": "Serbest",
 	"hint.rows": "Yön tuşları: seç ve değiştir · Enter / A: onayla · Esc / B: geri",
-	"hint.options": "Yön tuşları: gez · Enter / A: seç · Esc / B: vazgeç"
+	"hint.options": "Yön tuşları: gez · Enter / A: seç · Esc / B: vazgeç",
+	"call.host": "Karşı taraf",
+	"call.start": "Sesli arama — karşı tarafı ara",
+	"call.calling": "{name} aranıyor… — iptal",
+	"call.answer": "{name} arıyor — yanıtla",
+	"call.decline": "Reddet",
+	"call.hangup": "Görüşmede {time} — kapat",
+	"call.na": "Sesli arama — karşı taraftaki Pulsar eski"
 }

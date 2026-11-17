@@ -1,7 +1,7 @@
 // The `api` object: typed wrappers over the Tauri commands exposed by the Rust
 // core. Re-exported by `api.ts`.
 
-import type { AutoConnectTarget, Config, ConnInfo, ControllerInfo, PulsarToast } from './types';
+import type { AutoConnectTarget, CallSide, CallState, Config, ConnInfo, ControllerInfo, PulsarToast } from './types';
 import type { FsEntry, LocalCaps } from './api.types';
 import type { GameInfo, LanDevice, PenSample, PlayInfo, RemoteSources, ScannedApp, TouchSample, WindowInfo } from './api.types';
 import { invoke } from './api.invoke';
@@ -188,6 +188,20 @@ export const api = {
 	toastList: () => invoke<PulsarToast[]>('toast_list'),
 	toastOpen: (id: number) => invoke<void>('toast_open', { id }),
 	toastClose: (id: number) => invoke<void>('toast_close', { id }),
+	/** A call card's button: `accept`, `decline` or `hangup`. */
+	toastCall: (id: number, action: 'accept' | 'decline' | 'hangup') => invoke<void>('toast_call', { id, action }),
+	/** Voice call of a session (`host` + sid, or `client` + play id): ring / answer / decline / hang up. */
+	callAction: (side: CallSide, id: number, action: 'start' | 'accept' | 'decline' | 'hangup') =>
+		invoke<void>('call_action', { side, id, action }),
+	/** Every ongoing call (a window seeds itself, then follows `call-state`). */
+	callStates: () => invoke<CallState[]>('call_states'),
+	/** Settings: the ringtone of an incoming call (`custom` plays `path`). */
+	setRingtone: (tone: string, path: string) => invoke<void>('set_ringtone', { tone, path }),
+	/** Settings: play the picked ringtone for a few seconds, or stop it. */
+	ringtonePreview: (tone: string, path: string, stop = false) =>
+		invoke<void>('ringtone_preview', { tone, path, stop }),
+	/** Settings: pick a custom ringtone file (null = cancelled). */
+	pickRingtone: () => invoke<string | null>('pick_ringtone'),
 	/** Host: revoke/restore a connected SESSION's CONTROL ("Sadece izleme") — its
 	 * input is dropped while set; the stream keeps running. Keyed by session id. */
 	setViewOnly: (sid: number, on: boolean) => invoke<void>('set_view_only', { sid, on }),

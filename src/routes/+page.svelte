@@ -1169,6 +1169,12 @@
 		api.setAudioDevices(ui.micDevice ?? '', ui.speakerDevice ?? '').catch(() => {});
 	});
 
+	// Ringtone of an incoming voice call (Settings → Display → Audio) follows the setting.
+	$effect(() => {
+		if (isPopup) return;
+		api.setRingtone(ui.ringtone ?? 'classic', ui.ringtonePath ?? '').catch(() => {});
+	});
+
 	// Experimental DS4 headset jack (Windows USB) follows the setting.
 	$effect(() => {
 		if (isPopup) return;

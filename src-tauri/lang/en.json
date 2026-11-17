@@ -93,5 +93,11 @@
 	"err.fsList": "could not list the folder",
 	"err.notConnected": "device not connected",
 	"stream.shortfall": "The connection can't carry {picked} — using {current}",
-	"err.fsGet": "could not request the file"
+	"err.fsGet": "could not request the file",
+	"call.host": "The host",
+	"call.banner": "{name} is calling — open the Pulsar menu (Audio) to answer",
+	"call.call-declined": "Call declined",
+	"call.call-noanswer": "No answer",
+	"call.call-missed": "Missed call",
+	"call.call-ended": "Call ended"
 }

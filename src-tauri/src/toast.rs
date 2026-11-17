@@ -49,6 +49,12 @@ pub(crate) struct Toast {
 	/// `input-off`: the cause, for the click's fix.
 	#[serde(skip)]
 	input: Option<pulsar_core::input::InputFailure>,
+	/// `call-in` / `call-out` / `call-on`: the call it shows (its buttons act on it). Such a
+	/// card stays until the call layer removes it (no lifetime, never pushed out).
+	#[serde(skip)]
+	call: Option<crate::call::CallKey>,
+	/// Call cards: wall-clock ms the phase began (the talk timer).
+	since: u64,
 }
 
 static TOASTS: Mutex<Vec<Toast>> = Mutex::new(Vec::new());
@@ -106,6 +112,33 @@ pub(crate) fn input_note(app: &AppHandle, ok: bool, text: String) {
 	push(app, if ok { "input-on" } else { "input-off" }, text, String::new(), None);
 }
 
+/// A call card (`call-in` / `call-out` / `call-on`) for `key`, with `peer` the other side's
+/// name. Stays until [`remove`]; returns its id.
+pub(crate) fn call_card(app: &AppHandle, kind: &'static str, peer: &str, key: crate::call::CallKey, since: u64) -> u64 {
+	insert(app, Toast {
+		id: 0,
+		kind,
+		name: String::new(),
+		peer: peer.to_string(),
+		path: None,
+		chat_peer: None,
+		input: None,
+		call: Some(key),
+		since,
+	})
+}
+
+/// A call that ended on the other side: `call-missed`, `call-declined`, `call-noanswer`,
+/// `call-ended`.
+pub(crate) fn call_notice(app: &AppHandle, kind: &'static str, peer: &str) {
+	push(app, kind, String::new(), peer.to_string(), None);
+}
+
+/// Take a notice down (a call card when its call moves on).
+pub(crate) fn remove(app: &AppHandle, id: u64) {
+	dismiss(app, id);
+}
+
 fn push(app: &AppHandle, kind: &'static str, name: String, peer: String, path: Option<PathBuf>) {
 	push_with(app, kind, name, peer, path, None);
 }
@@ -130,27 +163,46 @@ fn push_full(
 	chat_peer: Option<String>,
 	input: Option<pulsar_core::input::InputFailure>,
 ) {
-	let id = NEXT.fetch_add(1, Ordering::Relaxed);
-	{
-		let mut g = TOASTS.lock().unwrap_or_else(|e| e.into_inner());
-		g.push(Toast {
-			id,
+	let id = insert(
+		app,
+		Toast {
+			id: 0,
 			kind,
 			name,
 			peer,
 			path: path.map(|p| p.to_string_lossy().into_owned()),
 			chat_peer,
 			input,
-		});
-		let over = g.len().saturating_sub(MAX_VISIBLE);
-		g.drain(..over);
-	}
-	sync(app);
+			call: None,
+			since: 0,
+		},
+	);
 	let app = app.clone();
 	tauri::async_runtime::spawn(async move {
 		tokio::time::sleep(LIFETIME).await;
 		dismiss(&app, id);
 	});
+}
+
+/// Add `t` (its id assigned here) and show the stack. Past [`MAX_VISIBLE`], the oldest
+/// ordinary notices make room; call cards are never pushed out.
+fn insert(app: &AppHandle, mut t: Toast) -> u64 {
+	let id = NEXT.fetch_add(1, Ordering::Relaxed);
+	t.id = id;
+	{
+		let mut g = TOASTS.lock().unwrap_or_else(|e| e.into_inner());
+		g.push(t);
+		while g.len() > MAX_VISIBLE {
+			match g.iter().position(|t| t.call.is_none()) {
+				Some(i) => {
+					g.remove(i);
+				}
+				None => break,
+			}
+		}
+	}
+	sync(app);
+	id
 }
 
 fn dismiss(app: &AppHandle, id: u64) {
@@ -244,13 +296,17 @@ pub(crate) fn toast_close(app: AppHandle, id: u64) {
 /// permission notice the permission's settings; any notice is then dismissed.
 #[tauri::command]
 pub(crate) fn toast_open(app: AppHandle, id: u64) {
-	let (kind, path, chat_peer, input) = TOASTS
+	let (kind, path, chat_peer, input, call) = TOASTS
 		.lock()
 		.unwrap_or_else(|e| e.into_inner())
 		.iter()
 		.find(|t| t.id == id)
-		.map(|t| (t.kind, t.path.clone(), t.chat_peer.clone(), t.input))
-		.unwrap_or(("", None, None, None));
+		.map(|t| (t.kind, t.path.clone(), t.chat_peer.clone(), t.input, t.call))
+		.unwrap_or(("", None, None, None, None));
+	// A call card acts through its buttons only (toast_call); a click elsewhere keeps it.
+	if call.is_some() {
+		return;
+	}
 	if kind == "kbd-perm" {
 		crate::kbdhook::request_permission();
 	}
@@ -264,6 +320,20 @@ pub(crate) fn toast_open(app: AppHandle, id: u64) {
 		reveal_in_folder(Path::new(&p));
 	}
 	dismiss(&app, id);
+}
+
+/// A call card's button: `accept`, `decline` or `hangup` on the call it shows.
+#[tauri::command]
+pub(crate) fn toast_call(app: AppHandle, id: u64, action: String) {
+	let key = TOASTS
+		.lock()
+		.unwrap_or_else(|e| e.into_inner())
+		.iter()
+		.find(|t| t.id == id)
+		.and_then(|t| t.call);
+	if let Some(key) = key {
+		crate::call::action(&app, key, &action);
+	}
 }
 
 /// Open the platform file manager on `path`'s folder with `path` selected (Explorer

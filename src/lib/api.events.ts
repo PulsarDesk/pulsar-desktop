@@ -3,7 +3,7 @@
 
 import { isTauri } from './api.invoke';
 import type { AuthPrompt, DataText, FileBegin, FileRecv, FsEntries, HostDisplay, LocalCaps, SessionEvent } from './api.types';
-import type { PulsarToast } from './types';
+import type { CallState, PulsarToast } from './types';
 
 async function listenTo<T>(event: string, cb: (e: T) => void): Promise<() => void> {
 	if (!isTauri) return () => {};
@@ -127,6 +127,8 @@ export const onDataClip = (cb: (e: DataText) => void) => listenTo<DataText>('dat
 export const onFileRecv = (cb: (e: FileRecv) => void) => listenTo<FileRecv>('file-recv', cb);
 /** Toast window: the full list of Pulsar notices whenever it changes. */
 export const onToasts = (cb: (list: PulsarToast[]) => void) => listenTo<PulsarToast[]>('toasts', cb);
+/** A session's voice call changed (either side; `call.rs`). */
+export const onCallState = (cb: (s: CallState) => void) => listenTo<CallState>('call-state', cb);
 /** Client: the host started streaming a file-manager download (FileBegin received).
  * Used to cancel the short wall-clock timeout so the concurrency slot isn't released
  * while the transfer is legitimately in flight. `peer` = play id as string. */

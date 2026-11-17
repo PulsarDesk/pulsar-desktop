@@ -746,6 +746,8 @@ fn stdin_control() {
 					});
 				}
 			}
+		} else if crate::overlay::call_line(l) {
+			// The session's voice call (`callstate <phase> <since_ms> <name>`) for the Audio rows.
 		} else if crate::overlay::audio_devices_line(l) {
 			// This computer's mic / output devices for the Ses pickers: `micdevs <cur> <dev>…`,
 			// `spkdevs …` (percent-encoded names, `*` = system default; overlay.rs).
@@ -2988,17 +2990,6 @@ fn apply_ov_cmd(ostate: &mut crate::overlay::OverlayState, c: crate::overlay::Ov
 				"amute" => AUDIO_MUTE.store(val == "on", Ordering::SeqCst),
 				"aquality" => crate::overlay::set_audio_quality(&val),
 				"mic" => MIC_ON.store(val == "on", Ordering::SeqCst),
-				// Voice call = mic + host audio together (paired optimistic update).
-				// ON enables BOTH; OFF drops ONLY the mic and leaves host audio
-				// as-is (it has its own `atx` row). The overlay highlight derives
-				// from MIC_ON alone (overlay::draw_audio) so it stays in sync.
-				"call" => {
-					let on = val == "on";
-					MIC_ON.store(on, Ordering::SeqCst);
-					if on {
-						AUDIO_TX.store(true, Ordering::SeqCst);
-					}
-				}
 				// View fit is renderer-local (instant Blt rect change) + forwarded
 				// so the frontend mirrors/persists it — Linux-parity (linux.rs).
 				"fit" => present::set_fit(&val),

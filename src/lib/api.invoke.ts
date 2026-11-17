@@ -318,6 +318,10 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 		case 'fs_get':
 		case 'mic_start':
 		case 'mic_stop':
+		case 'toast_call':
+		case 'call_action':
+		case 'set_ringtone':
+		case 'ringtone_preview':
 		case 'set_language':
 			return Promise.resolve(undefined as unknown as T);
 		case 'kbd_os_capture':
@@ -339,6 +343,10 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 							{ name: 'notlar.txt', dir: false, size: 2048 }
 						]) as unknown as T
 			);
+		case 'call_states':
+			return Promise.resolve([] as unknown as T);
+		case 'pick_ringtone':
+			return Promise.resolve(null as unknown as T);
 		default:
 			return Promise.reject(new Error(`unknown command: ${cmd}`));
 	}

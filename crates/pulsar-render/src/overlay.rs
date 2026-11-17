@@ -352,6 +352,77 @@ pub fn audio_devices_line(line: &str) -> bool {
 	true
 }
 
+/// The session's voice call as the app reports it (`callstate <phase> <since_ms> <name…>`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CallPhase {
+	/// The host's Pulsar does not take calls (older version): nothing to offer.
+	#[default]
+	Unavailable,
+	Idle,
+	/// We ring the host.
+	Out,
+	/// The host rings us.
+	In,
+	/// Talking.
+	Active,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CallUi {
+	pub phase: CallPhase,
+	/// Wall-clock ms the phase began (the talk timer).
+	pub since_ms: u64,
+	/// The host's name ("" = unknown).
+	pub peer: String,
+}
+
+static CALL: std::sync::Mutex<CallUi> =
+	std::sync::Mutex::new(CallUi { phase: CallPhase::Unavailable, since_ms: 0, peer: String::new() });
+
+/// Parse a `callstate …` line (after nothing: the whole line).
+pub fn parse_call_line(line: &str) -> Option<CallUi> {
+	let mut it = line.splitn(4, ' ');
+	if it.next()? != "callstate" {
+		return None;
+	}
+	let phase = match it.next()?.trim() {
+		"out" => CallPhase::Out,
+		"in" => CallPhase::In,
+		"active" => CallPhase::Active,
+		"idle" => CallPhase::Idle,
+		_ => CallPhase::Unavailable,
+	};
+	let since_ms = it.next().and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+	let peer = it.next().unwrap_or("").trim().to_string();
+	Some(CallUi { phase, since_ms, peer })
+}
+
+/// The app's `callstate …` stdin line (every backend calls this). Returns whether the line
+/// was one.
+pub fn call_line(line: &str) -> bool {
+	match parse_call_line(line) {
+		Some(c) => {
+			*CALL.lock().unwrap_or_else(|e| e.into_inner()) = c;
+			true
+		}
+		None => false,
+	}
+}
+
+fn call_ui() -> CallUi {
+	CALL.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// `m:ss` since `since_ms` (wall clock).
+fn talk_time(since_ms: u64) -> String {
+	let now = std::time::SystemTime::now()
+		.duration_since(std::time::UNIX_EPOCH)
+		.map(|d| d.as_millis() as u64)
+		.unwrap_or(0);
+	let s = now.saturating_sub(since_ms) / 1000;
+	format!("{}:{:02}", s / 60, s % 60)
+}
+
 fn dev_list(mic: bool) -> DevList {
 	let slot = if mic { &MIC_DEVS } else { &SPK_DEVS };
 	slot.lock().unwrap_or_else(|e| e.into_inner()).clone()
@@ -2085,10 +2156,10 @@ fn pending_note(ui: &mut egui::Ui, deferred: &[(&'static str, String)]) {
 
 /// Audio section: voice call / host transmit / host speakers / mic to host / quality.
 ///
-/// "Voice call" = both directions at once (host audio here + our mic there); the host already
-/// plays inbound mic audio, so it's a paired toggle. SEMANTIC (must match the backends' `call`
-/// handler): turning the call ON enables BOTH mic and host audio; OFF drops ONLY the mic and
-/// leaves host audio as the user had it — so its on/off derives from `mic_on` ALONE.
+/// "Voice call" works like a phone (the app's `call` module): "Call" rings the host, which
+/// answers or declines; while the host rings US the row turns into Answer + Decline; during a
+/// call it hangs up and shows the talk time. Each emits `call start|accept|decline|hangup`; the
+/// state comes back on the `callstate` line, nothing here is optimistic.
 fn draw_audio(
 	ui: &mut egui::Ui,
 	st: &OverlayState,
@@ -2100,26 +2171,58 @@ fn draw_audio(
 	// The device pickers (this computer's mic / output) show once the app sent the lists.
 	let mics = dev_list(true);
 	let spks = dev_list(false);
-	let mut rows = Rows::new(5 + usize::from(mics.known) + usize::from(spks.known), input);
+	let call = call_ui();
+	// An incoming call takes two rows (Answer, Decline).
+	let call_rows = if call.phase == CallPhase::In { 2 } else { 1 };
+	let mut rows = Rows::new(4 + call_rows + usize::from(mics.known) + usize::from(spks.known), input);
 	ui.spacing_mut().item_spacing.y = ROW_GAP;
-	let call = if st.mic_on { "on" } else { "off" };
-	if let Some(v) = rows.choice(ui, 0, t("audio.call"), call, &onoff, Some(t("info.call"))) {
-		cmds.push(OverlayCmd::Set("call", v));
+	let who = if call.peer.is_empty() { t("call.host").to_string() } else { call.peer.clone() };
+	match call.phase {
+		CallPhase::Unavailable => {
+			rows.action(ui, 0, t("call.na"), CYAN, false);
+		}
+		CallPhase::Idle => {
+			if rows.action(ui, 0, t("call.start"), CYAN, true) {
+				cmds.push(OverlayCmd::Set("call", "start".into()));
+			}
+		}
+		CallPhase::Out => {
+			let label = t("call.calling").replace("{name}", &who);
+			if rows.action(ui, 0, &label, DANGER, true) {
+				cmds.push(OverlayCmd::Set("call", "hangup".into()));
+			}
+		}
+		CallPhase::In => {
+			let label = t("call.answer").replace("{name}", &who);
+			if rows.action(ui, 0, &label, CALL_GREEN, true) {
+				cmds.push(OverlayCmd::Set("call", "accept".into()));
+			}
+			if rows.action(ui, 1, t("call.decline"), DANGER, true) {
+				cmds.push(OverlayCmd::Set("call", "decline".into()));
+			}
+		}
+		CallPhase::Active => {
+			let label = t("call.hangup").replace("{time}", &talk_time(call.since_ms));
+			if rows.action(ui, 0, &label, DANGER, true) {
+				cmds.push(OverlayCmd::Set("call", "hangup".into()));
+			}
+		}
 	}
+	let base = call_rows;
 	let host = if st.audio_tx { "on" } else { "off" };
-	if let Some(v) = rows.choice(ui, 1, t("audio.host"), host, &onoff, None) {
+	if let Some(v) = rows.choice(ui, base, t("audio.host"), host, &onoff, None) {
 		cmds.push(OverlayCmd::Set("atx", v));
 	}
 	// Speakers ON = not muted; the emitted `amute` is the inverse.
 	let spk = if st.audio_mute { "off" } else { "on" };
-	if let Some(v) = rows.choice(ui, 2, t("audio.speakers"), spk, &onoff, None) {
+	if let Some(v) = rows.choice(ui, base + 1, t("audio.speakers"), spk, &onoff, None) {
 		cmds.push(OverlayCmd::Set("amute", if v == "on" { "off".into() } else { "on".into() }));
 	}
 	let mic = if st.mic_on { "on" } else { "off" };
-	if let Some(v) = rows.choice(ui, 3, t("audio.mic"), mic, &onoff, None) {
+	if let Some(v) = rows.choice(ui, base + 2, t("audio.mic"), mic, &onoff, None) {
 		cmds.push(OverlayCmd::Set("mic", v));
 	}
-	let mut row = 4;
+	let mut row = base + 3;
 	// Which microphone / output device of THIS computer (applied at once, no stream restart;
 	// the app falls back to the system default while the pick is not connected).
 	for (list, is_mic) in [(&mics, true), (&spks, false)] {
@@ -2856,6 +2959,8 @@ const HEADER_H: f32 = 36.0;
 /// "End session": the plate at rest and lit (hover / cursor).
 const DANGER_DIM: egui::Color32 = egui::Color32::from_rgb(104, 34, 42);
 const DANGER: egui::Color32 = egui::Color32::from_rgb(200, 60, 70);
+/// Answer a call.
+const CALL_GREEN: egui::Color32 = egui::Color32::from_rgb(70, 200, 120);
 /// Side-by-side options: gap between two, and the well's padding around them.
 const SEG_GAP: f32 = 2.0;
 const SEG_PAD: f32 = 3.0;
@@ -4509,5 +4614,20 @@ mod audio_device_tests {
 		let empty = parse_dev_list(&[]);
 		assert!(empty.known && empty.cur.is_empty() && empty.devs.is_empty());
 		assert!(!audio_devices_line("hpvol x"));
+	}
+
+	#[test]
+	fn callstate_lines_parse() {
+		let c = parse_call_line("callstate in 1700000000000 Ahmet's PC").unwrap();
+		assert_eq!(c.phase, CallPhase::In);
+		assert_eq!(c.since_ms, 1_700_000_000_000);
+		assert_eq!(c.peer, "Ahmet's PC");
+		let c = parse_call_line("callstate active 5 ").unwrap();
+		assert_eq!((c.phase, c.since_ms, c.peer.as_str()), (CallPhase::Active, 5, ""));
+		assert_eq!(parse_call_line("callstate idle 0").unwrap().phase, CallPhase::Idle);
+		assert_eq!(parse_call_line("callstate na 0").unwrap().phase, CallPhase::Unavailable);
+		assert_eq!(parse_call_line("callstate out 1 x").unwrap().phase, CallPhase::Out);
+		assert!(parse_call_line("chat in hi").is_none());
+		assert!(parse_call_line("callstates in 1").is_none());
 	}
 }

@@ -143,52 +143,57 @@ pub(crate) async fn mic_start(
 	state: State<'_, AppState>,
 	id: u64,
 ) -> Result<(), String> {
-	let (tx, mic_slot, render_seed) = {
-		let plays = state.plays.lock().unwrap();
-		let p = plays.get(&id).ok_or(crate::i18n::t("err.session"))?;
-		(p.data_tx.clone(), p.mic.clone(), p.render_seed.clone())
-	};
-	// Hold the slot lock across check→start→insert (no await): two concurrent
-	// invocations could otherwise both pass the is_some() check and both capture,
-	// sending duplicate Audio frames for the session's lifetime.
-	let mut slot = mic_slot.lock().unwrap();
-	if slot.is_some() {
-		return Ok(()); // already on
-	}
-	// The capture thread picks the device (session menu → Microphone device), falls back to
-	// the system default and retries on its own (`mic_capture`).
-	let mic = crate::mic_capture::start(tx, ffmpeg_bin(&app))
-		.map_err(|_| crate::i18n::t("err.micRecorder").to_string())?;
-	*slot = Some(mic);
-	drop(slot);
-	// Record the mic-on bit in the audio truth so a codec/monitor-switch respawn
-	// re-seeds the fresh renderer's overlay with mic=1 (set_play_audio preserves
-	// this bit but never sets it — the mic state is owned here).
-	if let Some(seed) = render_seed.lock().unwrap().audio.as_mut() {
-		seed.2 = true;
-	}
-	Ok(())
+	set_client_mic(&app, &state, id, true)
 }
 
 /// Client: stop streaming the microphone.
 #[tauri::command]
-pub(crate) async fn mic_stop(state: State<'_, AppState>, id: u64) -> Result<(), String> {
+pub(crate) async fn mic_stop(
+	app: tauri::AppHandle,
+	state: State<'_, AppState>,
+	id: u64,
+) -> Result<(), String> {
+	set_client_mic(&app, &state, id, false)
+}
+
+/// Client: the session's microphone on or off (the mic switch, and a voice call — `call`).
+/// Idempotent. Off sends `AudioEnd` so the host closes its player at once.
+pub(crate) fn set_client_mic(app: &tauri::AppHandle, state: &AppState, id: u64, on: bool) -> Result<(), String> {
 	let (tx, mic_slot, render_seed) = {
 		let plays = state.plays.lock().unwrap();
 		let Some(p) = plays.get(&id) else {
-			return Ok(());
+			return if on { Err(crate::i18n::t("err.session").to_string()) } else { Ok(()) };
 		};
 		(p.data_tx.clone(), p.mic.clone(), p.render_seed.clone())
 	};
-	// Dropping the capture stops its thread (and reaps a fallback recorder process).
-	let mic = mic_slot.lock().unwrap().take();
-	drop(mic);
-	// Clear the mic-on bit in the audio truth so a later respawn re-seeds mic=0
-	// (mirrors mic_start; set_play_audio preserves but never sets this bit).
-	if let Some(seed) = render_seed.lock().unwrap().audio.as_mut() {
-		seed.2 = false;
+	if on {
+		// Hold the slot lock across check→start→insert (no await): two concurrent
+		// invocations could otherwise both pass the is_some() check and both capture,
+		// sending duplicate Audio frames for the session's lifetime.
+		let mut slot = mic_slot.lock().unwrap();
+		if slot.is_some() {
+			return Ok(()); // already on
+		}
+		// The capture thread picks the device (session menu → Microphone device), falls back to
+		// the system default and retries on its own (`mic_capture`).
+		let mic = crate::mic_capture::start(tx, ffmpeg_bin(app))
+			.map_err(|_| crate::i18n::t("err.micRecorder").to_string())?;
+		*slot = Some(mic);
+	} else {
+		// Dropping the capture stops its thread (and reaps a fallback recorder process).
+		let mic = mic_slot.lock().unwrap().take();
+		let was_on = mic.is_some();
+		drop(mic);
+		if was_on {
+			let _ = tx.try_send(DataMsg::AudioEnd);
+		}
 	}
-	let _ = tx.send(DataMsg::AudioEnd).await;
+	// Record the mic bit in the audio truth so a codec/monitor-switch respawn re-seeds the
+	// fresh renderer's overlay with it (set_play_audio preserves this bit but never sets it —
+	// the mic state is owned here).
+	if let Some(seed) = render_seed.lock().unwrap().audio.as_mut() {
+		seed.2 = on;
+	}
 	Ok(())
 }
 

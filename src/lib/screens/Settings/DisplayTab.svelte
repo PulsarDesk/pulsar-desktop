@@ -10,7 +10,9 @@
 		encodersForPlatform,
 		type VideoCodec,
 		type AudioQuality,
-		type Encoder
+		type Encoder,
+		RINGTONES,
+		type Ringtone
 	} from '#lib/settings.svelte.js';
 	import { caps, decodeAvailable, encoderAvailable } from '#lib/caps.svelte.js';
 	import { gameStore, saveGames } from '#lib/games.svelte.js';
@@ -28,6 +30,27 @@
 		ui.statusButtons = STATUS_BUTTONS.filter((x) => (x === b ? !on : ui.statusButtons.includes(x)));
 		saveUi();
 	}
+	// Ringtone of an incoming voice call: picking one plays it once; "custom" asks for a file.
+	const fileName = (p: string) => p.split(/[\/]/).pop() ?? p;
+	async function pickRingtone() {
+		const path = await api.pickRingtone().catch(() => null);
+		if (!path) return;
+		ui.ringtonePath = path;
+		ui.ringtone = 'custom';
+		saveUi();
+		api.ringtonePreview('custom', path).catch(() => {});
+	}
+	function setRingtone(r: Ringtone) {
+		ui.ringtone = r;
+		saveUi();
+		if (r === 'custom' && !ui.ringtonePath) {
+			pickRingtone();
+			return;
+		}
+		if (r === 'none') api.ringtonePreview(r, '', true).catch(() => {});
+		else api.ringtonePreview(r, ui.ringtonePath).catch(() => {});
+	}
+
 	// Same-host co-op component (ProtoInput) status, refreshed when the tab opens.
 	let coop = $state<{ supported: boolean; installed: boolean; dir: string; missing: string[] } | null>(null);
 	onMount(() => {
@@ -213,6 +236,34 @@
 			<option value={q}>{t('settings.aq.' + q)}</option>
 		{/each}
 	</select>
+</div>
+<div class="srow">
+	<div class="st">
+		<b>{t('settings.ringtone')}</b>
+		<span>{ui.ringtone === 'custom' && ui.ringtonePath ? fileName(ui.ringtonePath) : t('settings.ringtoneDesc')}</span>
+	</div>
+	<div class="ringctl">
+		<button
+			class="btn btn-ghost ringbtn"
+			aria-label={t('settings.ringtonePlay')}
+			title={t('settings.ringtonePlay')}
+			disabled={ui.ringtone === 'none' || (ui.ringtone === 'custom' && !ui.ringtonePath)}
+			onclick={() => api.ringtonePreview(ui.ringtone, ui.ringtonePath).catch(() => {})}
+		><Icon name="speaker" size={15} /></button>
+		{#if ui.ringtone === 'custom'}
+			<button class="btn btn-ghost ringbtn" onclick={pickRingtone}>{t('settings.ringtonePick')}</button>
+		{/if}
+		<select
+			class="select"
+			aria-label={t('settings.ringtone')}
+			value={ui.ringtone}
+			onchange={(e) => setRingtone(e.currentTarget.value as Ringtone)}
+		>
+			{#each RINGTONES as r (r)}
+				<option value={r}>{t('settings.ring.' + r)}</option>
+			{/each}
+		</select>
+	</div>
 </div>
 <div class="subgroup">{t('settings.subMouse')}</div>
 <div class="subdesc">{t('settings.subMouseDesc')}</div>
@@ -436,6 +487,15 @@
 		line-height: 1.45;
 		display: block;
 		max-width: 46ch;
+	}
+	.ringctl {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		flex: none;
+	}
+	.ringbtn {
+		padding: 7px 10px;
 	}
 	.select {
 		font-family: var(--font-sans);

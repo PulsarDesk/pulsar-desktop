@@ -417,6 +417,7 @@ async fn respawn_render_for_codec(
 					for l in crate::audio_devices::seed_lines() {
 						let _ = writeln!(si, "{l}");
 					}
+					let _ = writeln!(si, "{}", crate::call::seed_line(id));
 					if let Some((tx, mute, mic)) = seed.audio {
 						let _ = writeln!(
 							si,

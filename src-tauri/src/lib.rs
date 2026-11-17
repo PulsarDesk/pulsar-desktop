@@ -60,6 +60,9 @@ mod job;
 mod legacy_install;
 mod kbdhook;
 mod mic_capture;
+mod pcm_out;
+mod ringtone;
+mod call;
 mod native_audio;
 mod native_view;
 mod focus_gate;
@@ -969,6 +972,12 @@ pub fn run() {
 			toast::toast_list,
 			toast::toast_open,
 			toast::toast_close,
+			toast::toast_call,
+			call::call_action,
+			call::call_states,
+			call::set_ringtone,
+			call::ringtone_preview,
+			call::pick_ringtone,
 			set_view_only,
 			input_pointer,
 			input_button,

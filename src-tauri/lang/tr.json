@@ -93,5 +93,11 @@
 	"err.fsList": "klasör listelenemedi",
 	"err.notConnected": "cihaz bağlı değil",
 	"stream.shortfall": "Bağlantı {picked} taşımıyor — {current} kullanılıyor",
-	"err.fsGet": "dosya istenemedi"
+	"err.fsGet": "dosya istenemedi",
+	"call.host": "Karşı taraf",
+	"call.banner": "{name} arıyor — yanıtlamak için Pulsar menüsünü aç (Ses)",
+	"call.call-declined": "Arama reddedildi",
+	"call.call-noanswer": "Yanıt yok",
+	"call.call-missed": "Cevapsız arama",
+	"call.call-ended": "Görüşme bitti"
 }

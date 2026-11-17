@@ -9,6 +9,10 @@ export type AudioQuality = 'auto' | 'standard' | 'high' | 'raw';
 /** How long a viewed session keeps this machine's display awake after the last input
  * (minutes, or always / off). Rust: `keep_awake::set_client_awake`. */
 export type ClientAwake = '30' | '120' | 'always' | 'off';
+/** Incoming-call ringtones (synthesized in `ringtone.rs`), plus silent and a custom file. */
+export const RINGTONES = ['classic', 'chime', 'pulse', 'none', 'custom'] as const;
+export type Ringtone = (typeof RINGTONES)[number];
+
 export const CLIENT_AWAKE_MODES: ClientAwake[] = ['30', '120', 'always', 'off'];
 /** DualSense feature choice: auto = on, but auto-degrade may turn it off on a weak
  *  Bluetooth link; on = always on; off = off. Same tokens as the Rust `Mode`. */
@@ -152,6 +156,10 @@ export interface UiSettings {
 	/** Client output the session audio plays on, by device name ('' = system default). Picked
 	 * in the in-session menu (Audio → Audio output); falls back to the default while unplugged. */
 	speakerDevice: string;
+	/** Ringtone of an incoming voice call (`RINGTONES`); `custom` plays `ringtonePath`. */
+	ringtone: Ringtone;
+	/** The custom ringtone file (any format the bundled ffmpeg reads). */
+	ringtonePath: string;
 	hdr: boolean;
 	unattended: boolean;
 	tray: boolean;
@@ -286,6 +294,8 @@ const DEFAULTS: UiSettings = {
 	ds4Headset: false,
 	micDevice: '',
 	speakerDevice: '',
+	ringtone: 'classic',
+	ringtonePath: '',
 	hdr: false,
 	unattended: true,
 	tray: true,

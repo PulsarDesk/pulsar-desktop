@@ -310,6 +310,12 @@ pub(crate) fn start_render_reader(
 								let _ = app.emit("overlay-cmd", (cur_id, field.to_string(), val.to_string()));
 								continue 'lines;
 							}
+							// Audio → Voice call (`call start|accept|decline|hangup`): the call layer
+							// owns it (signalling, ringtone, mics) and answers with `callstate`.
+							if field == "call" {
+								crate::call::action(&app, crate::call::CallKey::Client(cur_id), val);
+								continue 'lines;
+							}
 							// The Ses section's device pickers (`micdev` / `spkdev <token>`): apply
 							// Rust-side at once, then hand the decoded name to the webview to save
 							// (ui.micDevice / ui.speakerDevice).

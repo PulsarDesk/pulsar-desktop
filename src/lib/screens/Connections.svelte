@@ -5,7 +5,8 @@
 	// Opens forward for a Remote connection, hidden for a Game one (decided host-side).
 	import { onMount } from 'svelte';
 	import Icon from '#lib/Icon.svelte';
-	import { api, onHostChat, onOpenChat, onPeerAvatar, onPeerName, onPeerId, onSessionEvent } from '#lib/api.js';
+	import { api, onCallState, onHostChat, onOpenChat, onPeerAvatar, onPeerName, onPeerId, onSessionEvent } from '#lib/api.js';
+	import type { CallPhase } from '#lib/types.js';
 	import { fmtPeerId } from '#lib/peers.svelte.js';
 	import { t } from '#lib/i18n.svelte.js';
 	import { closeOnEscape } from '#lib/escapeStack.js';
@@ -34,8 +35,34 @@
 	let clientIds = $state<Record<string, string>>({});
 	const idFor = (peer: string) => fmtPeerId(clientIds[peer] ?? peer);
 
+	// Voice call per session (sid → phase), from `call-state` (host side only). The row's phone
+	// button rings the client / cancels / hangs up; an incoming call is answered here too (the
+	// toast card has Answer + Decline).
+	let calls = $state<Record<number, CallPhase>>({});
+	// Sessions whose client takes calls (an older Pulsar never answers: no button then).
+	let callable = $state<Record<number, boolean>>({});
+	function callClick(r: Row) {
+		const phase = calls[r.sid] ?? 'idle';
+		const action = phase === 'idle' ? 'start' : phase === 'incoming' ? 'accept' : 'hangup';
+		api.callAction('host', r.sid, action).catch(() => {});
+	}
+	const callTitle = (p: CallPhase | undefined, ok = true) =>
+		!ok && (p ?? 'idle') === 'idle'
+			? t('host.callNa')
+			: p === 'outgoing' ? t('call.cancel') : p === 'incoming' ? t('call.accept') : p === 'active' ? t('call.hangup') : t('host.call');
+
 	onMount(() => {
 		// Initial snapshot (connections that existed before this window opened).
+		api
+			.callStates()
+			.then((list) => {
+				for (const c of list)
+					if (c.side === 'host') {
+						calls = { ...calls, [c.id]: c.phase };
+						callable = { ...callable, [c.id]: c.supported };
+					}
+			})
+			.catch(() => {});
 		api
 			.listConnections()
 			.then((list) => {
@@ -106,6 +133,12 @@
 			pushMsg(e.peer, { me: false, text: e.text });
 			// Don't badge a device whose chat modal is currently open (history keyed by peer).
 			if (msgRow?.peer !== e.peer) unread = { ...unread, [e.peer]: (unread[e.peer] ?? 0) + 1 };
+		}).then(track);
+		onCallState((c) => {
+			if (c.side === 'host') {
+				calls = { ...calls, [c.id]: c.phase };
+				callable = { ...callable, [c.id]: c.supported };
+			}
 		}).then(track);
 		// A clicked chat toast: open that client's chat (a window built for it asks on mount).
 		onOpenChat((peer) => {
@@ -309,6 +342,17 @@
 							>
 								<Icon name="chat" size={14} />
 								{#if (unread[r.peer] ?? 0) > 0}<span class="abadge">{unread[r.peer]}</span>{/if}
+							</button>
+							<button
+								class="act call"
+								class:live={calls[r.sid] === 'active'}
+								class:ringing={calls[r.sid] === 'outgoing' || calls[r.sid] === 'incoming'}
+								disabled={!callable[r.sid] && (calls[r.sid] ?? 'idle') === 'idle'}
+								onclick={() => callClick(r)}
+								title={callTitle(calls[r.sid], callable[r.sid])}
+								aria-label={callTitle(calls[r.sid], callable[r.sid])}
+							>
+								<Icon name={calls[r.sid] === 'active' || calls[r.sid] === 'outgoing' ? 'phoneOff' : 'phone'} size={14} />
 							</button>
 							<button
 								class="act kick"
@@ -527,6 +571,23 @@
 	}
 	.act.kick {
 		color: var(--danger-text);
+	}
+	.act.call.ringing {
+		color: var(--accent-ink);
+		border-color: var(--accent-soft-2);
+		animation: callpulse 1.2s ease-in-out infinite;
+	}
+	.act.call:disabled {
+		opacity: 0.4;
+		cursor: default;
+	}
+	.act.call.live {
+		color: var(--danger-text);
+	}
+	@keyframes callpulse {
+		50% {
+			background: var(--accent-soft);
+		}
 	}
 	.act.kick:hover {
 		background: color-mix(in oklch, var(--danger, red) 10%, transparent);

@@ -35,6 +35,7 @@
 		onPeerAvatar,
 		onPeerName,
 		onChatMsg,
+		onCallState,
 		onChatBubbles,
 		onPlayDims,
 		onHostPointer,
@@ -271,6 +272,8 @@
 	let chatBubbles = $state<[number, number, number, number][]>([]);
 	let peerAvatar = $state('');
 	let peerName = $state('');
+	// The last call-state for this session was 'active' (its end turns the mic switch off).
+	let callWasActive = false;
 	const displayTarget = $derived(peerName ? { name: peerName, id: target.id } : target);
 	$effect(() => {
 		const scope = listenScope();
@@ -284,6 +287,14 @@
 				if (e.peer !== String(playId)) return;
 				peerName = e.name;
 				setPeerIdentity(target.id, { name: e.name });
+			}),
+			// Voice call (call.rs turns the mic on for the call and off after it): keep the mic
+			// switch (status bar, menu) in step.
+			onCallState((c) => {
+				if (c.side !== 'client' || c.id !== playId) return;
+				if (c.phase === 'active') sidechan.micOn = true;
+				else if (callWasActive) sidechan.micOn = false;
+				callWasActive = c.phase === 'active';
 			}),
 			// Inbound chat: surface as a renderer toast (visible while the overlay is
 			// closed) AND into the overlay's native Chat log.
@@ -1023,14 +1034,8 @@
 					ui.speakerDevice = val;
 					saveUi();
 					break;
-				// Voice call: pair mic (us → host) with host audio (host → us) in one switch;
-				// turning it off only drops the mic (host audio stays as the user had it).
-				case 'call': {
-					const on = val === 'on';
-					if (on && !controls.transmitAudio) controls.toggleTransmit();
-					if (on !== sidechan.micOn) sidechan.toggleMic();
-					break;
-				}
+				// 'call' (Audio → Voice call) is handled Rust-side (render_stats → call.rs); a
+				// stale renderer's on/off value never reaches here.
 				case 'sendclip': sidechan.sendClipboard(); break;
 				// Overlay Tools toggle: the same switch as Settings → General.
 				case 'clipsync': {

@@ -364,6 +364,8 @@ pub(super) async fn hold_session(
 	let mut first_frames_at: Option<std::time::Instant> = None;
 	// The host's display name (DataMsg::PeerName), for the "file arrived" toasts.
 	let mut host_name = String::new();
+	// The host's mic during a voice call (`call`), played on this computer's output.
+	let mut host_voice = crate::pcm_out::voice_sink();
 	// Frame-clock probe (diagnostics): over ~2 s, how far the host's RTP clock advanced vs our
 	// wall clock, how many frames arrived and the worst inter-arrival gap. A host that emits
 	// fewer frames than its RTP clock claims shows rtp < wall (a fake, permanent delay trend);
@@ -927,6 +929,7 @@ pub(super) async fn hold_session(
 								// The host's display name — the UI updates the session target
 								// chip and the recents cache. Kept for the file toasts too.
 								host_name = name.clone();
+								crate::call::set_peer_name(crate::call::CallKey::Client(id), &name);
 								// The renderer labels the host pointer with it (issue #7).
 								{
 									use std::io::Write as _;
@@ -1283,6 +1286,9 @@ pub(super) async fn hold_session(
 									});
 								});
 							}
+							// Voice call: signalling, and the host's mic while the call is up.
+							DataMsg::Call(sig) => crate::call::on_signal(&app_ev, crate::call::CallKey::Client(id), sig),
+							m @ (DataMsg::Audio(_) | DataMsg::AudioEnd) => host_voice(m),
 							_ => {}
 						}
 					} else if let Some(list) = pulsar_core::service::decode_windows(&bytes) {

@@ -83,7 +83,6 @@ use pulsar_core::{Discovery, Node};
 use tauri::{AppHandle, Emitter, Manager as _, State};
 use tokio::sync::oneshot;
 
-use crate::audio_io::spawn_audio_player;
 use crate::events::{AvatarPayload, DataPayload, FilePayload, ReverseReq, SessionEvent};
 use crate::files::{sanitize_filename, save_received_file_chunks};
 use crate::process::{
@@ -1252,6 +1251,8 @@ pub(crate) async fn bring_online(
 						.lock()
 						.unwrap()
 						.insert(sid, (peer.clone(), out_tx.clone()));
+					// Voice calls: say we take them (repeated until the client answers).
+					crate::call::session_up(&app_h, crate::call::CallKey::Host(sid));
 					None
 				};
 
@@ -2823,6 +2824,10 @@ pub(crate) async fn bring_online(
 					on_chat: Box::new(on_chat),
 					on_file: if crate::seat::active() { Box::new(|_: pulsar_core::service::DataMsg| {}) } else { Box::new(on_file) },
 					on_audio: Box::new(on_audio),
+					on_call: Box::new({
+						let app_h = app_h.clone();
+						move |sig| crate::call::on_signal(&app_h, crate::call::CallKey::Host(sid), sig)
+					}),
 					on_reverse: Box::new(on_reverse),
 					stream_caps: Box::new({
 						let answer = crate::caps_guard::guarded(app_h.clone(), media_features, stream_caps);
@@ -3087,6 +3092,8 @@ pub(crate) async fn bring_online(
 				// Keyed by sid now: this entry is uniquely ours, so a plain remove() is
 				// correct — a same-DEVICE co-op session has its OWN sid key and is untouched.
 				incoming.lock().unwrap().remove(&sid);
+				// Before host_out goes: the call's capture writes into it.
+				crate::call::session_gone(&app_h, crate::call::CallKey::Host(sid));
 				host_out.lock().unwrap().remove(&sid);
 				tracing::info!(%peer, "session disconnected");
 				// Drop this session's row from the connections window's list; close the

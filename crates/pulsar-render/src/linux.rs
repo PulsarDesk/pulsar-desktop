@@ -770,6 +770,10 @@ pub fn run() {
 				Some("micdevs" | "spkdevs") => {
 					crate::overlay::audio_devices_line(&line);
 				}
+				// The session's voice call (`callstate <phase> <since_ms> <name>`) for the Audio rows.
+				Some("callstate") => {
+					crate::overlay::call_line(&line);
+				}
 				// Connected controller list (game mode only): `ctrls slot:kind:name[:uuid:target],...`
 				// 5-field form (T11+): slot:kind_tag:name:uuid:target
 				// 3-field form (legacy): slot:kind_tag:name  → uuid="" target="auto"
@@ -2486,17 +2490,6 @@ fn emit_cmd(state: &mut OverlayState, c: OverlayCmd) {
 				"amute" => AUDIO_MUTE.store(val == "on", Ordering::SeqCst),
 				"aquality" => crate::overlay::set_audio_quality(&val),
 				"mic" => MIC_ON.store(val == "on", Ordering::SeqCst),
-				// Voice call = mic + host audio together (paired optimistic update).
-				// ON enables BOTH; OFF drops ONLY the mic and leaves host audio as-is
-				// (it has its own `atx` row). The overlay highlight derives from MIC_ON
-				// alone (overlay::draw_audio), so highlight + state stay in sync.
-				"call" => {
-					let on = val == "on";
-					MIC_ON.store(on, Ordering::SeqCst);
-					if on {
-						AUDIO_TX.store(true, Ordering::SeqCst);
-					}
-				}
 				// Optimistic controller swap: the overlay row ▲/▼ was clicked.
 				// Swap the two entries in CONTROLLERS immediately so the list
 				// re-renders at the next frame without waiting for the gilrs

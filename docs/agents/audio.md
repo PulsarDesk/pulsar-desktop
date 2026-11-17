@@ -160,8 +160,39 @@ opened *into* a muted endpoint latches **pure silence** (verified live, −91 dB
 fixed 2026-06-13). Never force-mute the captured endpoint; user-set `mute_host`
 is still honored (mid-session muting is safe). Windows mute = endpoint **mute
 flag**, NOT volume-0. Un-muted on teardown.
-Mic/voice-call side-channel PCM: the host plays it with `src-tauri/src/audio_io.rs`; the
-client captures it with `src-tauri/src/mic_capture.rs` (below).
+Mic side-channel PCM (s16le 48 kHz mono, `DataMsg::Audio`): captured with
+`src-tauri/src/mic_capture.rs` (below), played with `pcm_out::voice_sink` (SDL3 on every OS,
+the old `audio_io::spawn_audio_player` process — Linux only — as the fallback). Before
+2026-11-17 the host played it ONLY through that Linux process: Windows / macOS hosts never
+played the client's mic.
+
+## Voice calls (2026-11-17, LOCAL, untested on hardware)
+
+Phone-style, either side can call (`src-tauri/src/call.rs`; the protocol/state machine and the
+built-in tones are pulsar-core `call.rs`, shared with mobile, which supports calls as client
+and host too). Host: the phone button on a row
+of the connections window. Client: in-session menu → Audio, first row. Signalling is
+`DataMsg::Call(CallSignal)` (pulsar-core: `Ring` / `Accept` / `Decline` / `Cancel` / `End`; old
+peers ignore it, so a ring to them rings out → "No answer"). The callee hears the ringtone
+(`ringtone.rs`: synthesized `classic` / `chime` / `pulse`, `none`, or a `custom` file decoded by
+the bundled ffmpeg; Settings → Display → Audio, `ui.ringtone` / `ui.ringtonePath`, pushed with
+`set_ringtone`) and gets a sticky toast card with Answer / Decline (`toast.rs` `call_card`,
+`ToastWindow.svelte`) on both sides; the client also gets a banner over the video and the
+menu rows (`callstate <idle|out|in|active> <since_ms> <name>` renderer line,
+`overlay::call_line`). While a call is up BOTH mics stream: the client's through the mic switch
+(`io_cmds::set_client_mic`), the host's through its own `mic_capture` into the session's
+outbound queue; the client plays the host's mic in `play/hold.rs` (`voice_sink`).
+
+Loss handling (the session is UDP): the caller repeats `Ring` every 2 s; a `Ring` that reaches
+a callee already in the call gets `Accept` again, one right after a decline gets `Decline`
+again; final signals go 3×; both sides time out on their own (caller 40 s, callee 35 s).
+Echo: `pcm_out::far_end` keeps the played far end on a timeline (`now + SDL queued`); the mic
+(`mic_capture` `EchoGuard`) and, on a Linux host, the parec system-audio reader
+(`CallEchoStereo`, the monitor hears our own playback — Windows/macOS captures exclude
+Pulsar's process) run pulsar-core `audio::aec` against it. Passthrough while no far end plays.
+Calling is offered only to a peer that said `Hello` (an older Pulsar: disabled button, menu row
+"too old"); the renderer gets its `callstate` on (re)spawn (`call::seed_line`).
+Not yet heard on real hardware (synthetic AEC tests only).
 
 ## Client mic + output device picks (2026-11-15, LOCAL, untested on hardware)
 

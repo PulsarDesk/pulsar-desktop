@@ -116,9 +116,42 @@ export type PulsarToast = {
 	 * click = fix it where possible: macOS Accessibility, Linux uinput udev rule).
 	 * `input-on`: that fix worked (`name` = what was done).
 	 * `chat-in`: a chat line while the chat is not on screen (`name` = the text, `peer` = who;
-	 * click = open the chat). */
-	kind: 'file-in' | 'file-del' | 'file-mod' | 'kbd-perm' | 'pad-off' | 'input-off' | 'input-on' | 'chat-in';
+	 * click = open the chat).
+	 * `call-in` / `call-out` / `call-on`: a voice call ringing here / ringing there / up
+	 * (`peer` = the other side; buttons act on it; stays until the call moves on).
+	 * `call-missed` / `call-declined` / `call-noanswer` / `call-ended`: how a call ended. */
+	kind:
+		| 'file-in'
+		| 'file-del'
+		| 'file-mod'
+		| 'kbd-perm'
+		| 'pad-off'
+		| 'input-off'
+		| 'input-on'
+		| 'chat-in'
+		| 'call-in'
+		| 'call-out'
+		| 'call-on'
+		| 'call-missed'
+		| 'call-declined'
+		| 'call-noanswer'
+		| 'call-ended';
 	name: string;
 	peer: string;
 	path: string | null;
+	/** Call cards: wall-clock ms the phase began (the talk timer). */
+	since?: number;
+};
+
+/** A session's voice call (`call-state` event / `call_states`). */
+export type CallSide = 'host' | 'client';
+export type CallPhase = 'idle' | 'outgoing' | 'incoming' | 'active';
+export type CallState = {
+	side: CallSide;
+	id: number;
+	phase: CallPhase;
+	peer: string;
+	since: number;
+	/** The peer takes calls (an older Pulsar never answers one). */
+	supported: boolean;
 };

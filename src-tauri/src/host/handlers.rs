@@ -500,6 +500,10 @@ fn spawn_pulse_audio_linux(
 		// 10 ms of f32 stereo; parec's own fragments are this size too.
 		let mut buf = vec![0u8; 3840];
 		let mut total = 0u64;
+		// A voice call's far end (the client's voice, played here) is in this capture too —
+		// the monitor hears everything the host plays, unlike the Windows / macOS captures that
+		// leave Pulsar's own process out. Cancelled per channel against what was played.
+		let mut echo = CallEchoStereo::default();
 		loop {
 			match out.read(&mut buf) {
 				Ok(0) => break,
@@ -508,8 +512,9 @@ fn spawn_pulse_audio_linux(
 						got_data.store(true, std::sync::atomic::Ordering::SeqCst);
 					}
 					total += n as u64;
+					let data = echo.clean(&buf[..n]);
 					// Fails once the stream generation moved on (re-stream / teardown).
-					if sink.write_all(&buf[..n]).is_err() {
+					if sink.write_all(&data).is_err() {
 						break;
 					}
 				}
@@ -537,6 +542,36 @@ fn spawn_pulse_audio_linux(
 		tracing::warn!("audio: parec reader thread failed to start: {e}");
 	}
 	true
+}
+
+/// Removes a voice call's far end from raw f32le stereo system audio (the Linux monitor
+/// capture). Untouched while no far end plays; whole frames only (a partial frame waits).
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct CallEchoStereo {
+	l: pulsar_core::audio::aec::AecStream,
+	r: pulsar_core::audio::aec::AecStream,
+	pending: Vec<u8>,
+}
+
+#[cfg(target_os = "linux")]
+impl CallEchoStereo {
+	fn clean(&mut self, bytes: &[u8]) -> Vec<u8> {
+		if self.pending.is_empty() && !crate::pcm_out::far_end::active() {
+			return bytes.to_vec();
+		}
+		self.pending.extend_from_slice(bytes);
+		let frames = self.pending.len() / 8;
+		let whole: Vec<u8> = self.pending.drain(..frames * 8).collect();
+		let Some(far) = crate::pcm_out::far_end::window(std::time::Instant::now(), frames) else {
+			return whole;
+		};
+		let f = |c: &[u8]| f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+		let l: Vec<f32> = whole.chunks_exact(8).map(|c| f(&c[..4])).collect();
+		let r: Vec<f32> = whole.chunks_exact(8).map(|c| f(&c[4..])).collect();
+		let (l, r) = (self.l.process(&far, &l), self.r.process(&far, &r));
+		l.iter().zip(&r).flat_map(|(a, b)| a.to_le_bytes().into_iter().chain(b.to_le_bytes())).collect()
+	}
 }
 
 /// How long `parec` gets to deliver its first bytes before it counts as hung (a pulse source
@@ -5077,46 +5112,11 @@ pub(super) fn make_on_file(app_h: AppHandle, peer: String, sid: u64) -> impl FnM
 	}
 }
 
-/// Audio player child killed AND reaped on drop. The closure itself dropping
-/// (client vanished mid-mic) must reap too — the player would otherwise exit on
-/// stdin EOF and linger as a zombie for the host app's lifetime, one per
-/// mic stop/disconnect.
-struct PlayerGuard(Child);
-impl Drop for PlayerGuard {
-	fn drop(&mut self) {
-		let _ = self.0.kill();
-		let _ = self.0.wait();
-	}
-}
-
-/// Build the per-session `on_audio` handler: lazily spawn an audio player and
-/// pipe received PCM frames to it, tearing it down on `AudioEnd` / write error.
+/// The per-session `on_audio` handler: the client's mic (a call, or the mic switch) played
+/// on this host's output (`pcm_out::voice_sink`: SDL3 on every OS, the old player process as
+/// the fallback).
 pub(super) fn make_on_audio() -> impl FnMut(DataMsg) + Send + 'static {
-	use std::io::Write;
-	// Lazily spawn an audio player and pipe received PCM frames to it.
-	let mut sink: Option<std::process::ChildStdin> = None;
-	let mut player: Option<PlayerGuard> = None;
-	move |m: DataMsg| match m {
-		DataMsg::Audio(frame) => {
-			if sink.is_none() {
-				if let Some((c, s)) = spawn_audio_player() {
-					player = Some(PlayerGuard(c));
-					sink = Some(s);
-				}
-			}
-			if let Some(s) = sink.as_mut() {
-				if s.write_all(&frame).is_err() {
-					sink = None;
-					player = None; // PlayerGuard::drop kills + reaps
-				}
-			}
-		}
-		DataMsg::AudioEnd => {
-			sink = None;
-			player = None; // PlayerGuard::drop kills + reaps
-		}
-		_ => {}
-	}
+	crate::pcm_out::voice_sink()
 }
 
 /// The native Media Foundation path takes the streams an ffmpeg CLI encoder would carry on a

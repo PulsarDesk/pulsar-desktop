@@ -31,8 +31,27 @@
 		};
 	});
 
+	// Call cards (`call-in` / `call-out` / `call-on`) carry their own buttons and stay until the
+	// call moves on; the talk timer ticks while one is up.
+	const isCall = (k: PulsarToast['kind']) => k === 'call-in' || k === 'call-out' || k === 'call-on';
+	let now = $state(Date.now());
+	$effect(() => {
+		if (!list.some((n) => n.kind === 'call-on')) return;
+		const timer = setInterval(() => (now = Date.now()), 1000);
+		return () => clearInterval(timer);
+	});
+	const talk = (since = 0) => {
+		const s = Math.max(0, Math.floor((now - since) / 1000));
+		return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+	};
+	const callAct = (id: number, a: 'accept' | 'decline' | 'hangup') => api.toastCall(id, a).catch(() => {});
+
 	const icon = (k: PulsarToast['kind']) =>
-		k === 'file-in'
+		k.startsWith('call-')
+			? k === 'call-missed' || k === 'call-declined' || k === 'call-noanswer' || k === 'call-ended'
+				? 'phoneOff'
+				: 'phone'
+			: k === 'file-in'
 			? 'download'
 			: k === 'file-del'
 				? 'x'
@@ -49,6 +68,30 @@
 
 <div class="stack">
 	{#each list as n (n.id)}
+		{#if isCall(n.kind)}
+			<div class="card call" class:ringing={n.kind === 'call-in'} role="group" aria-label={t(`toast.${n.kind}`)}>
+				<span class="ic callic" class:ring={n.kind === 'call-in'}><Icon name="phone" size={16} /></span>
+				<div class="txt">
+					<div class="ttl">{t(`toast.${n.kind}`)}{n.kind === 'call-on' ? ` · ${talk(n.since)}` : ''}</div>
+					<div class="nm">{n.peer || t('home.remoteDevice')}</div>
+				</div>
+				{#if n.kind === 'call-in'}
+					<button class="cb ok" aria-label={t('call.accept')} title={t('call.accept')} onclick={() => callAct(n.id, 'accept')}
+						><Icon name="phone" size={16} /></button
+					>
+					<button class="cb no" aria-label={t('call.decline')} title={t('call.decline')} onclick={() => callAct(n.id, 'decline')}
+						><Icon name="phoneOff" size={16} /></button
+					>
+				{:else}
+					<button
+						class="cb no"
+						aria-label={t(n.kind === 'call-out' ? 'call.cancel' : 'call.hangup')}
+						title={t(n.kind === 'call-out' ? 'call.cancel' : 'call.hangup')}
+						onclick={() => callAct(n.id, 'hangup')}><Icon name="phoneOff" size={16} /></button
+					>
+				{/if}
+			</div>
+		{:else}
 		<div
 			class="card"
 			role="button"
@@ -67,11 +110,14 @@
 				if (e.key === 'Enter' || e.key === ' ') api.toastOpen(n.id).catch(() => {});
 			}}
 		>
-			<span class="ic" class:del={n.kind === 'file-del' || n.kind === 'pad-off' || n.kind === 'input-off'}><Icon name={icon(n.kind)} size={16} /></span>
+			<span class="ic" class:del={n.kind === 'file-del' || n.kind === 'pad-off' || n.kind === 'input-off' || n.kind === 'call-missed' || n.kind === 'call-declined' || n.kind === 'call-noanswer'}><Icon name={icon(n.kind)} size={16} /></span>
 			<div class="txt">
 				{#if n.kind === 'chat-in'}
 					<div class="ttl">{n.peer || t('toast.chat-in')}</div>
 					<div class="nm wrap">{n.name}</div>
+				{:else if n.kind.startsWith('call-')}
+					<div class="ttl">{t(`toast.${n.kind}`)}</div>
+					<div class="nm">{n.peer || t('home.remoteDevice')}</div>
 				{:else}
 					<div class="ttl">{t(`toast.${n.kind}`)}</div>
 					<div class="nm" class:wrap={n.kind === 'pad-off' || n.kind === 'input-off' || n.kind === 'input-on'}>{n.kind === 'kbd-perm' ? t('toast.kbd-perm-body') : n.name}</div>
@@ -87,6 +133,7 @@
 				}}><Icon name="x" size={13} /></button
 			>
 		</div>
+		{/if}
 	{/each}
 </div>
 
@@ -187,6 +234,61 @@
 	.x:hover {
 		background: oklch(0.32 0.02 265);
 		color: oklch(0.95 0.01 265);
+	}
+	/* Call cards: an answer (green) / hang-up (red) round button, a pulsing icon while it rings. */
+	.card.call {
+		cursor: default;
+		gap: 9px;
+	}
+	.card.call.ringing {
+		border-color: oklch(0.72 0.15 150 / 0.75);
+	}
+	.ic.callic {
+		background: oklch(0.38 0.09 150 / 0.55);
+		color: oklch(0.86 0.12 150);
+	}
+	.ic.ring {
+		animation: ring 1.2s ease-in-out infinite;
+	}
+	.cb {
+		display: grid;
+		place-items: center;
+		width: 34px;
+		height: 34px;
+		border: 0;
+		border-radius: 50%;
+		cursor: pointer;
+		flex: none;
+		color: white;
+	}
+	.cb.ok {
+		background: oklch(0.62 0.16 150);
+	}
+	.cb.ok:hover {
+		background: oklch(0.68 0.17 150);
+	}
+	.cb.no {
+		background: oklch(0.58 0.19 25);
+	}
+	.cb.no:hover {
+		background: oklch(0.64 0.2 25);
+	}
+	@keyframes ring {
+		0%,
+		100% {
+			transform: rotate(0);
+		}
+		10%,
+		30% {
+			transform: rotate(-14deg);
+		}
+		20%,
+		40% {
+			transform: rotate(14deg);
+		}
+		50% {
+			transform: rotate(0);
+		}
 	}
 	@keyframes in {
 		from {
