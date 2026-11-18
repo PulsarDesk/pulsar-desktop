@@ -771,6 +771,13 @@ impl SdlOut {
 				std::mem::size_of_val(pcm) as i32,
 			);
 		}
+		// The mic's echo canceller must know what plays here: it starts after what is queued
+		// (while still prebuffering it starts later still; the canceller learns a later echo).
+		crate::pcm_out::far_end::push_session(
+			pcm,
+			CHANNELS,
+			now + std::time::Duration::from_secs_f32(before.max(0.0) / 1000.0 / self.ratio.max(0.5)),
+		);
 		self.stats.frames += (pcm.len() / CHANNELS) as u64;
 		let after = self.queued_ms();
 		// The queue is a sawtooth: +10 ms per packet, −one device buffer per device pull. What

@@ -17,6 +17,10 @@ const BYTES_PER_MS: usize = 96;
 /// More than this queued (a burst after a network stall) → drop the backlog: a call must
 /// stay live, not drift behind.
 const MAX_QUEUED_MS: usize = 250;
+/// Jitter cushion of a live stream: when its queue is empty (the first frame, or frames came
+/// late and it ran dry) this much silence goes in ahead of the frame. Without it every frame
+/// played the moment it arrived, so any late one left a gap: the call stuttered on Wi-Fi.
+const CUSHION_MS: usize = 60;
 
 /// An open SDL playback stream for s16le 48 kHz mono.
 pub struct PcmOut {
@@ -74,6 +78,10 @@ impl PcmOut {
 		unsafe {
 			if live && self.queued_ms() > MAX_QUEUED_MS {
 				sdl3_sys::audio::SDL_ClearAudioStream(self.stream);
+			}
+			if live && sdl3_sys::audio::SDL_GetAudioStreamQueued(self.stream) <= 0 {
+				let pad = vec![0u8; CUSHION_MS * BYTES_PER_MS];
+				sdl3_sys::audio::SDL_PutAudioStreamData(self.stream, pad.as_ptr().cast(), pad.len() as i32);
 			}
 			sdl3_sys::audio::SDL_PutAudioStreamData(self.stream, pcm.as_ptr().cast(), pcm.len() as i32);
 		}
@@ -153,10 +161,25 @@ pub fn voice_sink() -> impl FnMut(DataMsg) + Send + 'static {
 /// `now + queued`. The real output plays a little later still (device buffer) and a capture is
 /// time-stamped when it is READ (a little after it was recorded): both only push the echo later
 /// relative to this reference, which the canceller's tail (~213 ms) covers.
+///
+/// Two sources share the reference, each on its own timeline, summed by [`window`]: the call
+/// voice ([`push`]) and, on a client, the host's session audio ([`push_session`]). Without the
+/// second, the host's sound played here (a Discord call on the host, a game) reached our mic,
+/// went back to the host and out through its speakers into the host's own voice apps: the
+/// remote party heard themselves, round and round.
 pub mod far_end {
 	use std::collections::VecDeque;
 	use std::sync::Mutex;
 	use std::time::{Duration, Instant};
+
+	/// Which timeline a push belongs to.
+	#[derive(Clone, Copy)]
+	enum Src {
+		/// The peer's voice in a call (`voice_sink`).
+		Voice = 0,
+		/// The host's session audio played on this client (`native_audio`).
+		Session = 1,
+	}
 
 	const RATE: f64 = 48_000.0;
 	/// Kept history (the canceller looks back at most one tail plus a chunk).
@@ -174,7 +197,7 @@ pub mod far_end {
 		last_push: Instant,
 	}
 
-	static LINE: Mutex<Option<Line>> = Mutex::new(None);
+	static LINES: Mutex<[Option<Line>; 2]> = Mutex::new([None, None]);
 
 	fn idx(origin: Instant, t: Instant) -> i64 {
 		if t >= origin {
@@ -184,11 +207,28 @@ pub mod far_end {
 		}
 	}
 
-	/// `pcm` (s16le mono) starts playing at `play_at`.
+	/// `pcm` (s16le mono, the call voice) starts playing at `play_at`.
 	pub fn push(pcm: &[u8], play_at: Instant) {
-		let mut g = LINE.lock().unwrap_or_else(|e| e.into_inner());
+		push_src(Src::Voice, pcm.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32_768.0), play_at);
+	}
+
+	/// `pcm` (interleaved f32 with `channels` channels, 48 kHz: the host's session audio)
+	/// starts playing at `play_at`. Downmixed to mono: the mic hears the speakers' sum.
+	pub fn push_session(pcm: &[f32], channels: usize, play_at: Instant) {
+		let ch = channels.max(1);
+		let k = 1.0 / ch as f32;
+		push_src(Src::Session, pcm.chunks_exact(ch).map(|f| f.iter().sum::<f32>() * k), play_at);
+	}
+
+	fn push_src(src: Src, samples: impl Iterator<Item = f32>, play_at: Instant) {
+		let mut g = LINES.lock().unwrap_or_else(|e| e.into_inner());
 		let now = Instant::now();
-		let line = g.get_or_insert_with(|| Line { origin: now, start: idx(now, play_at), buf: VecDeque::new(), last_push: now });
+		let slot = &mut g[src as usize];
+		// A line idle past IDLE starts over (its old samples are long gone from the window).
+		if slot.as_ref().is_some_and(|l| l.last_push.elapsed() >= IDLE) {
+			*slot = None;
+		}
+		let line = slot.get_or_insert_with(|| Line { origin: now, start: idx(now, play_at), buf: VecDeque::new(), last_push: now });
 		line.last_push = now;
 		let at = idx(line.origin, play_at);
 		let end = line.start + line.buf.len() as i64;
@@ -202,7 +242,7 @@ pub mod far_end {
 			let keep = (at - line.start).max(0) as usize;
 			line.buf.truncate(keep);
 		}
-		line.buf.extend(pcm.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32_768.0));
+		line.buf.extend(samples);
 		let over = line.buf.len().saturating_sub(KEEP);
 		line.buf.drain(..over);
 		line.start += over as i64;
@@ -211,31 +251,30 @@ pub mod far_end {
 	/// Whether a far end played within [`IDLE`] (the Linux system-audio capture checks it).
 	#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 	pub fn active() -> bool {
-		LINE.lock()
+		LINES
+			.lock()
 			.unwrap_or_else(|e| e.into_inner())
-			.as_ref()
-			.is_some_and(|l| l.last_push.elapsed() < IDLE)
+			.iter()
+			.flatten()
+			.any(|l| l.last_push.elapsed() < IDLE)
 	}
 
-	/// The `n` far-end samples that played up to `end` (zeros where nothing played); `None`
-	/// when there is no far end ([`active`] false).
+	/// The `n` far-end samples that played up to `end`, every source summed (zeros where nothing
+	/// played); `None` when there is no far end ([`active`] false).
 	pub fn window(end: Instant, n: usize) -> Option<Vec<f32>> {
-		let g = LINE.lock().unwrap_or_else(|e| e.into_inner());
-		let line = g.as_ref().filter(|l| l.last_push.elapsed() < IDLE)?;
-		let e = idx(line.origin, end);
-		let s = e - n as i64;
-		Some(
-			(s..e)
-				.map(|i| {
-					let k = i - line.start;
-					if k >= 0 && (k as usize) < line.buf.len() {
-						line.buf[k as usize]
-					} else {
-						0.0
-					}
-				})
-				.collect(),
-		)
+		let g = LINES.lock().unwrap_or_else(|e| e.into_inner());
+		let mut out: Option<Vec<f32>> = None;
+		for line in g.iter().flatten().filter(|l| l.last_push.elapsed() < IDLE) {
+			let acc = out.get_or_insert_with(|| vec![0.0; n]);
+			let s = idx(line.origin, end) - n as i64;
+			for (j, o) in acc.iter_mut().enumerate() {
+				let k = s + j as i64 - line.start;
+				if k >= 0 && (k as usize) < line.buf.len() {
+					*o += line.buf[k as usize];
+				}
+			}
+		}
+		out
 	}
 
 	#[cfg(test)]
@@ -259,6 +298,12 @@ pub mod far_end {
 			let w = window(t0, 480).unwrap();
 			assert!(w.iter().all(|v| *v == 0.0));
 			assert!(active());
+			// The session audio (stereo, downmixed) adds onto the voice. One test only: the
+			// timelines are process-wide.
+			let stereo: Vec<f32> = std::iter::repeat_n([0.25f32, 0.15], 960).flatten().collect();
+			push_session(&stereo, 2, t0);
+			let w = window(t0 + Duration::from_millis(20), 960).unwrap();
+			assert!((w[100] - 0.7).abs() < 1e-3, "voice 0.5 + session 0.2, got {}", w[100]);
 		}
 	}
 }

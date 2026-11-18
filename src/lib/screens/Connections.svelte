@@ -345,7 +345,7 @@
 							</button>
 							<button
 								class="act call"
-								class:live={calls[r.sid] === 'active'}
+								class:oncall={calls[r.sid] === 'active'}
 								class:ringing={calls[r.sid] === 'outgoing' || calls[r.sid] === 'incoming'}
 								disabled={!callable[r.sid] && (calls[r.sid] ?? 'idle') === 'idle'}
 								onclick={() => callClick(r)}
@@ -581,7 +581,8 @@
 		opacity: 0.4;
 		cursor: default;
 	}
-	.act.call.live {
+	/* Not `.live`: that is the header's 8 px status dot, and it shrank this button into one. */
+	.act.call.oncall {
 		color: var(--danger-text);
 	}
 	@keyframes callpulse {
