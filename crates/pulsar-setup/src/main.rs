@@ -111,6 +111,10 @@ fn main() {
 			#[cfg(windows)]
 			round_corners(cc);
 			let mut app = SetupApp::new(uninstall, mock);
+			#[cfg(windows)]
+			{
+				app.hwnd = win_drag::hwnd(cc);
+			}
 			if let Some(u) = updating {
 				app.start_updating(u);
 			}
@@ -189,6 +193,62 @@ fn round_corners(cc: &eframe::CreationContext<'_>) {
 	}
 }
 
+/// Title-bar drag that moves the window with `SetWindowPos` while the button is held, instead
+/// of the system move loop (`StartDrag`). Outside that loop a monitor DPI change is handled
+/// like any other move: the window takes the new monitor's scale once and keeps it.
+#[cfg(windows)]
+mod win_drag {
+	use windows_sys::Win32::Foundation::{POINT, RECT};
+	use windows_sys::Win32::UI::WindowsAndMessaging::{
+		GetCursorPos, GetWindowRect, SetWindowPos, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
+	};
+
+	pub fn hwnd(cc: &eframe::CreationContext<'_>) -> Option<isize> {
+		use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+		match cc.window_handle().ok()?.as_raw() {
+			RawWindowHandle::Win32(w) => Some(w.hwnd.get()),
+			_ => None,
+		}
+	}
+
+	pub struct Drag {
+		hwnd: isize,
+		/// Cursor minus the window's top-left, in physical screen pixels.
+		grab: (i32, i32),
+	}
+
+	impl Drag {
+		pub fn start(hwnd: isize) -> Option<Drag> {
+			let (c, r) = (cursor()?, rect(hwnd)?);
+			Some(Drag { hwnd, grab: (c.x - r.left, c.y - r.top) })
+		}
+
+		/// Put the window under the cursor again (call every frame while dragging).
+		pub fn follow(&self) {
+			let (Some(c), Some(r)) = (cursor(), rect(self.hwnd)) else { return };
+			let (x, y) = (c.x - self.grab.0, c.y - self.grab.1);
+			if (x, y) != (r.left, r.top) {
+				// SAFETY: plain Win32 call on our own window.
+				unsafe {
+					SetWindowPos(self.hwnd as _, std::ptr::null_mut(), x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
+				};
+			}
+		}
+	}
+
+	fn cursor() -> Option<POINT> {
+		let mut p = POINT { x: 0, y: 0 };
+		// SAFETY: writes into the local POINT.
+		(unsafe { GetCursorPos(&mut p) } != 0).then_some(p)
+	}
+
+	fn rect(hwnd: isize) -> Option<RECT> {
+		let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+		// SAFETY: writes into the local RECT.
+		(unsafe { GetWindowRect(hwnd as _, &mut r) } != 0).then_some(r)
+	}
+}
+
 /// `--updating` arguments (see the module doc).
 struct Updating {
 	version: String,
@@ -263,6 +323,12 @@ struct SetupApp {
 	upd_rx: Option<Receiver<install::UpdMsg>>,
 	/// UI walkthrough mode (`--mock`): every system-touching step is simulated.
 	mock: Option<mock::Mock>,
+	/// The setup window (for the title-bar drag, see `win_drag`).
+	#[cfg(windows)]
+	hwnd: Option<isize>,
+	/// A title-bar drag in progress.
+	#[cfg(windows)]
+	drag: Option<win_drag::Drag>,
 }
 
 impl SetupApp {
@@ -333,6 +399,10 @@ impl SetupApp {
 			upd_rx: None,
 			dark: None,
 			mock,
+			#[cfg(windows)]
+			hwnd: None,
+			#[cfg(windows)]
+			drag: None,
 		};
 		if let Some(at) = mock.and_then(|m| m.at) {
 			use mock::At;
@@ -698,6 +768,22 @@ impl SetupApp {
 		// ── Title bar: drag area + close ──────────────────────────────────────────
 		let bar = Rect::from_min_size(o, Vec2::new(W, 40.0));
 		let drag = ui.interact(bar, ui.scope_id().with("titlebar"), Sense::click_and_drag());
+		// Windows: move the window ourselves. `StartDrag` enters the system move loop, and winit
+		// loses the DPI resize inside it: dragging between monitors with different scaling
+		// (laptop 175 % ↔ monitor 100 %) shrank or grew the window on every crossing.
+		#[cfg(windows)]
+		{
+			if drag.drag_started() {
+				self.drag = self.hwnd.and_then(win_drag::Drag::start);
+			}
+			if let Some(d) = &self.drag {
+				d.follow();
+			}
+			if drag.drag_stopped() || !ui.input(|i| i.pointer.primary_down()) {
+				self.drag = None;
+			}
+		}
+		#[cfg(not(windows))]
 		if drag.drag_started() {
 			ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
 		}
