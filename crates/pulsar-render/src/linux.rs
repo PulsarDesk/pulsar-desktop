@@ -1858,6 +1858,16 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 							),
 						)
 						.contains(pos);
+					// The in-call card's mic switch / hang-up: acted on here, no engage.
+					if let Some(b) = (!on_btn).then(|| overlay::call_btn_at(pos)).flatten() {
+						let (field, val) = b.command(MIC_ON.load(Ordering::SeqCst));
+						if field == "mic" {
+							MIC_ON.store(val == "on", Ordering::SeqCst);
+						}
+						println!("ov set {field} {val}");
+						let _ = std::io::stdout().flush();
+						continue;
+					}
 					// A chat bubble opens the overlay on the Chat (like the button, no engage).
 					let on_btn = on_btn || {
 						let b = overlay::bubble_at(pos);
@@ -2224,6 +2234,7 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 				|| stalled
 				|| recovering
 				|| !state.chat_toasts.is_empty()
+				|| overlay::call_active()
 			{
 				// Closed-state chrome: the mini stats HUD, the Parsec-style open button
 				// and/or the helper tooltip. Display-only on Linux (the container is input
@@ -2255,6 +2266,7 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 						let _ = overlay::draw_open_button(ctx, &state);
 					}
 					overlay::draw_chat_bubbles(ctx, &state);
+					overlay::draw_call_card(ctx, &state);
 					if let Some((text, alpha)) = &hint_text {
 						overlay::draw_hint(ctx, text, *alpha);
 					}
@@ -2304,6 +2316,35 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 				}
 				s
 			};
+			let mut last = LAST.lock().unwrap();
+			if *last != line {
+				println!("{line}");
+				let _ = std::io::stdout().flush();
+				*last = line;
+			}
+		}
+		// The same for the in-call card's buttons: `vidsink-callbtns <kind> x y w h …`
+		// (`mic` / `hangup`, client fractions; `-` = none).
+		{
+			static LAST: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+			let (sw, sh) = (w as f32 / ppp, h as f32 / ppp);
+			let btns = if open || sw <= 0.0 || sh <= 0.0 { Vec::new() } else { overlay::call_btn_rects() };
+			let mut line = String::from("vidsink-callbtns");
+			if btns.is_empty() {
+				line.push_str(" -");
+			}
+			for (r, b) in &btns {
+				use std::fmt::Write as _;
+				let _ = write!(
+					line,
+					" {} {:.4} {:.4} {:.4} {:.4}",
+					b.token(),
+					r.min.x / sw,
+					r.min.y / sh,
+					r.width() / sw,
+					r.height() / sh
+				);
+			}
 			let mut last = LAST.lock().unwrap();
 			if *last != line {
 				println!("{line}");

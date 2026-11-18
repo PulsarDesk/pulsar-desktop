@@ -1127,7 +1127,15 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
 				by = by.clamp(0.0, (sh - bs).max(0.0));
 				hit_btn = p.x >= bx && p.x <= bx + bs && p.y >= by && p.y <= by + bs;
 			}
-			if !hit_btn && crate::overlay::bubble_at(p) {
+			if let Some(b) = (!hit_btn).then(|| crate::overlay::call_btn_at(p)).flatten() {
+				// The in-call card: its mic switch / hang-up (not click-to-engage).
+				let (field, val) = b.command(MIC_ON.load(Ordering::SeqCst));
+				if field == "mic" {
+					MIC_ON.store(val == "on", Ordering::SeqCst);
+				}
+				println!("ov set {field} {val}");
+				let _ = std::io::stdout().flush();
+			} else if !hit_btn && crate::overlay::bubble_at(p) {
 				// A chat bubble: open the overlay on the Chat (not click-to-engage).
 				crate::overlay::open_to_chat();
 				println!("ov toggle");
@@ -1771,6 +1779,7 @@ impl Renderer {
 		let stalled = STALLED.load(Ordering::Relaxed);
 		let recovering = !stalled && RECOVERING.load(Ordering::Relaxed);
 		let toasts = chat_toasts();
+		let in_call = crate::overlay::call_active();
 		if !stats_hud
 			&& !ovbtn
 			&& hint_text.is_none()
@@ -1779,10 +1788,12 @@ impl Renderer {
 			&& !stalled
 			&& !recovering
 			&& toasts.is_empty()
+			&& !in_call
 		{
 			return;
 		}
 		self.ostate.chat_toasts = toasts;
+		self.ostate.mic_on = MIC_ON.load(Ordering::SeqCst);
 		// Sync the display state (same sources as the open path).
 		let s = *STATS.lock().unwrap();
 		if s[0] > 0.0 {
@@ -1838,6 +1849,7 @@ impl Renderer {
 				crate::overlay::draw_hint(ctx, text, *alpha);
 			}
 			crate::overlay::draw_chat_bubbles(ctx, ostate);
+			crate::overlay::draw_call_card(ctx, ostate);
 			paint_side_cursor(ctx, cursor_draw);
 			if let Some((p, a)) = host_draw {
 				crate::overlay::draw_host_pointer(ctx, p, a);

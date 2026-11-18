@@ -114,6 +114,13 @@ export const onChatMsg = (cb: (e: DataText) => void) => listenTo<DataText>('chat
  * `[x, y, w, h]` of the renderer window (`id` = play id; empty = none shown). */
 export const onChatBubbles = (cb: (e: { id: number; rects: [number, number, number, number][] }) => void) =>
 	listenTo<{ id: number; rects: [number, number, number, number][] }>('chat-bubbles', cb);
+/** A button on the renderer's in-call card (Linux hotspot): `rect` = client fractions
+ * `[x, y, w, h]` of the renderer window. */
+export type CallBtnSpot = { kind: 'mic' | 'hangup'; rect: [number, number, number, number] };
+/** Client (Linux renderer): where the in-call card's buttons are (`id` = play id; empty = no
+ * card). */
+export const onCallBtns = (cb: (e: { id: number; btns: CallBtnSpot[] }) => void) =>
+	listenTo<{ id: number; btns: CallBtnSpot[] }>('call-btns', cb);
 /** Host: a chat line arrived from a connected client. */
 /** Connections window: open this client's chat (peer key; a chat toast was clicked). */
 export const onOpenChat = (cb: (peer: string) => void) => listenTo<string>('open-chat', cb);

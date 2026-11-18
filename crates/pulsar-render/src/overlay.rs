@@ -413,6 +413,11 @@ fn call_ui() -> CallUi {
 	CALL.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
+/// A voice call is on (the closed-state chrome then shows the call card).
+pub fn call_active() -> bool {
+	CALL.lock().unwrap_or_else(|e| e.into_inner()).phase == CallPhase::Active
+}
+
 /// `m:ss` since `since_ms` (wall clock).
 fn talk_time(since_ms: u64) -> String {
 	let now = std::time::SystemTime::now()
@@ -880,7 +885,8 @@ pub fn draw_recovering(ctx: &egui::Context) {
 		// Background layer: over the video but UNDER the open menu.
 		.order(egui::Order::Background)
 		.interactable(false)
-		.anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 18.0))
+		// Under the in-call card when there is one (same spot otherwise).
+		.anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, if call_active() { 14.0 + CALL_CARD_H + 8.0 } else { 18.0 }))
 		.show(ctx, |ui| {
 			egui::Frame::NONE
 				.fill(egui::Color32::from_rgba_unmultiplied(18, 20, 26, 215))
@@ -3858,6 +3864,132 @@ pub fn draw_chat_bubbles(ctx: &egui::Context, st: &OverlayState) {
 		);
 		y = if downward { rect.bottom() + 6.0 } else { rect.top() - 6.0 };
 	}
+}
+
+/// A button on the in-call card ([`draw_call_card`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallBtn {
+	/// Turn the microphone on / off.
+	Mic,
+	/// End the call.
+	Hangup,
+}
+
+impl CallBtn {
+	/// The `ov set <field> <val>` the button sends (`mic_on` = the mic's state now).
+	pub fn command(self, mic_on: bool) -> (&'static str, &'static str) {
+		match self {
+			CallBtn::Mic => ("mic", if mic_on { "off" } else { "on" }),
+			CallBtn::Hangup => ("call", "hangup"),
+		}
+	}
+
+	/// Its token on the `vidsink-callbtns` line (Linux hotspots).
+	#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+	pub fn token(self) -> &'static str {
+		match self {
+			CallBtn::Mic => "mic",
+			CallBtn::Hangup => "hangup",
+		}
+	}
+}
+
+/// Where the call card's buttons were last drawn (egui points) and when.
+static CALL_HIT: std::sync::Mutex<(Vec<(egui::Rect, CallBtn)>, Option<std::time::Instant>)> =
+	std::sync::Mutex::new((Vec::new(), None));
+
+/// The call card's buttons on screen now (egui points; drawn within the last second).
+pub fn call_btn_rects() -> Vec<(egui::Rect, CallBtn)> {
+	let g = CALL_HIT.lock().unwrap_or_else(|e| e.into_inner());
+	if g.1.is_some_and(|at| at.elapsed().as_secs_f32() < 1.0) {
+		g.0.clone()
+	} else {
+		Vec::new()
+	}
+}
+
+/// A closed-state click at `pos` (egui points) landed on a call card button.
+pub fn call_btn_at(pos: egui::Pos2) -> Option<CallBtn> {
+	call_btn_rects().into_iter().find(|(r, _)| r.contains(pos)).map(|(_, b)| b)
+}
+
+/// Height of the in-call card.
+const CALL_CARD_H: f32 = 48.0;
+
+/// While a voice call is on: a card at the top centre of the session, styled like the menu —
+/// who, the talk time, a mic switch and a red hang-up. Drawn with the menu closed (the menu's
+/// Audio page has the same controls when it is open). The backends that get the closed-state
+/// clicks hit-test [`call_btn_at`]; Linux embedded puts webview hotspots over
+/// [`call_btn_rects`] instead.
+pub fn draw_call_card(ctx: &egui::Context, st: &OverlayState) {
+	let mut hit_guard = CALL_HIT.lock().unwrap_or_else(|e| e.into_inner());
+	hit_guard.1 = Some(std::time::Instant::now());
+	hit_guard.0.clear();
+	let call = call_ui();
+	if call.phase != CallPhase::Active {
+		return;
+	}
+	let screen = ctx.viewport_rect();
+	let who = if call.peer.is_empty() { t("call.host").to_string() } else { call.peer.clone() };
+	let time = talk_time(call.since_ms);
+	let font = egui::FontId::proportional(14.0);
+	let small = egui::FontId::monospace(12.5);
+	let (name_g, time_g) = ctx.fonts_mut(|f| {
+		(
+			f.layout_no_wrap(who, font.clone(), egui::Color32::WHITE),
+			f.layout_no_wrap(time, small.clone(), egui::Color32::from_rgb(170, 176, 196)),
+		)
+	});
+	let btn = 34.0;
+	let pad = 7.0;
+	let name_w = name_g.size().x.min(220.0);
+	let w = pad + btn + 10.0 + name_w + 8.0 + time_g.size().x + 14.0 + btn + 8.0 + btn + pad;
+	let rect = egui::Rect::from_min_size(
+		egui::pos2(screen.center().x - w / 2.0, screen.top() + 14.0),
+		egui::vec2(w, CALL_CARD_H),
+	);
+	let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("pulsar_call_card")));
+	let r = CALL_CARD_H / 2.0;
+	painter.rect_filled(rect, r, egui::Color32::from_rgba_unmultiplied(20, 22, 31, 240));
+	painter.rect_stroke(rect, r, egui::Stroke::new(1.0, CALL_GREEN.gamma_multiply(0.45)), egui::StrokeKind::Inside);
+	let cy = rect.center().y;
+	let glyph = |c: egui::Pos2, s: &str, size: f32, col: egui::Color32| {
+		painter.text(c, egui::Align2::CENTER_CENTER, s, egui::FontId::proportional(size), col);
+	};
+	// The live dot: a phone in a green ring.
+	let mut x = rect.left() + pad;
+	let dot = egui::pos2(x + btn / 2.0, cy);
+	painter.circle_filled(dot, btn / 2.0, CALL_GREEN.gamma_multiply(0.22));
+	glyph(dot, icon::PHONE, 17.0, CALL_GREEN);
+	x += btn + 10.0;
+	// Who, then the talk time.
+	let name_pos = egui::pos2(x, cy - name_g.size().y / 2.0);
+	painter.with_clip_rect(egui::Rect::from_min_size(name_pos, egui::vec2(name_w, name_g.size().y))).galley(
+		name_pos,
+		name_g.clone(),
+		egui::Color32::WHITE,
+	);
+	x += name_w + 8.0;
+	painter.galley(egui::pos2(x, cy - time_g.size().y / 2.0), time_g.clone(), egui::Color32::WHITE);
+	x += time_g.size().x + 14.0;
+	// Mic switch: lit while on, struck through in red while off.
+	let mic = egui::Rect::from_center_size(egui::pos2(x + btn / 2.0, cy), egui::vec2(btn, btn));
+	painter.circle_filled(mic.center(), btn / 2.0, if st.mic_on { ROW_HOVER } else { DANGER_DIM });
+	glyph(
+		mic.center(),
+		if st.mic_on { icon::MICROPHONE } else { icon::MICROPHONE_SLASH },
+		17.0,
+		if st.mic_on { egui::Color32::WHITE } else { egui::Color32::from_rgb(255, 150, 155) },
+	);
+	x += btn + 8.0;
+	// Hang up.
+	let end = egui::Rect::from_center_size(egui::pos2(x + btn / 2.0, cy), egui::vec2(btn, btn));
+	painter.circle_filled(end.center(), btn / 2.0, DANGER);
+	glyph(end.center(), icon::PHONE_DISCONNECT, 17.0, egui::Color32::WHITE);
+	hit_guard.0.push((mic, CallBtn::Mic));
+	hit_guard.0.push((end, CallBtn::Hangup));
+	// The talk time ticks.
+	ctx.request_repaint_after(std::time::Duration::from_millis(500));
 }
 
 /// Transient helper tooltip, bottom-center over the video (drawn while the overlay is

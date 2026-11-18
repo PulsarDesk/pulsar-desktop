@@ -37,6 +37,7 @@
 		onChatMsg,
 		onCallState,
 		onChatBubbles,
+		onCallBtns,
 		onPlayDims,
 		onHostPointer,
 		onHostDisplayStreamed,
@@ -270,6 +271,8 @@
 	// AND cached against the target id so recents/LAN/devices keep the face+name.
 	/** Where the renderer's closed-state chat bubbles are (client fractions; Linux only). */
 	let chatBubbles = $state<[number, number, number, number][]>([]);
+	/** Where the renderer's in-call card buttons are (client fractions; Linux only). */
+	let callBtns = $state<{ kind: 'mic' | 'hangup'; rect: [number, number, number, number] }[]>([]);
 	let peerAvatar = $state('');
 	let peerName = $state('');
 	// The last call-state for this session was 'active' (its end turns the mic switch off).
@@ -309,6 +312,11 @@
 			onChatBubbles((e) => {
 				if (e.id !== playId) return;
 				chatBubbles = e.rects;
+			}),
+			// Linux: the in-call card's mic switch / hang-up, the same way.
+			onCallBtns((e) => {
+				if (e.id !== playId) return;
+				callBtns = e.btns;
 			})
 		);
 		return scope.dispose;
@@ -1292,6 +1300,18 @@
 				onclick={() => {
 					chatBubbles = [];
 					api.renderChatOpen(playId).catch(() => {}).finally(() => dock.toggleOverlay());
+				}}
+			></button>
+		{/each}
+		<!-- The in-call card's buttons (Linux: same pass-through reason). -->
+		{#each callBtns as b (b.kind)}
+			<button
+				class="bubble-hotspot"
+				aria-label={b.kind === 'hangup' ? t('call.hangup') : t('session.mic')}
+				style="left:{b.rect[0] * 100}%; top:{b.rect[1] * 100}%; width:{b.rect[2] * 100}%; height:{b.rect[3] * 100}%"
+				onclick={() => {
+					if (b.kind === 'hangup') api.callAction('client', playId, 'hangup').catch(() => {});
+					else sidechan.toggleMic();
 				}}
 			></button>
 		{/each}

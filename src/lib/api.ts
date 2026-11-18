@@ -35,6 +35,7 @@ export {
 	onGamepadNav,
 	onChatMsg,
 	onChatBubbles,
+	onCallBtns,
 	onHostChat,
 	onOpenChat,
 	onClipboardIn,

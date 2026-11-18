@@ -245,6 +245,18 @@ pub(crate) fn start_render_reader(
 				let v: Vec<f32> = rest.split_whitespace().filter_map(|x| x.parse().ok()).collect();
 				let rects: Vec<[f32; 4]> = v.chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]).collect();
 				let _ = app.emit("chat-bubbles", serde_json::json!({ "id": cur_id, "rects": rects }));
+			} else if let Some(rest) = line.strip_prefix("vidsink-callbtns ") {
+				// The in-call card's buttons (`<mic|hangup> x y w h` each, client fractions, `-` =
+				// none; Linux renderer): the session puts click hotspots over them.
+				let toks: Vec<&str> = rest.split_whitespace().collect();
+				let btns: Vec<serde_json::Value> = toks
+					.chunks_exact(5)
+					.filter_map(|c| {
+						let v: Vec<f32> = c[1..].iter().filter_map(|x| x.parse().ok()).collect();
+						(v.len() == 4).then(|| serde_json::json!({ "kind": c[0], "rect": [v[0], v[1], v[2], v[3]] }))
+					})
+					.collect();
+				let _ = app.emit("call-btns", serde_json::json!({ "id": cur_id, "btns": btns }));
 			} else if let Some(rest) = line.strip_prefix("vidsink-ovbtn ") {
 				// The overlay-open button (client fractions, `-` = hidden): the free-cursor
 				// handover keeps it clickable by counting it as outside the video.

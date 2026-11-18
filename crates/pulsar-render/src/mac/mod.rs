@@ -1013,7 +1013,15 @@ fn handle_mouse(ev: &NSEvent, win: &window::Panel) {
 			let (bx, by, bs) = ovbtn_rect(sw, sh);
 			OVERLAY_BTN.load(Ordering::SeqCst) && pos.x >= bx && pos.x <= bx + bs && pos.y >= by && pos.y <= by + bs
 		};
-		if t == NSEventType::LeftMouseDown && !on_btn(pos) && crate::overlay::bubble_at(pos) {
+		let call_btn = (t == NSEventType::LeftMouseDown && !on_btn(pos)).then(|| crate::overlay::call_btn_at(pos)).flatten();
+		if let Some(b) = call_btn {
+			// The in-call card: its mic switch / hang-up.
+			let (field, val) = b.command(MIC_ON.load(Ordering::SeqCst));
+			if field == "mic" {
+				MIC_ON.store(val == "on", Ordering::SeqCst);
+			}
+			out_line(&format!("ov set {field} {val}"));
+		} else if t == NSEventType::LeftMouseDown && !on_btn(pos) && crate::overlay::bubble_at(pos) {
 			// A chat bubble: open the overlay on the Chat.
 			crate::overlay::open_to_chat();
 			out_line("ov toggle");
@@ -1099,8 +1107,9 @@ fn wants_mouse(win: &window::Panel) -> bool {
 	let ppp = overlay_ppp();
 	let k = win.scale as f32 / ppp;
 	let (px, py) = (x as f32 * k, y as f32 * k);
-	// A closed-state chat bubble takes the click too (it opens the Chat).
-	if crate::overlay::bubble_at(egui::pos2(px, py)) {
+	// A closed-state chat bubble takes the click too (it opens the Chat), and so does the
+	// in-call card's buttons.
+	if crate::overlay::bubble_at(egui::pos2(px, py)) || crate::overlay::call_btn_at(egui::pos2(px, py)).is_some() {
 		return true;
 	}
 	if !OVERLAY_BTN.load(Ordering::SeqCst) {
@@ -1406,6 +1415,7 @@ impl Renderer {
 			let stats_hud = STATS_HUD.load(Ordering::SeqCst);
 			let ovbtn = OVERLAY_BTN.load(Ordering::SeqCst);
 			let toasts = chat_toasts();
+			let in_call = crate::overlay::call_active();
 			if !stats_hud
 				&& !ovbtn
 				&& hint_text.is_none()
@@ -1414,10 +1424,12 @@ impl Renderer {
 				&& !stalled
 				&& !recovering
 				&& toasts.is_empty()
+				&& !in_call
 			{
 				return None;
 			}
 			self.ostate.chat_toasts = toasts;
+			self.ostate.mic_on = MIC_ON.load(Ordering::SeqCst);
 			self.sync_stats();
 			self.ostate.open = false;
 			self.ostate.stats_hud = stats_hud;
@@ -1442,6 +1454,7 @@ impl Renderer {
 					crate::overlay::draw_hint(ctx, text, *alpha);
 				}
 				crate::overlay::draw_chat_bubbles(ctx, ostate);
+				crate::overlay::draw_call_card(ctx, ostate);
 				paint_side_cursor(ctx, cursor_draw);
 				if let Some((p, a)) = host_draw {
 					crate::overlay::draw_host_pointer(ctx, p, a);
