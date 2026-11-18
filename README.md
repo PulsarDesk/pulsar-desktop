@@ -1,112 +1,249 @@
 <p align="center">
-  <img width="120" height="120" src="https://avatars.githubusercontent.com/u/290144039?s=240" alt="Pulsar logo">
+  <a href="https://pulsardesk.com"><img src=".github/assets/hero.png" alt="Pulsar Desktop: reach any PC, play any game" width="100%"></a>
 </p>
 
-<h1 align="center">Pulsar Desktop</h1>
+<h3 align="center">Free, open-source remote desktop and game streaming.</h3>
 
 <p align="center">
-  Remote desktop and game streaming for <b>Windows, macOS and Linux</b>. A free, open-source alternative to TeamViewer, AnyDesk and Parsec. ⚡
+  The TeamViewer, AnyDesk and Parsec alternative with <b>no account</b>, <b>no subscription</b> and <b>no tracking</b>.<br>
+  One app for Windows, macOS and Linux. Help a friend, reach your own PC, or play your games from another room.
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/maintenance/yes/2026?style=for-the-badge" alt="Maintained">
-  <a href="https://github.com/PulsarDesk/pulsar-desktop/releases"><img src="https://img.shields.io/github/v/release/PulsarDesk/pulsar-desktop?include_prereleases&style=for-the-badge" alt="Release"></a>
-  <a href="https://github.com/PulsarDesk/pulsar-desktop/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/PulsarDesk/pulsar-desktop/ci.yml?branch=main&style=for-the-badge&label=CI" alt="CI"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/PulsarDesk/pulsar-desktop?style=for-the-badge" alt="License"></a>
+  <a href="https://github.com/PulsarDesk/pulsar-desktop/releases/latest"><img src="https://img.shields.io/badge/Windows-Download-5B57E0?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows"></a>
+  <a href="https://github.com/PulsarDesk/pulsar-desktop/releases/latest"><img src="https://img.shields.io/badge/macOS-Download-5B57E0?style=for-the-badge&logo=apple&logoColor=white" alt="Download for macOS"></a>
+  <a href="https://github.com/PulsarDesk/pulsar-desktop/releases/latest"><img src="https://img.shields.io/badge/Linux-Download-5B57E0?style=for-the-badge&logo=linux&logoColor=white" alt="Download for Linux"></a>
+  <a href="https://github.com/PulsarDesk/pulsar-mobile/releases/latest/download/Pulsar-android.apk"><img src="https://img.shields.io/badge/Android-Download-13B3D4?style=for-the-badge&logo=android&logoColor=white" alt="Download for Android"></a>
 </p>
-
----
-
-## 🚀 Project Status
-**Alpha (0.x).** Remote control, game streaming, file transfer, clipboard and chat work; expect rough edges and
-[report what you find](#-reporting-a-bug).
 
 <p align="center">
-  <img src="docs/screenshots/connect.png" width="49%" alt="Connect screen">
-  <img src="docs/screenshots/game-mode.png" width="49%" alt="Game mode">
+  <a href="https://github.com/PulsarDesk/pulsar-desktop/releases"><img src="https://img.shields.io/github/v/release/PulsarDesk/pulsar-desktop?include_prereleases&style=flat-square&color=5B57E0&label=version" alt="Version"></a>
+  <a href="https://github.com/PulsarDesk/pulsar-desktop/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/PulsarDesk/pulsar-desktop/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
+  <a href="https://github.com/PulsarDesk/pulsar-desktop/releases"><img src="https://img.shields.io/github/downloads/PulsarDesk/pulsar-desktop/total?style=flat-square&color=13B3D4" alt="Downloads"></a>
+  <a href="https://github.com/PulsarDesk/pulsar-desktop/stargazers"><img src="https://img.shields.io/github/stars/PulsarDesk/pulsar-desktop?style=flat-square&color=5B57E0" alt="Stars"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPLv3-5B57E0?style=flat-square" alt="License: GPLv3"></a>
 </p>
 
-One app does both jobs: connect to another computer, or share this one. Connections go peer-to-peer when they can
-and through a relay when they can't.
+<p align="center">
+  <a href="https://pulsardesk.com"><b>Website</b></a> ·
+  <a href="#-get-pulsar"><b>Download</b></a> ·
+  <a href="#-questions"><b>FAQ</b></a> ·
+  <a href="https://github.com/PulsarDesk/pulsar-mobile"><b>Android app</b></a> ·
+  <a href="https://github.com/PulsarDesk/pulsar-desktop/issues/new/choose"><b>Report a bug</b></a>
+</p>
 
----
+<br>
 
-## ✨ Features
+<p align="center"><img src=".github/assets/stats.png" alt="240 fps game streaming · 4K HDR · always end-to-end encrypted · no accounts, ads or tracking" width="100%"></p>
 
-### 🎮 Game streaming
-- **Up to 4K, up to 240 fps:** 720p / 1080p / 1440p / 4K or the host monitor's own modes, at 30 to 240 fps
-  (120, 144, 165, 240 Hz panels included; capped by what the host monitor refreshes at).
-- **Low latency:** hardware encoding on the host and hardware decoding on the client, the picture drawn by a native
-  renderer (never the browser view), frames sent the moment they are captured, raw mouse input while a game holds
-  the cursor.
-- **H.264, H.265 and AV1**, plus **10-bit HDR** on supported displays. Software encode/decode as a fallback, so there
-  is always a picture.
-- **Optimized stream:** measures the link before the picture starts, then keeps tuning bitrate, resolution, error
-  correction (FEC) and loss recovery, so a busy Wi-Fi or a phone hotspot stays playable.
-- **Picture upscaling:** AMD FSR, plus NVIDIA RTX / Intel Video Super Resolution on Windows, so a lower stream
-  resolution still looks sharp.
-- **DualSense, for real:** the host sees a real DualSense: adaptive triggers, HD haptics, lightbar and LEDs,
-  speaker, headset jack, microphone, gyro, touchpad, over USB or Bluetooth. Headphones in the pad get the game's
-  sound, like on a PS5. Xbox, DualShock and Switch Pro pads work too ([details](#-controllers)).
-- **Wake with a controller:** the PS / Xbox button brings Pulsar forward in game mode; controller input can keep
-  flowing while another app is in front.
-- **Game audio:** Opus up to 320 kb/s, or uncompressed on a local network. The host's speakers can stay silent while
-  you play.
-- **Same-PC co-op (advanced):** split the screen, give each pane its own game window and its own controller.
-- **Small devices:** a dedicated Orange Pi 5 (RK3588) build with hardware decoding, usable as a living-room box.
+## 💜 Why Pulsar?
 
-### 🖥️ Remote desktop
-- **Tabs like a browser:** every session is a tab; drag one out into its own window, drop it onto another window,
-  or drag it onto the picture to show two sessions side by side.
-- **Split screen:** several independent sessions in one window, to the same host or different ones.
-- **Multi-monitor:** pick which host monitor to view; the list follows monitors being plugged in or removed.
-- **File manager:** browse the other computer's files and download them, or drop files to send them.
-- **Clipboard sync, chat and microphone** over the same session.
-- **Free cursor:** leave the picture and the mouse is yours again; enter it and you control the other side. When
-  the person at the host uses their own mouse, you see their pointer labelled "Host".
-- **Block control:** the person at the host can take control back at any time with one click.
-- **Switch sides:** turn a session around so the other person controls your computer, in one click.
+<table>
+<tr>
+<td width="33%" valign="top">
 
-### 🔒 Security and network
-- **End-to-end encryption, always on:** password-authenticated key exchange (PAKE) with forward secrecy. The relay
-  only ever sees encrypted traffic.
-- **Access control:** one-time password, a fixed connect password, approve / deny on screen, trusted (paired)
-  devices, unattended access, and two-factor authentication (TOTP) for any of them.
-- **Peer-to-peer first:** direct connection with NAT punching and automatic router port opening (UPnP / NAT-PMP),
-  works over ZeroTier, Tailscale and other VPNs, and falls back to the relay only when it has to.
-- **Self-hostable relay:** run your own [relay](https://github.com/PulsarDesk/relay), or the same `pulsar` binary
-  with `--relay`.
-- **Finds devices on your network** without typing an ID.
-- **Free and open source** (GPLv3): no account, no subscription, no telemetry.
+### 🆓 Free. Really.
+No trial, no "personal use only", no time limit on sessions and no account to create. Pulsar is open source
+(GPLv3), so it stays free.
 
----
+</td>
+<td width="33%" valign="top">
 
-## ⚡ Trying Pulsar
-Download the installer for your system from the [latest release](https://github.com/PulsarDesk/pulsar-desktop/releases/latest):
+### 🔒 Private by design
+Every session is end-to-end encrypted, always. Even the server that helps you connect only sees scrambled data.
+No telemetry, no ads.
 
-| System | File |
+</td>
+<td width="33%" valign="top">
+
+### 🎮 Made for games
+Up to 4K and 240 fps with HDR, a picture that adapts to your Wi-Fi, and your controller works like it is plugged
+into the other PC. A real DualSense, triggers and all.
+
+</td>
+</tr>
+<tr>
+<td width="33%" valign="top">
+
+### ⚡ Fast by default
+Pulsar connects your two devices directly whenever it can, so nothing sits in the middle slowing you down. When a
+direct path isn't possible, it falls back to a relay automatically.
+
+</td>
+<td width="33%" valign="top">
+
+### 🗂️ Tabs, like a browser
+Open several computers at once. Drag a session into its own window, drop it next to another, or view two side by
+side.
+
+</td>
+<td width="33%" valign="top">
+
+### 🏠 Yours to run
+Want everything on your own hardware? Run your own [Pulsar server](https://github.com/PulsarDesk/relay) with one
+command. The apps work with it out of the box.
+
+</td>
+</tr>
+</table>
+
+## 👀 A look inside
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/connect-light.png" alt="Connect screen: your ID and one-time password"></td>
+<td width="50%"><img src="docs/screenshots/gaming-dark.png" alt="Game mode: connect to a gaming PC"></td>
+</tr>
+<tr>
+<td align="center"><b>Connect</b> · share your ID or type someone else's</td>
+<td align="center"><b>Game mode</b> · a living-room view for your controller</td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/screenshots/settings-light.png" alt="Streaming settings"></td>
+<td width="50%"><img src="docs/screenshots/devices-dark.png" alt="Saved devices in dark mode"></td>
+</tr>
+<tr>
+<td align="center"><b>Settings</b> · quality, codec and HDR in plain words</td>
+<td align="center"><b>Devices</b> · your computers, one click away (dark theme)</td>
+</tr>
+</table>
+
+## 🚀 How it works
+
+<p align="center"><img src=".github/assets/steps.png" alt="1. Install Pulsar on both devices. 2. Share the ID and one-time password. 3. You're connected, encrypted end to end." width="100%"></p>
+
+That's it. No port forwarding, no sign-up, no IP addresses to look up. Devices on the same network even show up on
+their own.
+
+## ✨ What you can do
+
+### 🎮 Play your gaming PC from anywhere
+- **Sharp and smooth:** up to **4K** and **240 fps** (120, 144 and 165 Hz screens too), with **10-bit HDR**.
+- **Feels local:** hardware video on both sides and a picture drawn the moment it arrives, so the delay stays tiny.
+- **Never a frozen screen:** Pulsar tests your connection first, then keeps adjusting so busy Wi-Fi or a phone
+  hotspot stays playable.
+- **Looks better than it is:** AMD FSR, NVIDIA RTX and Intel video upscaling sharpen a lower-resolution stream.
+- **Your controller, for real:** Xbox, PlayStation and Switch Pro pads work. A DualSense keeps its adaptive
+  triggers, haptics, lightbar, speaker, mic and headset jack, just like on a PS5. [More on controllers](#-controllers)
+- **Wake it with the PS or Xbox button**, and play with the game's sound while the host's speakers stay quiet.
+- **Couch co-op on one PC** (advanced): split the screen and give every player their own game and controller.
+- **Living-room box:** a dedicated build for the Orange Pi 5 turns a tiny board into a game-streaming client.
+
+### 🖥️ Help, support and work remotely
+- **Remote control** of the whole desktop, on any monitor you pick.
+- **Send files** both ways with a built-in file manager, or just drag and drop.
+- **Copy here, paste there:** the clipboard follows you between computers.
+- **Chat and talk:** text chat and your microphone, in the same session.
+- **You stay in charge:** the person at the computer sees who is connected and can take control back with one
+  click. Need to swap roles? Switch sides in one click.
+- **Several computers at once** in tabs or split screen.
+
+### 🔒 Safe by default
+- **Always encrypted end to end,** with a modern key exchange that keeps past sessions safe.
+- **You decide who gets in:** a one-time password, a fixed password, an on-screen Allow / Deny prompt, trusted
+  devices, and two-factor codes for all of them.
+- **Unattended access** for your own machines, when you turn it on.
+- **Works through home routers and VPNs** (ZeroTier, Tailscale and others) without touching router settings.
+
+## 📥 Get Pulsar
+
+Grab the installer for your computer from the **[latest release](https://github.com/PulsarDesk/pulsar-desktop/releases/latest)**,
+or let [pulsardesk.com](https://pulsardesk.com) pick the right one for you.
+
+| Your computer | Download |
 |---|---|
-| Windows | `_x64-setup.exe` (or `_arm64-setup.exe`) |
-| macOS | `_aarch64.dmg` (Apple Silicon) or `_x64.dmg` (Intel) |
-| Linux | `.AppImage`, `.deb` or `.rpm` (x64 and arm64) |
-| Orange Pi 5 (RK3588) | `_opi5_arm64.deb`: hardware video decoding; needs Ubuntu 22.04 with the `ppa:jjriek/rockchip-multimedia` packages |
+| 🪟 **Windows** 10 / 11 | `_x64-setup.exe` (or `_arm64-setup.exe` for ARM laptops) |
+| 🍎 **macOS** | `_aarch64.dmg` for Apple Silicon, `_x64.dmg` for Intel Macs |
+| 🐧 **Linux** | `.AppImage`, `.deb` or `.rpm` (x64 and arm64) |
+| 🍊 **Orange Pi 5** (RK3588) | `_opi5_arm64.deb`, with hardware video (Ubuntu 22.04 + `ppa:jjriek/rockchip-multimedia`) |
+| 📱 **Android** | [`Pulsar-android.apk`](https://github.com/PulsarDesk/pulsar-mobile/releases/latest/download/Pulsar-android.apk) ([Pulsar Mobile](https://github.com/PulsarDesk/pulsar-mobile)) |
 
-Open Pulsar, share your **ID and one-time password** with the other side, or type theirs to connect.
+Then open Pulsar, tell the other side your **ID and one-time password**, or type theirs and press **Connect**.
+Pulsar keeps itself up to date.
 
-- **Windows:** not code-signed yet; if SmartScreen warns, choose "More info" -> "Run anyway".
-- **macOS:** not notarized yet; right-click the app -> Open the first time.
-- **Linux on Wayland:** the system asks once per session before your screen is shared.
+> [!NOTE]
+> Pulsar is new, so the installers aren't signed yet.
+> **Windows:** if SmartScreen warns, choose *More info* → *Run anyway*.
+> **macOS:** right-click the app → *Open* the first time.
+> **Linux on Wayland:** the system asks once per session before your screen is shared.
 
----
+## ❓ Questions
 
-## 📦 Other Pulsar Repositories
-- [**pulsar-mobile**](https://github.com/PulsarDesk/pulsar-mobile) - Pulsar for Android
-- [**relay**](https://github.com/PulsarDesk/relay) - Run your own relay server
-- [**pulsar-core**](https://github.com/PulsarDesk/pulsar-core) - The shared engine behind both apps
+<details>
+<summary><b>Is it really free?</b></summary>
+<br>
+Yes. Pulsar is free and open-source software under the GPLv3 license. There is no paid tier, no feature locked
+behind a subscription, and no "commercial use detected" pop-up.
+</details>
 
----
+<details>
+<summary><b>Do I need an account?</b></summary>
+<br>
+No. Each device gets an ID automatically. You share the ID and a one-time password, and that's all.
+</details>
 
-## 🖥️ Where it has been tested
+<details>
+<summary><b>Can someone else see my screen or my data?</b></summary>
+<br>
+No. Every session is end-to-end encrypted. When the connection goes through a relay server, that server only
+forwards data it cannot read. Pulsar sends no telemetry.
+</details>
+
+<details>
+<summary><b>Do I have to open ports on my router?</b></summary>
+<br>
+No. Pulsar finds a direct path through most home routers on its own (and opens one automatically with UPnP /
+NAT-PMP when your router allows it). If no direct path exists, it uses the relay automatically.
+</details>
+
+<details>
+<summary><b>Is it good enough for games?</b></summary>
+<br>
+That's what it was built for: hardware encoding and decoding, H.264 / H.265 / AV1, HDR, up to 240 fps, and full
+controller support. On a good home network it feels like sitting at the PC.
+</details>
+
+<details>
+<summary><b>Can I run my own server?</b></summary>
+<br>
+Yes. <a href="https://github.com/PulsarDesk/relay">Pulsar Relay</a> runs with one Docker command, or start the
+<code>pulsar</code> app itself with <code>--relay</code>. Then point your devices at it in Settings → Network.
+</details>
+
+<details>
+<summary><b>Is it finished?</b></summary>
+<br>
+Not yet: Pulsar is in <b>alpha</b> (0.x). Remote control, game streaming, file transfer, clipboard and chat work
+today, but expect rough edges. <a href="#-reporting-a-bug">Telling us what you hit</a> helps a lot.
+</details>
+
+## 🎮 Controllers
+
+Plug any controller into the computer you connect **from** (USB or Bluetooth). The games on the other PC see a
+virtual one:
+
+| Your controller | What the host's games see (Windows / Linux) |
+|---|---|
+| Xbox, Switch Pro, generic | Xbox 360 pad (no rumble yet) |
+| DualShock 3 / 4 | DualShock 4 with rumble, touchpad and PS button (Windows; a generic pad without rumble on Linux) |
+| DualSense | **a real DualSense**: adaptive triggers, HD haptics, lightbar, speaker, headset jack, mic, gyro, touchpad |
+
+<details>
+<summary>Details</summary>
+
+- Pick the virtual pad per controller in the Controllers panel; *Automatic* uses DualShock 4 for PlayStation pads.
+- The Windows installer adds the drivers (ViGEmBus, usbip-win2); Linux uses the kernel's `uinput` and `vhci-hcd`.
+- Linux host: remote mouse, keyboard and controllers need write access to `/dev/uinput`. The .deb / .rpm install a
+  udev rule for it (`70-pulsar-uinput.rules`); with the AppImage, click Pulsar's notice to install it (one password
+  prompt).
+- macOS hosts have no virtual controllers yet.
+- Not tested yet: the DualSense mic, a USB-cabled DualSense on the connecting side, and the experimental DS4
+  headset jack.
+
+</details>
+
+## 🧪 Where it has been tested
+
 | System | Share this computer | Connect to others |
 |---|---|---|
 | Windows 11, NVIDIA RTX | ✅ hardware (NVENC) | ✅ hardware |
@@ -116,59 +253,39 @@ Open Pulsar, share your **ID and one-time password** with the other side, or typ
 | Raspberry Pi, Orange Pi 5 (RK3588) | ✅ | ✅ hardware on the Orange Pi 5 |
 | Windows with AMD, Linux on GNOME / Intel, macOS | ❔ not tested yet | ❔ not tested yet |
 
-Without a usable graphics card Pulsar falls back to software encoding and decoding: slower, but there is always a
-picture. The `.AppImage` is checked on Fedora, Ubuntu, Debian, openSUSE and Arch every release (Ubuntu 22.04 or
-newer); `Pulsar.AppImage --selftest` shows which encoders work on your machine. Tried another system? A short
-[issue](https://github.com/PulsarDesk/pulsar-desktop/issues) helps, even when everything worked.
+No usable graphics card? Pulsar falls back to software video: slower, but there is always a picture. The
+`.AppImage` is checked on Fedora, Ubuntu, Debian, openSUSE and Arch every release (Ubuntu 22.04 or newer), and
+`Pulsar.AppImage --selftest` shows which encoders work on your machine.
 
----
-
-## 🎮 Controllers
-Plug any controller into the computer you connect **from** (USB or Bluetooth, read through SDL3). The host's games
-see a virtual one:
-
-| Your controller | Windows / Linux host |
-|---|---|
-| Xbox, Switch Pro, generic | Xbox 360 pad (no rumble yet) |
-| DualShock 3 / 4 | DualShock 4 with rumble, touchpad and PS button (Windows; a generic pad without rumble on Linux) |
-| DualSense | **a real DualSense**: adaptive triggers, HD haptics, lightbar, speaker, headset jack, mic, gyro, touchpad |
-
-- Pick the virtual pad per controller in the Controllers panel; *Automatic* uses DualShock 4 for PlayStation pads.
-- The Windows installer adds the drivers (ViGEmBus, usbip-win2); Linux uses the kernel's `uinput` and `vhci-hcd`.
-- Linux host: remote mouse, keyboard and controllers need write access to `/dev/uinput`. The .deb / .rpm install a
-  udev rule for it (`70-pulsar-uinput.rules`); with the AppImage, click Pulsar's notice to install it (one password
-  prompt).
-  macOS hosts have no virtual controllers yet.
-- Not tested yet: the DualSense mic, a USB-cabled DualSense on the connecting side, and the experimental DS4
-  headset jack.
-
----
+Tried Pulsar on another system? A short [issue](https://github.com/PulsarDesk/pulsar-desktop/issues) helps, even when
+everything worked.
 
 ## 🐞 Reporting a bug
+
 [Open an issue](https://github.com/PulsarDesk/pulsar-desktop/issues/new/choose) and include:
 
 - Pulsar version and your system on **both sides** (Windows / macOS / Linux, and X11 or Wayland on Linux)
 - Graphics card on both sides
 - What you did and what happened (black screen, no connection, crash, ...)
-- The log file: Settings -> General -> **Open log folder**
+- The log file: Settings → General → **Open log folder**
 - On Linux: the output of `Pulsar.AppImage --selftest`
 
----
+## 🌌 The Pulsar family
 
-## 🛠️ Requirements
-**To use:** Windows 10 or newer, macOS, or a 64-bit Linux (x64 or arm64). A graphics card with hardware video
-encoding helps but is not required.
+| | Project | |
+|---|---|---|
+| 📱 | [**Pulsar Mobile**](https://github.com/PulsarDesk/pulsar-mobile) | Pulsar for Android phones, tablets and TVs |
+| 🛰️ | [**Pulsar Relay**](https://github.com/PulsarDesk/relay) | Run your own Pulsar server |
+| 🧩 | [**pulsar-core**](https://github.com/PulsarDesk/pulsar-core) | The shared engine behind both apps |
+| 🌐 | [**pulsardesk.com**](https://pulsardesk.com) | The website |
 
-**For contributors / development:** Rust stable, [bun](https://bun.sh); on Linux also the GTK/WebKit and GStreamer
-development packages.
+## 🛠️ For developers
 
----
+<details>
+<summary>Build Pulsar from source</summary>
 
-## 🤝 Contributing
-Everyone can open [issues](https://github.com/PulsarDesk/pulsar-desktop/issues) and pull requests. Irrelevant or
-abusive issues may be closed or removed. Commits follow [Conventional Commits](https://www.conventionalcommits.org).
+**Needs:** Rust stable and [bun](https://bun.sh); on Linux also the GTK/WebKit and GStreamer development packages.
 
-### Development Guide
 ```bash
 git clone https://github.com/PulsarDesk/pulsar-desktop.git
 cd pulsar-desktop
@@ -179,7 +296,17 @@ bun run test:unit        # UI tests
 
 More: [docs/development.md](docs/development.md) (layout, encoders per platform, tests, releases).
 
----
+</details>
+
+Everyone is welcome to open [issues](https://github.com/PulsarDesk/pulsar-desktop/issues) and pull requests.
+Irrelevant or abusive issues may be closed or removed. Commits follow
+[Conventional Commits](https://www.conventionalcommits.org).
 
 ## 📄 License
-Pulsar is licensed under **GNU GPLv3 or later** (GPL-3.0-or-later). See the [LICENSE](LICENSE) file for details.
+
+Pulsar is free software under the **GNU GPLv3 or later** (GPL-3.0-or-later). See [LICENSE](LICENSE).
+
+<p align="center">
+  <br>
+  <b>Like Pulsar? A ⭐ helps other people find it.</b>
+</p>
