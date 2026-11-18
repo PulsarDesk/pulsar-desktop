@@ -161,7 +161,10 @@
 		{:else}
 			<p class="hint">{t('controllers.reorderHint')}</p>
 			<ul class="slot-list">
-				{#each slotRows as { slot, pad } (pad.uuid)}
+				<!-- Keyed by the list position, not the uuid: two pads of one model (a host's virtual
+			     Xbox pads, two identical controllers) share a uuid, and a duplicate key threw —
+			     the whole Games screen became "500 Internal Error" (issue #14). -->
+			{#each slotRows as { slot, pad } (pad.index)}
 					<li class="pad-card" class:off={!pad.connected} class:disabled={!!ui.controllerDisabled[pad.uuid]}>
 						<div class="pad-top">
 							<span class="slot-label mono">{t('controllers.slot')} {slot + 1}</span>

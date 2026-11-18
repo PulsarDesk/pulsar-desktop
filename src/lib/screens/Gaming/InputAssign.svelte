@@ -59,7 +59,8 @@
 		{#if pads.length === 0}
 			<div class="ia-empty">{t('input.noControllers')}</div>
 		{/if}
-		{#each pads as pad (pad.uuid)}
+		<!-- By list position: pads of one model share a uuid (a duplicate key throws, issue #14). -->
+		{#each pads as pad (pad.index)}
 			<div class="ia-row">
 				<span class="ia-name">🎮 {pad.name}</span>
 				<select

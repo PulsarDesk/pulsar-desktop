@@ -130,3 +130,18 @@ describe('DualSense headphone volume per pad', () => {
 		delete ui.headsetVolume[PAD_A.uuid];
 	});
 });
+
+// Issue #14: two pads of one model (a host's virtual Xbox pads, two identical controllers)
+// share a uuid; a pad list keyed by uuid threw `each_key_duplicate` and the Games screen
+// became "500 Internal Error". Pad lists are keyed by their position instead.
+describe('pad lists tolerate pads that share a uuid', () => {
+	it('no keyed each over pads uses the uuid', async () => {
+		const files = {
+			'Controllers.svelte': (await import('./Controllers.svelte?raw')).default,
+			'InputAssign.svelte': (await import('./screens/Gaming/InputAssign.svelte?raw')).default
+		};
+		for (const [f, src] of Object.entries(files)) {
+			expect(src, f).not.toMatch(/\{#each [^}]*\((?:pad|p)\.uuid\)\}/);
+		}
+	});
+});
