@@ -104,5 +104,8 @@ jobs:
         # here: the advisories (0367-0369, 0429 = symlink-size abort) are in ZipArchive::extract, which the updater calls only
         # for a Windows `.zip` update and only AFTER the minisign signature check — we ship
         # `-setup.exe` (extract_exe path). Our own zip use (pulsar-setup) is on zip 9.
+        # 0545 (AES entries) needs zip's `aes-crypto` feature: the updater builds zip with
+        # default-features = false, so it is not compiled in. 0548 is in `ZipStreamReader`,
+        # which the updater does not use (it extracts with `ZipArchive`).
         # REMOVE when tauri-plugin-updater ships zip >= 9 (re-run `cargo audit` to confirm).
-        run: cargo audit --ignore RUSTSEC-2026-0367 --ignore RUSTSEC-2026-0368 --ignore RUSTSEC-2026-0369 --ignore RUSTSEC-2026-0429
+        run: cargo audit --ignore RUSTSEC-2026-0367 --ignore RUSTSEC-2026-0368 --ignore RUSTSEC-2026-0369 --ignore RUSTSEC-2026-0429 --ignore RUSTSEC-2026-0545 --ignore RUSTSEC-2026-0548
