@@ -17,6 +17,10 @@ mod opus_rtp;
 /// the pad's own speaker/haptics audio stays out of the stream (process loopback otherwise).
 #[cfg(windows)]
 mod ds5_route;
+/// Audio → App sounds: the system audio with some apps left out (every other app captured on
+/// its own and summed).
+#[cfg(windows)]
+mod app_mix;
 
 /// Windows: stream the host's system audio via **WASAPI loopback** (no
 /// `virtual-audio-capturer` / Stereo Mix device required). Spawns the encoder ffmpeg
@@ -4749,6 +4753,7 @@ pub(super) fn make_on_stream(
 		#[cfg(windows)]
 		spawn_pointer_lock_watch(stats_out.clone(), proc_epoch.clone());
 		spawn_display_list_watch(stats_out.clone(), proc_epoch.clone());
+		super::app_audio::spawn_list_watch(stats_out.clone(), proc_epoch.clone());
 		if !req.game_mode {
 			spawn_host_pointer_watch(
 				stats_out.clone(),

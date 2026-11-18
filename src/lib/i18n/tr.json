@@ -799,6 +799,8 @@
 	"gaming.numpad": "Tuş takımı",
 	"settings.ringtone": "Arama sesi",
 	"settings.ringtoneDesc": "Karşı taraf seni sesli aradığında çalar.",
+	"settings.echoCancel": "Yankı engelleme",
+	"settings.echoCancelDesc": "Hoparlörden çalan sesi (karşı tarafın sesi, host'un sesi) mikrofonundan çıkarır, kimse kendi sesini geri duymaz. Yalnızca kulaklıkla kapat.",
 	"settings.ringtonePlay": "Dinle",
 	"settings.ringtonePick": "Dosya seç…",
 	"settings.ring.classic": "Klasik",

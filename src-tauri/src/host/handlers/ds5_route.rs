@@ -330,7 +330,13 @@ pub(super) fn start(sink: RtpAudioSink, pid: u32, mode: ProcessLoopbackMode) -> 
 		mux: mux.clone(),
 		src: AudioSource::Process,
 	};
-	if !super::start_process_capture(process, pid, mode) {
+	// Everything but Pulsar: through the per-app mix, which is the same single capture until a
+	// client leaves an app out (Audio → App sounds). One app's tree (`Include`): as is.
+	let started = match mode {
+		ProcessLoopbackMode::Exclude => super::app_mix::start(process, pid),
+		ProcessLoopbackMode::Include => super::start_process_capture(process, pid, mode),
+	};
+	if !started {
 		return false;
 	}
 	let token = StreamToken::new();

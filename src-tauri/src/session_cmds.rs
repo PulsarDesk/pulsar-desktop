@@ -418,6 +418,9 @@ async fn respawn_render_for_codec(
 						let _ = writeln!(si, "{l}");
 					}
 					let _ = writeln!(si, "{}", crate::call::seed_line(id));
+					if let Some(l) = crate::audio_apps::seed_line(id) {
+						let _ = writeln!(si, "{l}");
+					}
 					if let Some((tx, mute, mic)) = seed.audio {
 						let _ = writeln!(
 							si,
@@ -1536,6 +1539,13 @@ pub(crate) async fn set_audio_devices(mic: String, speaker: String) -> Result<()
 pub(crate) async fn set_ds4_headset(on: bool) -> Result<(), String> {
 	crate::ds4_headset::set_enabled(on);
 	Ok(())
+}
+
+/// Settings → Echo cancellation: the mic's (and a Linux host's system-audio capture's) echo
+/// canceller on / off. Process-wide, takes effect on the next captured chunk.
+#[tauri::command]
+pub(crate) fn set_echo_cancel(on: bool) {
+	crate::pcm_out::far_end::set_enabled(on);
 }
 
 /// Client: "Show the other side's cursor" (Settings / session menu). Process-wide; pushed to

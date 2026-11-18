@@ -774,6 +774,10 @@ pub fn run() {
 				Some("callstate") => {
 					crate::overlay::call_line(&line);
 				}
+				// The host's apps playing sound (`audioapps …`) for Audio → App sounds.
+				Some("audioapps") => {
+					crate::overlay::audio_apps_line(&line);
+				}
 				// Connected controller list (game mode only): `ctrls slot:kind:name[:uuid:target],...`
 				// 5-field form (T11+): slot:kind_tag:name:uuid:target
 				// 3-field form (legacy): slot:kind_tag:name  → uuid="" target="auto"

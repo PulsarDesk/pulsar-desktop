@@ -798,6 +798,8 @@
 	"settings.pairedLastSeen": "Соңғы қосылу: {d}",
 	"settings.ringtone": "Қоңырау әуені",
 	"settings.ringtoneDesc": "Екінші жақ сізге дауыстық қоңырау шалғанда ойналады.",
+	"settings.echoCancel": "Жаңғырықты басу",
+	"settings.echoCancelDesc": "Динамиктен шыққан дыбысты (екінші жақтың даусы, хост дыбысы) микрофоннан алып тастайды, ешкім өз даусын қайта естімейді. Тек құлаққаппен өшіріңіз.",
 	"settings.ringtonePlay": "Тыңдау",
 	"settings.ringtonePick": "Файл таңдау…",
 	"settings.ring.classic": "Классикалық",

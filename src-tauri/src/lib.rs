@@ -63,6 +63,8 @@ mod mic_capture;
 mod pcm_out;
 mod ringtone;
 mod call;
+// Audio → App sounds, client side: the host's app list to the renderer, its mutes back.
+mod audio_apps;
 mod native_audio;
 mod native_view;
 mod focus_gate;
@@ -929,6 +931,7 @@ pub fn run() {
 			set_pointer_free,
 			crate::session_cmds::set_upscale,
 			set_ds4_headset,
+			crate::session_cmds::set_echo_cancel,
 			crate::session_cmds::set_audio_devices,
 			set_host_cursor,
 			reverse_play,

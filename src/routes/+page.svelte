@@ -1175,6 +1175,12 @@
 		api.setRingtone(ui.ringtone ?? 'classic', ui.ringtonePath ?? '').catch(() => {});
 	});
 
+	// Echo cancellation (Settings → Display → Audio) follows the setting; on unless turned off.
+	$effect(() => {
+		if (isPopup) return;
+		api.setEchoCancel(ui.echoCancel !== false).catch(() => {});
+	});
+
 	// Experimental DS4 headset jack (Windows USB) follows the setting.
 	$effect(() => {
 		if (isPopup) return;

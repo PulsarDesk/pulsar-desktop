@@ -624,6 +624,9 @@ pub(crate) async fn start_remote_play(
 										let _ = writeln!(si, "{l}");
 									}
 									let _ = writeln!(si, "{}", crate::call::seed_line(id));
+									if let Some(l) = crate::audio_apps::seed_line(id) {
+										let _ = writeln!(si, "{l}");
+									}
 								}
 								*caps_line.lock().unwrap() = line;
 								render_seed.lock().unwrap().audio = Some((true, game_mode, false));
@@ -936,6 +939,9 @@ pub(crate) async fn start_remote_play(
 											let _ = writeln!(si, "{l}");
 										}
 										let _ = writeln!(si, "{}", crate::call::seed_line(id));
+										if let Some(l) = crate::audio_apps::seed_line(id) {
+											let _ = writeln!(si, "{l}");
+										}
 									}
 									*caps_line.lock().unwrap() = line;
 									render_seed.lock().unwrap().audio =
@@ -2478,6 +2484,7 @@ pub(crate) async fn stop_stream(
 	// Linux resident container must outlive that window).
 	crate::tabwin::play_stopped(&app, id);
 	crate::call::session_gone(&app, crate::call::CallKey::Client(id));
+	crate::audio_apps::forget(id);
 	let play = state.plays.lock().unwrap().remove(&id);
 	// Drop this session's per-id monitor-picker debounce entry so the map doesn't
 	// accumulate stale entries across reconnects.

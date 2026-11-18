@@ -265,6 +265,10 @@
 		</select>
 	</div>
 </div>
+<div class="srow">
+	<div class="st"><b>{t('settings.echoCancel')}</b><span>{t('settings.echoCancelDesc')}</span></div>
+	<button class="toggle" aria-label={t('settings.echoCancel')} class:on={ui.echoCancel !== false} aria-pressed={ui.echoCancel !== false} onclick={() => { ui.echoCancel = ui.echoCancel === false; saveUi(); }}><span class="knob"></span></button>
+</div>
 <div class="subgroup">{t('settings.subMouse')}</div>
 <div class="subdesc">{t('settings.subMouseDesc')}</div>
 <div class="srow">

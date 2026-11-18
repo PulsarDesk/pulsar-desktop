@@ -194,6 +194,33 @@ Calling is offered only to a peer that said `Hello` (an older Pulsar: disabled b
 "too old"); the renderer gets its `callstate` on (re)spawn (`call::seed_line`).
 Not yet heard on real hardware (synthetic AEC tests only).
 
+Since v0.34 `far_end` has two timelines summed by `window`: the call voice (`push`) and, on a
+client, the host's session audio as `native_audio` plays it (`push_session`, downmixed) — the
+host's sound (a Discord call there) no longer loops speakers → client mic → host → its voice
+app. The call voice gets a 60 ms silence cushion when its SDL queue is empty (`CUSHION_MS`).
+Settings → Display → Audio → Echo cancellation (`ui.echoCancel`, on unless set off;
+`set_echo_cancel` → `far_end::set_enabled`) turns all of it off: `window` / `active` say none.
+
+## App sounds: leave host apps out of the session audio (issue #13, Windows hosts)
+
+The client's menu → Audio → App sounds lists the host's apps playing sound, each on / off.
+- Wire (pulsar-core): `DataMsg::AudioApps(Vec<AudioAppInfo>)` host → client, sent by
+  `host/app_audio.rs` `spawn_list_watch` on change (1 s poll, at once after a mute); a host that
+  never sends it (macOS / Linux, older Windows, older Pulsar) gets no row.
+  `DataMsg::AudioAppMute { key, muted }` client → host (`DataHandlers::on_audio_app_mute`).
+- Keys are executable names, case-blind, host-wide for the process lifetime (`app_audio::MUTED`).
+  Voice-chat apps (`VOICE`) are flagged and listed first.
+- Capture (`host/handlers/app_mix.rs`, entered from `ds5_route::start` for the `Exclude` mode):
+  nothing left out playing → the single `Exclude(own pid)` capture as before. Otherwise every
+  other app with a session is captured `Include(pid)` (children of a captured app and anything
+  under Pulsar skipped) and summed by pulsar-core `audio::Mixer`, paced 10 ms into the encoder.
+  A 500 ms controller switches modes / joins and drops apps (stop before start: a gap, never
+  doubled sound). Misses the system-sounds session and an app's first ≤ 500 ms.
+- Client: `audio_apps.rs` turns the list into the renderer's `audioapps <key> <name> <m|v|->…`
+  line (re-seeded on respawn) and the renderer's `ov set appmute <key>,<0|1>` into the message.
+- Not built: macOS (SCContentFilter `excludingApplications`) and Linux (per-sink-input
+  `parec --monitor-stream` + the same mixer); mobile clients show no row yet.
+
 ## Client mic + output device picks (2026-11-15, LOCAL, untested on hardware)
 
 In-session menu → Ses: "Mikrofon cihazı" (which mic goes to the host) and "Ses çıkışı" (where

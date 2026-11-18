@@ -95,6 +95,8 @@ use crate::util::{config_path, display_rotation, identity_path, resolve_relay, D
 #[cfg(target_os = "linux")]
 pub(crate) mod cursor;
 mod handlers;
+// Audio → App sounds: which host apps a client left out of the session audio (issue #13).
+pub(crate) mod app_audio;
 /// Windows: host-ordered stream restarts around an NVIDIA driver that stops answering.
 #[cfg(windows)]
 pub(crate) mod failover;
@@ -2827,6 +2829,12 @@ pub(crate) async fn bring_online(
 					on_call: Box::new({
 						let app_h = app_h.clone();
 						move |sig| crate::call::on_signal(&app_h, crate::call::CallKey::Host(sid), sig)
+					}),
+					// Audio → App sounds: the list watcher answers with the fresh list.
+					on_audio_app_mute: Box::new(|key: String, muted: bool| {
+						if app_audio::supported() {
+							app_audio::set_muted(&key, muted);
+						}
 					}),
 					on_reverse: Box::new(on_reverse),
 					stream_caps: Box::new({

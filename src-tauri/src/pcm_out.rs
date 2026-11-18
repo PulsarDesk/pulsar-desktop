@@ -172,6 +172,18 @@ pub mod far_end {
 	use std::sync::Mutex;
 	use std::time::{Duration, Instant};
 
+	/// Settings → Echo cancellation (on by default). Off, [`window`] returns `None`: the mic and
+	/// a Linux host's system-audio capture pass through untouched.
+	static ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+	pub fn set_enabled(on: bool) {
+		ENABLED.store(on, std::sync::atomic::Ordering::Relaxed);
+	}
+
+	fn enabled() -> bool {
+		ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+	}
+
 	/// Which timeline a push belongs to.
 	#[derive(Clone, Copy)]
 	enum Src {
@@ -251,7 +263,8 @@ pub mod far_end {
 	/// Whether a far end played within [`IDLE`] (the Linux system-audio capture checks it).
 	#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 	pub fn active() -> bool {
-		LINES
+		enabled()
+			&& LINES
 			.lock()
 			.unwrap_or_else(|e| e.into_inner())
 			.iter()
@@ -262,6 +275,9 @@ pub mod far_end {
 	/// The `n` far-end samples that played up to `end`, every source summed (zeros where nothing
 	/// played); `None` when there is no far end ([`active`] false).
 	pub fn window(end: Instant, n: usize) -> Option<Vec<f32>> {
+		if !enabled() {
+			return None;
+		}
 		let g = LINES.lock().unwrap_or_else(|e| e.into_inner());
 		let mut out: Option<Vec<f32>> = None;
 		for line in g.iter().flatten().filter(|l| l.last_push.elapsed() < IDLE) {

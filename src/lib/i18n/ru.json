@@ -798,6 +798,8 @@
 	"settings.pairedLastSeen": "Последнее подключение: {d}",
 	"settings.ringtone": "Мелодия звонка",
 	"settings.ringtoneDesc": "Играет, когда другая сторона звонит вам (голосовой звонок).",
+	"settings.echoCancel": "Эхоподавление",
+	"settings.echoCancelDesc": "Убирает из микрофона то, что играют динамики (голос собеседника, звук хоста), чтобы никто не слышал себя. Отключайте только с наушниками.",
 	"settings.ringtonePlay": "Прослушать",
 	"settings.ringtonePick": "Выбрать файл…",
 	"settings.ring.classic": "Классический",

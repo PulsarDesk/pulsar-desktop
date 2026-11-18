@@ -799,6 +799,8 @@
 	"gaming.numpad": "Keypad",
 	"settings.ringtone": "Ringtone",
 	"settings.ringtoneDesc": "Plays when the other side calls you (voice call).",
+	"settings.echoCancel": "Echo cancellation",
+	"settings.echoCancelDesc": "Keeps what your speakers play (the other side's voice, the host's sound) out of your microphone, so nobody hears themselves back. Turn it off only with headphones.",
 	"settings.ringtonePlay": "Play",
 	"settings.ringtonePick": "Choose file…",
 	"settings.ring.classic": "Classic",

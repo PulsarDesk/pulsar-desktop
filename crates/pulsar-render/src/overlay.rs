@@ -122,6 +122,25 @@ pub enum View {
 	Files,       // NATIVE two-pane file manager
 	Gauges,      // stats HUD + overlay button toggles
 	Controllers, // player-slot list + swap order (game mode only)
+	AudioApps,   // Audio → App sounds: a page of Audio (not on the strip)
+}
+
+impl View {
+	/// Where back (the header button, B / Escape) goes from here.
+	fn parent(self) -> View {
+		match self {
+			View::AudioApps => View::Audio,
+			_ => View::Root,
+		}
+	}
+
+	/// The strip entry this page belongs to.
+	fn section(self) -> View {
+		match self {
+			View::AudioApps => View::Audio,
+			v => v,
+		}
+	}
 }
 
 /// One row of a file listing (local pane = the renderer's own std::fs; remote pane
@@ -350,6 +369,65 @@ pub fn audio_devices_line(line: &str) -> bool {
 	let toks: Vec<&str> = it.collect();
 	*slot.lock().unwrap_or_else(|e| e.into_inner()) = parse_dev_list(&toks);
 	true
+}
+
+/// One application playing sound on the host (the app's `audioapps` line): Audio → App sounds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostApp {
+	/// What the host matches it by (its executable name, e.g. `Discord.exe`).
+	pub key: String,
+	/// What the menu shows.
+	pub name: String,
+	/// Left out of this session's audio.
+	pub muted: bool,
+	/// A voice-chat app (Discord, Teams, …): its sound can echo back to the caller.
+	pub voice: bool,
+}
+
+/// `None` = the host cannot leave apps out (an older Pulsar, or the app has not said yet): the
+/// Audio page shows no App sounds row.
+static HOST_APPS: std::sync::Mutex<Option<Vec<HostApp>>> = std::sync::Mutex::new(None);
+
+/// Parse an `audioapps …` line's tokens (after the keyword): `na` = not supported, `-` = none
+/// playing, else `<key> <name> <flags>` triples (tokens as [`dev_encode`]; flags: `m` muted,
+/// `v` voice app, `-` neither).
+pub fn parse_audio_apps(toks: &[&str]) -> Option<Vec<HostApp>> {
+	if toks.first() == Some(&"na") {
+		return None;
+	}
+	Some(
+		toks.chunks_exact(3)
+			.filter_map(|c| {
+				let key = dev_decode(c[0])?;
+				let name = dev_decode(c[1]).filter(|n| !n.is_empty()).unwrap_or_else(|| key.clone());
+				(!key.is_empty()).then(|| HostApp { key, name, muted: c[2].contains('m'), voice: c[2].contains('v') })
+			})
+			.collect(),
+	)
+}
+
+/// The app's `audioapps …` stdin line (every backend calls this). Returns whether it was one.
+pub fn audio_apps_line(line: &str) -> bool {
+	let mut it = line.split_whitespace();
+	if it.next() != Some("audioapps") {
+		return false;
+	}
+	let toks: Vec<&str> = it.collect();
+	*HOST_APPS.lock().unwrap_or_else(|e| e.into_inner()) = parse_audio_apps(&toks);
+	true
+}
+
+fn host_apps() -> Option<Vec<HostApp>> {
+	HOST_APPS.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// A mute picked in the menu shows at once; the app's next `audioapps` line confirms it.
+fn set_app_muted_local(key: &str, muted: bool) {
+	if let Some(list) = HOST_APPS.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+		for a in list.iter_mut().filter(|a| a.key == key) {
+			a.muted = muted;
+		}
+	}
 }
 
 /// The session's voice call as the app reports it (`callstate <phase> <since_ms> <name…>`).
@@ -1121,7 +1199,7 @@ pub fn draw(ctx: &egui::Context, st: &OverlayState, ui_state: &mut UiState) -> V
 		if ui_state.picker.take().is_some() {
 			// back on the rows
 		} else if ui_state.view != View::Root {
-			ui_state.view = View::Root;
+			ui_state.view = ui_state.view.parent();
 		} else {
 			cmds.push(OverlayCmd::Close);
 		}
@@ -1242,7 +1320,7 @@ pub fn draw(ctx: &egui::Context, st: &OverlayState, ui_state: &mut UiState) -> V
 				if ui_state.back_focus {
 					if nav.activate {
 						if ui_state.picker.take().is_none() {
-							ui_state.view = View::Root;
+							ui_state.view = ui_state.view.parent();
 						}
 						ui_state.tab_focus = false;
 					} else if nav.down {
@@ -1252,7 +1330,7 @@ pub fn draw(ctx: &egui::Context, st: &OverlayState, ui_state: &mut UiState) -> V
 					}
 				} else {
 					let tabs: Vec<View> = section_tabs(st.mode).map(|c| c.2).collect();
-					if let Some(i) = tabs.iter().position(|v| *v == ui_state.view) {
+					if let Some(i) = tabs.iter().position(|v| *v == ui_state.view.section()) {
 						if nav.left {
 							if i > 0 {
 								ui_state.view = tabs[i - 1];
@@ -1341,6 +1419,8 @@ pub fn draw(ctx: &egui::Context, st: &OverlayState, ui_state: &mut UiState) -> V
 						// area no height of its own, and it would collapse to one row.
 						let vh = ui.ctx().viewport_rect().height();
 						let max_h = (vh - panel_top(vh) - PANEL_CHROME_H).max(160.0);
+						// A row that opens a page of the section (Audio → App sounds).
+						let mut goto: Option<View> = None;
 						let out = egui::ScrollArea::vertical()
 							.id_salt(("ov-rows", ui_state.anim_gen))
 							.max_height(max_h)
@@ -1360,7 +1440,12 @@ pub fn draw(ctx: &egui::Context, st: &OverlayState, ui_state: &mut UiState) -> V
 								match view {
 									View::Stream => draw_stream(ui, st, &ui_state.deferred, input, &mut cmds),
 									View::Display => draw_display(ui, st, &ui_state.deferred, input, &mut cmds),
-									View::Audio => draw_audio(ui, st, &ui_state.deferred, input, &mut cmds),
+									View::Audio => {
+										if draw_audio(ui, st, &ui_state.deferred, input, &mut cmds) {
+											goto = Some(View::AudioApps);
+										}
+									}
+									View::AudioApps => draw_audio_apps(ui, input, &mut cmds),
 									View::Tools => draw_tools(ui, st.mode, input, &mut cmds),
 									View::Gauges => draw_gauges(ui, st, input, &mut cmds),
 									View::Controllers => draw_controllers(ui, st, input, &mut cmds),
@@ -1368,6 +1453,9 @@ pub fn draw(ctx: &egui::Context, st: &OverlayState, ui_state: &mut UiState) -> V
 								}
 								ui.add_space(3.0);
 							});
+						if let Some(v) = goto {
+							ui_state.view = v;
+						}
 						// More rows above / below the visible part: fade that edge into the panel.
 						let hidden_above = out.state.offset().y;
 						let hidden_below = out.content_size.y - out.inner_rect.height() - out.state.offset().y;
@@ -1782,7 +1870,13 @@ fn section_tabs(mode: Mode) -> impl Iterator<Item = &'static (&'static str, &'st
 fn has_rows(view: View) -> bool {
 	matches!(
 		view,
-		View::Stream | View::Display | View::Audio | View::Tools | View::Gauges | View::Controllers
+		View::Stream
+			| View::Display
+			| View::Audio
+			| View::AudioApps
+			| View::Tools
+			| View::Gauges
+			| View::Controllers
 	)
 }
 
@@ -1821,12 +1915,12 @@ fn draw_section_header(ui: &mut egui::Ui, st: &OverlayState, us: &mut UiState) {
 			p.line_segment([c + egui::vec2(-7.0, 0.0), c + egui::vec2(-1.5, 5.5)], s);
 		}
 		if resp.clicked() && us.picker.take().is_none() {
-			us.view = View::Root;
+			us.view = us.view.parent();
 		}
 		resp.on_hover_cursor(egui::CursorIcon::PointingHand);
 		ui.add_space(4.0);
 		for (icon, key, v) in section_tabs(st.mode) {
-			let active = *v == us.view;
+			let active = *v == us.view.section();
 			let label = t(key);
 			// The current section shows its name; the others are an icon (the name on hover).
 			let w = if active { 38.0 + text_w(ui, label, 13.0) + 12.0 } else { 40.0 };
@@ -1878,7 +1972,8 @@ fn draw_section_header(ui: &mut egui::Ui, st: &OverlayState, us: &mut UiState) {
 					egui::Color32::from_rgb(225, 60, 70),
 				);
 			}
-			if resp.clicked() && !active {
+			// A page of the section (App sounds) goes back to the section's rows on its entry.
+			if resp.clicked() && *v != us.view {
 				us.view = *v;
 				us.picker = None;
 			}
@@ -2166,21 +2261,28 @@ fn pending_note(ui: &mut egui::Ui, deferred: &[(&'static str, String)]) {
 /// answers or declines; while the host rings US the row turns into Answer + Decline; during a
 /// call it hangs up and shows the talk time. Each emits `call start|accept|decline|hangup`; the
 /// state comes back on the `callstate` line, nothing here is optimistic.
+/// Audio section. Returns true when its App sounds row was activated (open that page).
 fn draw_audio(
 	ui: &mut egui::Ui,
 	st: &OverlayState,
 	deferred: &[(&'static str, String)],
 	input: RowsIn<'_>,
 	cmds: &mut Vec<OverlayCmd>,
-) {
+) -> bool {
 	let onoff = [("on", t("on")), ("off", t("off"))];
 	// The device pickers (this computer's mic / output) show once the app sent the lists.
 	let mics = dev_list(true);
 	let spks = dev_list(false);
+	// App sounds: offered once the host said it can leave apps out.
+	let apps = host_apps();
 	let call = call_ui();
 	// An incoming call takes two rows (Answer, Decline).
 	let call_rows = if call.phase == CallPhase::In { 2 } else { 1 };
-	let mut rows = Rows::new(4 + call_rows + usize::from(mics.known) + usize::from(spks.known), input);
+	let mut rows = Rows::new(
+		4 + call_rows + usize::from(mics.known) + usize::from(spks.known) + usize::from(apps.is_some()),
+		input,
+	);
+	let mut open_apps = false;
 	ui.spacing_mut().item_spacing.y = ROW_GAP;
 	let who = if call.peer.is_empty() { t("call.host").to_string() } else { call.peer.clone() };
 	match call.phase {
@@ -2219,16 +2321,30 @@ fn draw_audio(
 	if let Some(v) = rows.choice(ui, base, t("audio.host"), host, &onoff, None) {
 		cmds.push(OverlayCmd::Set("atx", v));
 	}
+	let mut row = base + 1;
+	// The host's apps, each on / off in this session's audio (a page of its own).
+	if let Some(list) = &apps {
+		let muted = list.iter().filter(|a| a.muted).count();
+		let label = if muted == 0 {
+			t("audio.apps").to_string()
+		} else {
+			t("audio.appsMuted").replace("{n}", &muted.to_string())
+		};
+		if rows.action(ui, row, &label, CYAN, true) {
+			open_apps = true;
+		}
+		row += 1;
+	}
 	// Speakers ON = not muted; the emitted `amute` is the inverse.
 	let spk = if st.audio_mute { "off" } else { "on" };
-	if let Some(v) = rows.choice(ui, base + 1, t("audio.speakers"), spk, &onoff, None) {
+	if let Some(v) = rows.choice(ui, row, t("audio.speakers"), spk, &onoff, None) {
 		cmds.push(OverlayCmd::Set("amute", if v == "on" { "off".into() } else { "on".into() }));
 	}
 	let mic = if st.mic_on { "on" } else { "off" };
-	if let Some(v) = rows.choice(ui, base + 2, t("audio.mic"), mic, &onoff, None) {
+	if let Some(v) = rows.choice(ui, row + 1, t("audio.mic"), mic, &onoff, None) {
 		cmds.push(OverlayCmd::Set("mic", v));
 	}
-	let mut row = base + 3;
+	row += 2;
 	// Which microphone / output device of THIS computer (applied at once, no stream restart;
 	// the app falls back to the system default while the pick is not connected).
 	for (list, is_mic) in [(&mics, true), (&spks, false)] {
@@ -2261,9 +2377,37 @@ fn draw_audio(
 		cmds.push(OverlayCmd::Set("aquality", v));
 	}
 	if rows.picking() {
-		return;
+		return open_apps;
 	}
 	pending_note(ui, deferred);
+	open_apps
+}
+
+/// Audio → App sounds: every app playing sound on the host, on / off in this session's audio.
+/// Off = the host leaves it out (it still plays there). Voice-chat apps come first with a note:
+/// their sound is what echoes back to the caller (issue #13). Sends `appmute <key>,<0|1>`.
+fn draw_audio_apps(ui: &mut egui::Ui, input: RowsIn<'_>, cmds: &mut Vec<OverlayCmd>) {
+	ui.spacing_mut().item_spacing.y = ROW_GAP;
+	let mut list = host_apps().unwrap_or_default();
+	// Voice apps first, then by name (the host sends them in no particular order).
+	list.sort_by(|a, b| b.voice.cmp(&a.voice).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+	if list.is_empty() {
+		ui.label(egui::RichText::new(t("audio.appsNone")).size(13.0).color(egui::Color32::from_gray(150)));
+		return;
+	}
+	let onoff = [("on", t("on")), ("off", t("off"))];
+	let mut rows = Rows::new(list.len(), input);
+	for (i, a) in list.iter().enumerate() {
+		let cur = if a.muted { "off" } else { "on" };
+		let info = a.voice.then(|| t("info.voiceApp"));
+		if let Some(v) = rows.choice(ui, i, &a.name, cur, &onoff, info) {
+			let mute = v == "off";
+			set_app_muted_local(&a.key, mute);
+			cmds.push(OverlayCmd::Set("appmute", format!("{},{}", dev_encode(&a.key), u8::from(mute))));
+		}
+	}
+	ui.add_space(2.0);
+	ui.label(egui::RichText::new(t("audio.appsHint")).size(11.5).color(egui::Color32::from_gray(130)));
 }
 
 /// Tools section. GAME mode trims this to JUST the fullscreen toggle (clipboard / file pick /

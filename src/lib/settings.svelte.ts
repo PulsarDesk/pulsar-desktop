@@ -150,6 +150,10 @@ export interface UiSettings {
 	/** Experimental (USB; Windows, Linux, macOS): session audio plays through a cabled DS4's headset jack
 	 * while headphones are in. Off by default; untested on hardware. */
 	ds4Headset: boolean;
+	/** Echo cancellation of the microphone against what this computer plays (the call voice and
+	 * the host's session audio), and on a Linux host of the system-audio capture. On by default;
+	 * off for headphones-only setups that want the untouched mic. */
+	echoCancel: boolean;
 	/** Client microphone sent to the host, by device name ('' = system default). Picked in the
 	 * in-session menu (Audio → Microphone device); falls back to the default while unplugged. */
 	micDevice: string;
@@ -292,6 +296,7 @@ const DEFAULTS: UiSettings = {
 	statusButtons: ['speaker', 'mic'],
 	statusBarFullscreen: false,
 	ds4Headset: false,
+	echoCancel: true,
 	micDevice: '',
 	speakerDevice: '',
 	ringtone: 'classic',

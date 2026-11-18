@@ -328,6 +328,12 @@ pub(crate) fn start_render_reader(
 								crate::call::action(&app, crate::call::CallKey::Client(cur_id), val);
 								continue 'lines;
 							}
+							// Audio → App sounds (`appmute <key>,<0|1>`): straight to the host, which
+							// answers with a fresh list.
+							if field == "appmute" {
+								crate::audio_apps::mute(&app, cur_id, val);
+								continue 'lines;
+							}
 							// The Ses section's device pickers (`micdev` / `spkdev <token>`): apply
 							// Rust-side at once, then hand the decoded name to the webview to save
 							// (ui.micDevice / ui.speakerDevice).

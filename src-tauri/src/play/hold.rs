@@ -996,6 +996,14 @@ pub(super) async fn hold_session(
 								}
 								let _ = app_ev.emit("host-displays", (id, list));
 							}
+							DataMsg::AudioApps(list) => {
+								// The host's apps playing sound (Audio → App sounds in the renderer).
+								let line = crate::audio_apps::on_list(id, &list);
+								use std::io::Write as _;
+								if let Some(si) = render_stdin.lock().unwrap().as_mut() {
+									let _ = writeln!(si, "{line}");
+								}
+							}
 							DataMsg::StreamedDisplay(d) => {
 								// The host streams another monitor than we asked for (Linux Wayland:
 								// the person at the host picked it in the portal dialog). Follow it:

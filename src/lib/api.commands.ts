@@ -394,6 +394,8 @@ export const api = {
 	setTouchpadGestures: (on: boolean) => invoke<void>('set_touchpad_gestures', { on }),
 	setHostCursor: (on: boolean) => invoke<void>('set_host_cursor', { on }),
 	setDs4Headset: (on: boolean) => invoke<void>('set_ds4_headset', { on }),
+	/** Echo cancellation of the mic (and a Linux host's system-audio capture) on / off. */
+	setEchoCancel: (on: boolean) => invoke<void>('set_echo_cancel', { on }),
 	/** This computer's mic sent to the host + the output the session plays on, by device name
 	 * ('' = system default). Process-wide; running sessions move within half a second. */
 	setAudioDevices: (mic: string, speaker: string) =>

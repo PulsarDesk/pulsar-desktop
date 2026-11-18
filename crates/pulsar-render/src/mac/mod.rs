@@ -729,6 +729,8 @@ fn stdin_control() {
 					});
 				}
 			}
+		} else if crate::overlay::audio_apps_line(l) {
+			// The host's apps playing sound (`audioapps …`) for Audio → App sounds.
 		} else if crate::overlay::call_line(l) {
 			// The session's voice call (`callstate <phase> <since_ms> <name>`) for the Audio rows.
 		} else if crate::overlay::audio_devices_line(l) {
