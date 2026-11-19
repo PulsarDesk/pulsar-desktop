@@ -191,7 +191,7 @@ mod linux {
 					.join(" "))
 			},
 		);
-		// Whether main.rs::appimage_host_libva swapped in the host's libva (VA-API needs it).
+		// Whether main.rs::appimage_host_libs swapped in the host's libva (VA-API needs it).
 		if std::env::var_os("APPDIR").is_some() {
 			let preload = std::env::var("LD_PRELOAD").unwrap_or_default();
 			r.line(
@@ -200,6 +200,15 @@ mod linux {
 				match preload.split(':').find(|p| p.ends_with("/libva.so.2")) {
 					Some(p) => Ok(format!("host {p}")),
 					None => Err("bundled 2.14 (host has none, or PULSAR_HOST_LIBVA set) — no VA-API on newer drivers".into()),
+				},
+			);
+			// Same swap for libGLESv2 (white WebKitGTK window on newer Mesa, issues #15/#16).
+			r.line(
+				false,
+				"libGLESv2",
+				match preload.split(':').find(|p| p.ends_with("/libGLESv2.so.2")) {
+					Some(p) => Ok(format!("host {p}")),
+					None => Err("bundled 22.04 copy (host has none, or PULSAR_HOST_LIBVA set) — the window may stay white".into()),
 				},
 			);
 		}

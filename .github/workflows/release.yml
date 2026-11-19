@@ -238,7 +238,7 @@ jobs:
       # the SYSTEM libpipewire (linuxdeploy's excludelist keeps it out; ABI-stable soname).
       # linuxdeploy-plugin-gstreamer copies EVERY file of GSTREAMER_PLUGINS_DIR, hence the
       # curated dir. nvcodec is optional (dlopens the NVIDIA driver; absent on some arches).
-      # vaapi (vaapih264enc, AMD/Intel) needs the HOST's libva — main.rs::appimage_host_libva.
+      # vaapi (vaapih264enc, AMD/Intel) needs the HOST's libva — main.rs::appimage_host_libs.
       - name: Stage GStreamer + libjack for the AppImage
         if: startsWith(matrix.os, 'ubuntu')
         run: |
@@ -256,7 +256,7 @@ jobs:
           echo "GSTREAMER_PLUGINS_DIR=$DST" >> "$GITHUB_ENV"
           # libjack is on linuxdeploy's excludelist, yet libavdevice/libmpv link it — a host
           # without JACK couldn't even start the app. Pulsar never talks to JACK, so ship it.
-          # (libva stays bundled; main.rs::appimage_host_libva swaps in the host's at start.)
+          # (libva stays bundled; main.rs::appimage_host_libs swaps in the host's at start.)
           JACK="$(readlink -f "/usr/lib/$MA/libjack.so.0")"
           cat > "$RUNNER_TEMP/appimage.conf.json" <<EOF
           {"bundle":{"linux":{"appimage":{"bundleMediaFramework":true,"files":{

@@ -2,9 +2,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-	// Linux AppImage: swap in the host's libva before anything loads a VA driver.
+	// Linux AppImage: swap in the host's libva and libGLESv2 before anything loads them.
 	#[cfg(target_os = "linux")]
-	appimage_host_libva();
+	appimage_host_libs();
 	// Linux: GTK derives WM_CLASS from g_get_prgname() (= argv[0]); force the brand
 	// name so taskbars/Alt-Tab show "Pulsar" regardless of how the binary was named
 	// or launched (plain `cargo run`, symlinks, renamed AppImage). Must run before
@@ -169,7 +169,8 @@ fn appimage_env() {
 	}
 }
 
-/// (Linux AppImage) Re-exec once with the HOST's libva preloaded, when the host has one.
+/// (Linux AppImage) Re-exec once with the HOST's libva and libGLESv2 preloaded, where the host
+/// has them.
 ///
 /// The bundled libva is Ubuntu 22.04's 2.14 loader, and a VA driver only exports the init
 /// symbol of the libva it was built against (Mesa 25: `__vaDriverInit_1_24`) — so on any newer
@@ -179,9 +180,15 @@ fn appimage_env() {
 /// bundled copies unused without shadowing every other bundled lib the way an
 /// `LD_LIBRARY_PATH=/usr/lib…` would. It has to be set before the process starts, hence the
 /// exec. A host without libva keeps the bundled one, so the app still starts everywhere.
-/// `PULSAR_HOST_LIBVA=0` opts out; children inherit the preload (it's the host's own lib).
+///
+/// libGLESv2: linuxdeploy bundles 22.04's libglvnd `libGLESv2.so.2` but not `libEGL.so.1`, so
+/// WebKitGTK got the host's EGL with the old GLES dispatcher and painted a white window on
+/// newer Mesa (Arch, SteamOS: issues #15, #16; `LD_PRELOAD=/usr/lib/libGLESv2.so.2` fixed it).
+/// GL libs belong to the host's driver stack (AppImage's own excludelist), so the host's copy
+/// always wins when there is one.
+/// `PULSAR_HOST_LIBVA=0` opts out; children inherit the preload (it's the host's own libs).
 #[cfg(target_os = "linux")]
-fn appimage_host_libva() {
+fn appimage_host_libs() {
 	use std::os::unix::process::CommandExt;
 	if std::env::var_os("APPDIR").is_none() || std::env::var_os("PULSAR_HOST_LIBVA").is_some() {
 		return;
@@ -204,16 +211,22 @@ fn appimage_host_libva() {
 			.map(|d| std::path::Path::new(d).join(name))
 			.find(|p| p.exists())
 	};
-	let Some(libva) = host_lib("libva.so.2") else {
+	let mut preload = Vec::new();
+	if let Some(libva) = host_lib("libva.so.2") {
+		preload.push(libva.into_os_string());
+		preload.extend(
+			["libva-drm.so.2", "libva-x11.so.2", "libva-wayland.so.2"]
+				.iter()
+				.filter_map(|n| host_lib(n))
+				.map(|p| p.into_os_string()),
+		);
+	}
+	if let Some(gles) = host_lib("libGLESv2.so.2") {
+		preload.push(gles.into_os_string());
+	}
+	if preload.is_empty() {
 		return;
-	};
-	let mut preload = vec![libva.into_os_string()];
-	preload.extend(
-		["libva-drm.so.2", "libva-x11.so.2", "libva-wayland.so.2"]
-			.iter()
-			.filter_map(|n| host_lib(n))
-			.map(|p| p.into_os_string()),
-	);
+	}
 	if let Some(cur) = std::env::var_os("LD_PRELOAD").filter(|v| !v.is_empty()) {
 		preload.push(cur);
 	}
@@ -225,8 +238,8 @@ fn appimage_host_libva() {
 		.env("LD_PRELOAD", preload.join(std::ffi::OsStr::new(":")))
 		.env("PULSAR_HOST_LIBVA", "1")
 		.exec();
-	// Only reached when exec failed: carry on with the bundled libva.
-	eprintln!("pulsar: re-exec with the host libva failed: {err}");
+	// Only reached when exec failed: carry on with the bundled libs.
+	eprintln!("pulsar: re-exec with the host libva / libGLESv2 failed: {err}");
 }
 
 /// (Windows) Read the persisted `request_admin` preference BEFORE Tauri starts. Defaults to `true`

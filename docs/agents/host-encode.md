@@ -234,9 +234,9 @@ Part of the pulsar-desktop agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
   probes the Wayland encoders with that same stack. System gst tools get the bundled env
   stripped (`pulsar_core::capture::use_system_gst_env`). **libva comes from the HOST**
   when it has one: 22.04's 2.14 loader can't open a newer Mesa driver
-  (`__vaDriverInit_1_24`), so `main.rs::appimage_host_libva` re-execs once with the host's
+  (`__vaDriverInit_1_24`), so `main.rs::appimage_host_libs` re-execs once with the host's
   libva in `LD_PRELOAD` (bundled copy stays as the no-libva fallback) — that is what makes
-  the bundled `vaapih264enc` and pulsar-render's VA-API decode work. libjack is bundled by
+  the bundled `vaapih264enc` and pulsar-render's VA-API decode work. The same re-exec preloads the host's `libGLESv2.so.2`: linuxdeploy bundles 22.04's copy but not `libEGL`, and that mix left the WebKitGTK window white on newer Mesa (Arch, SteamOS: issues #15/#16). libjack is bundled by
   hand (on linuxdeploy's excludelist, but libavdevice/libmpv need it to load at all).
   An encoder the bundled stack can't open is re-probed on the SYSTEM gst
   (`process.rs::gst_probe`); if it works there the stream runs as a system `gst-launch-1.0`
