@@ -50,6 +50,13 @@ const SOURCES = {
 	'macos/arm64': { url: 'https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/ffplay.zip', member: /(^|\/)ffplay$/, out: 'ffplay' }
 };
 
+// Windows: the system bsdtar (System32\tar.exe, Windows 10 1803+) reads zips. Not
+// Expand-Archive: on the windows-11-arm runner Windows PowerShell 5.1 loads PowerShell 7's
+// Archive module, which calls an ExtractToDirectory overload .NET Framework lacks, and the
+// failure is non-terminating: exit 0 with an empty folder. Not a bare `tar` either: Git's
+// GNU tar can come first in PATH and does not read zips.
+const WIN_TAR = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe');
+
 function run(cmd, args) {
 	return new Promise((res, rej) => {
 		const p = spawn(cmd, args, { stdio: 'inherit' });
@@ -89,11 +96,7 @@ async function main() {
 		await mkdir(out, { recursive: true });
 		console.log('extracting...');
 		if (process.platform === 'win32') {
-			await run('powershell', [
-				'-NoProfile',
-				'-Command',
-				`Expand-Archive -LiteralPath '${zip}' -DestinationPath '${out}' -Force`
-			]);
+			await run(WIN_TAR, ['-xf', zip, '-C', out]);
 		} else {
 			await run('unzip', ['-q', '-o', zip, '-d', out]);
 		}

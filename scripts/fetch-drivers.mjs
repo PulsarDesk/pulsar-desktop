@@ -122,16 +122,16 @@ function run(cmd, args) {
 	});
 }
 
-// Extract a .zip into destDir. We're Windows-only here, so PowerShell's
-// Expand-Archive (always present on Win10/11) is the dependency-free choice.
+// Extract a .zip into destDir (Windows-only script).
+// Windows: the system bsdtar (System32\tar.exe, Windows 10 1803+) reads zips. Not
+// Expand-Archive: on the windows-11-arm runner Windows PowerShell 5.1 loads PowerShell 7's
+// Archive module, which calls an ExtractToDirectory overload .NET Framework lacks, and the
+// failure is non-terminating: exit 0 with an empty folder. Not a bare `tar` either: Git's
+// GNU tar can come first in PATH and does not read zips.
+const WIN_TAR = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe');
 async function unzip(zip, destDir) {
 	await mkdir(destDir, { recursive: true });
-	await run('powershell', [
-		'-NoProfile',
-		'-NonInteractive',
-		'-Command',
-		`Expand-Archive -LiteralPath '${zip}' -DestinationPath '${destDir}' -Force`
-	]);
+	await run(WIN_TAR, ['-xf', zip, '-C', destDir]);
 }
 
 // Pull the Virtual-Audio-Driver signed inf/sys/cat into resources/virtual-audio-driver/.

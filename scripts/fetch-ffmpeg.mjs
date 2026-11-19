@@ -244,16 +244,14 @@ async function main() {
       // `tar` on every GitHub runner (incl. Windows bsdtar) handles .tar.xz.
       await run("tar", ["-xf", archive, "-C", extractDir]);
     } else {
-      // zip: prefer `unzip`, fall back to PowerShell Expand-Archive on Windows,
-      // then to `tar` (bsdtar reads zips too).
+      // zip: prefer `unzip`, then the Windows system bsdtar (System32\tar.exe reads zips;
+      // not Expand-Archive, which fails silently on the windows-11-arm runner, see
+      // fetch-player.mjs), then `tar` (bsdtar reads zips too).
       if (await hasCmd("unzip")) {
         await run("unzip", ["-q", "-o", archive, "-d", extractDir]);
       } else if (process.platform === "win32") {
-        await run("powershell", [
-          "-NoProfile",
-          "-Command",
-          `Expand-Archive -LiteralPath '${archive}' -DestinationPath '${extractDir}' -Force`,
-        ]);
+        const tar = join(process.env.SystemRoot || "C:\\Windows", "System32", "tar.exe");
+        await run(tar, ["-xf", archive, "-C", extractDir]);
       } else {
         await run("tar", ["-xf", archive, "-C", extractDir]);
       }
