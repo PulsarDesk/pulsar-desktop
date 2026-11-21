@@ -677,13 +677,23 @@ fn spawn_pointer_lock_watch(out: tokio::sync::mpsc::Sender<DataMsg>, epoch: crat
 /// again after a short settle (the new layout lands over a moment); while no event source is
 /// live: compared every 3 s. Sends only when the list really differs. Lives as long as this
 /// stream generation.
-fn spawn_display_list_watch(out: tokio::sync::mpsc::Sender<DataMsg>, epoch: crate::process::ProcEpoch) {
+fn spawn_display_list_watch(
+	out: tokio::sync::mpsc::Sender<DataMsg>,
+	epoch: crate::process::ProcEpoch,
+	#[cfg(windows)] follow: Option<DisplayFollow>,
+) {
 	use std::sync::atomic::Ordering;
 	let born = epoch.load(Ordering::SeqCst);
 	let _ = std::thread::Builder::new().name("display-list".into()).spawn(move || {
 		let mut seen = crate::display_watch::generation();
 		let mut last = crate::process::host_displays();
+		#[cfg(windows)]
+		let mut follow = follow;
 		while epoch.load(Ordering::SeqCst) == born && !out.is_closed() {
+			#[cfg(windows)]
+			if let Some(f) = follow.as_mut() {
+				f.tick(&out, &mut last);
+			}
 			// Re-read per turn: the macOS / Linux source can arm late or drop out.
 			let event_driven = crate::display_watch::event_driven();
 			// The epoch / channel checks run at least this often even with no display event.
@@ -705,10 +715,90 @@ fn spawn_display_list_watch(out: tokio::sync::mpsc::Sender<DataMsg>, epoch: crat
 			if now != last {
 				tracing::info!(count = now.len(), "host monitors changed → client");
 				let _ = out.try_send(DataMsg::Displays(now.clone()));
+				#[cfg(windows)]
+				if let Some(f) = follow.as_mut() {
+					f.list_changed(&out, &last, &now);
+				}
 				last = now;
 			}
 		}
 	});
+}
+
+/// Windows: keeps the client's monitor index on the monitor really streamed when the host's
+/// outputs are renumbered. DXGI lists the adapter owning the PRIMARY monitor first, so making
+/// another monitor primary swaps the indices (2026-11-21: `0=DISPLAY6, 1=DISPLAY1` became
+/// `0=DISPLAY1, 1=DISPLAY6`); the client's next request (every ABR step carries the index) would
+/// then move the stream to the other monitor. Tells the client the new index
+/// (`DataMsg::StreamedDisplay`, which it follows without a restart) and moves the host's own
+/// index stores with it.
+#[cfg(windows)]
+pub(super) struct DisplayFollow {
+	/// The host's input / pointer-watch index (`cur_display`).
+	cur_display: Arc<std::sync::atomic::AtomicU32>,
+	/// Native capture: the output the capture thread streams (it follows its monitor by name,
+	/// `RunExit::Moved`). `None` on the ffmpeg path — the monitor is then followed by name here.
+	live_out: Option<Arc<std::sync::atomic::AtomicU32>>,
+	/// The ffmpeg path's stored request (the watchers re-issue it): its index moves too.
+	last_req: Arc<Mutex<Option<StreamReq>>>,
+	/// The index the client was last told / asked for.
+	announced: u32,
+}
+
+#[cfg(windows)]
+impl DisplayFollow {
+	pub(super) fn new(
+		cur_display: Arc<std::sync::atomic::AtomicU32>,
+		live_out: Option<Arc<std::sync::atomic::AtomicU32>>,
+		last_req: Arc<Mutex<Option<StreamReq>>>,
+		announced: u32,
+	) -> Self {
+		DisplayFollow { cur_display, live_out, last_req, announced }
+	}
+
+	fn announce(&mut self, out: &tokio::sync::mpsc::Sender<DataMsg>, idx: u32) {
+		tracing::info!(from = self.announced, to = idx, "streamed monitor index changed → client follows");
+		self.announced = idx;
+		self.cur_display.store(idx, std::sync::atomic::Ordering::Relaxed);
+		if let Some(r) = self.last_req.lock().unwrap().as_mut() {
+			r.display_idx = idx;
+		}
+		let _ = out.try_send(DataMsg::StreamedDisplay(idx));
+	}
+
+	/// Native path, every turn: the capture moved to another index → tell the client. The list
+	/// goes first when it changed, so the client sizes the stream from the new table.
+	fn tick(&mut self, out: &tokio::sync::mpsc::Sender<DataMsg>, last: &mut Vec<pulsar_core::service::DisplayInfo>) {
+		let Some(live) = self.live_out.as_ref() else { return };
+		let idx = live.load(std::sync::atomic::Ordering::Relaxed);
+		if idx == self.announced {
+			return;
+		}
+		let now = crate::process::host_displays();
+		if now != *last {
+			tracing::info!(count = now.len(), "host monitors changed → client");
+			let _ = out.try_send(DataMsg::Displays(now.clone()));
+			*last = now;
+		}
+		self.announce(out, idx);
+	}
+
+	/// ffmpeg path: the streamed monitor (by name in the old list) sits at another index now.
+	fn list_changed(
+		&mut self,
+		out: &tokio::sync::mpsc::Sender<DataMsg>,
+		old: &[pulsar_core::service::DisplayInfo],
+		now: &[pulsar_core::service::DisplayInfo],
+	) {
+		if self.live_out.is_some() {
+			return;
+		}
+		let Some(name) = old.iter().find(|d| d.idx == self.announced).map(|d| d.name.clone()) else { return };
+		let Some(idx) = now.iter().find(|d| d.name == name).map(|d| d.idx) else { return };
+		if idx != self.announced {
+			self.announce(out, idx);
+		}
+	}
 }
 
 /// Remote-desktop sessions: tell the client while the person AT this host is using their own
@@ -2577,6 +2667,14 @@ pub(super) fn make_on_stream(
 				}
 			}
 		}
+		// The baseline's monitor is the one the capture streams NOW: the capture follows its
+		// monitor when a primary change renumbers the outputs (RunExit::Moved), so the index
+		// stored at the last request may name another monitor by now — a client pick of that
+		// index would then look "unchanged" and be dropped.
+		#[cfg(windows)]
+		if let (Some(prev), Some(h)) = (last_native_req.as_mut(), native_slot.lock().unwrap().as_ref()) {
+			prev.display_idx = h.current_output();
+		}
 		#[cfg(windows)]
 		if let Some((disp, bitrate)) =
 			last_native_req.as_ref().and_then(|prev| live_change(prev, &req))
@@ -3320,6 +3418,31 @@ pub(super) fn make_on_stream(
 		// shrinks anyway) → encoder init crash / dead stream. Apply after the Unix
 		// screen-clamp so a legitimately-clamped size is preserved, only floored.
 		let (eff_w, eff_h) = clamp_dims(eff_w, eff_h);
+		// The client's size is a BOX (its ladder point, built from the monitor size it knew): fit
+		// the streamed monitor's own aspect into it. The ffmpeg `-s` scale, ScreenCaptureKit and
+		// the Linux paths encode exactly this size, so a box of another aspect squashed the
+		// picture — a monitor that changed mode mid-session (its twin unplugged: 16:9 → 16:10)
+		// streamed stretched until a reconnect (2026-11-21). A window capture fits its window's
+		// own aspect further down.
+		let (eff_w, eff_h) = if req.window_hwnd.is_none() {
+			match crate::process::host_displays().into_iter().find(|d| d.idx == req.display_idx) {
+				Some(d) if d.width > 0 && d.height > 0 => {
+					let fit = pulsar_capture::fit_aspect(d.width, d.height, eff_w, eff_h);
+					if fit != (eff_w, eff_h) {
+						tracing::info!(
+							asked = %format!("{eff_w}x{eff_h}"),
+							monitor = %format!("{}x{}", d.width, d.height),
+							stream = %format!("{}x{}", fit.0, fit.1),
+							"stream size fitted to the monitor's aspect"
+						);
+					}
+					fit
+				}
+				_ => (eff_w, eff_h),
+			}
+		} else {
+			(eff_w, eff_h)
+		};
 		// PER-WINDOW capture off Windows (Windows resolves its WGC target further down): the
 		// client's window pick (`req.window_hwnd`), else the window of the game this session
 		// launched. Linux X11 grabs the X window by id. macOS captures it through
@@ -4394,6 +4517,10 @@ pub(super) fn make_on_stream(
 				// encoded-frame count has been standing.
 				#[cfg(windows)]
 				let (req_fo, mut last_encoded, mut flat_ticks) = (req.clone(), 0u32, 0u32);
+				// The monitor the capture streams at restart time, not the one it started on: it
+				// follows its monitor across a primary-change renumbering (RunExit::Moved).
+				#[cfg(windows)]
+				let cur_out_fo = native_out_arc.lock().unwrap().clone();
 				// A Media Foundation stall is this session's business (it keeps ffmpeg after
 				// the restart), not a sign that the NVIDIA driver stopped answering.
 				#[cfg(windows)]
@@ -4443,7 +4570,11 @@ pub(super) fn make_on_stream(
 							if !stall_is_mf {
 								crate::process::nvenc_report_stall(why);
 							}
-							let queued = super::failover::restart(sid, req_fo.clone());
+							let mut req_now = req_fo.clone();
+							if let Some(cur) = cur_out_fo.as_ref() {
+								req_now.display_idx = cur.load(std::sync::atomic::Ordering::Relaxed);
+							}
+							let queued = super::failover::restart(sid, req_now);
 							tracing::error!(encoded = n, queued, "{why} → restarting the stream on the next encoder");
 						}
 					}
@@ -4752,7 +4883,22 @@ pub(super) fn make_on_stream(
 		start_audio_and_mute(&procs, &ffmpeg, &app_h, adest, &req, sid, audio_pid, &proc_epoch);
 		#[cfg(windows)]
 		spawn_pointer_lock_watch(stats_out.clone(), proc_epoch.clone());
-		spawn_display_list_watch(stats_out.clone(), proc_epoch.clone());
+		// A window capture follows its window, not a monitor index.
+		#[cfg(windows)]
+		let follow = target_hwnd.is_none().then(|| {
+			DisplayFollow::new(
+				cur_display.clone(),
+				if native_started { native_out_arc.lock().unwrap().clone() } else { None },
+				last_req_store.clone(),
+				cur_display.load(std::sync::atomic::Ordering::Relaxed),
+			)
+		});
+		spawn_display_list_watch(
+			stats_out.clone(),
+			proc_epoch.clone(),
+			#[cfg(windows)]
+			follow,
+		);
 		super::app_audio::spawn_list_watch(stats_out.clone(), proc_epoch.clone());
 		if !req.game_mode {
 			spawn_host_pointer_watch(

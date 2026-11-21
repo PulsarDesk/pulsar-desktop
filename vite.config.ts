@@ -16,6 +16,7 @@ export default defineConfig({
 	],
 	clearScreen: false,
 	server: {
+		watch: { ignored: ['**/build/**', '**/dist/**', '**/src-tauri/**', '**/target/**'] },
 		port: 5173,
 		strictPort: true,
 		// Pre-transform the app shell before anything can request it.

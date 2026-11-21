@@ -195,8 +195,10 @@ impl CaptureDevice {
 					// absolute clicks land at the wrong virtual-desktop coordinates for the session.
 					// An HDR on/off switch on the monitor changes the duplication format (FP16 ⇄
 					// BGRA): the encoder (P010 + Main10 vs NV12) must be rebuilt for it too.
-					if self.output_idx != prev_output_idx
-						|| self.pool_format() != built_format
+					if self.output_idx != prev_output_idx {
+						return RunExit::Moved(self.output_idx);
+					}
+					if self.pool_format() != built_format
 						|| self.dup_desc.ModeDesc.Width != built_w
 						|| self.dup_desc.ModeDesc.Height != built_h
 						|| self.rotation_deg() != built_rotation
@@ -224,7 +226,10 @@ impl CaptureDevice {
 					// same silent-desync guard as the Reinit arm above. reinit() also re-reads the
 					// monitor's HDR state: a flip (FP16 ⇄ BGRA) needs the encoder rebuilt too, or a
 					// P010 encoder would read BGRA as scRGB (or the NV12 Blt FP16).
-					if self.output_idx != prev_output_idx || self.pool_format() != built_format {
+					if self.output_idx != prev_output_idx {
+						return RunExit::Moved(self.output_idx);
+					}
+					if self.pool_format() != built_format {
 						return RunExit::Switch(self.output_idx);
 					}
 					// Re-anchor the pacing clock after the reinit sleeps, as above.

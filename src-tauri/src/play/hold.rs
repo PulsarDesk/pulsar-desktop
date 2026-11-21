@@ -494,6 +494,18 @@ pub(super) async fn hold_session(
 	// a switch to a codec whose decoder failed the 10-bit probe must drop HDR, and a session
 	// that started on H.264 gets HDR after a switch to HEVC.
 	let mut cur_hdr = hdr_neg.want(&cur_codec);
+	// "HDR öner": ✓ on the card switched this session to HDR10 (kept across codec changes while
+	// the codec can carry it). `mon_hdr` = each host monitor's HDR mode, followed live from
+	// `DataMsg::Displays` (Windows turns HDR on/off per monitor — a game, the Settings app).
+	let mut hdr_accepted = false;
+	let mut mon_hdr: Vec<(u32, bool)> = hdr_neg.mon_hdr.clone();
+	let mut hdr_card = super::HdrSuggest::default();
+	// `(monitor idx, w, h)` the adaptive ladder was last sized for (see the tick below): the
+	// streamed monitor changing MODE mid-session (its twin unplugged, a resolution change on the
+	// host) re-sizes the ladder and re-requests, instead of streaming the old shape until a
+	// reconnect.
+	let mut ladder_mon: Option<(u32, u32, u32)> =
+		host_displays.iter().find(|m| m.0 == init_display).map(|m| (m.0, m.1, m.2));
 	// Inbound file reassembly (file-manager downloads — the host streams an FsGet
 	// back as FileBegin/Chunk/End): Begin → state, Chunk → store BY INDEX,
 	// End → save in the received-files folder. The session transport is unordered UDP,
@@ -973,6 +985,7 @@ pub(super) async fn hold_session(
 								// the webview session menu (`host-displays`).
 								tracing::info!(count = list.len(), "host monitors changed");
 								host_displays = list.iter().map(|d| (d.idx, d.width, d.height, d.refresh_hz)).collect();
+								mon_hdr = list.iter().map(|d| (d.idx, d.hdr)).collect();
 								let caps_line = tauri::Manager::state::<crate::state::AppState>(&app_ev)
 									.plays
 									.lock()
@@ -1752,6 +1765,56 @@ pub(super) async fn hold_session(
 						}
 					}
 				}
+				// The streamed monitor's size changed (DataMsg::Displays) while it stayed the same
+				// monitor: rebuild the ladder for it and re-request, so the stream takes the new
+				// shape (a switch to another monitor re-sizes the ladder on its own path; screen
+				// adaptation and window captures size it from the pane / window instead).
+				if cur_window.is_none() && cur_adapt.is_none() {
+					if let Some(&(i, w, h, hz)) = host_displays.iter().find(|m| m.0 == cur_display) {
+						let now_mon = (i, w, h);
+						if ladder_mon != Some(now_mon) {
+							let same_monitor = ladder_mon.is_some_and(|m| m.0 == i);
+							ladder_mon = Some(now_mon);
+							if same_monitor {
+								let fps = if hz > 1 { client_fps.min(crate::util::nearest_fps(hz)) } else { client_fps };
+								ctl.set_native(w, h, fps);
+								let p = stream_point(&ctl, auto_on);
+								if adapt_enabled || !manual_res {
+									cur_w = p.width;
+									cur_h = p.height;
+								}
+								if adapt_enabled || !manual_fps {
+									cur_fps = p.fps;
+								}
+								last_switch_at = std::time::Instant::now();
+								tracing::info!(display = i, native = %format!("{w}x{h}@{fps}"), point = %p.label(), "streamed host monitor changed size → ladder rebuilt, re-requesting");
+								if request_stream(&mut sess, &make_req!()).await.is_err() {
+									break;
+								}
+								repair_st.reset_stream();
+								frame_clock.reset();
+							}
+						}
+					}
+				}
+				// "HDR öner": offer HDR while the streamed host monitor is in HDR mode, the
+				// session streams SDR although HDR10 is possible end to end, and the link has
+				// room for it (a clean link at a rate where 10-bit pays off).
+				{
+					let host_hdr = cur_window.is_none() && mon_hdr.iter().any(|&(i, h)| i == cur_display && h);
+					let can = hdr_neg.suggest && !hdr_neg.pref && !cur_hdr && hdr_neg.possible(&cur_codec);
+					let sig = ctl.last();
+					let link_ok = !adapt_enabled
+						|| (sig.loss <= super::HDR_SUGGEST_MAX_LOSS && cur_bitrate >= super::HDR_SUGGEST_MIN_KBPS);
+					if let Some(show) = hdr_card.update(host_hdr, can, link_ok) {
+						tracing::info!(show, display = cur_display, kbps = cur_bitrate, loss_pct = sig.loss * 100.0, "HDR suggestion card");
+						use std::io::Write as _;
+						if let Some(si) = render_stdin.lock().unwrap().as_mut() {
+							let _ = writeln!(si, "hdrcard {}", u8::from(show));
+							let _ = si.flush();
+						}
+					}
+				}
 			},
 			q = restream_rx.recv() => match q {
 				// Session menu changed the resolution or encoder: merge it into the
@@ -1766,7 +1829,27 @@ pub(super) async fn hold_session(
 						(w, h, fps, codec.to_owned(), enc.to_owned(), disp, win, adapt)
 					};
 					let before = encoder_key(cur_w, cur_h, cur_fps, &cur_codec, &cur_encoder, cur_display, cur_window, cur_adapt);
+					let hdr_before = cur_hdr;
+					// A command that changes nothing on the host (the HDR card's ✗) sends no request.
+					let mut no_request = false;
 					match cmd {
+						Restream::HdrAnswer(accept) => {
+							use std::io::Write as _;
+							if let Some(si) = render_stdin.lock().unwrap().as_mut() {
+								let _ = writeln!(si, "hdrcard 0");
+								let _ = si.flush();
+							}
+							if accept && hdr_neg.possible(&cur_codec) {
+								hdr_accepted = true;
+								hdr_card.shown = false;
+								cur_hdr = true;
+								tracing::info!(codec = %cur_codec, "HDR suggestion accepted → HDR10 stream");
+							} else {
+								hdr_card.dismiss();
+								no_request = true;
+								tracing::info!(accept, "HDR suggestion dismissed");
+							}
+						}
 						// An explicit size pins the ladder's resolution; (0, 0) = "Otomatik"
 						// hands it back to the controller (which re-picks for its target).
 						Restream::Resolution(w, h) => {
@@ -1795,7 +1878,7 @@ pub(super) async fn hold_session(
 							ctl.set_codec(pulsar_core::adapt::codec_from_wire(&c));
 							cur_codec = c;
 							// HDR10 follows the codec (its decoder may not do 10-bit).
-							cur_hdr = hdr_neg.want(&cur_codec);
+							cur_hdr = hdr_neg.want(&cur_codec) || (hdr_accepted && hdr_neg.possible(&cur_codec));
 							// RFI reaches the new codec or not: the flip's mode follows.
 							if let Some(w) = flip_want {
 								cur_recovery = flip_recovery(w, host_rfi, &cur_codec);
@@ -1935,6 +2018,9 @@ pub(super) async fn hold_session(
 							}
 						}
 					}
+					if no_request {
+						continue;
+					}
 					let req = make_req!();
 					let rs = request_stream(&mut sess, &req).await;
 					tracing::info!(display_idx = cur_display, ok = rs.is_ok(), "restream request_stream sent");
@@ -1945,7 +2031,9 @@ pub(super) async fn hold_session(
 					// gaps / FEC state and frame clock now (the mobile client does the same). The
 					// seq-jump detection alone misses a new base that lands close to the old one —
 					// bogus gaps, NACKs and counted loss.
-					if encoder_key(cur_w, cur_h, cur_fps, &cur_codec, &cur_encoder, cur_display, cur_window, cur_adapt) != before {
+					if encoder_key(cur_w, cur_h, cur_fps, &cur_codec, &cur_encoder, cur_display, cur_window, cur_adapt) != before
+						|| cur_hdr != hdr_before
+					{
 						repair_st.reset_stream();
 						frame_clock.reset();
 					}

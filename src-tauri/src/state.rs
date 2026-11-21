@@ -256,6 +256,9 @@ pub(crate) enum Restream {
 	Audio(bool, bool),
 	/// New host monitor to capture (index into `StreamCaps::displays`, 0 = primary).
 	Display(u32),
+	/// The "HDR öner" card was answered: `true` (✓) switches this session to HDR10,
+	/// `false` (✗) dismisses the card until the host monitor leaves HDR mode again.
+	HdrAnswer(bool),
 	/// New per-WINDOW capture target (Phase 2b co-op): `Some(hwnd)` makes the host
 	/// capture that single window via WGC (overriding the monitor); `None` reverts to
 	/// the whole-monitor path. The HWND is a raw Win32 handle as an `i64`, from the
@@ -441,10 +444,16 @@ pub(crate) struct StreamCfg {
 	pub(crate) capture: String,
 	pub(crate) display: String,
 	pub(crate) vaapi_device: String,
-	/// Request HDR encoding (Settings → Display → "HDR aktar"). The env var
-	/// PULSAR_HDR is a debug override that wins if set; the UI toggle is
-	/// the normal production path.
+	/// Automatic HDR (Settings → Display → "Otomatik HDR"): ask the host for HDR10 whenever the
+	/// codec, the host and this client's 10-bit decoder can carry it; the host then streams HDR
+	/// while the captured monitor is in HDR mode and SDR otherwise, following it live. The env
+	/// var PULSAR_HDR is a debug override that wins if set; the UI toggle is the normal path.
 	pub(crate) hdr: bool,
+	/// Suggest HDR (Settings → Display → "HDR öner"), used while `hdr` is off: when the streamed
+	/// host monitor is in HDR mode and the link carries it, the session shows a bottom-right
+	/// card offering the switch (✓ switches this session to HDR, ✗ dismisses it until the host
+	/// leaves HDR again).
+	pub(crate) hdr_suggest: bool,
 }
 
 impl Default for StreamCfg {
@@ -466,6 +475,7 @@ impl Default for StreamCfg {
 			#[cfg(not(target_os = "linux"))]
 			vaapi_device: crate::drm_node::DEFAULT_NODE.into(),
 			hdr: false,
+			hdr_suggest: true,
 		}
 	}
 }

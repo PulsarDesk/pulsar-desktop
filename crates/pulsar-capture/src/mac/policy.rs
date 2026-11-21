@@ -2,17 +2,13 @@
 //! the framework calls so they build and are unit-tested on every target.
 
 /// The output size for a requested `want_w × want_h` on a display of `native_w × native_h`
-/// pixels: 0 means native; never larger than the display; even (NV12 + the encoders need it);
-/// at least 2×2. Each axis is clamped on its own, so the size may not have the display's aspect
-/// ratio: the capture STRETCHES the display into it (ScreenCaptureKit with
-/// `preservesAspectRatio = NO`, like ffmpeg's scale), never letterboxes, so a normalized
-/// pointer position maps onto the whole display.
+/// pixels: the display's own aspect fitted into the request (`crate::fit_aspect`: 0 = no limit
+/// on that axis, never larger than the display, even, at least 2×2). The whole display stays in
+/// the frame (ScreenCaptureKit `preservesAspectRatio = NO` is then a pure scale), so a
+/// normalized pointer position maps onto all of it. Each axis used to be clamped on its own,
+/// which squashed a display whose aspect differs from the client's ladder point.
 pub fn output_size(want_w: u32, want_h: u32, native_w: u32, native_h: u32) -> (u32, u32) {
-	let pick = |want: u32, native: u32| {
-		let v = if want == 0 { native } else if native > 0 { want.min(native) } else { want };
-		(v.max(2)) & !1
-	};
-	(pick(want_w, native_w), pick(want_h, native_h))
+	crate::fit_aspect(native_w, native_h, want_w, want_h)
 }
 
 /// The output size of a WINDOW stream: the host already fitted the window's aspect into the
@@ -79,7 +75,7 @@ mod tests {
 	#[test]
 	fn output_size_defaults_clamps_and_evens() {
 		assert_eq!(output_size(0, 0, 3024, 1964), (3024, 1964));
-		assert_eq!(output_size(1920, 1080, 3024, 1964), (1920, 1080));
+		assert_eq!(output_size(2560, 1440, 3024, 1964), (2216, 1440));
 		assert_eq!(output_size(4000, 3000, 2560, 1440), (2560, 1440));
 		assert_eq!(output_size(1281, 721, 2560, 1440), (1280, 720));
 		assert_eq!(output_size(1, 1, 0, 0), (2, 2));
@@ -87,12 +83,9 @@ mod tests {
 	}
 
 	#[test]
-	fn output_size_does_not_fit_the_display_aspect() {
-		// A 3024×1964 (≈1.54) panel asked for 16:9: the frame is 1920×1080 (stretched), not a
-		// 1663×1080 pillarbox, so x = 0..1 of the frame is x = 0..1 of the display.
-		let (w, h) = output_size(1920, 1080, 3024, 1964);
-		assert_eq!((w, h), (1920, 1080));
-		assert_ne!(w * 1964, h * 3024);
+	fn output_size_keeps_the_display_aspect() {
+		// A 3024×1964 (≈1.54) panel asked for 16:9: the whole panel, scaled to fit (no squash).
+		assert_eq!(output_size(1920, 1080, 3024, 1964), (1662, 1080));
 	}
 
 	#[test]

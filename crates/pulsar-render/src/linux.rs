@@ -771,7 +771,8 @@ pub fn run() {
 					crate::overlay::audio_devices_line(&line);
 				}
 				// The session's voice call (`callstate <phase> <since_ms> <name>`) for the Audio rows.
-				Some("callstate") => {
+				// …and the "HDR öner" card (`hdrcard 0|1`), drawn with it.
+				Some("callstate") | Some("hdrcard") => {
 					crate::overlay::call_line(&line);
 				}
 				// The host's apps playing sound (`audioapps …`) for Audio → App sounds.
@@ -2238,7 +2239,7 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 				|| stalled
 				|| recovering
 				|| !state.chat_toasts.is_empty()
-				|| overlay::call_active()
+				|| overlay::card_active()
 			{
 				// Closed-state chrome: the mini stats HUD, the Parsec-style open button
 				// and/or the helper tooltip. Display-only on Linux (the container is input

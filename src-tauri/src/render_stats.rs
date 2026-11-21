@@ -328,6 +328,11 @@ pub(crate) fn start_render_reader(
 								crate::call::action(&app, crate::call::CallKey::Client(cur_id), val);
 								continue 'lines;
 							}
+							// The "HDR öner" card (`hdr yes|no`): to the session's hold loop.
+							if field == "hdr" {
+								crate::session_cmds::hdr_answer(&app, cur_id, val == "yes");
+								continue 'lines;
+							}
 							// Audio → App sounds (`appmute <key>,<0|1>`): straight to the host, which
 							// answers with a fresh list.
 							if field == "appmute" {

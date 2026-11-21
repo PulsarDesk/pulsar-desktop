@@ -193,6 +193,8 @@ export const api = {
 	/** Voice call of a session (`host` + sid, or `client` + play id): ring / answer / decline / hang up. */
 	callAction: (side: CallSide, id: number, action: 'start' | 'accept' | 'decline' | 'hangup') =>
 		invoke<void>('call_action', { side, id, action }),
+	/** The "HDR öner" card was answered (✓ = switch this session to HDR10, ✗ = not now). */
+	hdrSuggestAnswer: (id: number, accept: boolean) => invoke<void>('hdr_suggest_answer', { id, accept }),
 	/** Every ongoing call (a window seeds itself, then follows `call-state`). */
 	callStates: () => invoke<CallState[]>('call_states'),
 	/** Settings: the ringtone of an incoming call (`custom` plays `path`). */

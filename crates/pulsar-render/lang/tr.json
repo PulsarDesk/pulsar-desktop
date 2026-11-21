@@ -126,6 +126,8 @@
 	"hint.rows": "Yön tuşları: seç ve değiştir · Enter / A: onayla · Esc / B: geri",
 	"hint.options": "Yön tuşları: gez · Enter / A: seç · Esc / B: vazgeç",
 	"call.host": "Karşı taraf",
+	"hdr.suggestTitle": "Karşı ekran HDR modunda",
+	"hdr.suggestBody": "Yayın HDR'a geçsin mi?",
 	"call.start": "Sesli arama — karşı tarafı ara",
 	"call.calling": "{name} aranıyor… — iptal",
 	"call.answer": "{name} arıyor — yanıtla",

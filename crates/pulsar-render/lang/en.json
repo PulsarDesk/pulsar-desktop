@@ -126,6 +126,8 @@
 	"hint.rows": "Arrows: select and change · Enter / A: confirm · Esc / B: back",
 	"hint.options": "Arrows: move · Enter / A: pick · Esc / B: cancel",
 	"call.host": "Host",
+	"hdr.suggestTitle": "The host screen is in HDR",
+	"hdr.suggestBody": "Switch this stream to HDR?",
 	"call.start": "Voice call — call the host",
 	"call.calling": "Calling {name}… — cancel",
 	"call.answer": "{name} is calling — answer",

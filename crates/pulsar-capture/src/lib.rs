@@ -440,6 +440,52 @@ impl Drop for CaptureHandle {
 // Pure-Rust RTP/H.264 packetizer (RFC 6184), byte-for-byte compatible with the
 // client depacketizer in `src/lib/h264.ts`. Platform-independent (std::net + rand),
 // so it builds and is unit-tested on every target.
+/// The stream size for a `nw × nh` source asked to fit a `bw × bh` box (the client's ladder
+/// point): the largest size with the SOURCE's aspect inside the box, never above the source
+/// (no upscale), even and at least 2×2. A `0` box axis = no limit there. Each axis clamped on
+/// its own squashed the picture whenever the box had another aspect — a host monitor that
+/// went from 16:9 to 16:10 (its twin unplugged) streamed stretched until a reconnect
+/// (2026-11-21). The whole source stays in the frame, so 0..1 pointer coordinates still map
+/// onto all of it.
+pub fn fit_aspect(nw: u32, nh: u32, bw: u32, bh: u32) -> (u32, u32) {
+	if nw == 0 || nh == 0 {
+		return (bw.max(2) & !1, bh.max(2) & !1);
+	}
+	let sx = if bw == 0 { 1.0 } else { bw as f64 / nw as f64 };
+	let sy = if bh == 0 { 1.0 } else { bh as f64 / nh as f64 };
+	let scale = sx.min(sy).min(1.0);
+	let w = ((nw as f64 * scale).round() as u32).max(2) & !1;
+	let h = ((nh as f64 * scale).round() as u32).max(2) & !1;
+	(w, h)
+}
+
+#[cfg(test)]
+mod fit_aspect_tests {
+	use super::fit_aspect;
+
+	#[test]
+	fn a_16_10_monitor_in_a_16_9_box_keeps_its_shape() {
+		assert_eq!(fit_aspect(1920, 1200, 1920, 1080), (1728, 1080));
+		assert_eq!(fit_aspect(2560, 1600, 1280, 720), (1152, 720));
+	}
+
+	#[test]
+	fn the_same_aspect_is_the_box_itself_and_never_upscaled() {
+		assert_eq!(fit_aspect(2560, 1440, 1920, 1080), (1920, 1080));
+		assert_eq!(fit_aspect(1920, 1080, 2560, 1440), (1920, 1080));
+		assert_eq!(fit_aspect(800, 600, 1920, 1080), (800, 600));
+	}
+
+	#[test]
+	fn a_portrait_source_and_odd_sizes() {
+		let (w, h) = fit_aspect(856, 1056, 1280, 720);
+		assert_eq!(h, 720);
+		assert!((w as i32 - 584).abs() <= 1, "{w}");
+		assert_eq!(fit_aspect(1513, 983, 4000, 4000), (1512, 982));
+		assert_eq!(fit_aspect(0, 0, 1281, 721), (1280, 720));
+	}
+}
+
 pub mod rtp;
 pub use rtp::{RtpEgress, RtpSender};
 
@@ -1304,12 +1350,12 @@ pts += 1;
 				// fallback left nothing to say why — this line is the first clue next time).
 				encode_log(&format!(
 					"build #{build_no} run exited ({}) frames_sent={frames_sent} submit_errs={submit_errs} dry={}",
-					match exit { dxgi::RunExit::Stop => "stop".to_string(), dxgi::RunExit::Switch(i) => format!("switch->{i}") },
+					run_exit_label(&exit),
 					went_dry.load(Ordering::Relaxed),
 				));
 				cap_log(&format!(
 					"build #{build_no} run exited ({}) frames_sent={frames_sent} submit_errs={submit_errs}",
-					match exit { dxgi::RunExit::Stop => "stop".to_string(), dxgi::RunExit::Switch(i) => format!("switch->{i}") },
+					run_exit_label(&exit),
 				));
 
 				// 6. Tear down NVENC (no drain — SYNC, no B-frames) + release the AddRef'd device
@@ -1322,6 +1368,13 @@ pts += 1;
 					dxgi::RunExit::Stop => break,
 					// Rebuild on the requested monitor (its adapter may differ — see above).
 					dxgi::RunExit::Switch(idx) => output_idx = idx,
+					// The same monitor under a new index: the old index names another monitor
+					// now, so it is no fallback — the rebuild takes the long retry budget and
+					// never reverts there (it would stream the wrong screen).
+					dxgi::RunExit::Moved(idx) => {
+						output_idx = idx;
+						prev_good_output = idx;
+					}
 				}
 			}
 		})?;
@@ -1455,6 +1508,16 @@ const NO_FRAME_SWITCH: std::time::Duration = std::time::Duration::from_millis(25
 /// How long a capture thread that missed its init deadline gets to exit before it is detached.
 #[cfg(windows)]
 const INIT_STOP_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Log label of why a capture build's run loop returned.
+#[cfg(windows)]
+fn run_exit_label(exit: &dxgi::RunExit) -> String {
+	match exit {
+		dxgi::RunExit::Stop => "stop".to_string(),
+		dxgi::RunExit::Switch(i) => format!("switch->{i}"),
+		dxgi::RunExit::Moved(i) => format!("moved->{i}"),
+	}
+}
 
 /// Capture-thread rebuild lifecycle log. Debug-builds only (no-op in release).
 /// Previously wrote to `C:\Users\Public\pulsar-capture-dbg.txt` unconditionally;

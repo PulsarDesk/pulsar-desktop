@@ -603,6 +603,21 @@ pub(crate) async fn set_play_auto_adjust(
 	Ok(())
 }
 
+/// Client: the "HDR öner" card was answered (renderer `ov set hdr yes|no`, or the Linux embedded
+/// webview's hotspot): ✓ switches the session to HDR10, ✗ dismisses the card until the host
+/// monitor leaves HDR mode. The hold loop applies it.
+pub(crate) fn hdr_answer(app: &tauri::AppHandle, id: u64, accept: bool) {
+	let tx = tauri::Manager::state::<AppState>(app).plays.lock().unwrap().get(&id).map(|p| p.restream_tx.clone());
+	if let Some(tx) = tx {
+		let _ = tx.try_send(Restream::HdrAnswer(accept));
+	}
+}
+
+#[tauri::command]
+pub(crate) fn hdr_suggest_answer(app: tauri::AppHandle, id: u64, accept: bool) {
+	hdr_answer(&app, id, accept);
+}
+
 /// Client: change the quality/perf bias of an active session on the fly. Parses
 /// "latency" / "balanced" / "quality" → [`QualityPref`] (unknown → `Balanced`) and
 /// re-requests the stream. The UI exposes only latency | quality.

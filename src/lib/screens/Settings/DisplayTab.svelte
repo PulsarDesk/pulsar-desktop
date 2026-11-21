@@ -168,6 +168,12 @@
 	<div class="st"><b>{t('settings.hdr')}</b><span>{t('settings.hdrDesc')}</span></div>
 	<button class="toggle" aria-label={t('settings.hdr')} class:on={ui.hdr} aria-pressed={ui.hdr} onclick={() => { ui.hdr = !ui.hdr; saveUi(); }}><span class="knob"></span></button>
 </div>
+{#if !ui.hdr}
+	<div class="srow">
+		<div class="st"><b>{t('settings.hdrSuggest')}</b><span>{t('settings.hdrSuggestDesc')}</span></div>
+		<button class="toggle" aria-label={t('settings.hdrSuggest')} class:on={ui.hdrSuggest !== false} aria-pressed={ui.hdrSuggest !== false} onclick={() => { ui.hdrSuggest = ui.hdrSuggest === false; saveUi(); }}><span class="knob"></span></button>
+	</div>
+{/if}
 <div class="srow">
 	<div class="st"><b>{t('settings.preOptimize')}</b><span>{t('settings.preOptimizeDesc')}</span></div>
 	<button class="toggle" aria-label={t('settings.preOptimize')} class:on={config?.pre_optimize_stream ?? true} aria-pressed={config?.pre_optimize_stream ?? true} onclick={() => { if (config) { config.pre_optimize_stream = !(config.pre_optimize_stream ?? true); saveConfig?.(); } }}><span class="knob"></span></button>

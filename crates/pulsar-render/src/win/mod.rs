@@ -1781,7 +1781,7 @@ impl Renderer {
 		let stalled = STALLED.load(Ordering::Relaxed);
 		let recovering = !stalled && RECOVERING.load(Ordering::Relaxed);
 		let toasts = chat_toasts();
-		let in_call = crate::overlay::call_active();
+		let in_call = crate::overlay::card_active();
 		if !stats_hud
 			&& !ovbtn
 			&& hint_text.is_none()

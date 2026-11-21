@@ -1047,11 +1047,17 @@ pub(crate) async fn start_remote_play(
 	// can show it (HDR10 output on an HDR monitor, tone-mapped to SDR otherwise). The PULSAR_HDR
 	// env var is a debug override that asks regardless.
 	// The same decision is re-made in hold.rs whenever the codec changes (HdrNeg::want).
+	let (hdr_pref, hdr_suggest) = {
+		let c = state.stream_cfg.lock().unwrap();
+		(c.hdr, c.hdr_suggest)
+	};
 	let hdr_neg = HdrNeg {
-		pref: state.stream_cfg.lock().unwrap().hdr,
+		pref: hdr_pref,
 		host: host_caps.features.iter().any(|f| f == pulsar_core::service::media::FEAT_HDR),
 		ten_bit: probed_decoders.iter().filter(|d| d.ok && d.ten_bit).map(|d| d.codec.clone()).collect(),
 		force: std::env::var_os("PULSAR_HDR").is_some(),
+		suggest: hdr_suggest,
+		mon_hdr: host_caps.displays.iter().map(|d| (d.idx, d.hdr)).collect(),
 	};
 	if hdr_neg.pref && !hdr_neg.want(&codec) {
 		tracing::info!(%codec, features = ?host_caps.features, ten_bit = ?hdr_neg.ten_bit, "HDR asked in Settings but not possible end to end — SDR stream");
@@ -2701,16 +2707,105 @@ pub(crate) fn hdr_possible(host_hdr: bool, codec: &str, client_ten_bit: bool) ->
 /// fallback) re-decides HDR for the NEW codec instead of keeping the first codec's answer.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct HdrNeg {
+	/// "Otomatik HDR" (Settings): ask for HDR10 whenever it is possible.
 	pub pref: bool,
 	pub host: bool,
 	pub ten_bit: Vec<String>,
 	pub force: bool,
+	/// "HDR öner" (Settings): with `pref` off, offer the switch while the host monitor is HDR.
+	pub suggest: bool,
+	/// Each host monitor's HDR mode when the caps were taken `(idx, hdr)`; the hold loop
+	/// follows `DataMsg::Displays` from there.
+	pub mon_hdr: Vec<(u32, bool)>,
 }
 
 impl HdrNeg {
 	/// Ask the host for HDR10 on codec?
 	pub(crate) fn want(&self, codec: &str) -> bool {
-		self.force || (self.pref && hdr_possible(self.host, codec, self.ten_bit.iter().any(|c| c == codec)))
+		self.force || (self.pref && self.possible(codec))
+	}
+
+	/// HDR10 can be carried end to end on codec (whatever the Settings say).
+	pub(crate) fn possible(&self, codec: &str) -> bool {
+		hdr_possible(self.host, codec, self.ten_bit.iter().any(|c| c == codec))
+	}
+}
+
+/// The lowest encoder rate the "HDR öner" card offers HDR at: 10-bit HDR asks a little more
+/// of the bitrate than 8-bit SDR at the same quality, and on a starved link the SDR picture
+/// is the better one.
+pub(crate) const HDR_SUGGEST_MIN_KBPS: u32 = 10_000;
+/// The loss the link may show (after repair) for the card to offer HDR.
+pub(crate) const HDR_SUGGEST_MAX_LOSS: f32 = 0.02;
+
+/// The "HDR öner" card's state for one session.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct HdrSuggest {
+	/// The card is on screen.
+	pub shown: bool,
+	/// ✗ was pressed: not again until the host monitor leaves HDR mode.
+	pub dismissed: bool,
+}
+
+impl HdrSuggest {
+	/// One evaluation. `host_hdr`: the streamed host monitor is in HDR mode now. `can`: the
+	/// switch is open to this session (suggest on, Otomatik HDR off, not streaming HDR10 already,
+	/// possible end to end, a monitor and not a window is streamed). `link_ok`: the link carries
+	/// it now. Returns `Some(show)` when the card must appear / go away.
+	///
+	/// A card on screen stays through a short link dip (it only goes when the offer itself is
+	/// gone), so it does not flicker in and out with the ABR.
+	pub(crate) fn update(&mut self, host_hdr: bool, can: bool, link_ok: bool) -> Option<bool> {
+		if !host_hdr {
+			self.dismissed = false;
+		}
+		let stay = host_hdr && can;
+		let want = if self.shown { stay } else { stay && link_ok && !self.dismissed };
+		if want == self.shown {
+			return None;
+		}
+		self.shown = want;
+		Some(want)
+	}
+
+	/// ✗: hide, and stay hidden until the host monitor leaves HDR.
+	pub(crate) fn dismiss(&mut self) {
+		self.shown = false;
+		self.dismissed = true;
+	}
+}
+
+#[cfg(test)]
+mod hdr_suggest_tests {
+	use super::HdrSuggest;
+
+	#[test]
+	fn the_card_shows_while_the_host_is_hdr_and_the_link_carries_it() {
+		let mut s = HdrSuggest::default();
+		assert_eq!(s.update(false, true, true), None, "host monitor SDR");
+		assert_eq!(s.update(true, true, false), None, "link too weak");
+		assert_eq!(s.update(true, true, true), Some(true));
+		assert_eq!(s.update(true, true, false), None, "a link dip keeps it");
+		assert_eq!(s.update(false, true, true), Some(false), "host left HDR");
+	}
+
+	#[test]
+	fn a_dismissed_card_returns_only_after_the_host_left_hdr() {
+		let mut s = HdrSuggest::default();
+		assert_eq!(s.update(true, true, true), Some(true));
+		s.dismiss();
+		assert_eq!(s.update(true, true, true), None);
+		assert_eq!(s.update(false, true, true), None);
+		assert_eq!(s.update(true, true, true), Some(true), "a new HDR episode");
+	}
+
+	#[test]
+	fn accepting_or_turning_hdr_on_takes_the_card_away() {
+		let mut s = HdrSuggest::default();
+		assert_eq!(s.update(true, true, true), Some(true));
+		// Streaming HDR10 now: the offer is gone.
+		assert_eq!(s.update(true, false, true), Some(false));
+		assert_eq!(s.update(true, false, true), None);
 	}
 }
 
@@ -2730,7 +2825,7 @@ mod hdr_tests {
 	fn a_codec_switch_re_decides_hdr() {
 		use super::HdrNeg;
 		// The client's AV1 decoder failed the 10-bit probe; HEVC passed.
-		let n = HdrNeg { pref: true, host: true, ten_bit: vec!["h265".into()], force: false };
+		let n = HdrNeg { pref: true, host: true, ten_bit: vec!["h265".into()], force: false, ..Default::default() };
 		assert!(n.want("h265"));
 		assert!(!n.want("av1"), "h265 -> av1 must drop HDR (8-bit-only AV1 decoder)");
 		assert!(!n.want("h264"));

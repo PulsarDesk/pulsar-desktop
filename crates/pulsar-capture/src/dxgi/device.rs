@@ -37,6 +37,11 @@ pub enum RunExit {
 	/// `CaptureDevice`/`Encoder` on this output index — `create` re-picks the owning adapter, so
 	/// a switch to a monitor on the OTHER GPU (MUX laptop) lands on the right device.
 	Switch(u32),
+	/// The streamed monitor itself is now at this output index (a primary-monitor change
+	/// renumbered the outputs, or it was unplugged and the first output took over). Rebuilt like
+	/// `Switch`, but it is not a move the host asked for: there is no "previous good" monitor to
+	/// fall back to — the old index names another monitor now.
+	Moved(u32),
 }
 
 /// Outcome of an `AcquireNextFrame` attempt, mapped from the raw HRESULT.
@@ -74,6 +79,11 @@ pub struct CaptureDevice {
 	pub(super) pool: Option<ID3D11Texture2D>,
 	/// Which adapter output index was requested (for rebuilds).
 	pub(super) output_idx: u32,
+	/// GDI device name (`\\.\DISPLAYn`) of the duplicated output. The index is NOT a stable
+	/// identity: DXGI lists the adapter that owns the PRIMARY monitor first, so making another
+	/// monitor primary renumbers the outputs (2026-11-21: `0=DISPLAY6, 1=DISPLAY1` became
+	/// `0=DISPLAY1, 1=DISPLAY6`). A rebuild finds the monitor by this name first.
+	pub(super) output_name: [u16; 32],
 	pub(super) qpc: Qpc,
 	/// Whether the LAST `snapshot` represented a real desktop change (→ `Frame.is_new`).
 	/// Loop-local state shared between `snapshot` (writes) and `run` (reads) without an
@@ -147,6 +157,7 @@ impl CaptureDevice {
 		// Use the actual chosen index (may differ from output_idx when find_output fell back
 		// to the first attached output because output_idx was out of range — C8).
 		let output_idx = actual_idx;
+		let output_name = output.GetDesc().map(|d| d.DeviceName).unwrap_or_default();
 
 		// Create the device on the adapter that OWNS this output. DRIVER_TYPE_UNKNOWN is
 		// mandatory when you pass a specific adapter (HARDWARE would assert).
@@ -180,6 +191,7 @@ impl CaptureDevice {
 			dup_desc: DXGI_OUTDUPL_DESC::default(),
 			pool: None,
 			output_idx,
+			output_name,
 			qpc: Qpc::new(),
 			last_was_new: false,
 			last_present_ns: 0,
@@ -380,6 +392,59 @@ impl CaptureDevice {
 		Err(windows::core::Error::from(DXGI_ERROR_NOT_FOUND))
 	}
 
+	/// The attached output named `name` (`DXGI_OUTPUT_DESC::DeviceName`) and its CURRENT index in
+	/// [`find_output`]'s order. `None` when no attached output has that name (unplugged).
+	pub(crate) unsafe fn find_output_named(
+		factory: &IDXGIFactory1,
+		name: &[u16; 32],
+	) -> Option<(IDXGIAdapter1, IDXGIOutput1, u32)> {
+		if name[0] == 0 {
+			return None;
+		}
+		let mut global_idx: u32 = 0;
+		let mut ai = 0u32;
+		while let Ok(adapter) = factory.EnumAdapters1(ai) {
+			let mut oi = 0u32;
+			while let Ok(out) = adapter.EnumOutputs(oi) {
+				if let Ok(desc) = out.GetDesc() {
+					if desc.AttachedToDesktop.as_bool() {
+						if desc.DeviceName == *name {
+							let out1: IDXGIOutput1 = out.cast().ok()?;
+							return Some((adapter, out1, global_idx));
+						}
+						global_idx += 1;
+					}
+				}
+				oi += 1;
+			}
+			ai += 1;
+		}
+		None
+	}
+
+	/// Re-resolve the streamed output after a topology change: the same monitor by NAME first
+	/// (its index moves when another monitor becomes primary), else `find_output`'s index lookup
+	/// with its first-output fallback (the monitor was unplugged). Updates `output` + `output_idx`.
+	unsafe fn refind_output(&mut self) {
+		if let Some((_, out1, idx)) = Self::find_output_named(&self.factory, &self.output_name) {
+			if idx != self.output_idx {
+				crate::encode_log(&format!(
+					"DXGI: streamed monitor {} moved from output {} to {idx} — following it",
+					String::from_utf16_lossy(&self.output_name).trim_end_matches('\0'),
+					self.output_idx
+				));
+			}
+			self.output = out1;
+			self.output_idx = idx;
+			return;
+		}
+		if let Ok((_, out1, actual_idx)) = Self::find_output(&self.factory, self.output_idx) {
+			self.output_name = out1.GetDesc().map(|d| d.DeviceName).unwrap_or_default();
+			self.output = out1;
+			self.output_idx = actual_idx;
+		}
+	}
+
 	/// `D3D11CreateDevice` on a specific adapter (UNKNOWN driver), feature level 11_1→11_0,
 	/// BGRA support for the duplication's B8G8R8A8 format.
 	unsafe fn create_device(
@@ -488,12 +553,15 @@ impl CaptureDevice {
 					// keep retrying up to the budget. Non-transient: give up after 3 tries.
 					let max = if transient { transient_budget } else { 3 };
 					if transient {
-						if let Ok((_, out1, actual_idx)) = Self::find_output(&self.factory, self.output_idx) {
-							self.output = out1;
-							// Keep output_idx accurate: if find_output fell back to a different
-							// monitor (e.g. the requested one was hot-unplugged) record the real
-							// one so cur_out_t reflects the monitor actually being captured (C8).
-							self.output_idx = actual_idx;
+						// Keep output_idx accurate (C8): the same monitor by name (renumbered by a
+						// primary change), or find_output's fallback when it was unplugged.
+						let before = self.output_idx;
+						self.refind_output();
+						if self.output_idx != before {
+							// The monitor's index moved. It may now sit on another adapter than
+							// this device (DuplicateOutput would keep failing): hand it back to the
+							// caller, which rebuilds the device on the output's own adapter.
+							return Err(windows::core::Error::from(DXGI_ERROR_NOT_FOUND));
 						}
 					}
 					attempt += 1;
@@ -568,9 +636,11 @@ impl CaptureDevice {
 		let nw = self.dup_desc.ModeDesc.Width.max(2);
 		let nh = self.dup_desc.ModeDesc.Height.max(2);
 		let (w, h) = if want_w > 0 && want_h > 0 {
-			// Explicit: honor it, clamped to native (can't meaningfully upscale a duplication).
-			// The VideoProcessor downscales native→encode in the Blt.
-			(want_w.min(nw), want_h.min(nh))
+			// Explicit: the requested box with the monitor's own aspect, never above native (no
+			// upscale of a duplication). The VideoProcessor downscales native→encode in the Blt.
+			// A rebuild after a mode change (RunExit::Switch / Moved) keeps the request it
+			// started with, so this is what keeps a 16:9 request off a 16:10 monitor unsquashed.
+			crate::fit_aspect(nw, nh, want_w, want_h)
 		} else if std::env::var("PULSAR_CAP_1080")
 			.map(|v| v == "1")
 			.unwrap_or(false)
@@ -665,13 +735,25 @@ impl CaptureDevice {
 		// 0) and returns actual_idx=0. Storing that real index means cur_out_t (written by the
 		// lib.rs loop from self.output_idx via RunExit::Switch) reflects the captured monitor,
 		// not the stale unplugged index — fixing the input-mapping desync (C8).
-		if let Ok((_, out1, actual_idx)) = Self::find_output(&self.factory, self.output_idx) {
-			self.output = out1;
-			self.output_idx = actual_idx;
+		// The streamed monitor is found by NAME first: making another monitor primary renumbers
+		// the outputs, and the old index then points at a different monitor — often on the other
+		// GPU, where this device cannot duplicate it (2026-11-21: the capture retried there for
+		// ~5 s, the host blamed NVENC and restarted the stream on the wrong monitor).
+		let before = self.output_idx;
+		self.refind_output();
+		if self.output_idx != before {
+			// Leave the duplication down: the caller sees the new index and rebuilds capture +
+			// encode on it (RunExit::Switch), on whichever adapter owns that output now.
+			return Ok(());
 		}
 		// In-session recovery (Hz change / transient ACCESS_LOST): keep the long retry budget —
 		// the stream is already established and the monitor genuinely needs to come back.
-		self.build_duplication(false)
+		let r = self.build_duplication(false);
+		if r.is_err() && self.output_idx != before {
+			// The retry loop saw the monitor move mid-way (see build_duplication): same hand-back.
+			return Ok(());
+		}
+		r
 	}
 }
 

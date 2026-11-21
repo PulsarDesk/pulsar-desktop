@@ -1199,7 +1199,8 @@
 				fps: gameStore.host.fps,
 				bitrate_kbps: gameStore.host.bitrate * 1000,
 				encoder: ui.encoder,
-				hdr: ui.hdr
+				hdr: ui.hdr,
+				hdr_suggest: ui.hdrSuggest !== false
 			})
 			.catch(() => {});
 	});

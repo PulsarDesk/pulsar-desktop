@@ -165,6 +165,8 @@ export interface UiSettings {
 	/** The custom ringtone file (any format the bundled ffmpeg reads). */
 	ringtonePath: string;
 	hdr: boolean;
+	/** "HDR öner": with `hdr` (Otomatik HDR) off, offer HDR in a card while the host screen is HDR. */
+	hdrSuggest: boolean;
 	unattended: boolean;
 	tray: boolean;
 	/** Pad Guide/PS button brings a hidden/background Pulsar forward in gaming mode. */
@@ -302,6 +304,7 @@ const DEFAULTS: UiSettings = {
 	ringtone: 'classic',
 	ringtonePath: '',
 	hdr: false,
+	hdrSuggest: true,
 	unattended: true,
 	tray: true,
 	padWake: false,

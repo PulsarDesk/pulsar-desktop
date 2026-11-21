@@ -272,7 +272,7 @@
 	/** Where the renderer's closed-state chat bubbles are (client fractions; Linux only). */
 	let chatBubbles = $state<[number, number, number, number][]>([]);
 	/** Where the renderer's in-call card buttons are (client fractions; Linux only). */
-	let callBtns = $state<{ kind: 'mic' | 'hangup'; rect: [number, number, number, number] }[]>([]);
+	let callBtns = $state<{ kind: 'mic' | 'hangup' | 'hdryes' | 'hdrno'; rect: [number, number, number, number] }[]>([]);
 	let peerAvatar = $state('');
 	let peerName = $state('');
 	// The last call-state for this session was 'active' (its end turns the mic switch off).
@@ -1307,10 +1307,12 @@
 		{#each callBtns as b (b.kind)}
 			<button
 				class="bubble-hotspot"
-				aria-label={b.kind === 'hangup' ? t('call.hangup') : t('session.mic')}
+				aria-label={b.kind === 'hangup' ? t('call.hangup') : b.kind === 'hdryes' ? t('session.hdrSwitch') : b.kind === 'hdrno' ? t('session.hdrDismiss') : t('session.mic')}
 				style="left:{b.rect[0] * 100}%; top:{b.rect[1] * 100}%; width:{b.rect[2] * 100}%; height:{b.rect[3] * 100}%"
 				onclick={() => {
 					if (b.kind === 'hangup') api.callAction('client', playId, 'hangup').catch(() => {});
+					// The "HDR öner" card (drawn with the call card's buttons).
+					else if (b.kind === 'hdryes' || b.kind === 'hdrno') api.hdrSuggestAnswer(playId, b.kind === 'hdryes').catch(() => {});
 					else sidechan.toggleMic();
 				}}
 			></button>

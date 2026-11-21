@@ -1808,6 +1808,13 @@ pub(crate) async fn bring_online(
 					// sentinel ensures we detect that and re-call display_rect/set_monitor (C8).
 					#[cfg(windows)]
 					let mut applied_gen: u32 = u32::MAX;
+					// Display-topology generation (display_watch: WM_DISPLAYCHANGE) the geometry was
+					// resolved at. A primary change or a mode change on ANOTHER monitor moves the
+					// streamed monitor in the virtual desktop (and the virtual desktop's extent, which
+					// the absolute SendInput mapping scales by) without a capture rebuild — the
+					// cached rect then put the pointer off-screen (2026-11-21: cursor gone, no motion).
+					#[cfg(windows)]
+					let mut applied_topo: u64 = u64::MAX;
 					// "Sadece izleme" gate: read per-event (cheap map lookup) so the
 					// Connections-window toggle takes effect mid-session, sid-guarded
 					// against a same-peer reconnection's newer entry.
@@ -2176,10 +2183,12 @@ pub(crate) async fn bring_online(
 											Some(arc) => arc.load(std::sync::atomic::Ordering::Relaxed),
 											None => 0,
 										};
-										if idx != applied_display || gen != applied_gen {
+										let topo = crate::display_watch::generation();
+										if idx != applied_display || gen != applied_gen || topo != applied_topo {
 											if let Some(r) = pulsar_capture::display_rect(idx) {
 												applied_display = idx;
 												applied_gen = gen;
+												applied_topo = topo;
 												$d.set_monitor(Some(pulsar_core::input::MonitorRect {
 													mon_left: r.mon_left,
 													mon_top: r.mon_top,
@@ -2254,12 +2263,14 @@ pub(crate) async fn bring_online(
 												// returns Some — a transient None (DXGI enumeration momentarily failing
 												// during a TDR/hotplug/mode-switch) is retried on the next pointer event
 												// instead of latching the primary-only fallback permanently (C23).
-												if idx != applied_display || gen != applied_gen {
+												let topo = crate::display_watch::generation();
+										if idx != applied_display || gen != applied_gen || topo != applied_topo {
 													if let Some(r) =
 														pulsar_capture::display_rect(idx)
 													{
 														applied_display = idx;
 														applied_gen = gen;
+												applied_topo = topo;
 														d.set_monitor(Some(
 															pulsar_core::input::MonitorRect {
 																mon_left: r.mon_left,
@@ -2314,12 +2325,14 @@ pub(crate) async fn bring_online(
 													};
 														(idx, gen)
 													};
-												if idx != applied_display || gen != applied_gen {
+												let topo = crate::display_watch::generation();
+										if idx != applied_display || gen != applied_gen || topo != applied_topo {
 													if let Some(r) =
 														pulsar_capture::display_rect(idx)
 													{
 														applied_display = idx;
 														applied_gen = gen;
+												applied_topo = topo;
 														d.set_monitor(Some(
 															pulsar_core::input::MonitorRect {
 																mon_left: r.mon_left,

@@ -478,6 +478,11 @@ pub fn parse_call_line(line: &str) -> Option<CallUi> {
 /// The app's `callstate …` stdin line (every backend calls this). Returns whether the line
 /// was one.
 pub fn call_line(line: &str) -> bool {
+	// The "HDR öner" card rides on the call card's plumbing (`hdrcard 0|1`).
+	if let Some(v) = line.strip_prefix("hdrcard ") {
+		HDR_CARD.store(v.trim() == "1", std::sync::atomic::Ordering::Relaxed);
+		return true;
+	}
 	match parse_call_line(line) {
 		Some(c) => {
 			*CALL.lock().unwrap_or_else(|e| e.into_inner()) = c;
@@ -494,6 +499,12 @@ fn call_ui() -> CallUi {
 /// A voice call is on (the closed-state chrome then shows the call card).
 pub fn call_active() -> bool {
 	CALL.lock().unwrap_or_else(|e| e.into_inner()).phase == CallPhase::Active
+}
+
+/// A card is on screen in the closed state — the call card or the "HDR öner" card — so the
+/// closed-state chrome must be painted.
+pub fn card_active() -> bool {
+	call_active() || HDR_CARD.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// `m:ss` since `since_ms` (wall clock).
@@ -4017,6 +4028,10 @@ pub enum CallBtn {
 	Mic,
 	/// End the call.
 	Hangup,
+	/// The "HDR öner" card's ✓: switch the session to HDR.
+	HdrYes,
+	/// The "HDR öner" card's ✗: not now.
+	HdrNo,
 }
 
 impl CallBtn {
@@ -4025,6 +4040,8 @@ impl CallBtn {
 		match self {
 			CallBtn::Mic => ("mic", if mic_on { "off" } else { "on" }),
 			CallBtn::Hangup => ("call", "hangup"),
+			CallBtn::HdrYes => ("hdr", "yes"),
+			CallBtn::HdrNo => ("hdr", "no"),
 		}
 	}
 
@@ -4034,8 +4051,64 @@ impl CallBtn {
 		match self {
 			CallBtn::Mic => "mic",
 			CallBtn::Hangup => "hangup",
+			CallBtn::HdrYes => "hdryes",
+			CallBtn::HdrNo => "hdrno",
 		}
 	}
+}
+
+/// The app's `hdrcard 0|1` line: show / hide the "HDR öner" card.
+static HDR_CARD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Bottom-right card offering HDR while the host monitor is in HDR mode (the app decides when;
+/// `hdrcard 1|0`): "the host screen is HDR — switch?" with ✗ and ✓. Same hit-testing as the call
+/// card's buttons ([`call_btn_at`]).
+fn draw_hdr_card(ctx: &egui::Context, hits: &mut Vec<(egui::Rect, CallBtn)>) {
+	if !HDR_CARD.load(std::sync::atomic::Ordering::Relaxed) {
+		return;
+	}
+	let screen = ctx.viewport_rect();
+	let (title_g, sub_g) = ctx.fonts_mut(|f| {
+		(
+			f.layout_no_wrap(t("hdr.suggestTitle").to_string(), egui::FontId::proportional(14.0), egui::Color32::WHITE),
+			f.layout_no_wrap(t("hdr.suggestBody").to_string(), egui::FontId::proportional(12.0), egui::Color32::from_rgb(170, 176, 196)),
+		)
+	});
+	let btn = 34.0;
+	let pad = 7.0;
+	let text_w = title_g.size().x.max(sub_g.size().x).min(260.0);
+	let w = pad + btn + 10.0 + text_w + 14.0 + btn + 8.0 + btn + pad;
+	let h = CALL_CARD_H + 6.0;
+	let rect = egui::Rect::from_min_size(egui::pos2(screen.right() - w - 18.0, screen.bottom() - h - 18.0), egui::vec2(w, h));
+	let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("pulsar_hdr_card")));
+	let r = h / 2.0;
+	let gold = egui::Color32::from_rgb(255, 196, 84);
+	painter.rect_filled(rect, r, egui::Color32::from_rgba_unmultiplied(20, 22, 31, 240));
+	painter.rect_stroke(rect, r, egui::Stroke::new(1.0, gold.gamma_multiply(0.45)), egui::StrokeKind::Inside);
+	let cy = rect.center().y;
+	let glyph = |c: egui::Pos2, s: &str, size: f32, col: egui::Color32| {
+		painter.text(c, egui::Align2::CENTER_CENTER, s, egui::FontId::proportional(size), col);
+	};
+	let mut x = rect.left() + pad;
+	let dot = egui::pos2(x + btn / 2.0, cy);
+	painter.circle_filled(dot, btn / 2.0, gold.gamma_multiply(0.22));
+	glyph(dot, icon::SUN, 18.0, gold);
+	x += btn + 10.0;
+	let gap = 2.0;
+	let top = cy - (title_g.size().y + gap + sub_g.size().y) / 2.0;
+	let clip = egui::Rect::from_min_size(egui::pos2(x, rect.top()), egui::vec2(text_w, h));
+	painter.with_clip_rect(clip).galley(egui::pos2(x, top), title_g.clone(), egui::Color32::WHITE);
+	painter.with_clip_rect(clip).galley(egui::pos2(x, top + title_g.size().y + gap), sub_g.clone(), egui::Color32::WHITE);
+	x += text_w + 14.0;
+	let no = egui::Rect::from_center_size(egui::pos2(x + btn / 2.0, cy), egui::vec2(btn, btn));
+	painter.circle_filled(no.center(), btn / 2.0, ROW_HOVER);
+	glyph(no.center(), icon::X, 17.0, egui::Color32::WHITE);
+	x += btn + 8.0;
+	let yes = egui::Rect::from_center_size(egui::pos2(x + btn / 2.0, cy), egui::vec2(btn, btn));
+	painter.circle_filled(yes.center(), btn / 2.0, CALL_GREEN);
+	glyph(yes.center(), icon::CHECK, 17.0, egui::Color32::WHITE);
+	hits.push((no, CallBtn::HdrNo));
+	hits.push((yes, CallBtn::HdrYes));
 }
 
 /// Where the call card's buttons were last drawn (egui points) and when.
@@ -4069,6 +4142,7 @@ pub fn draw_call_card(ctx: &egui::Context, st: &OverlayState) {
 	let mut hit_guard = CALL_HIT.lock().unwrap_or_else(|e| e.into_inner());
 	hit_guard.1 = Some(std::time::Instant::now());
 	hit_guard.0.clear();
+	draw_hdr_card(ctx, &mut hit_guard.0);
 	let call = call_ui();
 	if call.phase != CallPhase::Active {
 		return;

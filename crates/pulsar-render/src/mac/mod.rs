@@ -1417,7 +1417,7 @@ impl Renderer {
 			let stats_hud = STATS_HUD.load(Ordering::SeqCst);
 			let ovbtn = OVERLAY_BTN.load(Ordering::SeqCst);
 			let toasts = chat_toasts();
-			let in_call = crate::overlay::call_active();
+			let in_call = crate::overlay::card_active();
 			if !stats_hud
 				&& !ovbtn
 				&& hint_text.is_none()

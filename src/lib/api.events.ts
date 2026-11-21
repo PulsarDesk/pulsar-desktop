@@ -116,7 +116,7 @@ export const onChatBubbles = (cb: (e: { id: number; rects: [number, number, numb
 	listenTo<{ id: number; rects: [number, number, number, number][] }>('chat-bubbles', cb);
 /** A button on the renderer's in-call card (Linux hotspot): `rect` = client fractions
  * `[x, y, w, h]` of the renderer window. */
-export type CallBtnSpot = { kind: 'mic' | 'hangup'; rect: [number, number, number, number] };
+export type CallBtnSpot = { kind: 'mic' | 'hangup' | 'hdryes' | 'hdrno'; rect: [number, number, number, number] };
 /** Client (Linux renderer): where the in-call card's buttons are (`id` = play id; empty = no
  * card). */
 export const onCallBtns = (cb: (e: { id: number; btns: CallBtnSpot[] }) => void) =>

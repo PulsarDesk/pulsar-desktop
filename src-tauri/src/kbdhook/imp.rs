@@ -2265,6 +2265,18 @@ unsafe extern "system" fn reclip_event(
 	if event == 0x800B && (hwnd.is_null() || id_object != 0 || id_child != 0) {
 		return;
 	}
+	// EVENT_SYSTEM_DESKTOPSWITCH: Ctrl+Alt+Del, a UAC prompt or the lock screen took the input
+	// desktop. Our LL hooks see nothing there — the Ctrl/Alt key-ups of a Ctrl+Alt+Del never
+	// reach us — so the host kept Ctrl+Alt held and this PC stayed captured (2026-11-21: inputs
+	// "locked" on both sides). Drop control: up-strokes for everything held go to the host and
+	// the cursor is freed; the user clicks back in afterwards.
+	if event == 0x0020 {
+		let app = globals().lock().unwrap_or_else(|e| e.into_inner()).app.clone();
+		if let Some(app) = app {
+			release_engage_why(&app, "desktop switch (Ctrl+Alt+Del / UAC / lock screen)");
+		}
+		return;
+	}
 	reassert_confine();
 }
 
