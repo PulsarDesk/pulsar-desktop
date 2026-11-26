@@ -12,7 +12,7 @@
 //! `render` (Linux native renderer plumbing), `session_cmds` (live in-session
 //! commands), and `commands` (the assorted remaining commands).
 
-use tauri::{AppHandle, Emitter, Manager, WindowEvent};
+use tauri::{Emitter, Manager, WindowEvent};
 
 mod adapt_memory;
 mod audio_devices;
@@ -52,8 +52,12 @@ mod files_window;
 mod fs_browse;
 mod host;
 mod i18n;
+mod instance;
+mod user_host;
 #[cfg(unix)]
 mod instance_unix;
+#[cfg(windows)]
+mod instance_win;
 mod io_cmds;
 #[cfg(windows)]
 mod job;
@@ -205,6 +209,18 @@ fn host_only() -> bool {
 	host_only_mode()
 }
 
+/// Windows, before the elevation relaunch: if this user's Pulsar already runs, hand it this
+/// launch (show / connect / background) and return `true` (the caller exits), so a running
+/// Pulsar is reached without a UAC prompt. `false` = none runs, start normally.
+pub fn hand_to_running_instance(args: &[String]) -> bool {
+	let f = instance::forward(args);
+	if f == instance::Forward::NotRunning {
+		return false;
+	}
+	instance::explain(&f);
+	true
+}
+
 /// `pulsar --firewall-setup` / `--firewall-remove` (see firewall.rs). 0 elsewhere (no-op).
 pub fn firewall_cli(add: bool) -> i32 {
 	#[cfg(windows)]
@@ -264,10 +280,14 @@ fn acquire_single_instance() -> bool {
 	use windows_sys::Win32::System::Threading::CreateMutexW;
 	// "Local\\" namespace → scoped to the logon session (per ASTER seat / per user
 	// with fast-user-switching), not machine-global.
+	use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
 	let name: Vec<u16> = "Local\\PulsarSingletonMutex\0".encode_utf16().collect();
 	let h = unsafe { CreateMutexW(std::ptr::null(), 1, name.as_ptr()) };
 	if h.is_null() {
-		return true; // couldn't create the lock — never block startup over it
+		// ACCESS_DENIED: it exists, owned by an elevated Pulsar of ours (a non-elevated
+		// launch after a declined UAC prompt) — that is "already running", never a second
+		// app with the same identity. Any other failure: never block startup over the lock.
+		return unsafe { GetLastError() } != ERROR_ACCESS_DENIED;
 	}
 	// Held for the whole process (never closed) so the OS releases it only on exit.
 	unsafe { GetLastError() != ERROR_ALREADY_EXISTS }
@@ -298,61 +318,6 @@ pub(crate) fn acquire_single_instance_strict() -> bool {
 #[cfg(not(windows))]
 pub(crate) fn acquire_single_instance_strict() -> bool {
 	acquire_single_instance()
-}
-
-/// Name of the per-session "show yourself" event used to wake a tray-hidden instance
-/// when the user launches Pulsar again. `Local\` → scoped to the logon session (ASTER).
-#[cfg(windows)]
-const SHOW_EVENT_NAME: &str = "Local\\PulsarShowEvent\0";
-
-/// First instance: wait (on a background thread) for a second launch's signal and bring
-/// the main window to the front — so re-launching a tray-hidden Pulsar reveals it instead
-/// of doing nothing.
-#[cfg(windows)]
-fn spawn_show_watcher(app: AppHandle) {
-	use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
-	use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
-	std::thread::spawn(move || {
-		let name: Vec<u16> = SHOW_EVENT_NAME.encode_utf16().collect();
-		// Auto-reset, initially non-signaled. CreateEventW returns the existing event if a
-		// second instance already created it, so the signal is never lost to a startup race.
-		let ev = unsafe { CreateEventW(std::ptr::null(), 0, 0, name.as_ptr()) };
-		if ev.is_null() {
-			return;
-		}
-		loop {
-			if unsafe { WaitForSingleObject(ev, INFINITE) } != WAIT_OBJECT_0 {
-				break;
-			}
-			crate::ui_start::request_now();
-			if let Some(w) = app.get_webview_window("main") {
-				let _ = w.show();
-				let _ = w.unminimize();
-				let _ = w.set_focus();
-			}
-		}
-	});
-}
-
-/// Second instance: tell the already-running Pulsar (this user/seat) to surface its
-/// window, then exit. `AllowSetForegroundWindow(ASFW_ANY)` hands our foreground right to
-/// it first — without this, Windows' foreground lock would only flash the taskbar icon
-/// instead of raising the window.
-#[cfg(windows)]
-fn signal_existing_instance() {
-	use windows_sys::Win32::Foundation::CloseHandle;
-	use windows_sys::Win32::System::Threading::{CreateEventW, SetEvent};
-	use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
-	const ASFW_ANY: u32 = 0xFFFF_FFFF;
-	unsafe {
-		AllowSetForegroundWindow(ASFW_ANY);
-		let name: Vec<u16> = SHOW_EVENT_NAME.encode_utf16().collect();
-		let ev = CreateEventW(std::ptr::null(), 0, 0, name.as_ptr());
-		if !ev.is_null() {
-			SetEvent(ev);
-			CloseHandle(ev);
-		}
-	}
 }
 
 /// Unix (Linux/macOS) analog of the Windows named-mutex guard: take an advisory
@@ -489,56 +454,39 @@ pub fn run() {
 		};
 		SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
 	}
+	let args: Vec<String> = std::env::args().collect();
 	{
-		// Parse the auto-connect CLI: `--connect <id|ip> [--connect-pw <pw>] [--mode
-		// game|remote] [--app <name|id>] [--nofullscreen]`. `--mode` defaults to remote (an
-		// unrecognized value silently falls back to remote); `--app` is the host app/game to
-		// launch in game mode (empty / "Desktop" = stream the whole desktop, launch nothing);
-		// `--nofullscreen` (alias `--no-fullscreen`) keeps the kiosk session windowed.
-		let args: Vec<String> = std::env::args().collect();
-		let flag = |n: &str| {
-			args.iter()
-				.position(|a| a == n)
-				.and_then(|i| args.get(i + 1))
-				.cloned()
-		};
-		let nofullscreen = args
-			.iter()
-			.any(|a| a == "--nofullscreen" || a == "--no-fullscreen");
+		// The auto-connect CLI (`--connect …`, see instance::parse_auto_connect).
 		let host_only = args.iter().any(|a| a == "--host-only");
 		HOST_ONLY.store(host_only, std::sync::atomic::Ordering::Relaxed);
 		if host_only {
 			tracing::info!("--host-only: the UI offers hosting only");
 		}
 		// A host-only instance never connects out: `--connect` is ignored there.
-		let target = flag("--connect").filter(|_| {
+		let target = instance::parse_auto_connect(&args).filter(|_| {
 			if host_only {
 				tracing::warn!("--connect ignored: --host-only never connects out");
 			}
 			!host_only
-		}).map(|id| events::AutoConnect {
-			id,
-			pw: flag("--connect-pw").unwrap_or_default(),
-			mode: flag("--mode")
-				.map(|m| m.to_ascii_lowercase())
-				.filter(|m| m == "game" || m == "remote")
-				.unwrap_or_else(|| "remote".into()),
-			app: flag("--app").unwrap_or_default(),
-			nofullscreen,
 		});
 		if let Some(ref ac) = target {
-			tracing::info!(id = %ac.id, mode = %ac.mode, app = %ac.app, "auto-connect target set from CLI");
+			tracing::info!(id = %ac.id, mode = %ac.mode, app = %ac.app, kiosk = ac.kiosk, "auto-connect target set from CLI");
 		}
 		let _ = util::AUTO_CONNECT.set(target);
 	}
 	if !acquire_single_instance() {
-		tracing::info!("another Pulsar instance is already running for this user — surfacing it");
-		#[cfg(windows)]
-		signal_existing_instance();
-		#[cfg(unix)]
-		instance_unix::signal_existing_instance();
+		// Normally main.rs already handed the launch over (Windows, before the UAC relaunch);
+		// here: Linux/macOS, or one that started meanwhile.
+		tracing::info!("another Pulsar instance is already running for this user — handing this launch to it");
+		let f = instance::forward(&args);
+		instance::explain(&f);
 		return;
 	}
+	// Later launches reach this one from now on (queued until `setup` attaches the app).
+	#[cfg(windows)]
+	instance_win::spawn_server();
+	#[cfg(unix)]
+	instance_unix::spawn_server();
 	// Per-user or machine-wide ("Shared Pulsar for all users") data — decided before any
 	// path is resolved; may set up %ProgramData%\Pulsar on an elevated first launch.
 	let _ = shared_mode::resolved();
@@ -583,12 +531,10 @@ pub fn run() {
 			// Shared mode: the machine-wide host lease (one host per PC, follows the active session).
 			crate::shared_mode::lease::start(app.handle().clone());
 
-			// Re-launching a tray-hidden Pulsar should surface this instance (a second
-			// process detects the single-instance lock + signals us).
-			#[cfg(windows)]
-			spawn_show_watcher(app.handle().clone());
-			#[cfg(unix)]
-			instance_unix::spawn_show_listener(app.handle().clone());
+			// Later launches (a double-click, a `--connect` shortcut) reach this instance
+			// through the launch pipe / socket (instance.rs); requests that came during
+			// startup run now.
+			instance::attach(app.handle());
 			// The renderer's local-cursor hiding follows the real capture state.
 			crate::session_cmds::spawn_engage_sync(app.handle().clone());
 			crate::power_watch::spawn(app.handle().clone());
@@ -869,6 +815,9 @@ pub fn run() {
 			local_ip,
 			node_port,
 			auto_connect_target,
+			instance::take_cli_connects,
+			instance::arm_cli_engage,
+			instance::cli_session_done,
 			self_update_possible,
 			pkg_update::update_install_kind,
 			pkg_update::linux_package_update,
@@ -1031,10 +980,19 @@ pub fn run() {
 		])
 		.build(context())
 		.expect("error while running Pulsar")
-		.run(|_app, ev| {
-			if let tauri::RunEvent::Exit = ev {
+		.run(|_app, ev| match ev {
+			tauri::RunEvent::Exit => {
 				// Local touchpad gestures switched off while engaged come back on exit.
 				crate::kbdhook::gesture_shutdown();
 			}
+			// macOS: a click on the Dock icon (or opening the app again from Finder /
+			// Launchpad) does not start a second process; the system sends "reopen". With
+			// the window hidden to the menu bar, show it.
+			#[cfg(target_os = "macos")]
+			tauri::RunEvent::Reopen {
+				has_visible_windows: false,
+				..
+			} => instance::surface(_app, ""),
+			_ => {}
 		});
 }

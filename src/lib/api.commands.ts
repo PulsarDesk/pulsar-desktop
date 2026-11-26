@@ -1,7 +1,7 @@
 // The `api` object: typed wrappers over the Tauri commands exposed by the Rust
 // core. Re-exported by `api.ts`.
 
-import type { AutoConnectTarget, CallSide, CallState, Config, ConnInfo, ControllerInfo, PulsarToast } from './types';
+import type { AutoConnectTarget, CliConnect, CallSide, CallState, Config, ConnInfo, ControllerInfo, PulsarToast } from './types';
 import type { FsEntry, LocalCaps } from './api.types';
 import type { GameInfo, LanDevice, PenSample, PlayInfo, RemoteSources, ScannedApp, TouchSample, WindowInfo } from './api.types';
 import { invoke } from './api.invoke';
@@ -301,6 +301,13 @@ export const api = {
 	/** CLI `--connect` auto-connect target (id/ip + password + mode + app), or null. */
 	autoConnectTarget: () =>
 		invoke<AutoConnectTarget | null>('auto_connect_target'),
+	/** Connect requests of later launches (a `--connect` shortcut while Pulsar runs). */
+	takeCliConnects: () => invoke<CliConnect[]>('take_cli_connects'),
+	/** A CLI connect opened a NEW session: engage the keyboard capture like a `--connect` start. */
+	armCliEngage: () => invoke<void>('arm_cli_engage'),
+	/** The non-kiosk CLI session ended with nothing else open: back to the tray (or quit when
+	 * "Run in system tray" is off and `quitOk`). */
+	cliSessionDone: (quitOk: boolean) => invoke<void>('cli_session_done', { quitOk }),
 	/** Stop one remote-play session (tab) by id. */
 	stopStream: (id: number) => invoke<void>('stop_stream', { id }),
 	/** Whether an in-app self-update can actually replace the running binary on this platform.

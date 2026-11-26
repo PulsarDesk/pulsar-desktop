@@ -228,8 +228,12 @@ export interface UiSettings {
 	/** Auto-install app updates (download + install + relaunch silently at idle
 	 * launch). Default OFF — updates are surfaced in the chrome badge + modal and
 	 * installed only on explicit user action. Kiosk (--connect) boots always
-	 * auto-update regardless (appliance behavior, unchanged). */
+	 * auto-update unless `checkUpdates` is off. Off whenever `checkUpdates` is off. */
 	autoUpdate: boolean;
+	/** Look for updates on its own: at launch (3 s after an idle start), hourly while
+	 * idle, and before a kiosk (--connect) session. Off = no update request at all;
+	 * `autoUpdate` then counts as off too. Default ON. */
+	checkUpdates: boolean;
 	/** Whether GAMING mode was left in fullscreen — persisted so the app reopens
 	 * fullscreen in game mode the way the user last had it (the bottom-dock button /
 	 * F11 toggle writes this; restored at startup only when appMode==='game'). Scoped
@@ -327,6 +331,7 @@ const DEFAULTS: UiSettings = {
 	touchpadAsMouse: true,
 	appMode: 'remote',
 	autoUpdate: false,
+	checkUpdates: true,
 	gamingFullscreen: false,
 	ds5: DS5_DEFAULTS
 };

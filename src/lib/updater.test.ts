@@ -95,7 +95,7 @@ describe('silentUpdateCheck', () => {
 
 // ── Consent-based flow (checkForUpdateUi / installUpdate) ─────────────────────
 
-import { checkForUpdateUi, installUpdate, startPeriodicUpdateCheck, plainNotes } from './updater';
+import { checkForUpdateUi, checkNow, installUpdate, startPeriodicUpdateCheck, plainNotes } from './updater';
 import { update as updateState } from './update.svelte';
 import { ui } from './settings.svelte';
 import { api } from './api.commands';
@@ -121,8 +121,44 @@ beforeEach(() => {
 	updateState.pkgNote = '';
 	updateState.error = '';
 	ui.autoUpdate = false;
+	ui.checkUpdates = true;
 	vi.mocked(api.updateInstallKind).mockResolvedValue('inPlace');
 	vi.mocked(api.linuxPackageUpdate).mockReset().mockResolvedValue('installed');
+});
+
+describe('checkUpdates setting off', () => {
+	it('makes no update request on launch, hourly or kiosk checks, even with autoUpdate on', async () => {
+		ui.checkUpdates = false;
+		ui.autoUpdate = true;
+		mockCheck.mockResolvedValue(freshUpdate());
+
+		await checkForUpdateUi(() => false);
+		await silentUpdateCheck({ isBusy: () => false });
+
+		expect(mockCheck).not.toHaveBeenCalled();
+		expect(updateState.available).toBe(false);
+		expect(mockRelaunch).not.toHaveBeenCalled();
+	});
+
+	it('still lets "Check now" find a release and open the update window, without installing', async () => {
+		ui.checkUpdates = false;
+		ui.autoUpdate = true;
+		const u = freshUpdate();
+		mockCheck.mockResolvedValue(u);
+
+		await expect(checkNow()).resolves.toBe('available');
+
+		expect(updateState.available).toBe(true);
+		expect(updateState.open).toBe(true);
+		expect(u.download).not.toHaveBeenCalled();
+	});
+
+	it('"Check now" says up to date / failed', async () => {
+		mockCheck.mockResolvedValue(null);
+		await expect(checkNow()).resolves.toBe('latest');
+		mockCheck.mockRejectedValue(new Error('offline'));
+		await expect(checkNow()).resolves.toBe('error');
+	});
 });
 
 describe('Linux .deb/.rpm installs', () => {

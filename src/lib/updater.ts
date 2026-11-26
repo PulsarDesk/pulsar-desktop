@@ -39,6 +39,8 @@ export async function silentUpdateCheck(opts?: {
 	overallTimeoutMs?: number;
 	isBusy?: () => boolean;
 }): Promise<void> {
+	// Settings → "Check for updates" off: no update request, not even before a kiosk session.
+	if (!ui.checkUpdates) return;
 	const run = async () => {
 		// On Linux the updater self-replaces the file pointed to by $APPIMAGE. When the
 		// AppImage is launched without FUSE (e.g. `--appimage-extract-and-run`, or the raw
@@ -128,24 +130,48 @@ export async function silentUpdateCheck(opts?: {
  * visible — but with the Install button disabled and manual instructions shown.
  */
 export async function checkForUpdateUi(isBusy?: () => boolean): Promise<void> {
+	// Settings → "Check for updates" off: the launch and hourly checks do nothing.
+	if (!ui.checkUpdates) return;
 	try {
 		const update = await check({ timeout: 15000 });
 		if (!update) return; // up to date
-		updateState.handle = update;
-		updateState.from = update.currentVersion;
-		updateState.to = update.version;
-		updateState.notes = plainNotes(await notesFor(update.version, update.body ?? ''));
-		updateState.kind = await api.updateInstallKind().catch(() => 'inPlace' as const);
-		updateState.installable = updateState.kind !== 'none';
-		updateState.available = true;
+		await offerUpdate(update);
 		// A distro package needs the admin password: never pop that dialog unasked, even with
 		// auto-update on — the badge + modal offer it and the user clicks Install.
-		if (ui.autoUpdate && updateState.kind === 'inPlace' && !isBusy?.()) {
+		if (ui.autoUpdate && ui.checkUpdates && updateState.kind === 'inPlace' && !isBusy?.()) {
 			await installUpdate(isBusy);
 		}
 	} catch (e) {
 		console.warn('[updater] check skipped:', e);
 	}
+}
+
+/**
+ * Settings → "Check now": one check on request, also while automatic checks are off. A
+ * newer release opens the update window (Install stays the user's click); never installs.
+ */
+export async function checkNow(): Promise<'available' | 'latest' | 'error'> {
+	try {
+		const update = await check({ timeout: 15000 });
+		if (!update) return 'latest';
+		await offerUpdate(update);
+		updateState.open = true;
+		return 'available';
+	} catch (e) {
+		console.warn('[updater] manual check failed:', e);
+		return 'error';
+	}
+}
+
+/** Put a found release in the `update` store: the chrome badge + the update window. */
+async function offerUpdate(update: NonNullable<Awaited<ReturnType<typeof check>>>): Promise<void> {
+	updateState.handle = update;
+	updateState.from = update.currentVersion;
+	updateState.to = update.version;
+	updateState.notes = plainNotes(await notesFor(update.version, update.body ?? ''));
+	updateState.kind = await api.updateInstallKind().catch(() => 'inPlace' as const);
+	updateState.installable = updateState.kind !== 'none';
+	updateState.available = true;
 }
 
 /**

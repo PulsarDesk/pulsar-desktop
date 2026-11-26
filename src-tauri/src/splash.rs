@@ -265,7 +265,6 @@ pub(crate) fn is_done() -> bool {
 
 /// Bring the splash to the front (a second launch while this one is still booting).
 /// Main thread only.
-#[cfg(unix)]
 pub(crate) fn present(app: &AppHandle, token: &str) {
 	#[cfg(target_os = "linux")]
 	{

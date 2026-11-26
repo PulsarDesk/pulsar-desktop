@@ -27,11 +27,36 @@ See `client-video.md` "Bad-link stability".
 
 ## CLI / headless start (kiosk / appliance — esp. Orange Pi)
 
-`pulsar --connect <id|ip> [--connect-pw <pw>] [--mode game]` auto-connects on
-launch (splash, no home screen; `AppState.auto_connect`). Game mode's target app
+`pulsar --connect <id|ip> [--connect-pw <pw>] [--mode game] [--app <name>] [--nofullscreen] [--kiosk]`
+auto-connects on launch (splash, no home screen; `AppState.auto_connect`). Without
+`--kiosk` (a desktop shortcut) Pulsar goes back to the tray when that session ends (with
+"Run in system tray" off it quits, unless someone is connected to this PC; without a usable
+tray it stays). `--kiosk` (the Orange Pi player's `pulsar-kiosk.sh`) stays on the home screen. Game mode's target app
 defaults to **"Desktop"** — *always present, NOT deletable* (every host exposes a
 "Desktop" entry). `pulsar --relay --session-rate 10mbit …` runs the app as a
 relay (`relay_mode.rs`, same `pulsar_relay::Limits` flags as the relay repo).
+
+## Second launch (Pulsar already runs for this user)
+
+One Pulsar per user and session. A second process never becomes a second app: it hands its
+request to the running one and exits (`src-tauri/src/instance.rs`; transport `instance_win.rs`
+= pipe `\\.\pipe\pulsar-launch-<session>-<SID>`, `instance_unix.rs` = per-uid socket; both
+check the other end is this user / this exe before a password crosses).
+
+| Launch | Running Pulsar does |
+| --- | --- |
+| Plain (double-click, Start menu, Dock) | shows its window (the splash while it still starts). Windows: tried BEFORE the UAC relaunch, so no prompt; macOS Dock click = `RunEvent::Reopen` |
+| `--background` | nothing (it already runs) |
+| `--connect …` | connects like a `--connect` start: new tab (an open session to that device is focused), keyboard engaged, fullscreen unless `--nofullscreen`. Window was hidden → back to the tray when the session ends. `--host-only` instance: refuses with `cli.hostOnly` |
+| any, while `--headless-host` runs | message box (`launch.headlessRunning`), nothing opens |
+
+A declined UAC prompt no longer leaves a second, non-elevated Pulsar: the single-instance
+lock treats ACCESS_DENIED (an elevated owner) as "already running". macOS `open -a Pulsar --args …`
+cannot pass arguments to a running app (LaunchServices); run the binary inside the bundle.
+
+Windows per-user mode: the same account signed in to two sessions (Duo / Pulsar Seat) hosts
+from one of them only (`user_host.rs`, exclusive `host.lock` in the data dir); the other stays
+a client with `host.otherSession` on Home and takes over when the first quits.
 
 ## Host-only and headless host (CLI)
 

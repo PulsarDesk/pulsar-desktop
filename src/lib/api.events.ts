@@ -180,6 +180,8 @@ export const onOverlayToggle = (cb: (chordHeld: boolean) => void) =>
 /** Client (Linux native): the user pressed the Ctrl+Shift+F11 combo — toggle the Tauri
  * window's fullscreen state. Payload-less; the session stays alive (unlike kbd-leave). */
 export const onFullscreenToggle = (cb: () => void) => listenTo<null>('fullscreen-toggle', () => cb());
+/** A later launch (a `--connect` shortcut) queued a connect: fetch it with `takeCliConnects`. */
+export const onCliConnect = (cb: () => void) => listenTo<null>('cli-connect', () => cb());
 /** Client (Linux native overlay): the user changed a setting in the native egui overlay
  * (`pulsar-render`). Forwarded here so the existing setters apply it to the host.
  * Carries the play id — every mounted Session subscribes, so handlers must gate on it. */

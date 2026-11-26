@@ -127,6 +127,14 @@ fn main() {
 	// the `request_admin` setting (default ON; user can disable it in Settings → Security);
 	// `PULSAR_NO_ELEVATE=1` bypasses for dev. Done HERE — before `run()` takes the single-instance
 	// mutex — so the unelevated process exits cleanly and the elevated one acquires the lock.
+	//
+	// But first: this user's Pulsar may already run. Then hand it this launch (show the window,
+	// connect, or nothing for `--background`) and exit — no UAC prompt, no second app
+	// (instance.rs). A declined prompt used to leave a second, non-elevated Pulsar running.
+	#[cfg(windows)]
+	if pulsar_tauri::hand_to_running_instance(&args) {
+		return;
+	}
 	#[cfg(windows)]
 	if std::env::var_os("PULSAR_NO_ELEVATE").is_none()
 		&& !is_elevated()

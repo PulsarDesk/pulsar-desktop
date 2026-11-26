@@ -7,6 +7,7 @@
 	import { api, isTauri } from '#lib/api.js';
 	import type { SharedModeStatus } from '#lib/api.types.js';
 	import { sharedErrorKey, sharedNoAccessKey } from '#lib/sharedMode.js';
+	import { checkNow } from '#lib/updater.js';
 	import pkg from '../../../../package.json';
 
 	// Start with the computer (+ in the background): read from the OS (it is the source of
@@ -52,6 +53,19 @@
 			.then((m) => m.getVersion())
 			.then((v) => (version = v))
 			.catch(() => {});
+	}
+
+	// "Check now": one update check on request (also with automatic checks off). A newer
+	// release opens the update window; otherwise the result shows next to the version.
+	let checking = $state(false);
+	let checkMsg = $state('');
+	async function runCheckNow() {
+		checking = true;
+		checkMsg = '';
+		const r = await checkNow();
+		checking = false;
+		if (r === 'latest') checkMsg = t('settings.upToDate');
+		else if (r === 'error') checkMsg = t('settings.checkFailed');
 	}
 
 	// App log directory (file logging is always on; this is where a black-screen
@@ -214,8 +228,12 @@
 	<button class="toggle" aria-label={t('settings.tray')} class:on={ui.tray} aria-pressed={ui.tray} onclick={() => { ui.tray = !ui.tray; saveUi(); api.setTray(ui.tray).catch(() => {}); }}><span class="knob"></span></button>
 </div>
 <div class="srow">
-	<div class="st"><b>{t('settings.autoUpdate')}</b><span>{t('settings.autoUpdateDesc')}</span></div>
-	<button class="toggle" aria-label={t('settings.autoUpdate')} class:on={ui.autoUpdate} aria-pressed={ui.autoUpdate} onclick={() => { ui.autoUpdate = !ui.autoUpdate; saveUi(); }}><span class="knob"></span></button>
+	<div class="st"><b>{t('settings.checkUpdates')}</b><span>{t('settings.checkUpdatesDesc')}</span></div>
+	<button class="toggle" aria-label={t('settings.checkUpdates')} class:on={ui.checkUpdates} aria-pressed={ui.checkUpdates} onclick={() => { ui.checkUpdates = !ui.checkUpdates; if (!ui.checkUpdates) ui.autoUpdate = false; saveUi(); }}><span class="knob"></span></button>
+</div>
+<div class="srow">
+	<div class="st"><b>{t('settings.autoUpdate')}</b><span>{t(ui.checkUpdates ? 'settings.autoUpdateDesc' : 'settings.autoUpdateNeedsCheck')}</span></div>
+	<button class="toggle" aria-label={t('settings.autoUpdate')} class:on={ui.autoUpdate && ui.checkUpdates} aria-pressed={ui.autoUpdate && ui.checkUpdates} disabled={!ui.checkUpdates} onclick={() => { ui.autoUpdate = !ui.autoUpdate; saveUi(); }}><span class="knob"></span></button>
 </div>
 <div class="srow">
 	<div class="st"><b>{t('settings.clipboardSync')}</b><span>{t('settings.clipboardSyncDesc')}</span></div>
@@ -293,11 +311,22 @@
 	<button class="act" onclick={openLogs}>{t('settings.openLogs')}</button>
 </div>
 <div class="srow">
-	<div class="st"><b>{t('settings.version')}</b><span>{t('settings.versionDesc')}</span></div>
+	<div class="st">
+		<b>{t('settings.version')}</b>
+		<span>{t('settings.versionDesc')}{#if checkMsg} <strong class="restart">· {checkMsg}</strong>{/if}</span>
+	</div>
 	<span class="mono ver selectable">Pulsar v{version}</span>
+	{#if isTauri}
+		<button class="act" disabled={checking} onclick={runCheckNow}>{checking ? t('settings.checking') : t('settings.checkNow')}</button>
+	{/if}
 </div>
 
 <style>
+	/* Same as SecurityTab: an unavailable switch (auto-install while checks are off). */
+	.toggle:disabled {
+		opacity: 0.45;
+		cursor: not-allowed;
+	}
 	/* Same as DisplayTab's selects. */
 	.select {
 		font-family: var(--font-sans);

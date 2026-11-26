@@ -7,7 +7,7 @@ use serde::Serialize;
 /// plus the session mode and the host app/game to launch). `mode` is `game` or
 /// `remote` (default `remote`); `app` is the host app/game id-or-name to launch
 /// in game mode (empty / `Desktop` = stream the whole desktop, launch nothing).
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
 pub(crate) struct AutoConnect {
 	pub(crate) id: String,
 	pub(crate) pw: String,
@@ -17,6 +17,10 @@ pub(crate) struct AutoConnect {
 	/// host fills the screen with no chrome. With this flag the auto-connect session
 	/// starts windowed instead (debugging / dev test loops / embedded use).
 	pub(crate) nofullscreen: bool,
+	/// `--kiosk`: an appliance (the Orange Pi player). When its session ends the app stays
+	/// on its home screen; without it, a `--connect` launch goes back to the tray.
+	#[serde(default)]
+	pub(crate) kiosk: bool,
 }
 
 #[derive(Serialize)]

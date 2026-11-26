@@ -158,7 +158,7 @@ fn run(cli: Cli) -> i32 {
 }
 
 #[cfg(windows)]
-const STOP_EVENT: &str = "Local\\PulsarHeadlessHostStop";
+pub(crate) const STOP_EVENT: &str = "Local\\PulsarHeadlessHostStop";
 
 #[cfg(windows)]
 fn wide(s: &str) -> Vec<u16> {

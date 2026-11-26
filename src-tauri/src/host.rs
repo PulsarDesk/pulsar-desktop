@@ -559,6 +559,9 @@ pub(crate) async fn bring_online(
 ) -> Result<String, String> {
 	// Shared mode: only the machine-wide host lease holder registers (one host per PC).
 	crate::shared_mode::lease::may_host()?;
+	// Per-user mode: one host per Windows user across sessions (the same account signed in
+	// twice must not register one identity twice).
+	crate::user_host::may_host(&app)?;
 	// Remote input permission (Linux /dev/uinput, macOS Accessibility): with unattended access
 	// on, a toast now, so the person here can fix it before anyone connects (input_notice.rs;
 	// once per process).

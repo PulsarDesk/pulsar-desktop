@@ -44,6 +44,7 @@
 	"splash.encoder": "Preparing the hardware encoder…",
 	"splash.ready": "Ready",
 	"update.inProgress": "Pulsar is being updated. It will open by itself once the install finishes — give it a few seconds.",
+	"launch.headlessRunning": "Pulsar already runs for this user without a window (started with --headless-host), so no window opens. To use the app, stop it first: pulsar --headless-stop",
 	"ds5.shed.speaker": "Weak Bluetooth: controller speaker turned off",
 	"ds5.shed.mic": "Weak Bluetooth: controller mic turned off",
 	"ds5.shed.haptics": "Weak Bluetooth: HD haptics turned off, using classic rumble",

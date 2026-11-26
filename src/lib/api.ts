@@ -55,6 +55,7 @@ export {
 	onKbdDetach,
 	onOverlayToggle,
 	onFullscreenToggle,
+	onCliConnect,
 	onOverlayCmd,
 	onOverlayEnd,
 	onOverlayClose,

@@ -161,6 +161,11 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 		case 'auto_connect_target':
 			// No CLI auto-connect target in the browser mock (silences the reject log).
 			return Promise.resolve(null as unknown as T);
+		case 'take_cli_connects':
+			return Promise.resolve([] as unknown as T);
+		case 'arm_cli_engage':
+		case 'cli_session_done':
+			return Promise.resolve(undefined as unknown as T);
 		case 'local_relay_status':
 		case 'set_local_relay':
 			// The browser mock has no relay to run; report it stopped so the toggle renders.

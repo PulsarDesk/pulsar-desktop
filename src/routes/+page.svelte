@@ -22,7 +22,8 @@
 		onNodeVersionError,
 		onSessionPassword
 	} from '#lib/api.js';
-	import { onRelayE2e, onSharedHost } from '#lib/api.js';
+	import { onRelayE2e, onSharedHost, onCliConnect } from '#lib/api.js';
+	import type { AutoConnectTarget, CliConnect } from '#lib/types.js';
 	import { setPeerIdentity, loadSharedPeers } from '#lib/peers.svelte.js';
 	import {
 		relayAuth,
@@ -511,6 +512,13 @@
 				connecting = false;
 				return;
 			}
+			// This Windows user's Pulsar in another session hosts (user_host.rs): stay a
+			// client here. The auto-retry takes over once that one quits.
+			if (msg === 'USER_HOST_ELSEWHERE') {
+				connError = t('host.otherSession');
+				connecting = false;
+				return;
+			}
 			const sharedKey = sharedHostErrorKey(msg, IS_UNIX_UI);
 			if (sharedKey) {
 				versionBlocked = true;
@@ -627,6 +635,60 @@
 	// answer a later/unrelated host's prompt, and cleared after the first submit so a
 	// wrong-password re-fire (or a second connect) falls through to the normal modal.
 	let autoPw: { id: string; pw: string } | null = null;
+
+	// Tabs a non-kiosk CLI connect opened (`--connect` shortcut). When they are all gone and
+	// nothing else is open, Pulsar goes back to the tray (instance.rs `cli_session_done`) —
+	// only if one of them really ran: a failed connect keeps its error on screen.
+	let trayTabs = $state<number[]>([]);
+	let trayTabsRan = false;
+
+	/** CLI `--connect`: at launch (`cold`) or handed over by a later launch while running. */
+	function startCliConnect(ac: AutoConnectTarget, o: { cold: boolean; returnToTray: boolean }) {
+		// A host-only Pulsar never connects out: say so instead of silently showing Home.
+		if (hostOnly) {
+			sm.connectErr = t('cli.hostOnly');
+			return;
+		}
+		if (ac.pw) autoPw = { id: ac.id, pw: ac.pw };
+		const m = ac.mode === 'game' ? 'game' : 'remote';
+		// A CLI `--mode game` launch enters the gaming personality (transient — not persisted to
+		// ui.appMode, it's a launch-time override), so the user lands on the gaming home after.
+		// A handed-over connect switches it only while nothing else is open.
+		if (o.cold || sm.sessions.length === 0) mode = m;
+		const gameId = m === 'game' ? (ac.app || '') : '';
+		const before = new Set(sm.sessions.map((s) => s.tabId));
+		// Cold start: show the splash, THEN the Connecting screen. The session is created now (so
+		// the splash fades onto the Connecting screen, not the home view), but `holdConnecting`
+		// defers the real network connect until the splash is gone — so the P2P/relay milestone
+		// is on-screen instead of a fast connect finishing unseen. An open session to the same
+		// device is focused instead of opened twice (startConnect's de-dup).
+		void sm.startConnect(
+			{ name: ac.app || t('home.remoteDevice'), id: ac.id },
+			m,
+			gameId,
+			o.cold ? { holdConnecting: splashDone } : {}
+		);
+		const tab = sm.activeTab;
+		if (typeof tab !== 'number' || before.has(tab)) return;
+		// Keyboard capture engages at once, as on a `--connect` start (armed in Rust there).
+		if (!o.cold) api.armCliEngage().catch(() => {});
+		// Begin fullscreen so the host fills the screen with no app chrome. Toggle off with
+		// Ctrl+Shift+F11; `--nofullscreen` opts out (dev test loops / embedded).
+		if (!ac.nofullscreen) sm.enterFullscreenAuto();
+		if (o.returnToTray) trayTabs = [...trayTabs, tab];
+	}
+
+	$effect(() => {
+		if (trayTabs.length === 0) return;
+		const live = sm.sessions.filter((s) => trayTabs.includes(s.tabId));
+		if (live.some((s) => s.phase === 'active')) trayTabsRan = true;
+		if (live.length > 0) return;
+		const ran = trayTabsRan;
+		trayTabs = [];
+		trayTabsRan = false;
+		// Another session still open: the user is working in Pulsar, leave the window be.
+		if (ran && sm.sessions.length === 0) api.cliSessionDone(hostSessions.length === 0).catch(() => {});
+	});
 	const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 	async function boot() {
@@ -907,6 +969,14 @@
 		// game mode streams the whole desktop (host's tolerant on_launch match launches
 		// nothing). Remote mode always carries an empty gameId.
 		const ac = await api.autoConnectTarget().catch(() => null);
+		// A later launch (a `--connect` shortcut while Pulsar runs, instance.rs) queues its
+		// target; take it on the event, and once now for any that came while this UI loaded.
+		const takeCli = async () => {
+			for (const c of await api.takeCliConnects().catch(() => [] as CliConnect[]))
+				startCliConnect(c.target, { cold: false, returnToTray: c.returnToTray });
+		};
+		await onCliConnect(() => void takeCli());
+		void takeCli();
 		if (ac && ac.id) {
 			// Appliance/kiosk (CLI --connect): update on BOOT, before connecting. If an
 			// update installs, the app relaunches and never reaches startConnect below;
@@ -923,24 +993,8 @@
 				// install so we never tear down a session that began in the gap.
 				isBusy: () => sm.sessions.length > 0 || hostSessions.length > 0
 			});
-			if (ac.pw) autoPw = { id: ac.id, pw: ac.pw };
-			const m = ac.mode === 'game' ? 'game' : 'remote';
-			// A CLI `--mode game` kiosk launches into the gaming personality (transient —
-			// not persisted to ui.appMode, since it's a launch-time override). So when the
-			// session ends the user lands on the gaming home, and hosting is refused.
-			mode = m;
-			const gameId = m === 'game' ? (ac.app || '') : '';
-			// Headless --connect: show the splash, THEN the Connecting screen. The session is
-			// created now (so the splash fades onto the Connecting screen, not the home view),
-			// but `holdConnecting` defers the real network connect until the splash is gone — so
-			// the P2P/relay milestone is on-screen instead of a fast connect finishing unseen.
-			sm.startConnect({ name: ac.app || t('home.remoteDevice'), id: ac.id }, m, gameId, {
-				holdConnecting: splashDone
-			});
-			// Kiosk / headless start (CLI --connect): begin fullscreen so the host fills
-			// the screen with no app chrome. Toggle off with Ctrl+Shift+F11. `--nofullscreen`
-			// (ac.nofullscreen) opts out — the session starts windowed (dev test loops / embedded).
-			if (!ac.nofullscreen) sm.enterFullscreenAuto();
+			// Not `--kiosk` (a desktop shortcut): back to the tray when the session ends.
+			startCliConnect(ac, { cold: true, returnToTray: !ac.kiosk });
 		}
 		// Auto-update: only when this launch is IDLE (no CLI --connect into a live
 		// session) — the updater must never interrupt a remote session. Deferred a few

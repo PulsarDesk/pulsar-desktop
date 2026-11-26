@@ -44,6 +44,7 @@
 	"splash.encoder": "Donanımsal kodlayıcı hazırlanıyor…",
 	"splash.ready": "Hazır",
 	"update.inProgress": "Pulsar güncelleniyor. Kurulum bitince Pulsar kendiliğinden açılacak — birkaç saniye bekle.",
+	"launch.headlessRunning": "Pulsar bu kullanıcı için zaten penceresiz çalışıyor (--headless-host ile başlatıldı), bu yüzden pencere açılmıyor. Uygulamayı kullanmak için önce onu durdur: pulsar --headless-stop",
 	"ds5.shed.speaker": "Bluetooth zayıf: kol hoparlörü kapatıldı",
 	"ds5.shed.mic": "Bluetooth zayıf: kol mikrofonu kapatıldı",
 	"ds5.shed.haptics": "Bluetooth zayıf: HD titreşim kapatıldı, klasik titreşim kullanılıyor",

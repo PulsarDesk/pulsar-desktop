@@ -69,6 +69,16 @@ export interface AutoConnectTarget {
 	app: string;
 	/** `--nofullscreen`: start the kiosk auto-connect session windowed, not fullscreen. */
 	nofullscreen: boolean;
+	/** `--kiosk`: an appliance (the Pi player) — stays on its home screen after the session
+	 * instead of going back to the tray. */
+	kiosk?: boolean;
+}
+
+/** A later launch asked the running Pulsar to connect (`take_cli_connects`, instance.rs). */
+export interface CliConnect {
+	target: AutoConnectTarget;
+	/** The window was hidden (tray) when it came: hide it again once that session ends. */
+	returnToTray: boolean;
 }
 
 export type DeviceCategory = 'pc' | 'server' | 'console';
