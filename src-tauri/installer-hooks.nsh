@@ -30,6 +30,22 @@
 ; hook — so it's in scope here with zero extra dependencies and no double-declaration.
 ; ${StrLoc} $out "<haystack>" "<needle>" ">"  →  $out = offset of needle, "" if absent.
 
+; SYSTEM input agent (PulsarSysAgent service, docs/agents/system-agent.md). Before the files
+; are copied, stop the installed service so the update can replace its exe: `stop` ends the
+; service, and the service ends its helpers. taskkill catches a helper that outlived it.
+; A first install has no exe here yet; a service registered elsewhere does not lock $INSTDIR.
+!macro NSIS_HOOK_PREINSTALL
+  Push $0
+  IfFileExists "$INSTDIR\resources\pulsar-sysagent.exe" 0 sysagent_pre_done
+    DetailPrint "Pulsar: stopping the system agent service..."
+    nsExec::ExecToLog '"$INSTDIR\resources\pulsar-sysagent.exe" stop'
+    Pop $0
+    nsExec::ExecToLog 'taskkill /F /IM pulsar-sysagent.exe'
+    Pop $0
+  sysagent_pre_done:
+  Pop $0
+!macroend
+
 !macro NSIS_HOOK_POSTINSTALL
   Push $0
   Push $1
@@ -37,6 +53,16 @@
   Push $3
   Push $4
   Push $5
+
+  ; SYSTEM input agent: create the service, or point an existing one (an older version or a
+  ; dev install elsewhere) at this exe, then start it. On every install and update, so the
+  ; service always matches the app's helper protocol and trusts this install dir.
+  IfFileExists "$INSTDIR\resources\pulsar-sysagent.exe" 0 sysagent_post_done
+    DetailPrint "Pulsar: installing the system agent service..."
+    nsExec::ExecToLog '"$INSTDIR\resources\pulsar-sysagent.exe" install'
+    Pop $0
+    DetailPrint "Pulsar: system agent install finished (exit code $0)."
+  sysagent_post_done:
   ; Interception — keyboard capture below the OS hook layer (works under ASTER).
   IfFileExists "$INSTDIR\resources\interception\install-interception.exe" 0 +3
     DetailPrint "Pulsar: installing the Interception keyboard driver..."
@@ -180,6 +206,14 @@
 ; Uninstall: remove our firewall rules (only this install's paths) while pulsar.exe still
 ; exists. The drivers stay (shared system components, see windows-drivers.md).
 !macro NSIS_HOOK_PREUNINSTALL
+  ; Remove the SYSTEM input agent service (its exe is deleted with $INSTDIR).
+  Push $0
+  IfFileExists "$INSTDIR\resources\pulsar-sysagent.exe" 0 +5
+    nsExec::ExecToLog '"$INSTDIR\resources\pulsar-sysagent.exe" uninstall'
+    Pop $0
+    nsExec::ExecToLog 'taskkill /F /IM pulsar-sysagent.exe'
+    Pop $0
+  Pop $0
   IfFileExists "$INSTDIR\pulsar.exe" 0 +2
     ExecWait '"$INSTDIR\pulsar.exe" --firewall-remove'
 !macroend

@@ -167,21 +167,26 @@ Behaviour without the service is exactly today's.
 
 ## Install / uninstall
 
-What exists: the Tauri **NSIS** bundle (`tauri.windows.conf.json`, `installMode: perMachine`
-→ Program Files, admin) with `src-tauri/installer-hooks.nsh` (POSTINSTALL only today), and
-`crates/pulsar-setup` (per-user `%LOCALAPPDATA%\Programs\Pulsar`, no UAC). No MSI.
+Two installers: the Tauri **NSIS** bundle (`tauri.windows.conf.json`, `installMode: perMachine`
+→ Program Files, admin) with `src-tauri/installer-hooks.nsh`, and `crates/pulsar-setup`
+(per-user `%LOCALAPPDATA%\Programs\Pulsar`, no UAC). No MSI.
 
-- **NSIS (supported path).** Bundle `resources/pulsar-sysagent.exe`: add it to
-  `tauri.windows.conf.json` `bundle.resources`, and build it in `release.yml` like
-  pulsar-render (`cargo build --release -p pulsar-sysagent [--target …]`, copy to
-  `src-tauri/resources/`, per arch). Hooks:
-  - `NSIS_HOOK_PREINSTALL`: `IfFileExists "$INSTDIR\resources\pulsar-sysagent.exe"` →
-    `ExecWait '"…\pulsar-sysagent.exe" stop'` (unlocks the exe for an update; the job kills
-    the helpers).
-  - `NSIS_HOOK_POSTINSTALL`: `ExecWait '"$INSTDIR\resources\pulsar-sysagent.exe" install'`
-    (creates or reconfigures `PulsarSysAgent`: auto-start, LocalSystem, restart-on-failure
-    ×3, Turkish display name/description, then starts it).
-  - `NSIS_HOOK_PREUNINSTALL`: `ExecWait '"…\pulsar-sysagent.exe" uninstall'`.
+- **NSIS (shipped since 2026-11-26).** `release.yml` builds `pulsar-sysagent` per arch and
+  copies it to `src-tauri/resources/pulsar-sysagent.exe`, listed in `bundle.resources`
+  (git-ignored; a local `tauri build` needs the file there too). The in-app updater runs the
+  same NSIS installer (`/UPDATE`), so the service is updated with every app update. Hooks
+  (`nsExec::ExecToLog`, no console flash):
+  - `NSIS_HOOK_PREINSTALL`: if `$INSTDIR\resources\pulsar-sysagent.exe` exists → `stop`, then
+    `taskkill /F /IM pulsar-sysagent.exe` (a helper without a job, e.g. in a Duo session, could
+    keep the exe locked).
+  - `NSIS_HOOK_POSTINSTALL`: `"$INSTDIR\resources\pulsar-sysagent.exe" install` (creates
+    `PulsarSysAgent`, or stops an existing one and repoints it at this exe with no
+    `--client-dir`, so it trusts `$INSTDIR` and `$INSTDIR\resources` only; then starts it).
+  - `NSIS_HOOK_PREUNINSTALL`: `uninstall` + `taskkill`.
+- Before this, the service was only dev-installed (11-11, `C:\Program Files\PulsarDev`), and a
+  release `pulsar.exe` in `C:\Program Files\Pulsar` got `helper handshake failed: unexpected
+  reply None`: the helper closes the pipe on a client outside its allowed dirs, and an old
+  helper also spoke an older protocol. The first NSIS update repoints such a service.
 - **pulsar-setup (per-user): must NOT register the service.** A LocalSystem service whose exe
   sits in a user-writable dir is a direct privilege escalation. `install` refuses any path
   outside `%ProgramFiles%` unless `--allow-any-path` is passed. If the bootstrapper wants

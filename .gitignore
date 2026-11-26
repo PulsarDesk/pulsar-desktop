@@ -15,6 +15,7 @@ node_modules
 /src-tauri/resources/pulsar-render
 /src-tauri/resources/pulsar-render.exe
 /src-tauri/resources/pulsar-update.exe
+/src-tauri/resources/pulsar-sysagent.exe
 
 # Windows driver installers (fetch-drivers.mjs) — the small interception.dll is
 # committed as a runtime fallback; the signed installers are not.

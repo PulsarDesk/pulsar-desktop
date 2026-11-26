@@ -213,6 +213,22 @@ jobs:
           mkdir -p src-tauri/resources
           cp "$BIN" src-tauri/resources/pulsar-update.exe
 
+      # The SYSTEM input agent (UAC prompts / lock screen). Bundled as
+      # resources/pulsar-sysagent.exe; the NSIS hooks register and update the service.
+      - name: Build SYSTEM input agent (pulsar-sysagent)
+        if: startsWith(matrix.os, 'windows')
+        shell: bash
+        run: |
+          if [ -n "${{ matrix.rust_targets }}" ]; then
+            cargo build --release -p pulsar-sysagent --target "${{ matrix.rust_targets }}"
+            BIN="target/${{ matrix.rust_targets }}/release/pulsar-sysagent.exe"
+          else
+            cargo build --release -p pulsar-sysagent
+            BIN="target/release/pulsar-sysagent.exe"
+          fi
+          mkdir -p src-tauri/resources
+          cp "$BIN" src-tauri/resources/pulsar-sysagent.exe
+
       # Point the updater at this branch's channel (build-only edit, not committed).
       - name: Point updater at this branch's channel
         shell: bash

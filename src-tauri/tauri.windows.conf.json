@@ -6,6 +6,7 @@
 			"resources/ffmpeg.exe",
 			"resources/pulsar-render.exe",
 			"resources/pulsar-update.exe",
+			"resources/pulsar-sysagent.exe",
 			"resources/ffplay.exe",
 			"resources/interception/interception.dll",
 			"resources/ViGEmBus_Setup.exe",
