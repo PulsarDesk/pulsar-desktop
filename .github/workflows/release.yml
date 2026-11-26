@@ -1,14 +1,22 @@
-name: Release
+name: Main pipeline
 
-# Cut from `main`. semantic-release computes the next version from Conventional
-# Commits and creates a git TAG + GitHub Release ONLY — it never commits back to
-# the repo (no @semantic-release/git plugin). The version it computes is stamped
-# into the built installers (scripts/bump-version.mjs), not committed.
+# The one pipeline of a push to `main`. In parallel: CI (ci.yml: tests on every OS, frontend,
+# RustSec audit), Platform smoke (platform-smoke.yml: the app built, tested and started on
+# real macOS + Linux) and the release builds below. Any job that fails stops the whole run
+# (its last step cancels it), and `publish` runs only when CI, smoke and the builds all
+# passed — a red check can never ship to the auto-updater. Exceptions, as before: the
+# experimental Windows ARM64 build and the best-effort Orange Pi build never stop or hold
+# back a release.
+#
+# Release: semantic-release computes the next version from Conventional Commits and creates
+# a git TAG + GitHub Release ONLY — it never commits back to the repo (no
+# @semantic-release/git plugin). The version it computes is stamped into the built
+# installers (scripts/bump-version.mjs), not committed.
 #
 # The heavy signed-installer matrix (build + publish) only runs when the repo
 # variable ENABLE_DESKTOP_RELEASE=true AND these secrets are set:
 #   TAURI_SIGNING_PRIVATE_KEY, TAURI_SIGNING_PRIVATE_KEY_PASSWORD  (updater signing)
-# Until then `prepare` still computes/gate-tests but nothing is released.
+# Until then CI + smoke still run but nothing is released.
 on:
   workflow_dispatch:
   push:
@@ -16,6 +24,7 @@ on:
 
 permissions:
   contents: write
+  actions: write # a failed job cancels the run
 
 concurrency:
   group: release
@@ -25,11 +34,26 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Gates, in parallel with the builds below. `publish` needs both to succeed.
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+      actions: write
+
+  smoke:
+    name: Platform smoke
+    uses: ./.github/workflows/platform-smoke.yml
+    permissions:
+      contents: read
+      actions: write
+
   # 1. Decide the next version from Conventional Commits WITHOUT creating a tag or
-  #    release yet (dry-run). Also the test gate: if tests fail or no release is
-  #    due, nothing downstream runs.
+  #    release yet (dry-run). No release due → nothing downstream builds. (The tests that
+  #    used to run here are CI's now, which gates `publish`.)
   prepare:
-    name: Prepare (version + test gate)
+    name: Prepare (version)
     runs-on: ubuntu-22.04
     outputs:
       published: ${{ steps.semrel.outputs.new_release_published }}
@@ -39,14 +63,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install test deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libudev-dev libwebkit2gtk-4.1-dev build-essential librsvg2-dev
-      - name: Test (gate — no version/build/release if these fail)
-        run: cargo test --locked
       - name: Compute next version (dry-run — creates NO tag or release)
         id: semrel
         uses: cycjimmy/semantic-release-action@v4
@@ -56,6 +72,12 @@ jobs:
             conventional-changelog-conventionalcommits@^9
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Stop the whole run (a job failed)
+        if: failure()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run cancel ${{ github.run_id }} -R ${{ github.repository }}
 
   # 2. Build the app installers per platform, stamped with the computed version.
   build:
@@ -446,6 +468,15 @@ jobs:
           path: release-artifacts/*
           if-no-files-found: error
 
+      # The experimental ARM64 build may fail without stopping anything (continue-on-error).
+      - name: Stop the whole run (a job failed)
+        if: failure() && matrix.experimental != true
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run cancel ${{ github.run_id }} -R ${{ github.repository }}
+
   # 2b. The Orange Pi 5 build: a .deb on Ubuntu 22.04 arm64 linked against the Rockchip
   #     multimedia PPA's ffmpeg (rkmpp hardware decoding) — the generic linux-arm64 bundles
   #     link Ubuntu's own ffmpeg and decode in software on the board. Its updater points at
@@ -487,14 +518,15 @@ jobs:
           path: release-artifacts/*
           if-no-files-found: error
 
-  # 3. Everything built → NOW create the tag + GitHub release (NO commit) and
-  #    attach all installers + publish the rolling auto-update manifest.
+  # 3. Everything built AND CI + smoke green → NOW create the tag + GitHub release (NO
+  #    commit) and attach all installers + publish the rolling auto-update manifest.
   publish:
     name: Publish release
-    needs: [prepare, build, opi5]
-    # `always()`: the opi5 build is best effort — publish when the main matrix succeeded,
-    # whatever opi5 did (its assets and channel are simply missing if it failed).
-    if: ${{ always() && needs.prepare.outputs.published == 'true' && vars.ENABLE_DESKTOP_RELEASE == 'true' && needs.build.result == 'success' }}
+    needs: [ci, smoke, prepare, build, opi5]
+    # `always()`: the opi5 build is best effort — publish when the main matrix, CI and the
+    # platform smoke succeeded, whatever opi5 did (its assets and channel are simply missing
+    # if it failed).
+    if: ${{ always() && needs.ci.result == 'success' && needs.smoke.result == 'success' && needs.prepare.outputs.published == 'true' && vars.ENABLE_DESKTOP_RELEASE == 'true' && needs.build.result == 'success' }}
     runs-on: ubuntu-22.04
     permissions:
       contents: write

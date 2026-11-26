@@ -6,16 +6,19 @@ name: Platform smoke
 # Screen Recording) can be granted on a runner, there is no GPU video decoder guarantee and no
 # controller. It answers "does it build, do the tests pass, does it start and draw frames".
 
+#
+# Runs inside the main pipeline (release.yml) on every push to main: a failure stops the whole
+# run and nothing is published. Can also be started by hand.
 on:
-  push:
-    branches: [main]
+  workflow_call:
   workflow_dispatch:
 
 permissions:
   contents: read
+  actions: write # stop the whole run when a job fails (last step)
 
 concurrency:
-  group: smoke-${{ github.ref }}
+  group: smoke-${{ github.event_name == 'workflow_dispatch' && github.ref || github.run_id }}
   cancel-in-progress: true
 
 env:
@@ -161,3 +164,11 @@ jobs:
           echo "--- stdout"; grep -E "vidsink-(fps|dims|dec)" render.out | tail -8
           echo "--- stderr"; tail -40 render.err
           grep -qE "^vidsink-fps [1-9]" render.out
+
+      - name: Stop the whole run (a job failed)
+        if: failure()
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run cancel ${{ github.run_id }} -R ${{ github.repository }}

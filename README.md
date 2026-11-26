@@ -17,7 +17,7 @@
 
 <p align="center">
   <a href="https://github.com/PulsarDesk/pulsar-desktop/releases"><img src="https://img.shields.io/github/v/release/PulsarDesk/pulsar-desktop?include_prereleases&style=flat-square&color=5B57E0&label=version" alt="Version"></a>
-  <a href="https://github.com/PulsarDesk/pulsar-desktop/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/PulsarDesk/pulsar-desktop/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
+  <a href="https://github.com/PulsarDesk/pulsar-desktop/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflow/status/PulsarDesk/pulsar-desktop/release.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
   <a href="https://github.com/PulsarDesk/pulsar-desktop/releases"><img src="https://img.shields.io/github/downloads/PulsarDesk/pulsar-desktop/total?style=flat-square&color=13B3D4" alt="Downloads"></a>
   <a href="https://github.com/PulsarDesk/pulsar-desktop/stargazers"><img src="https://img.shields.io/github/stars/PulsarDesk/pulsar-desktop?style=flat-square&color=5B57E0" alt="Stars"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPLv3-5B57E0?style=flat-square" alt="License: GPLv3"></a>

@@ -1,15 +1,20 @@
 name: CI
 
+# Pull requests run this on its own. A push to main runs it as part of the main pipeline
+# (release.yml), next to Platform smoke and the release builds: a failure there stops the
+# whole run and nothing is published.
 on:
-  push:
-    branches: [main]
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
+  actions: write # stop the whole run when a job fails (last step of each job)
 
+# A newer push to a PR replaces its running check. Inside the main pipeline the group is the
+# run itself (the pipeline queues its own runs, see release.yml).
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: true
 
 env:
@@ -65,6 +70,13 @@ jobs:
       - name: Test
         run: cargo test --locked
 
+      - name: Stop the whole run (a job failed)
+        if: failure()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run cancel ${{ github.run_id }} -R ${{ github.repository }}
+
   # Frontend (SvelteKit) type-check + unit tests. vitest's jsdom chain needs
   # require(ESM) → Node >= 22.12; bun stays the package manager / script runner.
   frontend:
@@ -86,11 +98,19 @@ jobs:
         continue-on-error: true
         run: bun audit
 
+      - name: Stop the whole run (a job failed)
+        if: failure()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run cancel ${{ github.run_id }} -R ${{ github.repository }}
+
   audit:
     name: Security audit (RustSec)
     runs-on: ubuntu-22.04
     permissions:
       contents: read
+      actions: write
     steps:
       - uses: actions/checkout@v4
       # cargo-audit directly: rustsec/audit-check@v2 failed with "Not Found" while updating its
@@ -109,3 +129,10 @@ jobs:
         # which the updater does not use (it extracts with `ZipArchive`).
         # REMOVE when tauri-plugin-updater ships zip >= 9 (re-run `cargo audit` to confirm).
         run: cargo audit --ignore RUSTSEC-2026-0367 --ignore RUSTSEC-2026-0368 --ignore RUSTSEC-2026-0369 --ignore RUSTSEC-2026-0429 --ignore RUSTSEC-2026-0545 --ignore RUSTSEC-2026-0548
+
+      - name: Stop the whole run (a job failed)
+        if: failure()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run cancel ${{ github.run_id }} -R ${{ github.repository }}
