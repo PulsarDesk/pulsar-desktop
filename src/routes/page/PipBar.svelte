@@ -110,8 +110,10 @@
 		background: var(--surface-2, rgba(127, 127, 127, 0.15));
 		color: var(--text);
 	}
-	button.on {
+	button.on,
+	button.on:hover {
 		color: var(--accent);
+		background: color-mix(in srgb, var(--accent) 16%, transparent);
 	}
 	button.off {
 		opacity: 0.55;

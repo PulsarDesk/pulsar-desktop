@@ -64,3 +64,10 @@ describe('Chrome keep-on-top pin (issue #18)', () => {
 		expect(screen.getByRole('button', { name: 'Üstte tut' }).getAttribute('title')).toContain('Wayland');
 	});
 });
+
+describe('Chrome active toggles under the pointer', () => {
+	it('an active toggle keeps its lit style on hover (the hover rule must not outrank .on)', async () => {
+		const css = (await import('./Chrome.svelte?raw')).default as string;
+		expect(css).toMatch(/\.game-btn\.on:hover:not\(:disabled\)\s*\{[^}]*var\(--accent-soft\)/);
+	});
+});

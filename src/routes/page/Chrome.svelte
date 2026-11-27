@@ -368,6 +368,14 @@
 		border-color: var(--accent);
 		color: var(--accent-ink);
 	}
+	/* An active toggle stays lit under the pointer (the plain hover rule outranks `.on`: right
+	   after the click the pointer is still on it and the button looked switched off). */
+	.game-btn.on:hover:not(:disabled) {
+		background: var(--accent-soft);
+		border-color: var(--accent);
+		color: var(--accent-ink);
+		filter: brightness(1.12);
+	}
 	/* Frameless window controls: flush to the top-right corner, full bar height, no border —
 	   the standard custom-title-bar look. `margin-right` cancels the bar's right padding so they
 	   reach the window edge; close gets the red hover. Not a drag region (they're buttons). */
