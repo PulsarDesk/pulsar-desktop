@@ -275,7 +275,9 @@ pub(crate) async fn pip_open(
 		forget(&label);
 		return Err(e);
 	}
-	set_asked(&label, w, h);
+	// Our record of where it is (see GEOM): the builder's position, physical.
+	let scale = window.scale_factor().unwrap_or(1.0);
+	set_geom(&label, Geom { pos: (x * scale, y * scale), asked: (w, h) });
 	crate::tabwin::move_video(&app, play, &label);
 	push_line(&app, play);
 	crate::winalpha::apply(&app, &label);
@@ -398,72 +400,73 @@ fn resized(rect: (f64, f64, f64, f64), wa: (f64, f64, f64, f64), w: f64, h: f64)
 	(x.clamp(wa.0, wa.2 - w), y.clamp(wa.1, wa.3 - h), w, h)
 }
 
-/// Per PiP window: the client size we last asked for (logical) and the measured surplus the
-/// toolkit adds to it (physical). On Windows the surplus is 0 (the invisible resize frame lives
-/// OUTSIDE the client area); on Linux/GTK a frameless window reports and gets ~37 px more than
-/// `set_size` was given. Sizes we hand around (the frontend's base, the next PiP's size) are the
-/// ASKED ones, or every round trip would grow the window by the surplus.
+/// Per PiP window, OUR record of where it is: the rect we last put it at, in `set_position`'s own
+/// terms (physical: Windows/macOS = the outer frame's origin; Linux/GTK = the client origin), and
+/// the client size we asked for (logical). Hover growth and its way back are laid out from this
+/// record, never read back from the window: on GTK the read-backs lag and disagree (the client
+/// reports ~37 px taller right after the window is built, `outer_position` sits above the point
+/// `set_position` moves), which walked and grew the PiP on every round trip (Orange Pi). Only a
+/// move or resize by the USER is read back (`pip_snap`, `pip_size(user)`).
 static GEOM: Mutex<Option<HashMap<String, Geom>>> = Mutex::new(None);
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct Geom {
+	/// `set_position` origin (physical).
+	pos: (f64, f64),
+	/// Client size asked for (logical).
 	asked: (f64, f64),
-	surplus: Option<(f64, f64)>,
 }
 
-fn set_asked(label: &str, w: f64, h: f64) {
-	let mut g = GEOM.lock().unwrap();
-	let m = g.get_or_insert_with(HashMap::new);
-	let surplus = m.get(label).and_then(|e| e.surplus);
-	m.insert(label.to_string(), Geom { asked: (w, h), surplus });
+fn geom(label: &str) -> Option<Geom> {
+	GEOM.lock().unwrap().as_ref()?.get(label).copied()
 }
 
-/// Where the window is, in the terms each call needs (physical px): the visible client rect,
-/// the offset from it to what `set_position` moves (Windows/macOS: the outer frame; Linux/GTK:
-/// the client origin itself), and the surplus over the asked size.
-struct Place {
-	client: (f64, f64, f64, f64),
-	pos_off: (f64, f64),
-	surplus: (f64, f64),
-	scale: f64,
+fn set_geom(label: &str, g: Geom) {
+	GEOM.lock().unwrap().get_or_insert_with(HashMap::new).insert(label.to_string(), g);
 }
 
-fn place_of(win: &WebviewWindow) -> Option<Place> {
-	let s = win.scale_factor().ok()?;
-	let ip = win.inner_position().ok()?;
-	let isz = win.inner_size().ok()?;
-	let (iw, ih) = (isz.width as f64, isz.height as f64);
+/// What `set_position` moves, read from the window (only after the user moved it).
+fn set_position_origin(win: &WebviewWindow) -> Option<(f64, f64)> {
 	#[cfg(all(unix, not(target_os = "macos")))]
-	let pos_off = (0.0, 0.0);
+	let p = win.inner_position().ok()?;
 	#[cfg(not(all(unix, not(target_os = "macos"))))]
-	let pos_off = {
-		let op = win.outer_position().ok()?;
-		((op.x - ip.x) as f64, (op.y - ip.y) as f64)
-	};
-	let label = win.label().to_string();
-	let mut g = GEOM.lock().unwrap();
-	let m = g.get_or_insert_with(HashMap::new);
-	let e = m.entry(label).or_insert(Geom { asked: (iw / s, ih / s), surplus: None });
-	// Measured once, against a size we asked for and the toolkit applied.
-	let surplus = *e.surplus.get_or_insert(((iw - e.asked.0 * s).max(0.0), (ih - e.asked.1 * s).max(0.0)));
-	Some(Place { client: (ip.x as f64, ip.y as f64, ip.x as f64 + iw, ip.y as f64 + ih), pos_off, surplus, scale: s })
+	let p = win.outer_position().ok()?;
+	Some((p.x as f64, p.y as f64))
 }
 
-/// The PiP's own size (logical, as asked — without the toolkit's surplus): the frontend's base
-/// for hover growth. `user`: the user resized it by hand — take its new size as the asked one.
+/// The frame around the client area in `set_position` space (physical): Windows' invisible resize
+/// border (outer − inner, stable); none where `set_position` moves the client origin (GTK).
+fn frame(win: &WebviewWindow) -> (f64, f64) {
+	#[cfg(all(unix, not(target_os = "macos")))]
+	{
+		let _ = win;
+		(0.0, 0.0)
+	}
+	#[cfg(not(all(unix, not(target_os = "macos"))))]
+	{
+		match (win.outer_size(), win.inner_size()) {
+			(Ok(o), Ok(i)) => (o.width.saturating_sub(i.width) as f64, o.height.saturating_sub(i.height) as f64),
+			_ => (0.0, 0.0),
+		}
+	}
+}
+
+/// The PiP's own size (logical, as asked): the frontend's base for hover growth. `user`: the user
+/// resized it by hand — take its client size now as the asked one.
 #[tauri::command]
 pub(crate) fn pip_size(window: WebviewWindow, user: bool) -> Option<[f64; 2]> {
-	let pl = place_of(&window)?;
-	let s = pl.scale;
+	let label = window.label().to_string();
 	if user {
-		let (w, h) = ((pl.client.2 - pl.client.0 - pl.surplus.0) / s, (pl.client.3 - pl.client.1 - pl.surplus.1) / s);
-		set_asked(window.label(), w, h);
+		let s = window.scale_factor().ok()?;
+		let i = window.inner_size().ok()?;
+		let pos = set_position_origin(&window)?;
+		set_geom(&label, Geom { pos, asked: (i.width as f64 / s, i.height as f64 / s) });
 	}
-	GEOM.lock().unwrap().as_ref()?.get(window.label()).map(|g| [g.asked.0, g.asked.1])
+	geom(&label).map(|g| [g.asked.0, g.asked.1])
 }
 
-/// Resize the calling PiP window to `w`×`h` (logical, as asked) — hover growth and its way back —
-/// keeping the corner it sits in.
+/// Resize the calling PiP window to `w`×`h` (logical client size) — hover growth and its way
+/// back — keeping the screen corner it sits in.
 #[tauri::command]
 pub(crate) fn pip_resize(app: AppHandle, window: WebviewWindow, w: f64, h: f64) -> Result<(), String> {
 	if !is_pip_window(window.label()) {
@@ -471,31 +474,43 @@ pub(crate) fn pip_resize(app: AppHandle, window: WebviewWindow, w: f64, h: f64) 
 	}
 	let win = window.clone();
 	let _ = window.run_on_main_thread(move || {
-		let Some(pl) = place_of(&win) else { return };
+		let label = win.label().to_string();
+		let Ok(s) = win.scale_factor() else { return };
+		let Some(g) = geom(&label).or_else(|| {
+			let i = win.inner_size().ok()?;
+			Some(Geom { pos: set_position_origin(&win)?, asked: (i.width as f64 / s, i.height as f64 / s) })
+		}) else {
+			return;
+		};
 		let Some((l, t, r, b, _)) = work_area(&app, Some(&win)) else { return };
-		let s = pl.scale;
+		let (fw, fh) = frame(&win);
 		let (w, h) = (w.max(MIN_W), h.max(MIN_H));
-		// Lay out the client rect the window will really have (asked + surplus).
-		let (x, y, _, _) = resized(pl.client, (l, t, r, b), w * s + pl.surplus.0, h * s + pl.surplus.1);
-		tracing::debug!(client = ?pl.client, surplus = ?pl.surplus, off = ?pl.pos_off, to = ?(x, y, w, h), "pip resize");
-		set_asked(win.label(), w, h);
+		let rect = (g.pos.0, g.pos.1, g.pos.0 + g.asked.0 * s + fw, g.pos.1 + g.asked.1 * s + fh);
+		let (x, y, _, _) = resized(rect, (l, t, r, b), w * s + fw, h * s + fh);
+		tracing::debug!(?g, frame = ?(fw, fh), to = ?(x, y, w, h), "pip resize");
+		set_geom(&label, Geom { pos: (x, y), asked: (w, h) });
 		let _ = win.set_size(tauri::LogicalSize::new(w, h));
-		let _ = win.set_position(tauri::PhysicalPosition::new((x + pl.pos_off.0).round() as i32, (y + pl.pos_off.1).round() as i32));
+		let _ = win.set_position(tauri::PhysicalPosition::new(x.round() as i32, y.round() as i32));
 	});
 	Ok(())
 }
 
 /// A PiP was dragged and let go: within `SNAP` of a corner, it snaps into it. Returns where it
-/// ended up (logical x, y, w, h — position as `set_position` takes it, size as asked) so the next
-/// PiP opens there.
+/// ended up (logical x, y in `set_position` terms; w, h = the asked client size) so the next PiP
+/// opens there.
 #[tauri::command]
 pub(crate) fn pip_snap(app: AppHandle, window: WebviewWindow) -> Option<[f64; 4]> {
 	const SNAP: f64 = 48.0;
-	let pl = place_of(&window)?;
+	let label = window.label().to_string();
 	let (l, t, r, b, s) = work_area(&app, Some(&window))?;
-	let (cx, cy, cr, cb) = pl.client;
-	let (w, h) = (cr - cx, cb - cy);
-	let (mut x, mut y) = (cx, cy);
+	let (mut x, mut y) = set_position_origin(&window)?;
+	let asked = geom(&label).map(|g| g.asked).or_else(|| {
+		let i = window.inner_size().ok()?;
+		Some((i.width as f64 / s, i.height as f64 / s))
+	})?;
+	let (fw, fh) = frame(&window);
+	let (w, h) = (asked.0 * s + fw, asked.1 * s + fh);
+	let (x0, y0) = (x, y);
 	let m = MARGIN * s;
 	let near = |a: f64, b: f64| (a - b).abs() <= SNAP * s;
 	if near(x, l + m) || x < l + m {
@@ -508,12 +523,11 @@ pub(crate) fn pip_snap(app: AppHandle, window: WebviewWindow) -> Option<[f64; 4]
 	} else if near(y + h, b - m) || y + h > b - m {
 		y = b - m - h;
 	}
-	let (px, py) = (x + pl.pos_off.0, y + pl.pos_off.1);
-	if (x, y) != (cx, cy) {
-		let _ = window.set_position(tauri::PhysicalPosition::new(px.round() as i32, py.round() as i32));
+	if (x, y) != (x0, y0) {
+		let _ = window.set_position(tauri::PhysicalPosition::new(x.round() as i32, y.round() as i32));
 	}
-	let asked = GEOM.lock().unwrap().as_ref()?.get(window.label()).map(|g| g.asked)?;
-	Some([px / s, py / s, asked.0, asked.1])
+	set_geom(&label, Geom { pos: (x, y), asked });
+	Some([x / s, y / s, asked.0, asked.1])
 }
 
 #[cfg(test)]
