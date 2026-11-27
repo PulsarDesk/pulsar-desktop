@@ -21,6 +21,7 @@ use std::sync::Mutex;
 
 pub mod decode; // Media Foundation DXVA decode (Annex-B AU → NV12 ID3D11Texture2D)
 pub mod egui_paint; // minimal D3D11 painter for the egui overlay
+mod menu; // the Pulsar menu in its own window next to a picture-in-picture session
 pub mod present; // NV12 → swapchain RGB via ID3D11VideoProcessor (letterbox)
 mod fsr; // FSR 1 upscale (EASU + RCAS) after the VideoProcessor (present.rs)
 pub mod hdr; // HDR10 (P010) present: PQ pass-through on an HDR monitor, else tone-mapped (present.rs)
@@ -1026,7 +1027,7 @@ fn resolve_vk(wp: WPARAM, lp: LPARAM) -> u16 {
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
 	use windows::Win32::UI::WindowsAndMessaging::{
 		WM_CAPTURECHANGED, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-		WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS, WM_SYSKEYDOWN, WM_SYSKEYUP,
+		WM_SETFOCUS, WM_SYSKEYDOWN, WM_SYSKEYUP,
 	};
 	// ---- Keyboard (system-key capture) ---------------------------------------------
 	// While control is engaged this child holds the keyboard focus (see event_loop), so the
@@ -1241,48 +1242,59 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
 			}
 		}
 	}
-	// Only collect input while the overlay is open (we hold mouse capture then).
-	if OPEN.load(Ordering::SeqCst) {
-		let mut ev = EGUI_EVENTS.lock().unwrap();
-		let m = egui::Modifiers::default();
-		match msg {
-			WM_MOUSEMOVE => {
-				let p = lparam_xy(lp);
-				*POINTER.lock().unwrap() = (p.x, p.y);
-				ev.push(egui::Event::PointerMoved(p));
-			}
-			WM_LBUTTONDOWN | WM_LBUTTONUP => {
-				let p = lparam_xy(lp);
-				ev.push(egui::Event::PointerButton {
-					pos: p,
-					button: egui::PointerButton::Primary,
-					pressed: msg == WM_LBUTTONDOWN,
-					modifiers: m,
-				});
-			}
-			WM_RBUTTONDOWN | WM_RBUTTONUP => {
-				let p = lparam_xy(lp);
-				ev.push(egui::Event::PointerButton {
-					pos: p,
-					button: egui::PointerButton::Secondary,
-					pressed: msg == WM_RBUTTONDOWN,
-					modifiers: m,
-				});
-			}
-			WM_MOUSEWHEEL => {
-				let delta = ((wp.0 >> 16) & 0xffff) as i16 as f32 / 120.0;
-				ev.push(egui::Event::MouseWheel {
-					unit: egui::MouseWheelUnit::Line,
-					delta: egui::vec2(0.0, delta),
-					phase: egui::TouchPhase::Move,
-					source: egui::MouseWheelSource::Wheel,
-					modifiers: m,
-				});
-			}
-			_ => {}
-		}
+	// Only collect input while the overlay is open (we hold mouse capture then) — and drawn here:
+	// a picture-in-picture session's menu lives in its own window (menu.rs), which feeds it.
+	if OPEN.load(Ordering::SeqCst) && !crate::overlay::pip_on() {
+		push_pointer(msg, wp, lp);
 	}
 	unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
+}
+
+/// Mouse message → egui event for the open overlay (the video window's, or the PiP menu
+/// window's). True when it was one.
+fn push_pointer(msg: u32, wp: WPARAM, lp: LPARAM) -> bool {
+	use windows::Win32::UI::WindowsAndMessaging::{
+		WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP,
+	};
+	let mut ev = EGUI_EVENTS.lock().unwrap();
+	let m = egui::Modifiers::default();
+	match msg {
+		WM_MOUSEMOVE => {
+			let p = lparam_xy(lp);
+			*POINTER.lock().unwrap() = (p.x, p.y);
+			ev.push(egui::Event::PointerMoved(p));
+		}
+		WM_LBUTTONDOWN | WM_LBUTTONUP => {
+			let p = lparam_xy(lp);
+			ev.push(egui::Event::PointerButton {
+				pos: p,
+				button: egui::PointerButton::Primary,
+				pressed: msg == WM_LBUTTONDOWN,
+				modifiers: m,
+			});
+		}
+		WM_RBUTTONDOWN | WM_RBUTTONUP => {
+			let p = lparam_xy(lp);
+			ev.push(egui::Event::PointerButton {
+				pos: p,
+				button: egui::PointerButton::Secondary,
+				pressed: msg == WM_RBUTTONDOWN,
+				modifiers: m,
+			});
+		}
+		WM_MOUSEWHEEL => {
+			let delta = ((wp.0 >> 16) & 0xffff) as i16 as f32 / 120.0;
+			ev.push(egui::Event::MouseWheel {
+				unit: egui::MouseWheelUnit::Line,
+				delta: egui::vec2(0.0, delta),
+				phase: egui::TouchPhase::Move,
+				source: egui::MouseWheelSource::Wheel,
+				modifiers: m,
+			});
+		}
+		_ => return false,
+	}
+	true
 }
 
 /// The D3D11 device + swapchain + child window + the decode→present chain.
@@ -1363,6 +1375,8 @@ struct Renderer {
 	// egui overlay (same overlay.rs UI as Linux), painted on the swapchain after the video.
 	egui_ctx: egui::Context,
 	painter: Option<egui_paint::EguiPaint>,
+	// The Pulsar menu's own window while a picture-in-picture session has it open (menu.rs).
+	menu: Option<menu::MenuWin>,
 	ostate: crate::overlay::OverlayState,
 	// Frame-persistent overlay UI state (current page, chat composer, local file pane).
 	ov_ui: crate::overlay::UiState,
@@ -1400,6 +1414,7 @@ impl Renderer {
 			held_back,
 			pace_q,
 			painter,
+			menu,
 			cursor_tex,
 			ostate,
 			ov_ui,
@@ -1408,7 +1423,7 @@ impl Renderer {
 			..
 		} = self;
 		// Views and textures of the back buffer first, the swapchain last.
-		drop((painter, cursor_tex, present, decoder, last_nv12, held_back, pace_q, rtv));
+		drop((menu, painter, cursor_tex, present, decoder, last_nv12, held_back, pace_q, rtv));
 		drop(swap);
 		// SAFETY: the immediate context of this thread's device; both calls take no arguments.
 		unsafe {
@@ -1521,6 +1536,7 @@ impl Renderer {
 			cursor_dims: (0.0, 0.0),
 			egui_ctx,
 			painter,
+			menu: None,
 			ostate,
 			ov_ui: Default::default(),
 			was_open: false,
@@ -1559,9 +1575,29 @@ impl Renderer {
 			}
 			self.was_open = open;
 		}
+		// A picture-in-picture session's menu is drawn in its own window beside the PiP (menu.rs);
+		// the PiP itself keeps showing the video with the closed-state chrome.
+		let pip_menu = open && crate::overlay::pip_on();
+		if !pip_menu {
+			if let Some(m) = self.menu.as_mut() {
+				m.hide();
+			}
+		}
 		if !open {
 			self.paint_closed();
 			return;
+		}
+		if pip_menu {
+			self.paint_closed();
+			if self.menu.is_none() {
+				match menu::MenuWin::new(&self.device, self.hwnd, overlay_ppp()) {
+					Ok(m) => self.menu = Some(m),
+					Err(e) => eprintln!("pulsar-render(win): PiP menu window failed: {e}"),
+				}
+			}
+			if let Some(m) = self.menu.as_mut() {
+				m.show(&self.device, self.hwnd, overlay_ppp());
+			}
 		}
 		self.apply_caps_seed();
 		self.sync_cursor_tex();
@@ -1569,7 +1605,22 @@ impl Renderer {
 		let Some(painter) = self.painter.as_mut() else {
 			return;
 		};
-		let Some(rtv) = self.rtv.clone() else { return };
+		// Where the menu is drawn: the PiP menu window, or this window over the video.
+		let (rtv, target_w, target_h) = match self.menu.as_ref().filter(|_| pip_menu) {
+			Some(m) => match m.rtv.clone() {
+				Some(r) => (r, m.width, m.height),
+				None => return,
+			},
+			None => match self.rtv.clone() {
+				Some(r) => (r, self.width, self.height),
+				None => return,
+			},
+		};
+		if pip_menu {
+			// A fresh surface each frame (flip-model back buffers are undefined after Present).
+			let c = [0.05f32, 0.05, 0.07, 1.0];
+			self.context.ClearRenderTargetView(&rtv, &c);
+		}
 
 		// Live stats: self-measured by tick_fps (fps/decode/mbps) — or stdin `stat …`
 		// if the app ever sends one. The latency tile prefers the keepalive RTT.
@@ -1608,10 +1659,7 @@ impl Renderer {
 		let raw = egui::RawInput {
 			screen_rect: Some(egui::Rect::from_min_size(
 				egui::pos2(0.0, 0.0),
-				egui::vec2(
-					self.width as f32 / overlay_ppp(),
-					self.height as f32 / overlay_ppp(),
-				),
+				egui::vec2(target_w as f32 / overlay_ppp(), target_h as f32 / overlay_ppp()),
 			)),
 			events,
 			..Default::default()
@@ -1670,10 +1718,15 @@ impl Renderer {
 			&self.device,
 			&self.context,
 			&rtv,
-			[self.width, self.height],
+			[target_w, target_h],
 			self.egui_ctx.pixels_per_point(),
 			&prims,
 		);
+		if pip_menu {
+			if let Some(m) = self.menu.as_ref() {
+				m.present();
+			}
+		}
 	}
 
 	/// (Re)upload the side-channel cursor texture when a new `cursorimg` arrived.
