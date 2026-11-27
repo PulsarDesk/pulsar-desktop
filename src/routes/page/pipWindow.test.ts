@@ -82,6 +82,19 @@ describe('picture-in-picture window (issue #18)', () => {
 		expect(pw.grown).toBe(true);
 	});
 
+	it('another Pulsar window taking the input ends it', async () => {
+		let owns = true;
+		const deps = { restore: vi.fn(), takeControl: vi.fn(), playId: () => 7, ownsInput: () => owns, engaged: () => true };
+		const pw = new PipWindow(deps);
+		pw.down(press());
+		pw.up(press());
+		await vi.advanceTimersByTimeAsync(300);
+		expect(pw.active).toBe(true);
+		owns = false;
+		await vi.advanceTimersByTimeAsync(600);
+		expect(pw.active).toBe(false);
+	});
+
 	it('a double click brings the session back instead', async () => {
 		const { pw, deps } = make();
 		pw.down(press());

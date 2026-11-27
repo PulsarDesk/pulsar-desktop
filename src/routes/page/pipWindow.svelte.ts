@@ -19,6 +19,8 @@ import { api, isTauri, onChatMsg, onPipHover, onPipPress, onPipRestore } from '#
 import { ui, saveUi } from '#lib/settings.svelte.js';
 import { myLabel } from './tabWindows.svelte';
 
+const WINDOWS = typeof navigator !== 'undefined' && /Windows/i.test(navigator.userAgent);
+
 /** Height of the control bar shown while grown (CSS px). */
 export const PIP_BAR_H = 34;
 const HOVER_MS = 400;
@@ -93,7 +95,7 @@ export class PipWindow {
 		// moves the focus into the renderer child (still ours). The watch below then ends it once
 		// neither holds.
 		await w.onFocusChanged(({ payload: focused }) => {
-			if (!focused && !this.#deps.engaged()) this.deactivate();
+			if (!focused && this.#letGo()) this.deactivate();
 		});
 		// Resized by hand (not by us, not while grown): that is its size now.
 		await w.onResized(async () => {
@@ -224,6 +226,16 @@ export class PipWindow {
 
 	#activeWatch: ReturnType<typeof setInterval> | undefined;
 
+	/** The PiP is no longer in use: another Pulsar session window took the input, or the focus
+	 * left this window. On Windows a captured session moves the focus into the video's child
+	 * window (still ours), so there the capture keeps it active; on Linux / macOS the video
+	 * passes the pointer through and the focus stays in this webview. */
+	#letGo(): boolean {
+		if (!this.#deps.ownsInput()) return true;
+		if (typeof document === 'undefined' || document.hasFocus()) return false;
+		return !(WINDOWS && this.#deps.engaged());
+	}
+
 	/** Back to passive (the focus went elsewhere and nothing is captured). */
 	deactivate() {
 		clearInterval(this.#activeWatch);
@@ -236,10 +248,9 @@ export class PipWindow {
 		this.active = true;
 		this.#grow();
 		clearInterval(this.#activeWatch);
-		if (typeof document !== 'undefined')
-			this.#activeWatch = setInterval(() => {
-				if (!document.hasFocus() && !this.#deps.engaged()) this.deactivate();
-			}, 500);
+		this.#activeWatch = setInterval(() => {
+			if (this.#letGo()) this.deactivate();
+		}, 500);
 		void (async () => {
 			if (isTauri) {
 				const { getCurrentWindow } = await import('@tauri-apps/api/window');
