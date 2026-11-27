@@ -84,6 +84,8 @@
 	"tools.file": "Pick + send file",
 	"tools.reverse": "Reverse direction (they connect to me)",
 	"tools.fullscreen": "Toggle fullscreen",
+	"tools.pin": "Keep on top",
+	"info.pin": "Keeps this Pulsar window above other apps (the window, with all its tabs). Turn the feature off in Settings → General.",
 	"chat.empty": "No messages in this session yet",
 	"chat.placeholder": "Type a message…",
 	"chat.new": "New",

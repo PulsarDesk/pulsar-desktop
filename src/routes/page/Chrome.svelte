@@ -32,6 +32,12 @@
 		 *  Settings / the controllers popup from the bar. */
 		onOpenSettings?: () => void;
 		onOpenControllers?: () => void;
+		/** "Keep on top" (issue #18, window-level): this window is pinned above other apps. */
+		pinned?: boolean;
+		/** Pin / unpin this window. Absent = no pin button (feature off in Settings). */
+		onTogglePin?: () => void;
+		/** Linux Wayland: the desktop may ignore keep-on-top (the tooltip says so). */
+		pinMaybeIgnored?: boolean;
 	};
 	let {
 		title,
@@ -45,6 +51,9 @@
 		onToggleFullscreen,
 		onUpdate,
 		onOpenSettings,
+		pinned = false,
+		onTogglePin,
+		pinMaybeIgnored = false,
 		onOpenControllers
 	}: Props = $props();
 
@@ -149,6 +158,8 @@
 <!-- App toolbar (the OS now draws the title bar + window controls + drag/resize). -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="chrome" data-tauri-drag-region onmousedown={onBarDown}>
+	<!-- The version sits on the left: the right group grows with every new button. -->
+	<span class="mono ver">{ver ? `Pulsar v${ver}` : 'Pulsar'}</span>
 	<div class="ctitle">{title}</div>
 	<div class="cright">
 		{#if update.available}
@@ -201,6 +212,21 @@
 				<Icon name="settings" size={16} />
 			</button>
 		{/if}
+		{#if onTogglePin && !fullscreen}
+			<!-- "Keep on top" (issue #18): the window, with all its tabs. Hidden in fullscreen
+			     (the pin survives it and comes back on leaving). -->
+			<button
+				class="game-btn"
+				class:on={pinned}
+				use:navItem={gaming}
+				title={(pinned ? t('chrome.unpin') : t('chrome.pin')) + (pinMaybeIgnored ? ' — ' + t('chrome.pinWayland') : '')}
+				aria-label={t('chrome.pin')}
+				aria-pressed={pinned}
+				onclick={() => onTogglePin()}
+			>
+				<Icon name="pin" size={16} />
+			</button>
+		{/if}
 		{#if onToggleFullscreen}
 			<button
 				class="game-btn"
@@ -230,7 +256,6 @@
 			<Icon name="gaming" size={16} />
 		</button>
 		{/if}
-		<span class="mono ver">{ver ? `Pulsar v${ver}` : 'Pulsar'}</span>
 		{#if isTauri}
 			<div class="winctl">
 				<button class="wc" onclick={() => winCtl('min')} title={t('chrome.minimize')} aria-label={t('chrome.minimize')}>
@@ -276,9 +301,16 @@
 		gap: 10px;
 		z-index: 1;
 	}
-	.cright .ver {
+	.ver {
 		font-size: 11.5px;
 		color: var(--text-faint);
+		/* Over the drag region: never steal the title-bar drag. */
+		pointer-events: none;
+		z-index: 1;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		max-width: 22%;
 	}
 	.upd {
 		position: relative;

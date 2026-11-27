@@ -115,6 +115,7 @@ mod tabwin;
 mod toast;
 mod twofa;
 mod ui_start;
+mod winpin;
 mod pairing;
 mod pkg_update;
 mod update_guard;
@@ -710,7 +711,7 @@ pub fn run() {
 				}
 			}
 			// Native fullscreen (set_fullscreen) never marks the main window topmost, and
-			// set_window_fullscreen already clears any stray always-on-top on exit, so this
+			// set_window_fullscreen re-applies the window's own pin on exit (winpin.rs), so this
 			// arm no longer manages fullscreen z-order - it only tracks per-window focus below.
 			WindowEvent::Moved(_) if tabwin::is_tab_window(window.label()) => {
 				tabwin::note_moved(window.app_handle(), window.label());
@@ -763,6 +764,8 @@ pub fn run() {
 						}
 					}
 				}
+				// A pinned window that is gone must not stay in the pin set.
+				winpin::forget(window.label());
 				// Deny the pending auth request if an approval popup was closed by the OS.
 				let label = window.label();
 				if let Some(id_str) = label.strip_prefix("approve-") {
@@ -922,6 +925,11 @@ pub fn run() {
 			tabwin::tab_take_handoff,
 			tabwin::tab_detach,
 			tabwin::tab_move,
+			winpin::window_pin_set,
+			winpin::window_pin_get,
+			winpin::play_pin_set,
+			winpin::set_window_pin_enabled,
+			winpin::window_pin_maybe_ignored,
 			toast::toast_list,
 			toast::toast_open,
 			toast::toast_close,

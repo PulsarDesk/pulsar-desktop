@@ -1169,6 +1169,8 @@
 				}
 				case 'reverse': reverse(); break;
 				case 'fullscreen': onToggleFullscreen(); break;
+				// Tools → "Keep on top" (issue #18): pins the window showing this session.
+				case 'pin': api.playPinSet(playId, val === 'on').catch(() => {}); break;
 				// Overlay "Ekran uyarlama" (screen adaptation): `ov set adapt <w>x<h>` turns it on
 				// with the pane's pixel size, `ov set adapt off` turns it off. The host switches the
 				// captured monitor to the best-fit mode (and reverts on exit).

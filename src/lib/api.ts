@@ -66,6 +66,7 @@ export {
 	onOverlayFs,
 	onOverlayFiles,
 	onWindowBlur,
+	onWindowPin,
 	onPlayEnded,
 	onPlayReady,
 	onPlayOptimizing,

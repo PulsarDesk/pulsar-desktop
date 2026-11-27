@@ -71,6 +71,21 @@ its sessions. The session never restarts:
   focused last (`input-window` event); `kbd_capture_stop(id)` only stops that session's.
 - Not movable: connecting tabs, local host-game tabs, split mode, Linux single-surface.
 
+## Keep on top (window pin, issue #18)
+
+Window-level: the main window or a tab window, with all its tabs. Settings → Genel → "Üstte tut"
+(`ui.windowPin`, default on; pushed with `set_window_pin_enabled` at start and on change).
+
+- Controls: the title-bar pin (`Chrome.svelte`, left of fullscreen; hidden in fullscreen, absent
+  while the setting is off) and the Pulsar menu's Tools row (`overlay.rs` `pin_row`, both modes;
+  `pin <available> <on>` in, `ov set pin on|off` out → `play_pin_set`). State per window lives in
+  `src-tauri/src/winpin.rs`; every change is echoed as `window-pin` (label, on) and to the
+  window's renderers. Frontend: `routes/page/windowPin.svelte.ts`.
+- Leaving fullscreen re-applies the pin (`winpin::reapply` in `set_window_fullscreen`).
+- A tab torn off a pinned window opens pinned (`tab_detach`). Not remembered across restarts.
+- Setting off: every pinned window is released, `window_pin_set(true)` is refused.
+- Linux Wayland (XWayland): the compositor may ignore keep-above; the tooltip says so.
+
 ## Theming
 
 Tokens live in `src/app.css` (ported from `../design/project/assets/tokens.css`, which has **no

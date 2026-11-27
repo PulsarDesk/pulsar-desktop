@@ -697,9 +697,10 @@ pub(crate) fn set_window_fullscreen(
 				let _ = w.unmaximize();
 			}
 		}
-		// Self-heal any stray always-on-top the old fullscreen path could have left set.
+		// Leaving fullscreen: the window's own pin ("Keep on top", winpin.rs) decides — this
+		// also self-heals any stray always-on-top the old fullscreen path could have left set.
 		if !on {
-			let _ = w.set_always_on_top(false);
+			crate::winpin::reapply(&w);
 		}
 		let _ = w.set_fullscreen(on);
 		let mut maximized = false;

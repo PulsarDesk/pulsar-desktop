@@ -224,6 +224,10 @@
 	</div>
 {/if}
 <div class="srow">
+	<div class="st"><b>{t('settings.windowPin')}</b><span>{t('settings.windowPinDesc')}</span></div>
+	<button class="toggle" aria-label={t('settings.windowPin')} class:on={ui.windowPin} aria-pressed={ui.windowPin} onclick={() => { ui.windowPin = !ui.windowPin; saveUi(); api.setWindowPinEnabled(ui.windowPin).catch(() => {}); }}><span class="knob"></span></button>
+</div>
+<div class="srow">
 	<div class="st"><b>{t('settings.tray')}</b><span>{t('settings.trayDesc')}</span></div>
 	<button class="toggle" aria-label={t('settings.tray')} class:on={ui.tray} aria-pressed={ui.tray} onclick={() => { ui.tray = !ui.tray; saveUi(); api.setTray(ui.tray).catch(() => {}); }}><span class="knob"></span></button>
 </div>

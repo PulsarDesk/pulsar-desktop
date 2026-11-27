@@ -525,6 +525,9 @@ fn stdin_control() {
 			crate::overlay::set_auto_adj(rest.trim() == "1");
 		} else if let Some(rest) = l.strip_prefix("ptrfree ") {
 			crate::overlay::set_ptr_free(rest.trim() == "1");
+		} else if let Some(rest) = l.strip_prefix("pin ") {
+			// "Keep on top" (issue #18): `pin <available> <on>`.
+			crate::overlay::pin_line(rest);
 		} else if let Some(rest) = l.strip_prefix("hostptr ") {
 			crate::overlay::host_ptr_line(rest);
 		} else if let Some(rest) = l.strip_prefix("hostptrshow ") {
@@ -3009,6 +3012,7 @@ fn apply_ov_cmd(ostate: &mut crate::overlay::OverlayState, c: crate::overlay::Ov
 				"fit" => present::set_fit(&val),
 				"msens" => crate::overlay::set_mouse_sens(&val),
 				"ptrfree" => crate::overlay::set_ptr_free(val == "on"),
+				"pin" => crate::overlay::set_pin_on(val == "on"),
 				"autoadj" => crate::overlay::set_auto_adj(val == "on"),
 				"hostptr" => crate::overlay::set_host_ptr_show(val == "on"),
 				// Upscaling picked in the menu: applied now, forwarded for the app to save.

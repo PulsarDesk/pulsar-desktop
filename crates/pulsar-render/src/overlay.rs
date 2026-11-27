@@ -593,6 +593,30 @@ pub fn ptr_free() -> bool {
 	PTR_FREE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// "Keep on top" (issue #18): `pin <available 0|1> <on 0|1>` from the app. Available = the
+/// feature is on in Settings (off hides the Tools row). The row flips `on` optimistically and
+/// emits `ov set pin on|off`; the app pins the window showing this session and echoes the truth.
+static PIN_AVAIL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static PIN_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn pin_line(rest: &str) {
+	let mut it = rest.split_whitespace();
+	PIN_AVAIL.store(it.next() == Some("1"), std::sync::atomic::Ordering::Relaxed);
+	PIN_ON.store(it.next() == Some("1"), std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn set_pin_on(on: bool) {
+	PIN_ON.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn pin_avail() -> bool {
+	PIN_AVAIL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn pin_on() -> bool {
+	PIN_ON.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// "Automatic adjustment" (the Streaming section; `autoadj 0|1` from the app, which owns it): on = the
 /// adaptive controller moves the bitrate / resolution / fps with the link; off = the picks stay
 /// fixed (an automatic bitrate = the measured good rate, shown on the bitrate row). The row flips
@@ -2428,15 +2452,27 @@ fn draw_audio_apps(ui: &mut egui::Ui, input: RowsIn<'_>, cmds: &mut Vec<OverlayC
 /// too (they were plain mouse buttons). Chat + the file manager have their own native views.
 fn draw_tools(ui: &mut egui::Ui, mode: Mode, input: RowsIn<'_>, cmds: &mut Vec<OverlayCmd>) {
 	ui.spacing_mut().item_spacing.y = ROW_GAP;
+	let onoff = [("on", t("on")), ("off", t("off"))];
+	// "Keep on top" (window pin, issue #18): the last row in both modes, while the feature is
+	// on in Settings.
+	let pin_row = |rows: &mut Rows<'_>, ui: &mut egui::Ui, i: usize, cmds: &mut Vec<OverlayCmd>| {
+		let cur = if pin_on() { "on" } else { "off" };
+		if let Some(v) = rows.choice(ui, i, t("tools.pin"), cur, &onoff, Some(t("info.pin"))) {
+			set_pin_on(v == "on");
+			cmds.push(OverlayCmd::Set("pin", v));
+		}
+	};
 	if mode == Mode::Game {
-		let mut rows = Rows::new(1, input);
+		let mut rows = Rows::new(1 + usize::from(pin_avail()), input);
 		if rows.action(ui, 0, t("tools.fullscreen"), CYAN, true) {
 			cmds.push(OverlayCmd::Set("fullscreen", "1".into()));
 		}
+		if pin_avail() {
+			pin_row(&mut rows, ui, 1, cmds);
+		}
 		return;
 	}
-	let mut rows = Rows::new(5, input);
-	let onoff = [("on", t("on")), ("off", t("off"))];
+	let mut rows = Rows::new(5 + usize::from(pin_avail()), input);
 	let sync = if clip_sync() { "on" } else { "off" };
 	if let Some(v) = rows.choice(ui, 0, t("tools.clipsync"), sync, &onoff, None) {
 		set_clip_sync(v == "on");
@@ -2454,6 +2490,9 @@ fn draw_tools(ui: &mut egui::Ui, mode: Mode, input: RowsIn<'_>, cmds: &mut Vec<O
 	}
 	if rows.action(ui, 4, t("tools.fullscreen"), CYAN, true) {
 		cmds.push(OverlayCmd::Set("fullscreen", "1".into()));
+	}
+	if pin_avail() {
+		pin_row(&mut rows, ui, 5, cmds);
 	}
 }
 
@@ -4891,6 +4930,22 @@ mod rows_tests {
 		for (_, _, v) in categories(Mode::Game) {
 			assert!(has_rows(*v), "every game-mode section is made of rows");
 		}
+	}
+
+	#[test]
+	fn keep_on_top_is_a_tools_row_while_the_app_offers_it() {
+		// Issue #18: `pin 1 0` = the feature is on, the window is not pinned.
+		pin_line("1 0");
+		let st = OverlayState { open: true, mode: Mode::Game, ..OverlayState::default() };
+		let (ctx, mut ui) = opened(View::Tools, &st);
+		press(&ctx, &st, &mut ui, egui::Key::ArrowDown);
+		assert_eq!(press(&ctx, &st, &mut ui, egui::Key::Enter), vec![("pin", "on".to_string())]);
+		assert!(pin_on(), "optimistic: the row shows it at once");
+		// Turned off in Settings: the row is gone, game mode is back to fullscreen alone.
+		pin_line("0 0");
+		let (ctx, mut ui) = opened(View::Tools, &st);
+		press(&ctx, &st, &mut ui, egui::Key::ArrowDown);
+		assert_eq!(press(&ctx, &st, &mut ui, egui::Key::Enter), vec![("fullscreen", "1".to_string())]);
 	}
 
 	#[test]

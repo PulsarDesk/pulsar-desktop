@@ -629,6 +629,8 @@ pub fn run() {
 					}
 				}
 				Some("ptrfree") => crate::overlay::set_ptr_free(it.next() == Some("1")),
+				// "Keep on top" (issue #18): `pin <available> <on>`.
+				Some("pin") => crate::overlay::pin_line(&it.collect::<Vec<_>>().join(" ")),
 				// "Otomatik ayar" state from the app (every stats window + on a change).
 				Some("autoadj") => crate::overlay::set_auto_adj(it.next() == Some("1")),
 				// Host pointer marker (issue #7): `hostptr 1 x y` / `hostptr 0`, the label name,
@@ -2527,6 +2529,7 @@ fn emit_cmd(state: &mut OverlayState, c: OverlayCmd) {
 				"fit" => video::set_fit(&val),
 				"msens" => crate::overlay::set_mouse_sens(&val),
 				"ptrfree" => crate::overlay::set_ptr_free(val == "on"),
+				"pin" => crate::overlay::set_pin_on(val == "on"),
 				"autoadj" => crate::overlay::set_auto_adj(val == "on"),
 				"hostptr" => crate::overlay::set_host_ptr_show(val == "on"),
 				"upscale" => crate::gl_fsr::set_upscale(&val),

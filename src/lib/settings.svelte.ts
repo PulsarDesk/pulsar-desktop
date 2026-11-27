@@ -136,6 +136,9 @@ export interface UiSettings {
 	/** Allow more than one session to the same device (same host, mode and game): a repeat
 	 * connect opens another session instead of switching to the open one. Off by default. */
 	duplicateSessions: boolean;
+	/** "Keep on top" (issue #18): the title bar's pin and the Pulsar menu's row keep a window
+	 * above other apps. On by default; off hides both and releases every pinned window. */
+	windowPin: boolean;
 	/** Session status bar under the video (issue #5). Off by default. */
 	statusBar: boolean;
 	/** Which facts the status bar shows (`StatusBar.svelte` STATUS_FIELDS). */
@@ -295,6 +298,7 @@ const DEFAULTS: UiSettings = {
 	hostCursor: true,
 	duplicateSessions: false,
 	upscale: 'auto',
+	windowPin: true,
 	statusBar: false,
 	// The always-on stats HUD's set (codec · fps · latency · decode · bitrate).
 	statusFields: ['codec', 'fps', 'latency', 'decode', 'bitrate'],

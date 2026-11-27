@@ -526,6 +526,17 @@ export const api = {
 	 * handler knows whether to hide-to-tray (enabled=true) or quit (enabled=false). */
 	setTray: (enabled: boolean) => invoke<void>('set_tray', { enabled }),
 	setPadWake: (enabled: boolean) => invoke<void>('set_pad_wake', { enabled }),
+	/** "Keep on top" (issue #18): pin / unpin THIS window above other apps. Resolves to the
+	 * applied state; rejects while the feature is off in Settings. */
+	windowPinSet: (on: boolean) => invoke<boolean>('window_pin_set', { on }),
+	/** Is this window pinned? (A torn-off tab window starts pinned when its source was.) */
+	windowPinGet: () => invoke<boolean>('window_pin_get'),
+	/** Pin the window showing play `id` (the Pulsar menu's "Keep on top" row). */
+	playPinSet: (id: number, on: boolean) => invoke<boolean>('play_pin_set', { id, on }),
+	/** Settings → General → "Keep on top": off releases every pinned window. */
+	setWindowPinEnabled: (enabled: boolean) => invoke<void>('set_window_pin_enabled', { enabled }),
+	/** Linux Wayland: the desktop may ignore keep-on-top (the pin's tooltip warns). */
+	windowPinMaybeIgnored: () => invoke<boolean>('window_pin_maybe_ignored'),
 	/** Background controller input (Settings → General): the pad keeps driving the host
 	 * while another app is focused. Off = the host gets a released pad. */
 	setPadBackground: (enabled: boolean) => invoke<void>('set_pad_background', { enabled }),

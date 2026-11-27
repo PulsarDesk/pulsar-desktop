@@ -64,6 +64,7 @@
 	import Controllers from '#lib/Controllers.svelte';
 	import { SessionManager } from './page/sessions.svelte';
 	import { TabWindows, isTabWin } from './page/tabWindows.svelte';
+	import { WindowPin } from './page/windowPin.svelte';
 	import { setLivePeers } from '#lib/presence.svelte.js';
 	import { setAuthDoneHandler } from '#lib/authDone.js';
 	import { sharedHostErrorKey, IS_UNIX_UI } from '#lib/sharedMode.js';
@@ -193,6 +194,8 @@
 	const sm = new SessionManager({ getMode: () => mode, onAuthDone: (target) => closePwFor(target) });
 	// Chrome-style tabs: tear a session tab off into its own window, or merge it into another.
 	const tw = new TabWindows(sm);
+	// "Keep on top" (issue #18) for this window.
+	const pin = new WindowPin();
 	// Drag-to-split (IntelliJ-style): a tab dragged over the session area highlights the half
 	// it would take (nearest edge); the middle just shows that tab. The native video is hidden
 	// meanwhile so the highlight is visible over it.
@@ -827,6 +830,7 @@
 		// is unreachable, goOnline blocks for its full timeout; a close during that window
 		// would otherwise hide-to-tray for a user who disabled it, leaving a ghost process.
 		api.setTray(ui.tray).catch(() => {});
+		api.setWindowPinEnabled(ui.windowPin).catch(() => {});
 		api.setPadWake(ui.padWake).catch(() => {});
 		api.setPadBackground(ui.padBackground).catch(() => {});
 		api.setClientAwake(ui.clientAwake).catch(() => {});
@@ -1307,6 +1311,9 @@
 				onToggleFullscreen={sm.toggleFullscreen}
 				onUpdate={openUpdate}
 				onOpenSettings={() => (splitSettingsOpen = true)}
+				pinned={pin.pinned}
+				onTogglePin={pin.available ? () => void pin.toggle() : undefined}
+				pinMaybeIgnored={pin.maybeIgnored}
 				onOpenControllers={() =>
 					sm.splitSessionMode === 'game' && assignPanes.length
 						? (showInputAssign = true)

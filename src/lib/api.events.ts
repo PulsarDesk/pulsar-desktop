@@ -207,6 +207,10 @@ export const onOverlayFs = (cb: (e: { id: number; op: string; path: string }) =>
  * file-manager WINDOW (the session supplies the peer label). Payload = play id. */
 export const onOverlayFiles = (cb: (id: number) => void) =>
 	listenTo<number>('overlay-files', (id) => cb(id));
+/** "Keep on top" (issue #18) changed for window `label` (title bar, Pulsar menu, Settings).
+ * Every window hears it: compare the label with your own. */
+export const onWindowPin = (cb: (label: string, on: boolean) => void) =>
+	listenTo<[string, boolean]>('window-pin', (p) => cb(p[0], p[1]));
 /** The Pulsar window lost focus — close the overlay so the focus-gated combo can't strand it. */
 export const onWindowBlur = (cb: () => void) => listenTo<null>('window-blur', () => cb());
 /** Client: the stream is REALLY up (first decoded frames/bitrate) — the Connecting

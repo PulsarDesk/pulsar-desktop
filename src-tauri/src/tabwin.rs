@@ -550,11 +550,15 @@ pub(crate) async fn tab_detach(
 	let (cx, cy) = cursor(&app, (sx, sy));
 	// Logical position of the new window: the grab point sits under the cursor.
 	let (x, y) = (cx / scale - grab.0, cy / scale - grab.1);
+	// A tab torn off a pinned window opens pinned too ("Keep on top", winpin.rs).
+	let pinned = crate::winpin::is_pinned(window.label());
+	crate::winpin::mark(&label, pinned);
 	let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
 	let handle = app.clone();
 	let lbl = label.clone();
 	let posted = app.run_on_main_thread(move || {
 		let built = WebviewWindowBuilder::new(&handle, &lbl, WebviewUrl::App("index.html".into()))
+			.always_on_top(pinned)
 			.initialization_script(format!("window.__TABWIN__={n};"))
 			.background_color(crate::splash::window_bg(&handle))
 			.title("Pulsar")

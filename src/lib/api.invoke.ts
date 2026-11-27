@@ -257,6 +257,15 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 			return Promise.resolve(['off', 'auto', 'fsr', 'ai', 'sgsr'] as unknown as T);
 		case 'take_pending_chat':
 			return Promise.resolve(null as unknown as T);
+		// "Keep on top" (issue #18): the mock just echoes the asked state.
+		case 'window_pin_set':
+		case 'play_pin_set':
+			return Promise.resolve(Boolean(args?.on) as unknown as T);
+		case 'window_pin_get':
+		case 'window_pin_maybe_ignored':
+			return Promise.resolve(false as unknown as T);
+		case 'set_window_pin_enabled':
+			return Promise.resolve(undefined as unknown as T);
 		case 'show_connections':
 		case 'relaunch_to_home':
 			return Promise.resolve(undefined as unknown as T);

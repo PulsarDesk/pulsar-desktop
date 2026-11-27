@@ -37,3 +37,30 @@ describe('Chrome update badge', () => {
 		update.available = false;
 	});
 });
+
+describe('Chrome keep-on-top pin (issue #18)', () => {
+	it('toggles the window pin and shows its state', async () => {
+		const onTogglePin = vi.fn();
+		render(Chrome, { props: { ...base, onToggleMode: () => {}, onTogglePin, pinned: true } });
+		const btn = screen.getByRole('button', { name: 'Üstte tut' });
+		expect(btn).toHaveAttribute('aria-pressed', 'true');
+		expect(btn).toHaveAttribute('title', 'Üstte tutmayı bırak');
+		await fireEvent.click(btn);
+		expect(onTogglePin).toHaveBeenCalledOnce();
+	});
+
+	it('is absent when the feature is off, and hidden in fullscreen', () => {
+		const { unmount } = render(Chrome, { props: { ...base, onToggleMode: () => {} } });
+		expect(screen.queryByRole('button', { name: 'Üstte tut' })).toBeNull();
+		unmount();
+		render(Chrome, {
+			props: { ...base, onToggleMode: () => {}, onTogglePin: () => {}, onToggleFullscreen: () => {}, fullscreen: true }
+		});
+		expect(screen.queryByRole('button', { name: 'Üstte tut' })).toBeNull();
+	});
+
+	it('warns on Wayland that the desktop may ignore it', () => {
+		render(Chrome, { props: { ...base, onToggleMode: () => {}, onTogglePin: () => {}, pinMaybeIgnored: true } });
+		expect(screen.getByRole('button', { name: 'Üstte tut' }).getAttribute('title')).toContain('Wayland');
+	});
+});
