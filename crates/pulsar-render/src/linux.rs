@@ -1370,6 +1370,8 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 		Ok(g) => g,
 		Err(e) => panic!("pulsar-render: GL setup failed: {e}"),
 	};
+	// The Pulsar menu's own window while a picture-in-picture session has it open.
+	let mut pip_menu_win: Option<PipMenuWin> = None;
 
 	let dpy_ptr = display.as_ptr();
 	// KMS-LEASE: fullscreen DRM-lease presenter (kms_lease.rs). While it holds a lease, video
@@ -1781,9 +1783,42 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 		let mut events: Vec<egui::Event> = Vec::new();
 		// Button edges of this batch: (X button, pressed, position in egui points).
 		let mut btns: Vec<(u32, bool, egui::Pos2)> = Vec::new();
+		// Pointer input of the PiP menu window (its own coordinates).
+		let mut menu_events: Vec<egui::Event> = Vec::new();
 		while xlib::XPending(xd) > 0 {
 			let mut ev: xlib::XEvent = std::mem::zeroed();
 			xlib::XNextEvent(xd, &mut ev);
+			if pip_menu_win.as_ref().is_some_and(|m| m.win == ev.any.window) {
+				match ev.get_type() {
+					xlib::MotionNotify => {
+						let m = ev.motion;
+						menu_events.push(egui::Event::PointerMoved(egui::pos2(m.x as f32 / ppp, m.y as f32 / ppp)));
+					}
+					xlib::ButtonPress | xlib::ButtonRelease => {
+						let b = ev.button;
+						let pos = egui::pos2(b.x as f32 / ppp, b.y as f32 / ppp);
+						let pressed = ev.get_type() == xlib::ButtonPress;
+						match b.button {
+							1 | 3 => menu_events.push(egui::Event::PointerButton {
+								pos,
+								button: if b.button == 1 { egui::PointerButton::Primary } else { egui::PointerButton::Secondary },
+								pressed,
+								modifiers: Default::default(),
+							}),
+							4 | 5 if pressed => menu_events.push(egui::Event::MouseWheel {
+								unit: egui::MouseWheelUnit::Line,
+								delta: egui::vec2(0.0, if b.button == 4 { 1.0 } else { -1.0 }),
+								phase: egui::TouchPhase::Move,
+								source: egui::MouseWheelSource::Wheel,
+								modifiers: Default::default(),
+							}),
+							_ => {}
+						}
+					}
+					_ => {}
+				}
+				continue;
+			}
 			match ev.get_type() {
 				// KMS-LEASE: XI2 raw input drives the renderer-owned pointer while leased (X's
 				// pointer coordinates no longer match the screen). Buttons 1-3 come from here,
@@ -2159,7 +2194,10 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 			}
 		};
 
-		if open {
+		// A picture-in-picture session's menu is drawn in its own window (below); the PiP keeps
+		// the video with the closed-state chrome.
+		let pip_menu = open && overlay::pip_on() && !kms.active() && !standalone;
+		if open && !pip_menu {
 			// Controller nav tokens → egui arrow/Enter/Escape keys for this frame. The overlay
 			// reads them via its own selection index (Root grid + sub-view rows).
 			{
@@ -2363,6 +2401,57 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 				*last = line;
 			}
 		}
+		// The PiP menu window: shown, placed beside the PiP and drawn while a picture-in-picture
+		// session has the menu open; hidden otherwise. Drawn on its own surface, then the video
+		// window's surface is made current again for its swap below.
+		if pip_menu {
+			if pip_menu_win.is_none() {
+				let want = ((PIP_MENU_PTS.0 * ppp) as u32, (PIP_MENU_PTS.1 * ppp) as u32);
+				pip_menu_win = PipMenuWin::new(xd, &egl, display, config, visual, depth, cmap, want.0, want.1);
+			}
+			if let Some(m) = pip_menu_win.as_mut() {
+				let top = toplevel_of(xd, parent);
+				let want = ((PIP_MENU_PTS.0 * ppp) as u32, (PIP_MENU_PTS.1 * ppp) as u32);
+				m.show(xd, if top != 0 { top } else { win }, want);
+				if egl.make_current(display, Some(m.surface), Some(m.surface), Some(g.context)).is_ok() {
+					// Never wait on this window's vsync too: the video window paces the loop.
+					egl.swap_interval(display, 0).ok();
+					g.gl.disable(glow::SCISSOR_TEST);
+					g.gl.viewport(0, 0, m.w as i32, m.h as i32);
+					g.gl.clear_color(0.05, 0.05, 0.07, 1.0);
+					g.gl.clear(glow::COLOR_BUFFER_BIT);
+					let mut events = std::mem::take(&mut menu_events);
+					for tok in NAV_IN.lock().unwrap().drain(..).collect::<Vec<String>>() {
+						events.extend(nav_events(&tok));
+					}
+					events.append(&mut KEY_IN.lock().unwrap());
+					let raw_input = egui::RawInput {
+						screen_rect: Some(egui::Rect::from_min_size(
+							egui::pos2(0.0, 0.0),
+							egui::vec2(m.w as f32 / ppp, m.h as f32 / ppp),
+						)),
+						events,
+						focused: true,
+						..Default::default()
+					};
+					let mut cmds: Vec<OverlayCmd> = Vec::new();
+					let mut full = g.egui_ctx.run_pass(raw_input, |ctx| {
+						cmds = overlay::draw(ctx, &state, &mut ov_ui);
+					});
+					for c in cmds {
+						emit_cmd(&mut state, c);
+					}
+					let prims = g.egui_ctx.tessellate(full.shapes, full.pixels_per_point);
+					g.painter.paint_and_update_textures([m.w, m.h], full.pixels_per_point, &prims, &mut full.textures_delta);
+					let _ = egl.swap_buffers(display, m.surface);
+					if egl.make_current(display, Some(g.surface), Some(g.surface), Some(g.context)).is_err() {
+						loss = Some("eglMakeCurrent (back from the PiP menu)".into());
+					}
+				}
+			}
+		} else if let Some(m) = pip_menu_win.as_mut() {
+			m.hide(xd);
+		}
 		if kms.active() {
 			// KMS-LEASE: atomic commit to the planes; paces the loop on the page flip (any
 			// failure hands the output back and the next iteration draws through X again).
@@ -2432,8 +2521,116 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 		g.painter.destroy();
 	}
 	egl.make_current(display, None, None, None).ok();
+	if let Some(m) = pip_menu_win.take() {
+		let _ = egl.destroy_surface(display, m.surface);
+		xlib::XDestroyWindow(xd, m.win);
+	}
 	xlib::XDestroyWindow(xd, win);
 	xlib::XCloseDisplay(xd);
+}
+
+/// The Pulsar menu in a window of its own, for a session shown in a picture-in-picture window
+/// (issue #18): a small PiP cannot hold the menu, so while it is open the egui overlay is drawn
+/// into this undecorated window beside the PiP (the side with room, on screen), on a second EGL
+/// surface of the same GL context; the video keeps playing in the PiP. Override-redirect: the
+/// window manager never gives it the focus (keys keep arriving over stdin, `kin …`) nor frames it.
+struct PipMenuWin {
+	win: u64,
+	surface: egl::Surface,
+	w: u32,
+	h: u32,
+	mapped: bool,
+}
+
+/// The menu window's size in egui points (the overlay panel and its frame, full height).
+const PIP_MENU_PTS: (f32, f32) = (600.0, 700.0);
+
+/// Where the menu goes (root px): beside the PiP's toplevel on the side with more room, bottom
+/// edges level, on the screen.
+unsafe fn pip_menu_place(xd: *mut xlib::Display, top: u64, w: u32, h: u32) -> (i32, i32, u32, u32) {
+	let scr = xlib::XDefaultScreen(xd);
+	let (sw, sh) = (xlib::XDisplayWidth(xd, scr), xlib::XDisplayHeight(xd, scr));
+	let mut a: xlib::XWindowAttributes = std::mem::zeroed();
+	xlib::XGetWindowAttributes(xd, top, &mut a);
+	let (mut px, mut py) = (0i32, 0i32);
+	let mut child: xlib::Window = 0;
+	xlib::XTranslateCoordinates(xd, top, xlib::XDefaultRootWindow(xd), 0, 0, &mut px, &mut py, &mut child);
+	let (w, h) = ((w as i32).min(sw), (h as i32).min(sh));
+	let (right, bottom) = (px + a.width, py + a.height);
+	const GAP: i32 = 8;
+	let x = if px >= sw - right { px - GAP - w } else { right + GAP };
+	let y = bottom - h;
+	(x.clamp(0, (sw - w).max(0)), y.clamp(0, (sh - h).max(0)), w as u32, h as u32)
+}
+
+impl PipMenuWin {
+	#[allow(clippy::too_many_arguments)]
+	unsafe fn new(
+		xd: *mut xlib::Display,
+		egl: &egl::Instance<egl::Static>,
+		display: egl::Display,
+		config: egl::Config,
+		visual: *mut xlib::Visual,
+		depth: i32,
+		cmap: xlib::Colormap,
+		w: u32,
+		h: u32,
+	) -> Option<Self> {
+		let mut swa: xlib::XSetWindowAttributes = std::mem::zeroed();
+		swa.colormap = cmap;
+		swa.background_pixel = 0;
+		swa.border_pixel = 0;
+		swa.override_redirect = xlib::True;
+		swa.event_mask = xlib::ExposureMask | xlib::ButtonPressMask | xlib::ButtonReleaseMask | xlib::PointerMotionMask;
+		let valuemask =
+			xlib::CWColormap | xlib::CWEventMask | xlib::CWBackPixel | xlib::CWBorderPixel | xlib::CWOverrideRedirect;
+		let win = xlib::XCreateWindow(
+			xd,
+			xlib::XDefaultRootWindow(xd),
+			0,
+			0,
+			w,
+			h,
+			0,
+			depth,
+			xlib::InputOutput as u32,
+			visual,
+			valuemask,
+			&mut swa,
+		);
+		if win == 0 {
+			return None;
+		}
+		match egl.create_window_surface(display, config, win as egl::NativeWindowType, None) {
+			Ok(surface) => Some(Self { win, surface, w, h, mapped: false }),
+			Err(e) => {
+				eprintln!("pulsar-render: PiP menu surface: {e}");
+				xlib::XDestroyWindow(xd, win);
+				None
+			}
+		}
+	}
+
+	/// Put it beside the PiP and show it (re-placed on every open: the PiP may have moved).
+	unsafe fn show(&mut self, xd: *mut xlib::Display, top: u64, want: (u32, u32)) {
+		let (x, y, w, h) = pip_menu_place(xd, top, want.0, want.1);
+		if !self.mapped || (w, h) != (self.w, self.h) {
+			xlib::XMoveResizeWindow(xd, self.win, x, y, w, h);
+			self.w = w;
+			self.h = h;
+		}
+		if !self.mapped {
+			xlib::XMapRaised(xd, self.win);
+			self.mapped = true;
+		}
+	}
+
+	unsafe fn hide(&mut self, xd: *mut xlib::Display) {
+		if self.mapped {
+			xlib::XUnmapWindow(xd, self.win);
+			self.mapped = false;
+		}
+	}
 }
 
 /// KMS-LEASE: put one egui frame on screen — into the overlay-plane buffer while leased (only
