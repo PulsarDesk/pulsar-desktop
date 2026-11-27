@@ -62,6 +62,7 @@ impl mi::Sink for TauriSink {
 			mi::Signal::OverlayToggle(kept) => self.app.emit("overlay-toggle", kept),
 			mi::Signal::Leave => self.app.emit("kbd-leave", ()),
 			mi::Signal::FullscreenToggle => self.app.emit("fullscreen-toggle", ()),
+			mi::Signal::Shortcut(name) => self.app.emit("shortcut", name),
 		};
 	}
 
@@ -173,6 +174,10 @@ pub fn set_pointer_lock(id: u64, on: bool) {
 
 pub fn pointer_free_changed(on: bool) {
 	mi::set_pointer_free(on);
+}
+
+pub fn shortcuts_changed(pin: u32, pip: u32) {
+	mi::set_shortcuts(pin, pip);
 }
 
 pub fn is_engaged() -> bool {

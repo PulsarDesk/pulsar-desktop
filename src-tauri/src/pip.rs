@@ -274,6 +274,7 @@ pub(crate) async fn pip_open(
 	}
 	crate::tabwin::move_video(&app, play, &label);
 	push_line(&app, play);
+	crate::winalpha::apply(&app, &label);
 	watch_hover(&app);
 	Ok(label)
 }
@@ -294,6 +295,7 @@ pub(crate) fn pip_return(app: AppHandle, window: WebviewWindow, session: serde_j
 	tracing::info!(%label, play, %home, "pip return");
 	crate::tabwin::move_video(&app, play, &home);
 	push_line(&app, play);
+	crate::winalpha::apply(&app, &home);
 	let _ = app.emit_to(&home, "pip-return", (home.clone(), play, session));
 	if let Some(w) = app.get_webview_window(&home) {
 		let _ = w.unminimize();

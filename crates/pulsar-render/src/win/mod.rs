@@ -530,6 +530,9 @@ fn stdin_control() {
 		} else if let Some(rest) = l.strip_prefix("pin ") {
 			// "Keep on top" (issue #18): `pin <available> <on>`.
 			crate::overlay::pin_line(rest);
+		} else if let Some(rest) = l.strip_prefix("opacity ") {
+			// Window opacity (issue #18): `opacity <available> <pct>` (the Tools row).
+			crate::overlay::alpha_line(rest);
 		} else if let Some(rest) = l.strip_prefix("pipwin ") {
 			// "Small window" (issue #18): `pipwin <available> <on>`.
 			crate::overlay::pip_line(rest);

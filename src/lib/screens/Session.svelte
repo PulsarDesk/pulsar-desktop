@@ -48,6 +48,7 @@
 	import { SessionInput } from './Session/input.svelte';
 	import { evdevCode } from '#lib/keymap.js';
 	import { SessionControls } from './Session/controls.svelte';
+	import { autoResFor } from './Session/autoRes';
 	import { SessionSideChannels } from './Session/sidechannels.svelte';
 	import { SessionUi } from './Session/ui.svelte';
 	import { ui, saveUi, applyCtrlSwap, type AudioQuality, type Encoder, type VideoCodec } from '#lib/settings.svelte.js';
@@ -99,6 +100,9 @@
 		pip?: boolean;
 		/** Pulsar menu → "Small window" (`ov set pip on|off`): open / leave the PiP window. */
 		onPip?: (on: boolean) => void;
+		/** The view is temporarily resized (a PiP grown on hover): resolution-follows-window
+		 * keeps its last pick meanwhile. */
+		resHold?: boolean;
 	};
 	let {
 		playId,
@@ -123,7 +127,8 @@
 		onEnd = () => {},
 		adopted = false,
 		pip = false,
-		onPip
+		onPip,
+		resHold = false
 	}: Props = $props();
 
 	// Reverse direction: ask the host to connect back to us so roles swap.
@@ -471,6 +476,54 @@
 			window.removeEventListener('resize', report);
 		};
 	});
+	// "Resolution follows the window" (Settings → Display, default on): a view smaller than the
+	// host screen asks for a smaller stream (autoRes.ts; the encoder scales, the host display
+	// mode stays). Only with resolution on Auto (a picked size wins), not in split (panes have
+	// their own sizes), not with screen adaptation (it already fits the host to the view), not
+	// while a PiP is grown on hover. Settled for 1.5 s before asking: each ask restarts the
+	// host's encoder. Turning it off (or a condition ending) goes back to the host's size.
+	let autoResSent: [number, number] = [0, 0];
+	$effect(() => {
+		const el = screenEl;
+		const on =
+			ui.autoResWindow &&
+			native &&
+			!split &&
+			controls.streamRes === 'auto' &&
+			!controls.streamAdapt &&
+			playId >= 0;
+		const host = hostDisplays[controls.streamDisplay] ?? hostDisplays[0];
+		const hostW = host?.width ?? 0;
+		const hostH = host?.height ?? 0;
+		if (resHold) return;
+		if (!on || !el) {
+			if (autoResSent[0] !== 0 && playId >= 0 && controls.streamRes === 'auto' && !controls.streamAdapt) {
+				autoResSent = [0, 0];
+				controls.setAutoRes(0, 0);
+			}
+			return;
+		}
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const send = () => {
+			const r = el.getBoundingClientRect();
+			const dpr = window.devicePixelRatio || 1;
+			const want = autoResFor(Math.round(r.width * dpr), Math.round(r.height * dpr), hostW, hostH);
+			if (want[0] === autoResSent[0] && want[1] === autoResSent[1]) return;
+			autoResSent = want;
+			controls.setAutoRes(want[0], want[1]);
+		};
+		const schedule = () => {
+			clearTimeout(timer);
+			timer = setTimeout(send, 1500);
+		};
+		const ro = new ResizeObserver(schedule);
+		ro.observe(el);
+		schedule();
+		return () => {
+			clearTimeout(timer);
+			ro.disconnect();
+		};
+	});
 	// Split pane streaming ONE host window: ask the host to fit that window to this pane's shape
 	// (screen adaptation's per-window form — the host restores the window when the session ends).
 	// Sent once the pane's size settles, and again only when it changes noticeably (a layout
@@ -747,6 +800,13 @@
 	}
 	export function pipSpeakerOn(): boolean {
 		return controls.transmitAudio;
+	}
+	/** The host's monitors and the one streamed (the PiP bar's monitor picker). */
+	export function pipMonitors(): { list: import('#lib/api.types.js').HostDisplay[]; current: number } {
+		return { list: hostDisplays, current: controls.streamDisplay };
+	}
+	export function pipSetMonitor(idx: number) {
+		controls.setMonitor(idx);
 	}
 	/** Keyboard/mouse are captured for the host (the OS hook engaged, or the canvas controls). */
 	export function pipEngaged(): boolean {
@@ -1200,6 +1260,12 @@
 				case 'pin': api.playPinSet(playId, val === 'on').catch(() => {}); break;
 				// Tools → "Small window" (issue #18): into / out of picture-in-picture.
 				case 'pip': onPip?.(val === 'on'); break;
+				// Tools → window opacity (issue #18): the window showing this session.
+				case 'opacity': {
+					const pct = Number(val);
+					if (Number.isFinite(pct)) api.playAlphaSet(playId, pct).catch(() => {});
+					break;
+				}
 				// Overlay "Ekran uyarlama" (screen adaptation): `ov set adapt <w>x<h>` turns it on
 				// with the pane's pixel size, `ov set adapt off` turns it off. The host switches the
 				// captured monitor to the best-fit mode (and reverts on exit).

@@ -10,7 +10,7 @@
 use crate::geom::{self, Rect};
 use crate::os;
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::SeqCst};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -48,6 +48,31 @@ pub enum Signal {
 	Leave,
 	/// `fullscreen-toggle`
 	FullscreenToggle,
+	/// `shortcut` "pin" / "pip": a user shortcut (Ctrl+Shift+<key>, `set_shortcuts`).
+	Shortcut(&'static str),
+}
+
+/// User shortcuts (issue #18): Ctrl+Shift+<evdev key> for "keep on top" and "small window";
+/// 0 = off. Set by the app from Settings.
+static SC_PIN: AtomicU32 = AtomicU32::new(0);
+static SC_PIP: AtomicU32 = AtomicU32::new(0);
+
+pub fn set_shortcuts(pin: u32, pip: u32) {
+	SC_PIN.store(pin, SeqCst);
+	SC_PIP.store(pip, SeqCst);
+}
+
+/// The shortcut evdev `code` triggers (with Ctrl+Shift), if any.
+fn shortcut_of(code: u32) -> Option<&'static str> {
+	if code == 0 {
+		None
+	} else if code == SC_PIN.load(SeqCst) {
+		Some("pin")
+	} else if code == SC_PIP.load(SeqCst) {
+		Some("pip")
+	} else {
+		None
+	}
 }
 
 /// Where the capture sends its output. `send` must never block (it is called on the event-tap
@@ -731,6 +756,9 @@ pub(crate) fn key_suppress(evdev: u32) -> bool {
 	}
 	let shift = K_SHIFT.load(SeqCst);
 	let ctrl = K_CTRL.load(SeqCst);
+	if shortcut_of(evdev).is_some() {
+		return ctrl && shift;
+	}
 	match evdev {
 		50 | 16 => ctrl && shift,
 		87 => (ctrl || K_META.load(SeqCst)) && shift,
@@ -808,12 +836,12 @@ fn handle_key_locked(g: &mut State, evdev: u32, down: bool, sigs: &mut Vec<Signa
 	}
 	let engaged = ENGAGED.load(SeqCst);
 	let owned = engaged || APP_FOCUSED.load(SeqCst);
-	let combo_key = matches!(evdev, 50 | 16 | 87 | 44);
+	let combo_key = matches!(evdev, 50 | 16 | 87 | 44) || shortcut_of(evdev).is_some();
 	let combo_edge = if combo_key {
 		if down {
 			let edge = g.combo_held.insert(evdev);
 			if edge {
-				let chord = ((evdev == 50 || evdev == 16) && g.ctrl && g.shift)
+				let chord = ((evdev == 50 || evdev == 16 || shortcut_of(evdev).is_some()) && g.ctrl && g.shift)
 					|| (evdev == 87 && (g.ctrl || g.meta) && g.shift)
 					|| (evdev == 44 && g.ctrl && g.alt);
 				if chord {
@@ -858,6 +886,11 @@ fn handle_key_locked(g: &mut State, evdev: u32, down: bool, sigs: &mut Vec<Signa
 	// Ctrl+Shift+F11 (or Cmd+Shift+F11) — fullscreen; control stays as it is.
 	if combo_edge && evdev == 87 && (g.ctrl || g.meta) && g.shift && owned {
 		sigs.push(Signal::FullscreenToggle);
+		return true;
+	}
+	// The user's shortcuts (keep on top / small window): control stays as it is.
+	if let Some(name) = shortcut_of(evdev).filter(|_| combo_edge && g.ctrl && g.shift && owned) {
+		sigs.push(Signal::Shortcut(name));
 		return true;
 	}
 	if !engaged {

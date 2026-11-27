@@ -53,6 +53,39 @@ pub fn pointer_free() -> bool {
 	POINTER_FREE.load(std::sync::atomic::Ordering::SeqCst)
 }
 
+/// The user's shortcuts (issue #18, Settings → General): Ctrl+Shift+<evdev key> toggles "keep on
+/// top" / sends the session to a small window. 0 = off. Caught like the built-in combos (engaged
+/// or merely Pulsar focused) and emitted as `shortcut` "pin" / "pip".
+static SC_PIN: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+static SC_PIP: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+
+pub fn set_shortcuts(pin: u16, pip: u16) {
+	SC_PIN.store(pin, std::sync::atomic::Ordering::SeqCst);
+	SC_PIP.store(pip, std::sync::atomic::Ordering::SeqCst);
+	#[cfg(target_os = "macos")]
+	mac::shortcuts_changed(pin as u32, pip as u32);
+}
+
+/// The shortcut evdev `code` triggers (with Ctrl+Shift), if any.
+pub fn shortcut_of(code: u16) -> Option<&'static str> {
+	use std::sync::atomic::Ordering::SeqCst;
+	if code == 0 {
+		None
+	} else if code == SC_PIN.load(SeqCst) {
+		Some("pin")
+	} else if code == SC_PIP.load(SeqCst) {
+		Some("pip")
+	} else {
+		None
+	}
+}
+
+/// Settings → General → the two shortcuts' keys (evdev codes, 0 = off).
+#[tauri::command]
+pub(crate) fn set_window_shortcuts(pin: u16, pip: u16) {
+	set_shortcuts(pin, pip);
+}
+
 pub fn set_session_remote(remote: bool) {
 	SESSION_REMOTE.store(remote, std::sync::atomic::Ordering::SeqCst);
 }

@@ -863,8 +863,9 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, star
 							// fire every time" bug (see `chord_mods`). Checked BEFORE the
 							// `want_suspend` gate so the overlay can also be CLOSED (and the
 							// session left) by combo while the grab is suspended.
+							let shortcut = super::shortcut_of(code);
 							if ev.value() == 1
-								&& matches!(code, KEY_M | KEY_F11 | KEY_Q | KEY_Z)
+								&& (matches!(code, KEY_M | KEY_F11 | KEY_Q | KEY_Z) || shortcut.is_some())
 								&& is_focused()
 							{
 								let (lc, ls, la) = chord_mods(&grabbed);
@@ -904,7 +905,11 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, star
 										// session; the frontend listens for `fullscreen-toggle`
 										// and flips the Tauri window fullscreen state.
 										let _ = app.emit("fullscreen-toggle", ());
-									} else {
+									} else if let Some(name) = shortcut {
+										// The user's shortcuts (issue #18): keep on top / small
+										// window. Control stays as it is.
+										let _ = app.emit("shortcut", name);
+									} else if code == KEY_Q {
 										// Leave (Ctrl+Shift+Q). Q is the reliable leave key --
 										// media-mode keyboards (e.g. Logitech MX Keys) may not
 										// emit the F-keys (F11 is fullscreen). The UI ENDS
@@ -928,10 +933,10 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, star
 							// fall through and the ctrl+shift shortcut path would forward M-down → a
 							// phantom 'm' typed on the host. Only suppress when the chord is ACTUALLY
 							// held (kernel-sourced, like the combo gate) — a BARE m/q/z still repeats.
-							if ev.value() == 2 && matches!(code, KEY_M | KEY_F11 | KEY_Q | KEY_Z) {
+							if ev.value() == 2 && (matches!(code, KEY_M | KEY_F11 | KEY_Q | KEY_Z) || shortcut.is_some()) {
 								let (lc, ls, la) = chord_mods(&grabbed);
 								let (cmod, smod, amod) = (ctrl || lc, shift || ls, lalt || la);
-								if (matches!(code, KEY_M | KEY_F11 | KEY_Q) && cmod && smod)
+								if ((matches!(code, KEY_M | KEY_F11 | KEY_Q) || shortcut.is_some()) && cmod && smod)
 									|| (code == KEY_Z && cmod && amod)
 																	{
 									continue;

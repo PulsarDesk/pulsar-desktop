@@ -73,7 +73,7 @@ mod os {
 pub use engine::{
 	app_focused, app_focused_now, arm_kiosk, capture_active, disable, enable, engage, engage_auto,
 	hover_edge, is_engaged, overlay_open, release, set_focused, set_ovbtn_frac, set_pointer_free,
-	set_pointer_lock, set_stream_stalled, set_video_frac, set_view, web_key, Arm, Out, Signal, Sink,
+	set_pointer_lock, set_shortcuts, set_stream_stalled, set_video_frac, set_view, web_key, Arm, Out, Signal, Sink,
 	View,
 };
 

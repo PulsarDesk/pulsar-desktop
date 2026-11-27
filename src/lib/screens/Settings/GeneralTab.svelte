@@ -8,6 +8,7 @@
 	import type { SharedModeStatus } from '#lib/api.types.js';
 	import { sharedErrorKey, sharedNoAccessKey } from '#lib/sharedMode.js';
 	import { checkNow } from '#lib/updater.js';
+	import { SHORTCUT_KEYS, pushShortcuts } from '#lib/windowShortcuts.js';
 	import pkg from '../../../../package.json';
 
 	// Start with the computer (+ in the background): read from the OS (it is the source of
@@ -228,8 +229,55 @@
 	<button class="toggle" aria-label={t('settings.windowPin')} class:on={ui.windowPin} aria-pressed={ui.windowPin} onclick={() => { ui.windowPin = !ui.windowPin; saveUi(); api.setWindowPinEnabled(ui.windowPin).catch(() => {}); }}><span class="knob"></span></button>
 </div>
 <div class="srow">
+	<div class="st"><b>{t('settings.opacity')}</b><span>{t('settings.opacityDesc')}</span></div>
+	<button class="toggle" aria-label={t('settings.opacity')} class:on={ui.opacity} aria-pressed={ui.opacity} onclick={() => { ui.opacity = !ui.opacity; saveUi(); api.setWindowAlphaPrefs(ui.opacity, ui.opacityDefault).catch(() => {}); }}><span class="knob"></span></button>
+</div>
+<div class="srow" class:dim={!ui.opacity}>
+	<div class="st"><b>{t('settings.opacityDefault')}</b><span>{t('settings.opacityDefaultDesc')}</span></div>
+	<select
+		class="select"
+		aria-label={t('settings.opacityDefault')}
+		disabled={!ui.opacity}
+		value={ui.opacityDefault}
+		onchange={(e) => { ui.opacityDefault = Number(e.currentTarget.value); saveUi(); api.setWindowAlphaPrefs(ui.opacity, ui.opacityDefault).catch(() => {}); }}
+	>
+		{#each [100, 90, 80, 70, 50] as v (v)}
+			<option value={v}>%{v}</option>
+		{/each}
+	</select>
+</div>
+<div class="srow">
 	<div class="st"><b>{t('settings.pip')}</b><span>{t('settings.pipDesc')}</span></div>
 	<button class="toggle" aria-label={t('settings.pip')} class:on={ui.pip} aria-pressed={ui.pip} onclick={() => { ui.pip = !ui.pip; saveUi(); api.setPipEnabled(ui.pip).catch(() => {}); }}><span class="knob"></span></button>
+</div>
+{#each [['shortcutPin', 'settings.shortcutPin'], ['shortcutPip', 'settings.shortcutPip']] as [field, label] (field)}
+	{@const k = field as 'shortcutPin' | 'shortcutPip'}
+	<div class="srow" class:dim={k === 'shortcutPin' ? !ui.windowPin : !ui.pip}>
+		<div class="st"><b>{t(label)}</b><span>{t('settings.shortcutDesc')}</span></div>
+		<select
+			class="select"
+			aria-label={t(label)}
+			value={ui[k]}
+			onchange={(e) => {
+				const v = e.currentTarget.value;
+				// One key, one shortcut: taking the other's key turns that one off.
+				const other = k === 'shortcutPin' ? 'shortcutPip' : 'shortcutPin';
+				if (v && ui[other] === v) ui[other] = '';
+				ui[k] = v;
+				saveUi();
+				pushShortcuts();
+			}}
+		>
+			<option value="">{t('settings.shortcutOff')}</option>
+			{#each SHORTCUT_KEYS as code (code)}
+				<option value={code}>Ctrl+Shift+{code.slice(3)}</option>
+			{/each}
+		</select>
+	</div>
+{/each}
+<div class="srow" class:dim={!ui.pip}>
+	<div class="st"><b>{t('settings.pipAutoMinimize')}</b><span>{t('settings.pipAutoMinimizeDesc')}</span></div>
+	<button class="toggle" aria-label={t('settings.pipAutoMinimize')} class:on={ui.pipAutoMinimize} aria-pressed={ui.pipAutoMinimize} disabled={!ui.pip} onclick={() => { ui.pipAutoMinimize = !ui.pipAutoMinimize; saveUi(); }}><span class="knob"></span></button>
 </div>
 <div class="srow" class:dim={!ui.pip}>
 	<div class="st"><b>{t('settings.pipHoverGrow')}</b><span>{t('settings.pipHoverGrowDesc')}</span></div>

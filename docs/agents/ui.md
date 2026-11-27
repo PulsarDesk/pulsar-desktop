@@ -114,6 +114,29 @@ the Pulsar menu's Tools row (`pipwin <available> <on>` in, `ov set pip on|off` o
 - Hovering a PiP never takes control, also with the free cursor: Windows `handle_hover` and the
   macOS engine (`Arm::click_only`) skip PiP plays, the canvas path's `hoverBlocked` is true.
 
+### More window features (issue #18 follow-ups)
+
+- **Transparency** (`src-tauri/src/winalpha.rs`): Settings → Genel "Saydamlık" (`ui.opacity`, on)
+  + default opacity (`ui.opacityDefault`, 100); per window from the Pulsar menu's Tools row
+  (`opacity <available> <pct>` / `ov set opacity <pct>` → `play_alpha_set`). Windows = layered
+  top-level (`LWA_ALPHA`, dropped at 100 %), Linux = GTK toplevel opacity, macOS = NSWindow
+  `alphaValue` + the renderer panel (`Panel::set_alpha`). Whether the Windows flip-model video
+  child turns see-through with its parent is UNVERIFIED.
+- **Small window when minimized** (`ui.pipAutoMinimize`, on): `+page.svelte` sends the session on
+  screen (active tab / focused pane) to a PiP when its window is minimized.
+- **PiP bar extras**: chat badge (`chat-msg` for its play since the menu was opened) and a host
+  monitor picker (several host screens; `Session.pipSetMonitor`).
+- **Shortcuts** (`src/lib/windowShortcuts.ts`): Ctrl+Shift+<key> for keep-on-top (`ui.shortcutPin`,
+  T) and small window (`ui.shortcutPip`, P; in a PiP: bring back). M/Q/Z are not offered. The
+  input hooks catch them like the built-in combos (`kbdhook::shortcut_of`: Windows `imp.rs`,
+  Linux `linux.rs`, macOS engine `Signal::Shortcut`) and emit `shortcut`; the webview catches them
+  when no hook does; `runShortcut` drops the second sighting of one press.
+- **Resolution follows the window** (Settings → Görüntü, `ui.autoResWindow`, on;
+  `Session/autoRes.ts`): with the resolution on Auto, not split, no screen adaptation, a view
+  smaller than the host screen asks `set_play_resolution` for a snapped step (360…2160) after
+  1.5 s settled; back to 0×0 (host size) when it no longer applies. A PiP grown on hover holds
+  (`resHold`). Applies in fullscreen too (a 1080p client of a 4K host streams 1080p).
+
 ## Theming
 
 Tokens live in `src/app.css` (ported from `../design/project/assets/tokens.css`, which has **no

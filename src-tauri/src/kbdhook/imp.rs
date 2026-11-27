@@ -1044,7 +1044,9 @@ fn handle_key(evdev: u32, down: bool) -> bool {
 	// avoids the dead-lock the combo branches would create: they return early BEFORE
 	// the g.held update at the bottom, so a combo_edge check on `held` would never see
 	// the first press (held lacks the key at combo-fire time for the same reason).
-	let combo_key = matches!(evdev, 50 | 16 | 87 | 44);
+	// The user's shortcuts (keep on top / small window, Ctrl+Shift+<key>) are combos too.
+	let shortcut = u16::try_from(evdev).ok().and_then(super::shortcut_of);
+	let combo_key = matches!(evdev, 50 | 16 | 87 | 44) || shortcut.is_some();
 
 	let combo_edge = if combo_key {
 		if down {
@@ -1056,7 +1058,7 @@ fn handle_key(evdev: u32, down: bool) -> bool {
 				// M/Q/Z repeat meant for the remote (bare press → chord=false → not
 				// recorded → its repeats forward). Mirrors linux.rs keeping the chord
 				// test so a bare m/q/z still repeats.
-				let chord = ((evdev == 50 || evdev == 16 || evdev == 87)
+				let chord = ((evdev == 50 || evdev == 16 || evdev == 87 || shortcut.is_some())
 					&& g.ctrl_down
 					&& g.shift_down)
 					|| (evdev == 44 && g.ctrl_down && g.alt_down);
@@ -1194,6 +1196,20 @@ fn handle_key(evdev: u32, down: bool) -> bool {
 		}
 		if let Some(app) = &app_handle {
 			let _ = app.emit("fullscreen-toggle", ());
+		}
+		return true;
+	}
+	// The user's shortcuts (issue #18): keep on top / small window. Control stays as it is.
+	if let Some(name) = shortcut.filter(|_| {
+		combo_edge && g.ctrl_down && g.shift_down && (ENGAGED.load(Ordering::SeqCst) || APP_FOCUSED.load(Ordering::SeqCst))
+	}) {
+		let app_handle = g.app.clone();
+		drop(g);
+		if !ENGAGED.load(Ordering::SeqCst) {
+			mask_modifier_hotkey();
+		}
+		if let Some(app) = &app_handle {
+			let _ = app.emit("shortcut", name);
 		}
 		return true;
 	}

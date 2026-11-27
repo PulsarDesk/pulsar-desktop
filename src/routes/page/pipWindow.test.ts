@@ -8,7 +8,8 @@ vi.mock('#lib/api.js', async () => {
 		api: { pipResize: _vi.fn().mockResolvedValue(undefined), pipSnap: _vi.fn().mockResolvedValue(null) },
 		onPipRestore: _vi.fn(),
 		onPipHover: _vi.fn(),
-		onPipPress: _vi.fn()
+		onPipPress: _vi.fn(),
+		onChatMsg: _vi.fn()
 	};
 });
 

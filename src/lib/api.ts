@@ -71,6 +71,7 @@ export {
 	onPipRestore,
 	onPipHover,
 	onPipPress,
+	onShortcut,
 	onPlayEnded,
 	onPlayReady,
 	onPlayOptimizing,

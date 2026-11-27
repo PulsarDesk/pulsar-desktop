@@ -172,6 +172,8 @@ pub struct Panel {
 	info: Option<(CGRect, bool)>,
 	info_at: Option<std::time::Instant>,
 	info_key: (u32, Option<(i32, i32, i32, i32)>),
+	/// Opacity in % (follows the app window, `set_alpha`).
+	alpha: u8,
 }
 
 const INFO_EVERY: std::time::Duration = std::time::Duration::from_millis(8);
@@ -228,6 +230,7 @@ impl Panel {
 			info: None,
 			info_at: None,
 			info_key: (0, None),
+			alpha: 100,
 		}
 	}
 
@@ -303,6 +306,14 @@ impl Panel {
 	/// The panel's size in points.
 	pub fn size_pt(&self) -> (f64, f64) {
 		(self.frame.2, self.frame.3)
+	}
+
+	/// Opacity in % (the app window's, so the picture is as see-through as the window around it).
+	pub fn set_alpha(&mut self, pct: u8) {
+		if self.alpha != pct {
+			self.alpha = pct;
+			self.panel.setAlphaValue(pct.clamp(1, 100) as f64 / 100.0);
+		}
 	}
 
 	/// Take the mouse (overlay open / on the overlay button) or let it fall through to the app.

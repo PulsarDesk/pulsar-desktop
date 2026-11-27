@@ -117,6 +117,7 @@ mod toast;
 mod twofa;
 mod ui_start;
 mod winpin;
+mod winalpha;
 mod pairing;
 mod pkg_update;
 mod update_guard;
@@ -774,6 +775,7 @@ pub fn run() {
 				// A pinned window that is gone must not stay in the pin set.
 				winpin::forget(window.label());
 				pip::forget(window.label());
+				winalpha::forget(window.label());
 				// Deny the pending auth request if an approval popup was closed by the OS.
 				let label = window.label();
 				if let Some(id_str) = label.strip_prefix("approve-") {
@@ -946,6 +948,9 @@ pub fn run() {
 			pip::pip_resize,
 			pip::pip_snap,
 			pip::pip_close,
+			winalpha::set_window_alpha_prefs,
+			winalpha::play_alpha_set,
+			kbdhook::set_window_shortcuts,
 			toast::toast_list,
 			toast::toast_open,
 			toast::toast_close,

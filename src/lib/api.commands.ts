@@ -552,6 +552,13 @@ export const api = {
 	pipResize: (w: number, h: number) => invoke<void>('pip_resize', { w, h }),
 	/** PiP window: after a drag, snap into a near corner; resolves to [x, y, w, h] (logical). */
 	pipSnap: () => invoke<number[] | null>('pip_snap'),
+	/** Settings → General → transparency on/off and the default opacity (%) of every window. */
+	setWindowAlphaPrefs: (enabled: boolean, defaultPct: number) =>
+		invoke<void>('set_window_alpha_prefs', { enabled, defaultPct }),
+	/** The Pulsar menu's opacity row: the window showing play `id` → `pct` %. */
+	playAlphaSet: (id: number, pct: number) => invoke<void>('play_alpha_set', { id, pct }),
+	/** Settings → General → the shortcuts' keys (evdev codes; Ctrl+Shift held; 0 = off). */
+	setWindowShortcuts: (pin: number, pip: number) => invoke<void>('set_window_shortcuts', { pin, pip }),
 	/** Settings → General → "Small window": off brings every PiP back. */
 	setPipEnabled: (enabled: boolean) => invoke<void>('set_pip_enabled', { enabled }),
 	/** Linux Wayland: the desktop may ignore keep-on-top (the pin's tooltip warns). */

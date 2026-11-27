@@ -582,6 +582,7 @@ pub(crate) async fn tab_detach(
 		return Err("main thread unavailable".into());
 	}
 	rx.await.map_err(|e| e.to_string())??;
+	crate::winalpha::apply(&app, &label);
 	for id in plays {
 		// A picture-in-picture session's tab is a placeholder: its video stays in the PiP
 		// window, which now returns it HERE.

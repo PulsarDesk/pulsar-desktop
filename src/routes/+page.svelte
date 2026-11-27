@@ -22,7 +22,8 @@
 		onNodeVersionError,
 		onSessionPassword
 	} from '#lib/api.js';
-	import { onRelayE2e, onSharedHost, onCliConnect, onPipReturn } from '#lib/api.js';
+	import { onRelayE2e, onSharedHost, onCliConnect, onPipReturn, onShortcut } from '#lib/api.js';
+	import { pushShortcuts, runShortcut, shortcutOf } from '#lib/windowShortcuts.js';
 	import type { AutoConnectTarget, CliConnect } from '#lib/types.js';
 	import { setPeerIdentity, loadSharedPeers } from '#lib/peers.svelte.js';
 	import {
@@ -207,6 +208,8 @@
 		pipToggleSpeaker: () => void;
 		pipSpeakerOn: () => boolean;
 		pipEngaged: () => boolean;
+		pipMonitors: () => { list: import('#lib/api.types.js').HostDisplay[]; current: number };
+		pipSetMonitor: (idx: number) => void;
 	};
 	let sessionRefs = $state<Record<number, PipControls | undefined>>({});
 	const pipSession = () => (sm.sessions[0] ? sessionRefs[sm.sessions[0].tabId] : undefined);
@@ -218,6 +221,26 @@
 		engaged: () => pipSession()?.pipEngaged() ?? false
 	});
 	let pipSpeaker = $state(true);
+	/** A window shortcut: keep this window on top / the session on screen to a small window
+	 * (in a PiP window: bring it back). */
+	function windowShortcut(name: 'pin' | 'pip') {
+		if (name === 'pin') {
+			if (pin.available) void pin.toggle();
+			return;
+		}
+		if (!ui.pip) return;
+		if (isPip) {
+			void tw.pipReturn();
+			return;
+		}
+		const tab = sm.splitMode === 'off' ? sm.activeTab : sm.panes[sm.focusedPane];
+		if (typeof tab === 'number' && sm.canPip(tab)) void sm.toPip(tab);
+	}
+	// The host monitor the PiP streams (its bar's picker); read from the session when it grows.
+	let pipMonitor = $state(0);
+	$effect(() => {
+		if (isPip && pipw.grown) pipMonitor = pipSession()?.pipMonitors().current ?? 0;
+	});
 	// Drag-to-split (IntelliJ-style): a tab dragged over the session area highlights the half
 	// it would take (nearest edge); the middle just shows that tab. The native video is hidden
 	// meanwhile so the highlight is visible over it.
@@ -783,10 +806,36 @@
 		}
 		if (!isPopupOnly) void tw.init();
 		if (isPip) void pipw.init();
+		// The window shortcuts (issue #18): from the input hook (in control / focused) — the
+		// window owning the input acts — and from this webview's own keys otherwise.
+		if (!isPopupOnly && isTauri) {
+			await onShortcut((name) => {
+				if (tw.ownsInput) runShortcut(name, () => windowShortcut(name));
+			});
+			window.addEventListener('keydown', (e) => {
+				const name = shortcutOf(e);
+				if (!name) return;
+				e.preventDefault();
+				runShortcut(name, () => windowShortcut(name));
+			});
+		}
 		// The PiP window hands a session back: the placeholder tab here becomes it again.
 		if (!isPopupOnly && !isPip && isTauri) {
 			await onPipReturn((to, play, session) => {
 				if (to === myLabel) sm.fromPip(play, session);
+			});
+			// "Small window when minimized" (Settings → General, default on): minimizing this
+			// window sends the session on screen (the active tab / the focused pane) to a PiP.
+			const { getCurrentWindow } = await import('@tauri-apps/api/window');
+			const me = getCurrentWindow();
+			let wasMin = false;
+			await me.onResized(async () => {
+				const min = await me.isMinimized().catch(() => false);
+				if (min && !wasMin && ui.pip && ui.pipAutoMinimize) {
+					const tab = sm.splitMode === 'off' ? sm.activeTab : sm.panes[sm.focusedPane];
+					if (typeof tab === 'number' && sm.canPip(tab)) void sm.toPip(tab);
+				}
+				wasMin = min;
 			});
 		}
 		if (isTabWin && isTauri) {
@@ -861,6 +910,8 @@
 		api.setTray(ui.tray).catch(() => {});
 		api.setWindowPinEnabled(ui.windowPin).catch(() => {});
 		api.setPipEnabled(ui.pip).catch(() => {});
+		api.setWindowAlphaPrefs(ui.opacity, ui.opacityDefault).catch(() => {});
+		pushShortcuts();
 		api.setPadWake(ui.padWake).catch(() => {});
 		api.setPadBackground(ui.padBackground).catch(() => {});
 		api.setClientAwake(ui.clientAwake).catch(() => {});
@@ -1482,6 +1533,7 @@
 						joinPrompt={joinPromptFor(s.playId, paneIdx)}
 						onEnd={() => sm.endSession(s.tabId)}
 						pip={isPip}
+						resHold={isPip && pipw.grown}
 						onPip={(on) => {
 							if (isPip && !on) void tw.pipReturn();
 							else if (!isPip && on) void sm.toPip(s.tabId);
@@ -1546,7 +1598,17 @@
 				active={pipw.active}
 				pinned={pin.pinned}
 				speakerOn={pipSpeaker}
-				onMenu={() => pipSession()?.pipToggleMenu()}
+				unread={pipw.unread}
+				monitors={sm.sessions[0].hostDisplays ?? []}
+				monitor={pipMonitor}
+				onMonitor={(idx) => {
+					pipSession()?.pipSetMonitor(idx);
+					pipMonitor = idx;
+				}}
+				onMenu={() => {
+					pipw.unread = 0;
+					pipSession()?.pipToggleMenu();
+				}}
 				onRestore={() => void tw.pipReturn()}
 				onTogglePin={pin.available ? () => void pin.toggle() : undefined}
 				onSpeaker={() => {

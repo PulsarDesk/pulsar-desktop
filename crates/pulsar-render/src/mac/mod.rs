@@ -511,6 +511,10 @@ fn stdin_control() {
 		} else if let Some(rest) = l.strip_prefix("pin ") {
 			// "Keep on top" (issue #18): `pin <available> <on>`.
 			crate::overlay::pin_line(rest);
+		} else if let Some(rest) = l.strip_prefix("opacity ") {
+			// Window opacity (issue #18): `opacity <available> <pct>` — the panel follows the
+			// app window's alpha (applied on the main loop).
+			crate::overlay::alpha_line(rest);
 		} else if let Some(rest) = l.strip_prefix("pipwin ") {
 			// "Small window" (issue #18): `pipwin <available> <on>`.
 			crate::overlay::pip_line(rest);
@@ -1846,6 +1850,8 @@ fn event_loop(mtm: MainThreadMarker, parent: u32, port: u16, codec: Codec, mode:
 			}
 
 			// ---- Where the picture goes.
+			// Window opacity: the panel matches the app window it sits over.
+			win.set_alpha(crate::overlay::alpha_pct());
 			let np = NEW_PARENT.swap(0, Ordering::SeqCst);
 			if np != 0 && np <= u32::MAX as u64 {
 				win.parent = np as u32;

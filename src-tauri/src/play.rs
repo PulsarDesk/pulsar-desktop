@@ -618,6 +618,7 @@ pub(crate) async fn start_remote_play(
 									let _ = writeln!(si, "ptrfree {}", if crate::kbdhook::pointer_free() { 1 } else { 0 });
 									let _ = writeln!(si, "{}", crate::winpin::render_line(id));
 									let _ = writeln!(si, "{}", crate::pip::render_line(id));
+									let _ = writeln!(si, "{}", crate::winalpha::render_line(id));
 									let _ = writeln!(si, "{}", crate::kbdhook::pen_touch_line(host_pen, host_touch));
 									let _ = writeln!(si, "{}", crate::native_view::upscalers_line());
 									let _ = writeln!(si, "upscale {}", crate::native_view::upscale_mode());
@@ -935,6 +936,7 @@ pub(crate) async fn start_remote_play(
 										let _ = writeln!(si, "ptrfree {}", if crate::kbdhook::pointer_free() { 1 } else { 0 });
 										let _ = writeln!(si, "{}", crate::winpin::render_line(id));
 										let _ = writeln!(si, "{}", crate::pip::render_line(id));
+										let _ = writeln!(si, "{}", crate::winalpha::render_line(id));
 										let _ = writeln!(si, "{}", crate::kbdhook::pen_touch_line(host_pen, host_touch));
 										let _ = writeln!(si, "{}", crate::native_view::upscalers_line());
 										let _ = writeln!(si, "upscale {}", crate::native_view::upscale_mode());

@@ -15,7 +15,7 @@
 // Presses: on Windows the renderer reports them (`pip-press`: click or drag); on Linux and
 // macOS the video passes the pointer through to the webview (capture-phase DOM handlers).
 
-import { api, isTauri, onPipHover, onPipPress, onPipRestore } from '#lib/api.js';
+import { api, isTauri, onChatMsg, onPipHover, onPipPress, onPipRestore } from '#lib/api.js';
 import { ui, saveUi } from '#lib/settings.svelte.js';
 import { myLabel } from './tabWindows.svelte';
 
@@ -46,6 +46,8 @@ export class PipWindow {
 	grown = $state(false);
 	/** Clicked into: input goes to the host. Cleared when the focus leaves the window. */
 	active = $state(false);
+	/** Chat lines from the host since the menu was last opened here (the bar's badge). */
+	unread = $state(0);
 
 	#deps: Deps;
 	/** The window's size while not grown (logical px). */
@@ -73,6 +75,9 @@ export class PipWindow {
 			if (label !== myLabel) return;
 			if (on) this.enter();
 			else this.leave();
+		});
+		await onChatMsg((e) => {
+			if (Number(e.peer) === this.#deps.playId()) this.unread++;
 		});
 		await onPipPress((play, drag) => {
 			if (play !== this.#deps.playId()) return;

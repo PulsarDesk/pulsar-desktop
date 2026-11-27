@@ -624,6 +624,28 @@ fn pip_avail() -> bool {
 	PIP_AVAIL.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Window opacity (issue #18): `opacity <available 0|1> <pct>` from the app. The Tools row picks
+/// a step and emits `ov set opacity <pct>`; the app applies it to the window and echoes it.
+static ALPHA_AVAIL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static ALPHA_PCT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(100);
+
+pub fn alpha_line(rest: &str) {
+	let mut it = rest.split_whitespace();
+	ALPHA_AVAIL.store(it.next() == Some("1"), std::sync::atomic::Ordering::Relaxed);
+	if let Some(p) = it.next().and_then(|v| v.parse::<u8>().ok()) {
+		ALPHA_PCT.store(p.min(100), std::sync::atomic::Ordering::Relaxed);
+	}
+}
+
+/// The window's opacity in % (the macOS panel follows it).
+pub fn alpha_pct() -> u8 {
+	ALPHA_PCT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn alpha_avail() -> bool {
+	ALPHA_AVAIL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// This session is shown in a picture-in-picture window (the Windows renderer then turns a
 /// press on the video into a window drag or a `pipclick` instead of click-to-engage).
 pub fn pip_on() -> bool {
@@ -2491,7 +2513,24 @@ fn draw_tools(ui: &mut egui::Ui, mode: Mode, input: RowsIn<'_>, cmds: &mut Vec<O
 			cmds.push(OverlayCmd::Set("pip", v));
 		}
 	};
-	let extra = usize::from(pin_avail()) + usize::from(pip_avail());
+	// Window opacity: the steps offered (the app clamps to 30..=100 %).
+	const ALPHA_STEPS: [(&str, &str); 5] = [("100", "100%"), ("90", "90%"), ("80", "80%"), ("70", "70%"), ("50", "50%")];
+	let alpha_row = |rows: &mut Rows<'_>, ui: &mut egui::Ui, i: usize, cmds: &mut Vec<OverlayCmd>| {
+		let pct = alpha_pct();
+		// The nearest step is the one shown as picked.
+		let cur = ALPHA_STEPS
+			.iter()
+			.min_by_key(|(v, _)| (v.parse::<i16>().unwrap_or(100) - pct as i16).abs())
+			.map(|(v, _)| *v)
+			.unwrap_or("100");
+		if let Some(v) = rows.choice(ui, i, t("tools.opacity"), cur, &ALPHA_STEPS, Some(t("info.opacity"))) {
+			if let Ok(p) = v.parse::<u8>() {
+				ALPHA_PCT.store(p, std::sync::atomic::Ordering::Relaxed);
+			}
+			cmds.push(OverlayCmd::Set("opacity", v));
+		}
+	};
+	let extra = usize::from(pin_avail()) + usize::from(pip_avail()) + usize::from(alpha_avail());
 	if mode == Mode::Game {
 		let mut rows = Rows::new(1 + extra, input);
 		if rows.action(ui, 0, t("tools.fullscreen"), CYAN, true) {
@@ -2504,6 +2543,10 @@ fn draw_tools(ui: &mut egui::Ui, mode: Mode, input: RowsIn<'_>, cmds: &mut Vec<O
 		}
 		if pip_avail() {
 			pip_row(&mut rows, ui, i, cmds);
+			i += 1;
+		}
+		if alpha_avail() {
+			alpha_row(&mut rows, ui, i, cmds);
 		}
 		return;
 	}
@@ -2533,6 +2576,10 @@ fn draw_tools(ui: &mut egui::Ui, mode: Mode, input: RowsIn<'_>, cmds: &mut Vec<O
 	}
 	if pip_avail() {
 		pip_row(&mut rows, ui, i, cmds);
+		i += 1;
+	}
+	if alpha_avail() {
+		alpha_row(&mut rows, ui, i, cmds);
 	}
 }
 

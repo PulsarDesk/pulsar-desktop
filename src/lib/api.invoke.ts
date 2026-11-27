@@ -271,6 +271,9 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 		case 'pip_close':
 		case 'pip_resize':
 		case 'set_pip_enabled':
+		case 'set_window_alpha_prefs':
+		case 'play_alpha_set':
+		case 'set_window_shortcuts':
 			return Promise.resolve(undefined as unknown as T);
 		case 'pip_open':
 			return Promise.resolve('pip-1' as unknown as T);

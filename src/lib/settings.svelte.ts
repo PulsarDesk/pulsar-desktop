@@ -104,6 +104,10 @@ export interface UiSettings {
 	 *  link; false = the picks stay fixed (Moonlight-like; an automatic bitrate = the measured
 	 *  good rate). Settings → Display and the session menu; applied live and on connect. */
 	autoAdjust: boolean;
+	/** "Resolution follows the window": with the resolution on Auto, a session shown smaller
+	 * than the host's screen asks for a smaller stream (the host's encoder scales; its display
+	 * mode never changes). Default on. */
+	autoResWindow: boolean;
 	/** Stream resolution picked in the session menu ('auto', a preset like '1080p', or 'WxH'),
 	 *  applied on the next connect. */
 	streamRes: string;
@@ -139,9 +143,21 @@ export interface UiSettings {
 	/** "Keep on top" (issue #18): the title bar's pin and the Pulsar menu's row keep a window
 	 * above other apps. On by default; off hides both and releases every pinned window. */
 	windowPin: boolean;
+	/** Window transparency (issue #18): a session window can be made see-through (Pulsar menu →
+	 * Tools, per window). On by default; off = every window opaque. */
+	opacity: boolean;
+	/** The opacity (%) every session window starts with (30..100; 100 = opaque). */
+	opacityDefault: number;
 	/** "Small window" (picture-in-picture, issue #18): a session can go to a small window of its
 	 * own while its tab stays. On by default; off brings every PiP back and hides the entries. */
 	pip: boolean;
+	/** Shortcuts (issue #18): Ctrl+Shift+<key> toggles keep-on-top / sends the session on screen
+	 * to a small window (in a PiP window: brings it back). `KeyboardEvent.code` of the key
+	 * ('KeyT'); '' = off. Caught before the host sees them, also while in control. */
+	shortcutPin: string;
+	shortcutPip: string;
+	/** Minimizing a window sends its session on screen to a PiP. On by default. */
+	pipAutoMinimize: boolean;
 	/** The PiP grows while the pointer rests on it (its controls get room). On by default. */
 	pipHoverGrow: boolean;
 	/** How much it grows, in % of its size (125 / 150 / 200). */
@@ -297,6 +313,7 @@ const DEFAULTS: UiSettings = {
 	bitrate: 0,
 	autoAdjust: true,
 	streamRes: 'auto',
+	autoResWindow: true,
 	streamFps: 0,
 	codec: 'auto',
 	encoder: 'auto',
@@ -308,7 +325,12 @@ const DEFAULTS: UiSettings = {
 	duplicateSessions: false,
 	upscale: 'auto',
 	windowPin: true,
+	opacity: true,
+	opacityDefault: 100,
 	pip: true,
+	pipAutoMinimize: true,
+	shortcutPin: 'KeyT',
+	shortcutPip: 'KeyP',
 	pipHoverGrow: true,
 	pipHoverScale: 150,
 	pipLast: null,

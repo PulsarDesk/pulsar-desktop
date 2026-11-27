@@ -110,6 +110,15 @@ export class SessionControls {
 		const [w, h] = resToWh(v);
 		api.setPlayResolution(playId, w, h).catch(() => {});
 	};
+	// "Resolution follows the window" (Settings → Display): the stream size picked from the
+	// video area (autoRes.ts), 0×0 = the host's own size. Not saved — the next connect starts
+	// from the user's pick and the window decides again.
+	setAutoRes = (w: number, h: number) => {
+		const playId = this.#in.playId();
+		if (playId < 0) return;
+		this.#beginSwitch(4000);
+		api.setPlayResolution(playId, w, h).catch(() => {});
+	};
 	// Screen adaptation (overlay "Ekran uyarlama"): `on` with the pane's pixel size (w,h) asks
 	// the host to switch its captured monitor to the best-fit mode and revert on exit. The host
 	// changes resolution → new SPS, so it's the same depth of rebuild as a monitor switch.

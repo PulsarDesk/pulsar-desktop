@@ -632,6 +632,8 @@ pub fn run() {
 				// "Keep on top" (issue #18): `pin <available> <on>`.
 				Some("pin") => crate::overlay::pin_line(&it.collect::<Vec<_>>().join(" ")),
 				// "Small window" (issue #18): `pipwin <available> <on>`.
+				// Window opacity (issue #18): `opacity <available> <pct>`.
+				Some("opacity") => crate::overlay::alpha_line(&it.collect::<Vec<_>>().join(" ")),
 				Some("pipwin") => crate::overlay::pip_line(&it.collect::<Vec<_>>().join(" ")),
 				// "Otomatik ayar" state from the app (every stats window + on a change).
 				Some("autoadj") => crate::overlay::set_auto_adj(it.next() == Some("1")),
