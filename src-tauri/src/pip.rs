@@ -356,12 +356,14 @@ pub(crate) fn pip_restore(app: AppHandle, play: u64) -> Result<(), String> {
 	Ok(())
 }
 
-/// Show the PiP window of play `play` (the placeholder was clicked).
+/// Show the PiP window of play `play` (the placeholder was clicked): restored, shown and brought
+/// to the front (only showing it left it behind the window whose button was pressed).
 #[tauri::command]
 pub(crate) fn pip_focus(app: AppHandle, play: u64) {
 	if let Some(w) = pip_of_play(play).and_then(|l| app.get_webview_window(&l)) {
 		let _ = w.unminimize();
 		let _ = w.show();
+		let _ = w.set_focus();
 	}
 }
 
