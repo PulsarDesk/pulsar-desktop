@@ -1609,6 +1609,12 @@ impl Renderer {
 			}
 			if let Some(m) = self.menu.as_mut() {
 				m.show(&self.device, self.hwnd, pw, ph);
+				// A click anywhere else closes it (the in-window menu's click-beside rule).
+				if m.clicked_outside(self.hwnd) {
+					apply_ov_cmd(&mut self.ostate, crate::overlay::OverlayCmd::Close);
+					use std::io::Write as _;
+					let _ = std::io::stdout().flush();
+				}
 			}
 		}
 		self.apply_caps_seed();

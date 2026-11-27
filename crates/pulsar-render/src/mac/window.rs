@@ -352,6 +352,28 @@ impl Panel {
 		(x >= 0.0 && y >= 0.0 && x < self.frame.2 && y < self.frame.3).then_some((x, y))
 	}
 
+	/// The PiP menu panel: a mouse button went down outside it, its PiP's video panel `video`
+	/// aside, since the last check (`was_down` keeps the last state). The PiP window outside its
+	/// video is its control bar, whose menu button opens and closes the menu itself — not counted.
+	pub fn clicked_outside(&self, video: &Panel, was_down: &mut bool) -> bool {
+		let down = NSEvent::pressedMouseButtons() & 0b11 != 0;
+		let edge = down && !*was_down;
+		*was_down = down;
+		if !edge || !self.shown {
+			return false;
+		}
+		let m = NSEvent::mouseLocation();
+		// SAFETY: plain display query.
+		let main_h = unsafe { CGDisplayBounds(CGMainDisplayID()).size.height };
+		let (x, y) = (m.x, main_h - m.y);
+		let inside = |f: (f64, f64, f64, f64)| x >= f.0 && y >= f.1 && x < f.0 + f.2 && y < f.1 + f.3;
+		if inside(self.frame) {
+			return false;
+		}
+		let pip = window_info(self.parent).map(|(b, _)| (b.origin.x, b.origin.y, b.size.width, b.size.height));
+		!(pip.is_some_and(inside) && !inside(video.frame))
+	}
+
 	/// The panel's size in points.
 	pub fn size_pt(&self) -> (f64, f64) {
 		(self.frame.2, self.frame.3)

@@ -34,6 +34,8 @@ pub(super) struct MenuWin {
 	pub width: u32,
 	pub height: u32,
 	shown: bool,
+	/// A mouse button was down at the last check (`clicked_outside` acts on the press edge).
+	was_down: bool,
 }
 
 unsafe extern "system" fn menu_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -95,7 +97,7 @@ impl MenuWin {
 			..Default::default()
 		};
 		let swap = factory.CreateSwapChainForHwnd(device, hwnd, &desc, None, None)?;
-		let mut me = Self { hwnd, swap, rtv: None, width: w as u32, height: h as u32, shown: false };
+		let mut me = Self { hwnd, swap, rtv: None, width: w as u32, height: h as u32, shown: false, was_down: false };
 		me.make_rtv(device)?;
 		Ok(me)
 	}
@@ -123,7 +125,34 @@ impl MenuWin {
 		if !self.shown {
 			let _ = ShowWindow(self.hwnd, SW_SHOWNA);
 			self.shown = true;
+			// A button still down from the click that opened it is not a click outside.
+			self.was_down = buttons_down();
 		}
+	}
+
+	/// A mouse button went down outside the menu since the last check: the menu closes, like a
+	/// click beside the in-window menu. Not on the PiP's control bar (the PiP window outside its
+	/// video, `child`): its menu button opens and closes the menu itself.
+	pub unsafe fn clicked_outside(&mut self, child: HWND) -> bool {
+		let down = buttons_down();
+		let edge = down && !self.was_down;
+		self.was_down = down;
+		if !edge || !self.shown {
+			return false;
+		}
+		let mut p = windows::Win32::Foundation::POINT::default();
+		if windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut p).is_err() {
+			return false;
+		}
+		let inside = |h: HWND| {
+			let mut r = RECT::default();
+			GetWindowRect(h, &mut r).is_ok() && p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom
+		};
+		if inside(self.hwnd) {
+			return false;
+		}
+		let owner = GetAncestor(child, GA_ROOT);
+		!(inside(owner) && !inside(child))
 	}
 
 	pub unsafe fn hide(&mut self) {
@@ -136,6 +165,13 @@ impl MenuWin {
 	pub unsafe fn present(&self) {
 		let _ = self.swap.Present(1, Default::default());
 	}
+}
+
+/// Left or right mouse button down right now.
+fn buttons_down() -> bool {
+	use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
+	// SAFETY: plain key-state queries.
+	unsafe { (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000) != 0 || (GetAsyncKeyState(VK_RBUTTON.0 as i32) as u16 & 0x8000) != 0 }
 }
 
 impl Drop for MenuWin {

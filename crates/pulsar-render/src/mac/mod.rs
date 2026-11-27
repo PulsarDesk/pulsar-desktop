@@ -1111,6 +1111,8 @@ fn handle_mouse(ev: &NSEvent, win: &window::Panel) {
 /// The open menu is drawn in its own panel (a PiP too small for it): the video panel then
 /// leaves the pointer to the app.
 static MENU_POPUP: AtomicBool = AtomicBool::new(false);
+/// A mouse button was down at the last outside-click check of the PiP menu panel.
+static MENU_WAS_DOWN: AtomicBool = AtomicBool::new(false);
 
 /// Pointer input of the PiP menu panel (its own coordinates), drained by its overlay pass.
 static MENU_EVENTS: Mutex<Vec<egui::Event>> = Mutex::new(Vec::new());
@@ -1551,7 +1553,21 @@ impl Renderer {
 			let menu_size = self.menu.as_mut().map(|m| {
 				m.parent = win.parent;
 				let k = ppp as f64 / m.scale.max(1.0);
+				let was_shown = m.shown;
 				m.place_menu(want.x as f64 * k, want.y as f64 * k);
+				let mut was_down = MENU_WAS_DOWN.load(Ordering::SeqCst);
+				if !was_shown {
+					// A button still down from the click that opened it is not a click outside.
+					was_down = NSEvent::pressedMouseButtons() & 0b11 != 0;
+				}
+				// A click anywhere else closes it (the in-window menu's click-beside rule).
+				let outside = m.clicked_outside(win, &mut was_down);
+				MENU_WAS_DOWN.store(was_down, Ordering::SeqCst);
+				if outside {
+					apply_ov_cmd(&mut self.ostate, crate::overlay::OverlayCmd::Close);
+					use std::io::Write as _;
+					let _ = std::io::stdout().flush();
+				}
 				m.size_px
 			});
 			if let Some(ms) = menu_size {

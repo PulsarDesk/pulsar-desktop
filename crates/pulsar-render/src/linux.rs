@@ -2421,6 +2421,11 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 			if let Some(m) = pip_menu_win.as_mut() {
 				let top = toplevel_of(xd, parent);
 				m.show(xd, if top != 0 { top } else { win }, want);
+				// A click anywhere else closes it (the in-window menu's click-beside rule).
+				if m.clicked_outside(xd, top, win) {
+					emit_cmd(&mut state, OverlayCmd::Close);
+					let _ = std::io::stdout().flush();
+				}
 				if egl.make_current(display, Some(m.surface), Some(m.surface), Some(g.context)).is_ok() {
 					// Never wait on this window's vsync too: the video window paces the loop.
 					egl.swap_interval(display, 0).ok();
@@ -2551,6 +2556,30 @@ struct PipMenuWin {
 	w: u32,
 	h: u32,
 	mapped: bool,
+	/// Where it is (root px).
+	x: i32,
+	y: i32,
+	/// A mouse button was down at the last check (`clicked_outside` acts on the press edge).
+	was_down: bool,
+}
+
+/// The pointer (root px) and whether button 1 or 3 is down.
+unsafe fn pointer_and_buttons(xd: *mut xlib::Display) -> (i32, i32, bool) {
+	let (mut rr, mut cr) = (0, 0);
+	let (mut rx, mut ry, mut wx, mut wy) = (0, 0, 0, 0);
+	let mut mask = 0u32;
+	xlib::XQueryPointer(xd, xlib::XDefaultRootWindow(xd), &mut rr, &mut cr, &mut rx, &mut ry, &mut wx, &mut wy, &mut mask);
+	(rx, ry, mask & (xlib::Button1Mask | xlib::Button3Mask) != 0)
+}
+
+/// Window `w`'s rect in root px.
+unsafe fn root_rect(xd: *mut xlib::Display, w: u64) -> (i32, i32, i32, i32) {
+	let mut a: xlib::XWindowAttributes = std::mem::zeroed();
+	xlib::XGetWindowAttributes(xd, w, &mut a);
+	let (mut x, mut y) = (0i32, 0i32);
+	let mut child: xlib::Window = 0;
+	xlib::XTranslateCoordinates(xd, w, xlib::XDefaultRootWindow(xd), 0, 0, &mut x, &mut y, &mut child);
+	(x, y, a.width, a.height)
 }
 
 /// Where the menu goes (root px): centred on the PiP's toplevel, on the screen.
@@ -2606,7 +2635,7 @@ impl PipMenuWin {
 			return None;
 		}
 		match egl.create_window_surface(display, config, win as egl::NativeWindowType, None) {
-			Ok(surface) => Some(Self { win, surface, w, h, mapped: false }),
+			Ok(surface) => Some(Self { win, surface, w, h, mapped: false, x: 0, y: 0, was_down: false }),
 			Err(e) => {
 				eprintln!("pulsar-render: PiP menu surface: {e}");
 				xlib::XDestroyWindow(xd, win);
@@ -2618,15 +2647,36 @@ impl PipMenuWin {
 	/// Put it on the PiP's centre, `want` px (the panel's size), and show it.
 	unsafe fn show(&mut self, xd: *mut xlib::Display, top: u64, want: (u32, u32)) {
 		let (x, y, w, h) = pip_menu_place(xd, top, want.0, want.1);
-		if !self.mapped || (w, h) != (self.w, self.h) {
+		if !self.mapped || (w, h) != (self.w, self.h) || (x, y) != (self.x, self.y) {
 			xlib::XMoveResizeWindow(xd, self.win, x, y, w, h);
 			self.w = w;
 			self.h = h;
+			self.x = x;
+			self.y = y;
 		}
 		if !self.mapped {
 			xlib::XMapRaised(xd, self.win);
 			self.mapped = true;
+			// A button still down from the click that opened it is not a click outside.
+			self.was_down = pointer_and_buttons(xd).2;
 		}
+	}
+
+	/// A mouse button went down outside the menu since the last check: the menu closes, like a
+	/// click beside the in-window menu. Not on the PiP's control bar (the PiP toplevel `top`
+	/// outside its video window `video`): its menu button opens and closes the menu itself.
+	unsafe fn clicked_outside(&mut self, xd: *mut xlib::Display, top: u64, video: u64) -> bool {
+		let (px, py, down) = pointer_and_buttons(xd);
+		let edge = down && !self.was_down;
+		self.was_down = down;
+		if !edge || !self.mapped {
+			return false;
+		}
+		let inside = |(x, y, w, h): (i32, i32, i32, i32)| px >= x && py >= y && px < x + w && py < y + h;
+		if inside((self.x, self.y, self.w as i32, self.h as i32)) {
+			return false;
+		}
+		!(top != 0 && inside(root_rect(xd, top)) && !inside(root_rect(xd, video)))
 	}
 
 	unsafe fn hide(&mut self, xd: *mut xlib::Display) {
