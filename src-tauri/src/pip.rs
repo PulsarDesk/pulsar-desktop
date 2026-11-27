@@ -536,60 +536,86 @@ pub(crate) fn pip_size(window: WebviewWindow, user: bool) -> Option<[f64; 2]> {
 	geom(&label).map(|g| [g.asked.0, g.asked.1])
 }
 
+/// How long a PiP resize is animated, and its step (ms).
+const ANIM_MS: u64 = 120;
+const ANIM_STEP_MS: u64 = 15;
+
 /// Resize the calling PiP window to `w`×`h` (logical client size) — hover growth and its way
-/// back — keeping the screen corner it sits in. `around_cursor`: keep the point under the pointer
-/// where it is instead (a grown PiP shrinking as the user starts to drag it).
+/// back — keeping the screen corner it sits in, animated over `ANIM_MS`. `around_cursor`: keep
+/// the point under the pointer where it is instead (a grown PiP shrinking as the user starts to
+/// drag it). Resolves once the window has its new size, so a drag can start from it.
 #[tauri::command]
-pub(crate) fn pip_resize(app: AppHandle, window: WebviewWindow, w: f64, h: f64, around_cursor: Option<bool>) -> Result<(), String> {
+pub(crate) async fn pip_resize(app: AppHandle, window: WebviewWindow, w: f64, h: f64, around_cursor: Option<bool>) -> Result<(), String> {
 	if !is_pip_window(window.label()) {
 		return Err("not a small window".into());
 	}
-	let win = window.clone();
-	let _ = window.run_on_main_thread(move || {
-		let label = win.label().to_string();
-		let Ok(s) = win.scale_factor() else { return };
-		let Some(g) = geom(&label).or_else(|| {
-			let i = win.inner_size().ok()?;
-			Some(Geom { pos: set_position_origin(&win)?, asked: (i.width as f64 / s, i.height as f64 / s) })
-		}) else {
-			return;
-		};
-		let Some((l, t, r, b, _)) = work_area(&app, Some(&win)) else { return };
-		let off = client_off(&win);
-		let (w, h) = (w.max(MIN_W), h.max(MIN_H));
-		// Laid out on the client rect (our record), converted back to `set_position` terms.
-		let (cx, cy) = (g.pos.0 + off.0, g.pos.1 + off.1);
-		let rect = (cx, cy, cx + g.asked.0 * s, cy + g.asked.1 * s);
-		let (nx, ny) = match app.cursor_position().ok().filter(|_| around_cursor == Some(true)) {
-			Some(c) => {
-				let fx = ((c.x - cx) / (g.asked.0 * s)).clamp(0.0, 1.0);
-				let fy = ((c.y - cy) / (g.asked.1 * s)).clamp(0.0, 1.0);
-				(c.x - fx * w * s, c.y - fy * h * s)
-			}
-			None => {
-				let (nx, ny, _, _) = resized(rect, (l, t, r, b), w * s, h * s);
-				(nx, ny)
-			}
-		};
-		let (x, y) = (nx - off.0, ny - off.1);
-		tracing::debug!(?g, ?off, to = ?(x, y, w, h), "pip resize");
-		set_geom(&label, Geom { pos: (x, y), asked: (w, h) });
-		// Covers the re-applied move below too.
-		ours_for(&label, 700);
-		let to = tauri::PhysicalPosition::new(x.round() as i32, y.round() as i32);
-		let _ = win.set_position(to);
-		let _ = win.set_size(tauri::LogicalSize::new(w, h));
-		// GTK drops a move that races the resize (the window then shrinks from its top-left):
-		// put it where it belongs once more after the resize landed. Harmless elsewhere.
-		let again = win.clone();
-		tauri::async_runtime::spawn(async move {
-			tokio::time::sleep(std::time::Duration::from_millis(120)).await;
-			let w2 = again.clone();
-			let _ = again.run_on_main_thread(move || {
-				let _ = w2.set_position(to);
-			});
+	let around = around_cursor == Some(true);
+	let label = window.label().to_string();
+	let s = window.scale_factor().map_err(|e| e.to_string())?;
+	let g = geom(&label)
+		.or_else(|| {
+			let i = window.inner_size().ok()?;
+			Some(Geom { pos: set_position_origin(&window)?, asked: (i.width as f64 / s, i.height as f64 / s) })
+		})
+		.ok_or("no geometry")?;
+	let (l, t, r, b, _) = work_area(&app, Some(&window)).ok_or("no work area")?;
+	let off = client_off(&window);
+	let (w, h) = (w.max(MIN_W), h.max(MIN_H));
+	// Laid out on the client rect (our record), converted back to `set_position` terms.
+	let (cx, cy) = (g.pos.0 + off.0, g.pos.1 + off.1);
+	let rect = (cx, cy, cx + g.asked.0 * s, cy + g.asked.1 * s);
+	let (nx, ny) = match app.cursor_position().ok().filter(|_| around) {
+		Some(c) => {
+			let fx = ((c.x - cx) / (g.asked.0 * s)).clamp(0.0, 1.0);
+			let fy = ((c.y - cy) / (g.asked.1 * s)).clamp(0.0, 1.0);
+			(c.x - fx * w * s, c.y - fy * h * s)
+		}
+		None => {
+			let (nx, ny, _, _) = resized(rect, (l, t, r, b), w * s, h * s);
+			(nx, ny)
+		}
+	};
+	let (x, y) = (nx - off.0, ny - off.1);
+	tracing::debug!(?g, ?off, to = ?(x, y, w, h), "pip resize");
+	set_geom(&label, Geom { pos: (x, y), asked: (w, h) });
+	// Our own moves for the whole animation (and the GTK re-apply below).
+	ours_for(&label, ANIM_MS + 700);
+	let steps = (ANIM_MS / ANIM_STEP_MS).max(1);
+	for i in 1..=steps {
+		// Ease-out: quick start, soft landing.
+		let k = 1.0 - (1.0 - i as f64 / steps as f64).powi(3);
+		let lerp = |a: f64, b: f64| a + (b - a) * k;
+		let (sx, sy) = (lerp(g.pos.0, x), lerp(g.pos.1, y));
+		let (sw, sh) = (lerp(g.asked.0, w), lerp(g.asked.1, h));
+		let win = window.clone();
+		// Each step lands before the next is sent — and the last before this resolves: a drag
+		// started right after must not meet a move still queued on the UI thread (it ended the
+		// drag before the window ever followed the pointer).
+		let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+		let posted = window.run_on_main_thread(move || {
+			let _ = win.set_position(tauri::PhysicalPosition::new(sx.round() as i32, sy.round() as i32));
+			let _ = win.set_size(tauri::LogicalSize::new(sw, sh));
+			let _ = tx.send(());
 		});
-	});
+		if posted.is_ok() {
+			let _ = rx.await;
+		}
+		if i < steps {
+			tokio::time::sleep(std::time::Duration::from_millis(ANIM_STEP_MS)).await;
+		}
+	}
+	// GTK drops a move that races the resize (the window then shrinks from its top-left): put it
+	// where it belongs once more after the resize landed. Not before a drag (it would yank the
+	// window back from under the pointer), not elsewhere (only GTK needs it).
+	#[cfg(all(unix, not(target_os = "macos")))]
+	if !around {
+		let to = tauri::PhysicalPosition::new(x.round() as i32, y.round() as i32);
+		tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+		let win = window.clone();
+		let _ = window.run_on_main_thread(move || {
+			let _ = win.set_position(to);
+		});
+	}
 	Ok(())
 }
 

@@ -156,9 +156,11 @@ export class PipWindow {
 		}, 450);
 	}
 
-	#resize(w: number, h: number, aroundCursor = false) {
+	/** Resolves once the (animated) resize landed. */
+	#resize(w: number, h: number, aroundCursor = false): Promise<void> {
 		this.#selfResize++;
-		api.pipResize(w, h, aroundCursor)
+		return api
+			.pipResize(w, h, aroundCursor)
 			.catch(() => {})
 			.finally(() => setTimeout(() => this.#selfResize--, 300));
 	}
@@ -226,7 +228,9 @@ export class PipWindow {
 		this.#dragging = true;
 		if (this.grown) {
 			this.grown = false;
-			this.#resize(this.#base.w, this.#base.h, true);
+			// The drag starts from the PiP's own size (the shrink is animated; the button is
+			// still held meanwhile).
+			await this.#resize(this.#base.w, this.#base.h, true);
 		}
 		if (!isTauri) return;
 		const { getCurrentWindow } = await import('@tauri-apps/api/window');
