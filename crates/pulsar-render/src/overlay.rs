@@ -19,6 +19,9 @@ pub enum Mode {
 pub struct OverlayState {
 	pub mode: Mode,
 	pub open: bool,
+	/// The menu is drawn alone in a window of its own (a picture-in-picture session's, issue
+	/// #18): no scrim, the panel at the top-left corner — the window is sized to the panel.
+	pub bare: bool,
 	pub id: String,
 	pub conn_label: String,
 	// live stats
@@ -891,6 +894,7 @@ impl Default for OverlayState {
 		Self {
 			mode: Mode::Game,
 			open: false,
+			bare: false,
 			id: String::new(),
 			conn_label: String::new(),
 			fps: 0.0,
@@ -1282,7 +1286,8 @@ pub fn draw(ctx: &egui::Context, st: &OverlayState, ui_state: &mut UiState) -> V
 			cmds.push(OverlayCmd::Close);
 		}
 	}
-	// Dim scrim behind the panel; clicking it closes the overlay.
+	// Dim scrim behind the panel; clicking it closes the overlay. Not in a window of its own.
+	if !st.bare {
 	egui::Area::new(egui::Id::unique("scrim"))
 		.order(egui::Order::Background)
 		.fixed_pos(egui::pos2(0.0, 0.0))
@@ -1300,13 +1305,14 @@ pub fn draw(ctx: &egui::Context, st: &OverlayState, ui_state: &mut UiState) -> V
 				cmds.push(OverlayCmd::TakeControl);
 			}
 		});
+	}
 
 	// The panel must FIT a windowed app (~720p): compact fixed width and per-topic
 	// sub-views keep every page short (tallest ≈ 340 pt — under a 576 pt 720p
 	// surface), so no scroll container is needed (an auto-height egui Window
 	// collapses a ScrollArea to its first row).
 	let frame = egui::Frame::window(&ctx.global_style()).inner_margin(egui::Margin::same(14));
-	egui::Window::new("pulsar_overlay")
+	let panel = egui::Window::new("pulsar_overlay")
 		.title_bar(false)
 		.resizable(false)
 		.collapsible(false)
@@ -1314,7 +1320,10 @@ pub fn draw(ctx: &egui::Context, st: &OverlayState, ui_state: &mut UiState) -> V
 		// page of two tiles), and centred it jumped up and down under the pointer with every
 		// step — the back button and the strip were never where the last click left them.
 		// The top sits where the tallest page ([`PANEL_REF_H`]) would be centred.
-		.anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, panel_top(ctx.viewport_rect().height())))
+		.anchor(
+			if st.bare { egui::Align2::LEFT_TOP } else { egui::Align2::CENTER_TOP },
+			if st.bare { egui::vec2(0.0, 0.0) } else { egui::vec2(0.0, panel_top(ctx.viewport_rect().height())) },
+		)
 		// `PANEL_W` pt of CONTENT width: in egui 0.37 `fixed_size` is the OUTER size (margins +
 		// stroke included), so add the frame's margins back.
 		.fixed_size(egui::vec2(PANEL_W + frame.total_margin().sum().x, 0.0))
@@ -1564,6 +1573,10 @@ pub fn draw(ctx: &egui::Context, st: &OverlayState, ui_state: &mut UiState) -> V
 				.color(egui::Color32::from_rgb(120, 125, 140)),
 			);
 		});
+	// The panel's laid-out size: a window the menu is alone in is sized to it (`menu_size`).
+	if let Some(r) = panel {
+		*PANEL_SIZE.lock().unwrap() = Some(r.response.rect.size());
+	}
 	// Stream-restarting choices wait for the menu to close (see `UiState::deferred`): hold them
 	// here; a Close from inside the overlay applies them right before closing, End drops them.
 	let mut out = Vec::with_capacity(cmds.len());
@@ -1603,6 +1616,25 @@ const PANEL_REF_H: f32 = 540.0;
 /// the gap under it (42), the footer line and its gap (24), the enter slide (8) and a gap to
 /// the bottom of the surface (24).
 const PANEL_CHROME_H: f32 = 126.0;
+
+/// Does the menu fit a surface `w`×`h` pt (a picture-in-picture window)? Else it opens in a
+/// window of its own (issue #18).
+pub fn menu_fits(w: f32, h: f32) -> bool {
+	w >= PANEL_W + 28.0 + 24.0 && h >= PANEL_REF_H + 24.0
+}
+
+/// The menu panel's size (pt) as last laid out (the window it is alone in is sized to it), or
+/// its widest/tallest page before the first frame.
+pub fn menu_size(_ctx: &egui::Context) -> egui::Vec2 {
+	PANEL_SIZE
+		.lock()
+		.unwrap()
+		.filter(|s| s.x > 1.0 && s.y > 1.0)
+		.unwrap_or(egui::vec2(PANEL_W + 28.0, PANEL_REF_H))
+}
+
+/// The panel's size (pt) as last drawn.
+static PANEL_SIZE: std::sync::Mutex<Option<egui::Vec2>> = std::sync::Mutex::new(None);
 
 /// The panel's top edge on a surface `viewport_h` pt high: where a [`PANEL_REF_H`] panel would
 /// be centred, and never closer than 12 pt to the top.

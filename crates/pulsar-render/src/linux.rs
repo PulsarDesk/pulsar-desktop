@@ -2196,8 +2196,15 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 
 		// A picture-in-picture session's menu is drawn in its own window (below); the PiP keeps
 		// the video with the closed-state chrome.
-		let pip_menu = open && overlay::pip_on() && !kms.active() && !standalone;
-		if open && !pip_menu {
+		let pip_menu = open
+			&& overlay::pip_on()
+			&& !kms.active()
+			&& !standalone
+			&& !overlay::menu_fits(w as f32 / ppp, h as f32 / ppp);
+		if pip_menu {
+			// No closed-state chrome on the PiP while its menu is in its own window: a second
+			// pass of the same egui context without the menu's widgets made egui drop the press.
+		} else if open {
 			// Controller nav tokens → egui arrow/Enter/Escape keys for this frame. The overlay
 			// reads them via its own selection index (Root grid + sub-view rows).
 			{
@@ -2405,20 +2412,21 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 		// session has the menu open; hidden otherwise. Drawn on its own surface, then the video
 		// window's surface is made current again for its swap below.
 		if pip_menu {
+			// Sized to the panel as last laid out (each page has its own height).
+			let sz = overlay::menu_size(&g.egui_ctx) * ppp;
+			let want = (sz.x.ceil().max(1.0) as u32, sz.y.ceil().max(1.0) as u32);
 			if pip_menu_win.is_none() {
-				let want = ((PIP_MENU_PTS.0 * ppp) as u32, (PIP_MENU_PTS.1 * ppp) as u32);
 				pip_menu_win = PipMenuWin::new(xd, &egl, display, config, visual, depth, cmap, want.0, want.1);
 			}
 			if let Some(m) = pip_menu_win.as_mut() {
 				let top = toplevel_of(xd, parent);
-				let want = ((PIP_MENU_PTS.0 * ppp) as u32, (PIP_MENU_PTS.1 * ppp) as u32);
 				m.show(xd, if top != 0 { top } else { win }, want);
 				if egl.make_current(display, Some(m.surface), Some(m.surface), Some(g.context)).is_ok() {
 					// Never wait on this window's vsync too: the video window paces the loop.
 					egl.swap_interval(display, 0).ok();
 					g.gl.disable(glow::SCISSOR_TEST);
 					g.gl.viewport(0, 0, m.w as i32, m.h as i32);
-					g.gl.clear_color(0.05, 0.05, 0.07, 1.0);
+					g.gl.clear_color(0.07, 0.07, 0.09, 1.0);
 					g.gl.clear(glow::COLOR_BUFFER_BIT);
 					let mut events = std::mem::take(&mut menu_events);
 					for tok in NAV_IN.lock().unwrap().drain(..).collect::<Vec<String>>() {
@@ -2435,9 +2443,12 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 						..Default::default()
 					};
 					let mut cmds: Vec<OverlayCmd> = Vec::new();
+					// Alone in its window: no scrim, the panel at the corner.
+					state.bare = true;
 					let mut full = g.egui_ctx.run_pass(raw_input, |ctx| {
 						cmds = overlay::draw(ctx, &state, &mut ov_ui);
 					});
+					state.bare = false;
 					for c in cmds {
 						emit_cmd(&mut state, c);
 					}
@@ -2530,9 +2541,9 @@ unsafe fn real_run(wid: u64, mode: Mode) {
 }
 
 /// The Pulsar menu in a window of its own, for a session shown in a picture-in-picture window
-/// (issue #18): a small PiP cannot hold the menu, so while it is open the egui overlay is drawn
-/// into this undecorated window beside the PiP (the side with room, on screen), on a second EGL
-/// surface of the same GL context; the video keeps playing in the PiP. Override-redirect: the
+/// too small to hold it (issue #18; a big enough PiP shows it inside): the egui panel is drawn
+/// alone into this undecorated window, sized to the panel and centred on the PiP (on screen), on
+/// a second EGL surface of the same GL context; the video keeps playing in the PiP. Override-redirect: the
 /// window manager never gives it the focus (keys keep arriving over stdin, `kin …`) nor frames it.
 struct PipMenuWin {
 	win: u64,
@@ -2542,11 +2553,7 @@ struct PipMenuWin {
 	mapped: bool,
 }
 
-/// The menu window's size in egui points (the overlay panel and its frame, full height).
-const PIP_MENU_PTS: (f32, f32) = (600.0, 700.0);
-
-/// Where the menu goes (root px): beside the PiP's toplevel on the side with more room, bottom
-/// edges level, on the screen.
+/// Where the menu goes (root px): centred on the PiP's toplevel, on the screen.
 unsafe fn pip_menu_place(xd: *mut xlib::Display, top: u64, w: u32, h: u32) -> (i32, i32, u32, u32) {
 	let scr = xlib::XDefaultScreen(xd);
 	let (sw, sh) = (xlib::XDisplayWidth(xd, scr), xlib::XDisplayHeight(xd, scr));
@@ -2556,10 +2563,7 @@ unsafe fn pip_menu_place(xd: *mut xlib::Display, top: u64, w: u32, h: u32) -> (i
 	let mut child: xlib::Window = 0;
 	xlib::XTranslateCoordinates(xd, top, xlib::XDefaultRootWindow(xd), 0, 0, &mut px, &mut py, &mut child);
 	let (w, h) = ((w as i32).min(sw), (h as i32).min(sh));
-	let (right, bottom) = (px + a.width, py + a.height);
-	const GAP: i32 = 8;
-	let x = if px >= sw - right { px - GAP - w } else { right + GAP };
-	let y = bottom - h;
+	let (x, y) = (px + a.width / 2 - w / 2, py + a.height / 2 - h / 2);
 	(x.clamp(0, (sw - w).max(0)), y.clamp(0, (sh - h).max(0)), w as u32, h as u32)
 }
 
@@ -2611,7 +2615,7 @@ impl PipMenuWin {
 		}
 	}
 
-	/// Put it beside the PiP and show it (re-placed on every open: the PiP may have moved).
+	/// Put it on the PiP's centre, `want` px (the panel's size), and show it.
 	unsafe fn show(&mut self, xd: *mut xlib::Display, top: u64, want: (u32, u32)) {
 		let (x, y, w, h) = pip_menu_place(xd, top, want.0, want.1);
 		if !self.mapped || (w, h) != (self.w, self.h) {

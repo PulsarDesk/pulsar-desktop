@@ -303,9 +303,9 @@ impl Panel {
 		p
 	}
 
-	/// Place the menu panel (`w`×`h` points) beside the app window it belongs to — the side with
-	/// more room on that window's display, bottom edges level — and show it. Returns true when
-	/// the drawable size changed.
+	/// Place the menu panel (`w`×`h` points, the menu's own size) centred on the app window it
+	/// belongs to, on that window's display, and show it. Returns true when the drawable size
+	/// changed.
 	pub fn place_menu(&mut self, w: f64, h: f64) -> bool {
 		let Some((b, _)) = window_info(self.parent) else { return false };
 		let (cx, cy) = (b.origin.x + b.size.width / 2.0, b.origin.y + b.size.height / 2.0);
@@ -313,10 +313,7 @@ impl Panel {
 		let d = unsafe { CGDisplayBounds(display_at(cx, cy)) };
 		let (dl, dt, dr, db) = (d.origin.x, d.origin.y, d.origin.x + d.size.width, d.origin.y + d.size.height);
 		let (w, h) = (w.min(d.size.width), h.min(d.size.height));
-		const GAP: f64 = 8.0;
-		let left = b.origin.x - dl >= dr - (b.origin.x + b.size.width);
-		let x = if left { b.origin.x - GAP - w } else { b.origin.x + b.size.width + GAP };
-		let y = b.origin.y + b.size.height - h;
+		let (x, y) = (cx - w / 2.0, cy - h / 2.0);
 		let f = (x.clamp(dl, (dr - w).max(dl)), y.clamp(dt, (db - h).max(dt)), w, h);
 		if f != self.frame {
 			self.frame = f;

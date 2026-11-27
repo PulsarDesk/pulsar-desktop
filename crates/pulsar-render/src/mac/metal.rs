@@ -722,7 +722,7 @@ impl Gpu {
 		let Some(cb) = self.queue.commandBuffer() else { return false };
 		let target = drawable.texture();
 		let size = (target.width() as u32, target.height() as u32);
-		let Some(enc) = cb.renderCommandEncoderWithDescriptor(&Self::pass(&target, Some([0.05, 0.05, 0.07, 1.0]))) else {
+		let Some(enc) = cb.renderCommandEncoderWithDescriptor(&Self::pass(&target, Some([0.07, 0.07, 0.09, 1.0]))) else {
 			return false;
 		};
 		self.paint_egui(&enc, prims, size, ppp);

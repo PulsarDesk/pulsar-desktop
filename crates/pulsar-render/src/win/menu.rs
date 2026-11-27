@@ -1,7 +1,8 @@
 //! The Pulsar menu in a window of its own, for a session shown in a picture-in-picture window
-//! (issue #18): a small PiP cannot hold the menu, so while it is open the egui overlay is drawn
-//! into this borderless popup NEXT TO the PiP (on the side with room, kept on its monitor), and
-//! the video keeps playing in the PiP.
+//! too small to hold it (issue #18; a PiP big enough shows it inside, as usual): the egui panel
+//! is drawn alone into this borderless popup, sized to the panel and centred on the PiP (kept
+//! on the PiP's monitor, so the scale and the pointer mapping are the PiP's), and the video
+//! keeps playing in the PiP.
 //!
 //! * Never takes the focus (`WS_EX_NOACTIVATE`): keyboard input reaches the menu the way it always
 //!   does — the app's webview relays it over stdin (`kin …`) — and the PiP keeps its input.
@@ -25,11 +26,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
 	WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
-/// The menu window's size in egui points: the overlay panel (520 pt + its frame) and its full
-/// height. Scaled by the display's DPI like the overlay itself; clamped to the monitor.
-const MENU_PTS: (f32, f32) = (600.0, 700.0);
-/// Gap between the PiP and the menu (physical px at 100 %).
-const GAP: i32 = 8;
 
 pub(super) struct MenuWin {
 	pub hwnd: HWND,
@@ -50,8 +46,7 @@ unsafe extern "system" fn menu_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
 	DefWindowProcW(hwnd, msg, wp, lp)
 }
 
-/// Where the menu goes (physical): beside the PiP on the side with more room, its bottom edge
-/// level with the PiP's, all inside the monitor's work area.
+/// Where the menu goes (physical): centred on the PiP, inside the PiP's monitor's work area.
 unsafe fn place(owner: HWND, w: i32, h: i32) -> (i32, i32, i32, i32) {
 	let mut pip = RECT::default();
 	let _ = GetWindowRect(owner, &mut pip);
@@ -59,22 +54,19 @@ unsafe fn place(owner: HWND, w: i32, h: i32) -> (i32, i32, i32, i32) {
 	let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
 	let wa = if GetMonitorInfoW(mon, &mut mi).as_bool() { mi.rcWork } else { pip };
 	let (w, h) = (w.min(wa.right - wa.left), h.min(wa.bottom - wa.top));
-	let room_left = pip.left - wa.left;
-	let room_right = wa.right - pip.right;
-	let x = if room_left >= room_right { pip.left - GAP - w } else { pip.right + GAP };
-	let y = pip.bottom - h;
+	let (cx, cy) = ((pip.left + pip.right) / 2, (pip.top + pip.bottom) / 2);
+	let (x, y) = (cx - w / 2, cy - h / 2);
 	(x.clamp(wa.left, wa.right - w), y.clamp(wa.top, wa.bottom - h), w, h)
 }
 
 impl MenuWin {
-	/// Create the popup (hidden) for the PiP whose renderer child is `child`.
-	pub unsafe fn new(device: &ID3D11Device, child: HWND, ppp: f32) -> Result<Self> {
+	/// Create the popup (hidden) for the PiP whose renderer child is `child`, `pw`×`ph` px.
+	pub unsafe fn new(device: &ID3D11Device, child: HWND, pw: i32, ph: i32) -> Result<Self> {
 		let owner = GetAncestor(child, GA_ROOT);
 		let hinstance = GetModuleHandleW(None)?;
 		let class = w!("PulsarRenderMenu");
 		let wc = WNDCLASSW { lpfnWndProc: Some(menu_wndproc), hInstance: hinstance.into(), lpszClassName: class, ..Default::default() };
 		RegisterClassW(&wc); // a second registration fails harmlessly
-		let (pw, ph) = ((MENU_PTS.0 * ppp) as i32, (MENU_PTS.1 * ppp) as i32);
 		let (x, y, w, h) = place(owner, pw, ph);
 		let hwnd = CreateWindowExW(
 			WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
@@ -116,10 +108,9 @@ impl MenuWin {
 		Ok(())
 	}
 
-	/// Show it beside the PiP (re-placed on every open: the PiP may have moved).
-	pub unsafe fn show(&mut self, device: &ID3D11Device, child: HWND, ppp: f32) {
+	/// Show it centred on the PiP, `pw`×`ph` px (the panel's size; follows each page's height).
+	pub unsafe fn show(&mut self, device: &ID3D11Device, child: HWND, pw: i32, ph: i32) {
 		let owner = GetAncestor(child, GA_ROOT);
-		let (pw, ph) = ((MENU_PTS.0 * ppp) as i32, (MENU_PTS.1 * ppp) as i32);
 		let (x, y, w, h) = place(owner, pw, ph);
 		if (w as u32, h as u32) != (self.width, self.height) {
 			self.rtv = None;

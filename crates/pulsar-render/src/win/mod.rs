@@ -53,6 +53,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 // ---- shared control state (host → renderer over stdin) ---------------------------------
 static OPEN: AtomicBool = AtomicBool::new(false);
+/// The open menu is drawn in its own window (a PiP too small for it, menu.rs): the video window
+/// then leaves the pointer alone.
+static MENU_POPUP: AtomicBool = AtomicBool::new(false);
 // Frame pacing default OFF (lowest latency); the app pushes the user's setting on start.
 static PACE: AtomicBool = AtomicBool::new(false);
 /// Set by a `rotate` stdin line that changed the rotation: the next presented frame
@@ -1244,7 +1247,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
 	}
 	// Only collect input while the overlay is open (we hold mouse capture then) — and drawn here:
 	// a picture-in-picture session's menu lives in its own window (menu.rs), which feeds it.
-	if OPEN.load(Ordering::SeqCst) && !crate::overlay::pip_on() {
+	if OPEN.load(Ordering::SeqCst) && !MENU_POPUP.load(Ordering::SeqCst) {
 		push_pointer(msg, wp, lp);
 	}
 	unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
@@ -1577,7 +1580,11 @@ impl Renderer {
 		}
 		// A picture-in-picture session's menu is drawn in its own window beside the PiP (menu.rs);
 		// the PiP itself keeps showing the video with the closed-state chrome.
-		let pip_menu = open && crate::overlay::pip_on();
+		// Only when the PiP is too small to hold the menu: a big enough one shows it inside.
+		let pip_menu = open
+			&& crate::overlay::pip_on()
+			&& !crate::overlay::menu_fits(self.width as f32 / overlay_ppp(), self.height as f32 / overlay_ppp());
+		MENU_POPUP.store(pip_menu, Ordering::SeqCst);
 		if !pip_menu {
 			if let Some(m) = self.menu.as_mut() {
 				m.hide();
@@ -1588,15 +1595,20 @@ impl Renderer {
 			return;
 		}
 		if pip_menu {
-			self.paint_closed();
+			// No closed-state chrome on the PiP meanwhile: a second pass of the same egui
+			// context without the menu's widgets each frame made egui drop the press, so no click
+			// in the menu ever completed.
+			// Sized to the panel as last laid out (each page has its own height).
+			let sz = crate::overlay::menu_size(&self.egui_ctx) * overlay_ppp();
+			let (pw, ph) = (sz.x.ceil() as i32, sz.y.ceil() as i32);
 			if self.menu.is_none() {
-				match menu::MenuWin::new(&self.device, self.hwnd, overlay_ppp()) {
+				match menu::MenuWin::new(&self.device, self.hwnd, pw, ph) {
 					Ok(m) => self.menu = Some(m),
 					Err(e) => eprintln!("pulsar-render(win): PiP menu window failed: {e}"),
 				}
 			}
 			if let Some(m) = self.menu.as_mut() {
-				m.show(&self.device, self.hwnd, overlay_ppp());
+				m.show(&self.device, self.hwnd, pw, ph);
 			}
 		}
 		self.apply_caps_seed();
@@ -1617,8 +1629,9 @@ impl Renderer {
 			},
 		};
 		if pip_menu {
-			// A fresh surface each frame (flip-model back buffers are undefined after Present).
-			let c = [0.05f32, 0.05, 0.07, 1.0];
+			// A fresh surface each frame (flip-model back buffers are undefined after Present);
+			// the panel's own colour, so its rounded corners don't show a different one.
+			let c = [0.07f32, 0.07, 0.09, 1.0];
 			self.context.ClearRenderTargetView(&rtv, &c);
 		}
 
@@ -1689,6 +1702,8 @@ impl Renderer {
 		ostate.controllers_locked = CONTROLLERS_LOCKED.lock().unwrap().iter().cloned().collect();
 		let ov_ui = &mut self.ov_ui;
 		let mut cmds = Vec::new();
+		// Alone in its window: no scrim, the panel at the corner (the window is its size).
+		ostate.bare = pip_menu;
 		let mut out = self.egui_ctx.run_pass(raw, |ctx| {
 			cmds = crate::overlay::draw(ctx, ostate, ov_ui);
 			// Show the "stream stopped" indicator even while the overlay is open so the

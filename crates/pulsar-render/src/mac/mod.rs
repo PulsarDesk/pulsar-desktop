@@ -1108,6 +1108,10 @@ fn handle_mouse(ev: &NSEvent, win: &window::Panel) {
 	}
 }
 
+/// The open menu is drawn in its own panel (a PiP too small for it): the video panel then
+/// leaves the pointer to the app.
+static MENU_POPUP: AtomicBool = AtomicBool::new(false);
+
 /// Pointer input of the PiP menu panel (its own coordinates), drained by its overlay pass.
 static MENU_EVENTS: Mutex<Vec<egui::Event>> = Mutex::new(Vec::new());
 
@@ -1144,7 +1148,7 @@ fn handle_menu_mouse(ev: &NSEvent, menu: &window::Panel) {
 /// Should the panel take the mouse right now (instead of letting it reach the app)?
 fn wants_mouse(win: &window::Panel) -> bool {
 	// A picture-in-picture session's menu is in its own panel: the PiP keeps its pointer.
-	if (OPEN.load(Ordering::SeqCst) && !crate::overlay::pip_on()) || BTN_DRAG.lock().unwrap().is_some() {
+	if (OPEN.load(Ordering::SeqCst) && !MENU_POPUP.load(Ordering::SeqCst)) || BTN_DRAG.lock().unwrap().is_some() {
 		return true;
 	}
 	if !win.shown {
@@ -1528,7 +1532,10 @@ impl Renderer {
 		let size = win.size_px;
 		// A picture-in-picture session's menu: drawn in its own panel beside the PiP; the PiP
 		// keeps the video with the closed-state chrome.
-		let pip_menu = OPEN.load(Ordering::SeqCst) && crate::overlay::pip_on();
+		let pip_menu = OPEN.load(Ordering::SeqCst)
+			&& crate::overlay::pip_on()
+			&& !crate::overlay::menu_fits(size.0 as f32 / overlay_ppp(), size.1 as f32 / overlay_ppp());
+		MENU_POPUP.store(pip_menu, Ordering::SeqCst);
 		if pip_menu {
 			EGUI_EVENTS.lock().unwrap().clear();
 			if self.menu.is_none() {
@@ -1539,14 +1546,21 @@ impl Renderer {
 				}
 			}
 			let ppp = overlay_ppp();
+			// Sized to the panel as last laid out (each page has its own height), in panel points.
+			let want = crate::overlay::menu_size(&self.egui_ctx);
 			let menu_size = self.menu.as_mut().map(|m| {
 				m.parent = win.parent;
-				m.place_menu(600.0 * ppp as f64 / m.scale.max(1.0), 700.0 * ppp as f64 / m.scale.max(1.0));
+				let k = ppp as f64 / m.scale.max(1.0);
+				m.place_menu(want.x as f64 * k, want.y as f64 * k);
 				m.size_px
 			});
 			if let Some(ms) = menu_size {
 				let events = std::mem::take(&mut *MENU_EVENTS.lock().unwrap());
-				if let Some(prims) = self.overlay_prims(ms, true, Some(events)) {
+				// Alone in its panel: no scrim, the panel at the corner.
+				self.ostate.bare = true;
+				let prims = self.overlay_prims(ms, true, Some(events));
+				self.ostate.bare = false;
+				if let Some(prims) = prims {
 					let ppp = self.egui_ctx.pixels_per_point();
 					if let Some(m) = self.menu.as_ref() {
 						self.gpu.render_overlay_on(&m.layer, &prims, ppp);
@@ -1556,7 +1570,9 @@ impl Renderer {
 		} else if let Some(m) = self.menu.as_mut() {
 			m.hide();
 		}
-		let prims = self.overlay_prims(size, !pip_menu, None);
+		// No closed-state chrome on the PiP while its menu is in its own panel: a second pass of
+		// the same egui context without the menu's widgets made egui drop the press.
+		let prims = if pip_menu { None } else { self.overlay_prims(size, true, None) };
 		let video = frame.map(|f| {
 			let (iw, ih) = f.size();
 			let (vw, vh) = view::displayed_dims(iw, ih);
