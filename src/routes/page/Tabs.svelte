@@ -415,6 +415,21 @@
 				<Icon name="edit" size={11} />
 			</button>
 		{/if}
+		{#if onPip && canPip(s.tabId)}
+			<!-- Picture-in-picture (issue #18): the visible way in (also right-click, the Pulsar
+			     menu, the status bar, Ctrl+Shift+P). Shown on hover, like the pencil. -->
+			<button
+				class="tx tpen"
+				aria-label={t('pip.open')}
+				title={t('pip.open')}
+				onclick={(e) => {
+					e.stopPropagation();
+					onPip?.(s.tabId);
+				}}
+			>
+				<Icon name="pip" size={11} />
+			</button>
+		{/if}
 		<button
 			class="tx"
 			aria-label={t('tab.close')}

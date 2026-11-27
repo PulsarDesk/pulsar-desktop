@@ -30,6 +30,13 @@ describe('tab right-click menu (picture-in-picture, issue #18)', () => {
 		expect(onPipRestore).toHaveBeenCalledWith(2);
 	});
 
+	it('the tab has its own small-window button (no status bar needed)', async () => {
+		const onPip = vi.fn();
+		render(Tabs, { props: { ...base, sessions: [session(4)], canPip: () => true, onPip } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Küçük pencerede aç' }));
+		expect(onPip).toHaveBeenCalledWith(4);
+	});
+
 	it('no menu when the tab cannot go to a small window', async () => {
 		render(Tabs, { props: { ...base, sessions: [session(3)], canPip: () => false, onPip: () => {} } });
 		await fireEvent.contextMenu(screen.getByText('PC 3'));
