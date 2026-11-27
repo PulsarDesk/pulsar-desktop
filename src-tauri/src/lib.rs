@@ -745,6 +745,12 @@ pub fn run() {
 				// The session window focused last owns keyboard/mouse capture (tab windows).
 				if *focused {
 					tabwin::note_focus(window.app_handle(), window.label());
+					// Its opacity (Settings → transparency) once it is surely mapped.
+					if tabwin::is_session_window(window.label()) {
+						if let Some(w) = window.app_handle().get_webview_window(window.label()) {
+							winalpha::reapply(&w);
+						}
+					}
 				}
 				// Losing focus while the overlay is open would otherwise STRAND it: the combo is
 				// now focus-gated off, so it couldn't be closed. Auto-close it on blur so the

@@ -81,6 +81,14 @@ pub(crate) fn apply(app: &AppHandle, label: &str) {
 	let _ = app.emit_to(label, "window-alpha", (label.to_string(), pct));
 }
 
+/// Re-apply window `w`'s opacity alone (on the UI thread already): a window shown after the
+/// opacity was first set can come up opaque (GTK applies it to a mapped toplevel only), so session
+/// windows re-apply it when they gain the focus. Idempotent and cheap (100 % = opaque, nothing
+/// layered).
+pub(crate) fn reapply(w: &WebviewWindow) {
+	set_alpha(w, current(w.label()));
+}
+
 #[cfg(windows)]
 fn set_alpha(w: &WebviewWindow, pct: u8) {
 	use windows_sys::Win32::Foundation::HWND;
