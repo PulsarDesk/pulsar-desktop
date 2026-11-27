@@ -327,7 +327,7 @@
 						<div class="acts">
 							<button
 								class="act"
-								class:on={r.viewOnly}
+								class:off={r.viewOnly}
 								onclick={() => toggleViewOnly(r)}
 								title={r.viewOnly ? t('host.viewOnlyOn') : t('host.viewOnly')}
 								aria-label={t('host.viewOnly')}
@@ -564,12 +564,14 @@
 		background: var(--accent-soft);
 		color: var(--accent-ink);
 	}
-	.act.on {
-		background: var(--accent-soft);
-		color: var(--accent-ink);
-		border-color: var(--accent-soft-2);
-	}
 	.act.kick {
+		color: var(--danger-text);
+	}
+	/* Remote control turned off for this viewer: red, like the other "off" states. */
+	.act.off,
+	.act.off:hover {
+		background: color-mix(in oklch, var(--danger, red) 10%, transparent);
+		border-color: color-mix(in oklch, var(--danger, red) 45%, transparent);
 		color: var(--danger-text);
 	}
 	.act.call.ringing {
