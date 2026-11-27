@@ -275,9 +275,13 @@ pub(crate) async fn pip_open(
 		forget(&label);
 		return Err(e);
 	}
-	// Our record of where it is (see GEOM): the builder's position, physical.
+	// Our record of where it is (see GEOM): the builder's position, physical — then settled into
+	// its corner with the margins measured on the client (the builder places the outer frame).
 	let scale = window.scale_factor().unwrap_or(1.0);
 	set_geom(&label, Geom { pos: (x * scale, y * scale), asked: (w, h) });
+	if let Some(pw) = app.get_webview_window(&label) {
+		let _ = snap_now(&app, &pw);
+	}
 	crate::tabwin::move_video(&app, play, &label);
 	push_line(&app, play);
 	crate::winalpha::apply(&app, &label);
@@ -434,9 +438,11 @@ fn set_position_origin(win: &WebviewWindow) -> Option<(f64, f64)> {
 	Some((p.x as f64, p.y as f64))
 }
 
-/// The frame around the client area in `set_position` space (physical): Windows' invisible resize
-/// border (outer − inner, stable); none where `set_position` moves the client origin (GTK).
-fn frame(win: &WebviewWindow) -> (f64, f64) {
+/// From what `set_position` moves to the visible client area's origin (physical): Windows' outer
+/// frame starts at the invisible resize border left of the client (and none above it); nothing
+/// where `set_position` moves the client origin itself (GTK). Margins and corners are measured on
+/// the client, so the PiP sits the same distance from the screen edges on every OS.
+fn client_off(win: &WebviewWindow) -> (f64, f64) {
 	#[cfg(all(unix, not(target_os = "macos")))]
 	{
 		let _ = win;
@@ -444,8 +450,8 @@ fn frame(win: &WebviewWindow) -> (f64, f64) {
 	}
 	#[cfg(not(all(unix, not(target_os = "macos"))))]
 	{
-		match (win.outer_size(), win.inner_size()) {
-			(Ok(o), Ok(i)) => (o.width.saturating_sub(i.width) as f64, o.height.saturating_sub(i.height) as f64),
+		match (win.inner_position(), win.outer_position()) {
+			(Ok(i), Ok(o)) => ((i.x - o.x) as f64, (i.y - o.y) as f64),
 			_ => (0.0, 0.0),
 		}
 	}
@@ -483,11 +489,14 @@ pub(crate) fn pip_resize(app: AppHandle, window: WebviewWindow, w: f64, h: f64) 
 			return;
 		};
 		let Some((l, t, r, b, _)) = work_area(&app, Some(&win)) else { return };
-		let (fw, fh) = frame(&win);
+		let off = client_off(&win);
 		let (w, h) = (w.max(MIN_W), h.max(MIN_H));
-		let rect = (g.pos.0, g.pos.1, g.pos.0 + g.asked.0 * s + fw, g.pos.1 + g.asked.1 * s + fh);
-		let (x, y, _, _) = resized(rect, (l, t, r, b), w * s + fw, h * s + fh);
-		tracing::debug!(?g, frame = ?(fw, fh), to = ?(x, y, w, h), "pip resize");
+		// Laid out on the client rect (our record), converted back to `set_position` terms.
+		let (cx, cy) = (g.pos.0 + off.0, g.pos.1 + off.1);
+		let rect = (cx, cy, cx + g.asked.0 * s, cy + g.asked.1 * s);
+		let (nx, ny, _, _) = resized(rect, (l, t, r, b), w * s, h * s);
+		let (x, y) = (nx - off.0, ny - off.1);
+		tracing::debug!(?g, ?off, to = ?(x, y, w, h), "pip resize");
 		set_geom(&label, Geom { pos: (x, y), asked: (w, h) });
 		let to = tauri::PhysicalPosition::new(x.round() as i32, y.round() as i32);
 		let _ = win.set_position(to);
@@ -506,21 +515,21 @@ pub(crate) fn pip_resize(app: AppHandle, window: WebviewWindow, w: f64, h: f64) 
 	Ok(())
 }
 
-/// A PiP was dragged and let go: within `SNAP` of a corner, it snaps into it. Returns where it
-/// ended up (logical x, y in `set_position` terms; w, h = the asked client size) so the next PiP
-/// opens there.
-#[tauri::command]
-pub(crate) fn pip_snap(app: AppHandle, window: WebviewWindow) -> Option<[f64; 4]> {
+/// Snap window `window` into a corner it is near (within `SNAP` of two edges, margins measured on
+/// the client area) and record where it is. Returns where it ended up (logical x, y in
+/// `set_position` terms; w, h = the asked client size).
+fn snap_now(app: &AppHandle, window: &WebviewWindow) -> Option<[f64; 4]> {
 	const SNAP: f64 = 48.0;
 	let label = window.label().to_string();
-	let (l, t, r, b, s) = work_area(&app, Some(&window))?;
-	let (mut x, mut y) = set_position_origin(&window)?;
+	let (l, t, r, b, s) = work_area(app, Some(window))?;
+	let (px, py) = set_position_origin(window)?;
 	let asked = geom(&label).map(|g| g.asked).or_else(|| {
 		let i = window.inner_size().ok()?;
 		Some((i.width as f64 / s, i.height as f64 / s))
 	})?;
-	let (fw, fh) = frame(&window);
-	let (w, h) = (asked.0 * s + fw, asked.1 * s + fh);
+	let off = client_off(window);
+	let (w, h) = (asked.0 * s, asked.1 * s);
+	let (mut x, mut y) = (px + off.0, py + off.1);
 	let (x0, y0) = (x, y);
 	let m = MARGIN * s;
 	let near = |a: f64, b: f64| (a - b).abs() <= SNAP * s;
@@ -534,11 +543,19 @@ pub(crate) fn pip_snap(app: AppHandle, window: WebviewWindow) -> Option<[f64; 4]
 	} else if near(y + h, b - m) || y + h > b - m {
 		y = b - m - h;
 	}
-	if (x, y) != (x0, y0) {
+	let (x, y) = (x - off.0, y - off.1);
+	if (x, y) != (x0 - off.0, y0 - off.1) {
 		let _ = window.set_position(tauri::PhysicalPosition::new(x.round() as i32, y.round() as i32));
 	}
 	set_geom(&label, Geom { pos: (x, y), asked });
 	Some([x / s, y / s, asked.0, asked.1])
+}
+
+/// A PiP was dragged and let go: it snaps into a near corner; the result is where the next PiP
+/// opens.
+#[tauri::command]
+pub(crate) fn pip_snap(app: AppHandle, window: WebviewWindow) -> Option<[f64; 4]> {
+	snap_now(&app, &window)
 }
 
 #[cfg(test)]
