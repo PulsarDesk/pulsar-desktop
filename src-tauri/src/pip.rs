@@ -284,7 +284,7 @@ pub(crate) async fn pip_open(
 	// Our record of where it is (see GEOM): the builder's position, physical — then settled into
 	// its corner with the margins measured on the client (the builder places the outer frame).
 	let scale = window.scale_factor().unwrap_or(1.0);
-	set_geom(&label, Geom { pos: (x * scale, y * scale), asked: (w, h) });
+	set_geom(&label, Geom { pos: (x * scale, y * scale), asked: (w, h), home: None });
 	if let Some(pw) = app.get_webview_window(&label) {
 		// The settle below is ours too (size, then the corner).
 		ours_for(&label, 1200);
@@ -443,6 +443,10 @@ struct Geom {
 	pos: (f64, f64),
 	/// Client size asked for (logical).
 	asked: (f64, f64),
+	/// Where it was before a hover growth (pos, asked): shrinking back to that size returns
+	/// exactly there — re-anchoring from the grown rect moved it whenever the growth crossed the
+	/// screen's middle or met an edge. Dropped when the user moves or resizes it.
+	home: Option<((f64, f64), (f64, f64))>,
 }
 
 fn geom(label: &str) -> Option<Geom> {
@@ -479,7 +483,7 @@ pub(crate) fn note_moved(window: &tauri::Window) {
 	}
 	let Some(w) = window.app_handle().get_webview_window(&label) else { return };
 	let (Some(pos), Some(g)) = (set_position_origin(&w), geom(&label)) else { return };
-	set_geom(&label, Geom { pos, asked: g.asked });
+	set_geom(&label, Geom { pos, asked: g.asked, home: None });
 }
 
 /// A PiP window was resized by the user (an edge drag, not our hover growth): its client size now
@@ -491,7 +495,7 @@ pub(crate) fn note_resized(window: &tauri::Window) {
 	}
 	let Some(w) = window.app_handle().get_webview_window(&label) else { return };
 	let (Ok(s), Ok(i), Some(pos)) = (w.scale_factor(), w.inner_size(), set_position_origin(&w)) else { return };
-	set_geom(&label, Geom { pos, asked: (i.width as f64 / s, i.height as f64 / s) });
+	set_geom(&label, Geom { pos, asked: (i.width as f64 / s, i.height as f64 / s), home: None });
 }
 
 /// What `set_position` moves, read from the window (only after the user moved it).
@@ -531,7 +535,7 @@ pub(crate) fn pip_size(window: WebviewWindow, user: bool) -> Option<[f64; 2]> {
 		let s = window.scale_factor().ok()?;
 		let i = window.inner_size().ok()?;
 		let pos = set_position_origin(&window)?;
-		set_geom(&label, Geom { pos, asked: (i.width as f64 / s, i.height as f64 / s) });
+		set_geom(&label, Geom { pos, asked: (i.width as f64 / s, i.height as f64 / s), home: None });
 	}
 	geom(&label).map(|g| [g.asked.0, g.asked.1])
 }
@@ -555,7 +559,7 @@ pub(crate) async fn pip_resize(app: AppHandle, window: WebviewWindow, w: f64, h:
 	let g = geom(&label)
 		.or_else(|| {
 			let i = window.inner_size().ok()?;
-			Some(Geom { pos: set_position_origin(&window)?, asked: (i.width as f64 / s, i.height as f64 / s) })
+			Some(Geom { pos: set_position_origin(&window)?, asked: (i.width as f64 / s, i.height as f64 / s), home: None })
 		})
 		.ok_or("no geometry")?;
 	let (l, t, r, b, _) = work_area(&app, Some(&window)).ok_or("no work area")?;
@@ -564,7 +568,13 @@ pub(crate) async fn pip_resize(app: AppHandle, window: WebviewWindow, w: f64, h:
 	// Laid out on the client rect (our record), converted back to `set_position` terms.
 	let (cx, cy) = (g.pos.0 + off.0, g.pos.1 + off.1);
 	let rect = (cx, cy, cx + g.asked.0 * s, cy + g.asked.1 * s);
+	// Back to the size it had before a hover growth: back to where it was then, exactly.
+	let back_home = g.home.filter(|(_, a)| !around && (a.0 - w).abs() < 0.5 && (a.1 - h).abs() < 0.5);
 	let (nx, ny) = match app.cursor_position().ok().filter(|_| around) {
+		_ if back_home.is_some() => {
+			let (p, _) = back_home.unwrap();
+			(p.0 + off.0, p.1 + off.1)
+		}
 		Some(c) => {
 			let fx = ((c.x - cx) / (g.asked.0 * s)).clamp(0.0, 1.0);
 			let fy = ((c.y - cy) / (g.asked.1 * s)).clamp(0.0, 1.0);
@@ -577,7 +587,11 @@ pub(crate) async fn pip_resize(app: AppHandle, window: WebviewWindow, w: f64, h:
 	};
 	let (x, y) = (nx - off.0, ny - off.1);
 	tracing::debug!(?g, ?off, to = ?(x, y, w, h), "pip resize");
-	set_geom(&label, Geom { pos: (x, y), asked: (w, h) });
+	// Growing from its own size: remember that spot for the way back. A drag (around the
+	// pointer) or the way back itself ends it.
+	let growing = !around && (w > g.asked.0 + 0.5 || h > g.asked.1 + 0.5);
+	let home = if growing { g.home.or(Some((g.pos, g.asked))) } else { None };
+	set_geom(&label, Geom { pos: (x, y), asked: (w, h), home });
 	// Our own moves for the whole animation (and the GTK re-apply below).
 	ours_for(&label, ANIM_MS + 700);
 	let steps = (ANIM_MS / ANIM_STEP_MS).max(1);
@@ -652,7 +666,7 @@ fn snap_now(app: &AppHandle, window: &WebviewWindow) -> Option<[f64; 4]> {
 		ours_for(&label, 400);
 		let _ = window.set_position(tauri::PhysicalPosition::new(x.round() as i32, y.round() as i32));
 	}
-	set_geom(&label, Geom { pos: (x, y), asked });
+	set_geom(&label, Geom { pos: (x, y), asked, home: None });
 	Some([x / s, y / s, asked.0, asked.1])
 }
 
