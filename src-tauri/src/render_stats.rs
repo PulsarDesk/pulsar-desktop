@@ -515,6 +515,7 @@ pub(crate) fn start_render_reader(
 					// Picture-in-picture (issue #18, Windows renderer): a click on the passive
 					// video, or a press that turned into a drag — the PiP window decides.
 					(Some("ov"), Some(kind @ ("pipclick" | "pipdrag"))) => {
+						tracing::info!(id = cur_id, kind, "pip press (renderer)");
 						let _ = app.emit("pip-press", (cur_id, kind == "pipdrag"));
 					}
 					// The renderer's "stream stopped" edge: release the capture (no picture to

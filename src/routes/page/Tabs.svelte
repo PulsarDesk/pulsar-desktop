@@ -435,9 +435,11 @@
 			role="menuitem"
 			onpointerdown={(e) => e.stopPropagation()}
 			onclick={() => {
+				// Read it before closing: `m` follows `menu` and is null after.
+				const { pip, tabId } = m;
 				menu = null;
-				if (m.pip) onPipRestore?.(m.tabId);
-				else onPip?.(m.tabId);
+				if (pip) onPipRestore?.(tabId);
+				else onPip?.(tabId);
 			}}
 		>
 			<Icon name={m.pip ? 'expand' : 'pip'} size={14} />{m.pip ? t('pip.restore') : t('pip.open')}

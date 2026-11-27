@@ -1906,7 +1906,10 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, _sta
 	// which engages immediately like the Linux evdev path. KIOSK_ENGAGE is LATCHED
 	// (not consumed): the frontend re-arms capture on tab-activation churn, and a
 	// one-shot left that second enable() disengaged (see kbdhook/linux.rs).
-	let kiosk = KIOSK_ENGAGE.load(Ordering::SeqCst);
+	// A picture-in-picture session is never auto-engaged, kiosk or not: it is taken with a click
+	// (issue #18) — the kiosk's engage-on-focus would send the click that focuses it to the host.
+	let pip = crate::pip::is_pip_play(id);
+	let kiosk = KIOSK_ENGAGE.load(Ordering::SeqCst) && !pip;
 	KIOSK_SESSION.store(kiosk, Ordering::SeqCst);
 	if kiosk && !ENGAGED.load(Ordering::SeqCst) {
 		// Only while Pulsar is focused — a `--connect` launch the user tabbed away from
@@ -1920,7 +1923,9 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, _sta
 		// the renderer cursor/hint resyncs; a remembered-disengaged session stays off.
 		// A LIVE engagement wins over a stale memo: a re-arm without a disable() in between
 		// (effect re-run on the same tab) used to clear the user's control silently.
-		if ENGAGED_MEMO.load(Ordering::SeqCst) {
+		// Not into a picture-in-picture window: the control the session had in its old window
+		// does not follow it there (a click takes it).
+		if ENGAGED_MEMO.load(Ordering::SeqCst) && !pip {
 			engage(&app);
 		} else if ENGAGED.load(Ordering::SeqCst) {
 			tracing::info!("kbd capture enable(): keeping the live engagement");
@@ -1937,7 +1942,11 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, _sta
 	// read the pointer from the canvas instead, so keep mouse capture off there.
 	MOUSE_CAPTURE.store(mouse, Ordering::SeqCst);
 	ENABLED.store(true, Ordering::SeqCst);
-	// A deferred auto-engage for this session whose focus came while capture was disarmed.
+	// A deferred auto-engage for this session whose focus came while capture was disarmed —
+	// never for a picture-in-picture session (one left over from its old window would fire).
+	if pip {
+		PENDING_ENGAGE.store(u64::MAX, Ordering::SeqCst);
+	}
 	try_pending_engage();
 	match MECHANISM.load(Ordering::SeqCst) {
 		0 => {

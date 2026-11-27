@@ -146,6 +146,9 @@ export class PipWindow {
 		if (!this.grown) return;
 		this.grown = false;
 		this.#resize(this.#base.w, this.#base.h);
+		// A drag usually ends with the pointer still on the window (grown): it snaps and is
+		// remembered once it is back to its own size.
+		this.#remember();
 	}
 
 	/** The pointer entered the window. */

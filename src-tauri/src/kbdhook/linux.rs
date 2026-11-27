@@ -474,15 +474,20 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, star
 	// auto-connect launch (lib.rs gates on AUTO_CONNECT + no `.skip-autoconnect`
 	// marker), so every enable() in this process belongs to the kiosk session —
 	// re-engaging them all is correct (an appliance has no manual sessions).
-	let kiosk = KIOSK_ENGAGE.load(Ordering::SeqCst);
+	// A picture-in-picture session is never auto-engaged, kiosk or not: it is taken with a click
+	// (issue #18) — the kiosk's engage-on-focus would send the click that focuses it to the host.
+	let pip = crate::pip::is_pip_play(id);
+	let kiosk = KIOSK_ENGAGE.load(Ordering::SeqCst) && !pip;
 	KIOSK_SESSION.store(kiosk, Ordering::SeqCst);
 	// Same-session re-arm restores whatever engagement the user had when this id was last
 	// active. The live ENGAGED was cleared by the intervening disable(), so read the memory
 	// that survives it (ENGAGED_MEMO) instead — that's what makes preservation work for the
 	// disable()→enable() tab-switch path. Everything else (new id) starts at the kiosk
 	// default (engaged for appliances, off for manual sessions).
+	// A picture-in-picture session starts released: the control it had in its old window does
+	// not follow it there (a click takes it).
 	let engaged = if same_session {
-		ENGAGED_MEMO.load(Ordering::SeqCst) || kiosk
+		(ENGAGED_MEMO.load(Ordering::SeqCst) && !pip) || kiosk
 	} else {
 		kiosk
 	};

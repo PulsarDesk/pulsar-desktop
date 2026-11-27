@@ -403,11 +403,15 @@ pub(crate) fn pip_resize(app: AppHandle, window: WebviewWindow, w: f64, h: f64) 
 	}
 	let win = window.clone();
 	let _ = window.run_on_main_thread(move || {
-		let (Ok(p), Ok(sz)) = (win.outer_position(), win.outer_size()) else { return };
+		let (Ok(p), Ok(sz), Ok(inner)) = (win.outer_position(), win.outer_size(), win.inner_size()) else { return };
 		let Some((l, t, r, b, s)) = work_area(&app, Some(&win)) else { return };
+		// The outer rect carries an invisible frame (Windows' resize border) around the client
+		// area `set_size` sets: lay out the OUTER rect, size the inner one — or every grow/shrink
+		// round trip walks the window by the frame's width.
+		let (fw, fh) = (sz.width as f64 - inner.width as f64, sz.height as f64 - inner.height as f64);
 		let rect = (p.x as f64, p.y as f64, p.x as f64 + sz.width as f64, p.y as f64 + sz.height as f64);
-		let (x, y, nw, nh) = resized(rect, (l, t, r, b), w.max(MIN_W) * s, h.max(MIN_H) * s);
-		let _ = win.set_size(tauri::PhysicalSize::new(nw.round() as u32, nh.round() as u32));
+		let (x, y, nw, nh) = resized(rect, (l, t, r, b), w.max(MIN_W) * s + fw, h.max(MIN_H) * s + fh);
+		let _ = win.set_size(tauri::PhysicalSize::new((nw - fw).round() as u32, (nh - fh).round() as u32));
 		let _ = win.set_position(tauri::PhysicalPosition::new(x.round() as i32, y.round() as i32));
 	});
 	Ok(())
@@ -437,7 +441,10 @@ pub(crate) fn pip_snap(app: AppHandle, window: WebviewWindow) -> Option<[f64; 4]
 	if (x, y) != (p.x as f64, p.y as f64) {
 		let _ = window.set_position(tauri::PhysicalPosition::new(x.round() as i32, y.round() as i32));
 	}
-	Some([x / s, y / s, w / s, h / s])
+	// The next PiP is built with this as its INNER size (and outer position): hand back the
+	// client size, or each reopen grows it by the invisible frame.
+	let inner = window.inner_size().ok()?;
+	Some([x / s, y / s, inner.width as f64 / s, inner.height as f64 / s])
 }
 
 #[cfg(test)]

@@ -389,14 +389,17 @@ pub fn enable(new_sink: Arc<dyn Sink>, arm: Arm) -> bool {
 	if tap {
 		os::refresh_geometry();
 	}
-	let kiosk = KIOSK_ENGAGE.load(SeqCst);
+	// A picture-in-picture session is never auto-engaged, kiosk or not: it is taken with a click
+	// (issue #18) — the kiosk's engage-on-focus would send the click that focuses it to the host.
+	let kiosk = KIOSK_ENGAGE.load(SeqCst) && !arm.click_only;
 	KIOSK_SESSION.store(kiosk, SeqCst);
 	if kiosk && !ENGAGED.load(SeqCst) {
 		engage_auto();
 	} else if kiosk {
 		tracing::info!("mac kbd capture enable(): kiosk, keeping the live engagement");
 	} else if same_session {
-		if ENGAGED_MEMO.load(SeqCst) {
+		// Not into a picture-in-picture window (`click_only`): a click takes it there.
+		if ENGAGED_MEMO.load(SeqCst) && !arm.click_only {
 			engage();
 		} else if ENGAGED.load(SeqCst) {
 			tracing::info!("mac kbd capture enable(): keeping the live engagement");
@@ -405,6 +408,9 @@ pub fn enable(new_sink: Arc<dyn Sink>, arm: Arm) -> bool {
 		tracing::info!("mac kbd capture enable(): keeping the fresh engagement");
 	} else {
 		ENGAGED.store(false, SeqCst);
+	}
+	if arm.click_only {
+		PENDING_ENGAGE.store(u64::MAX, SeqCst);
 	}
 	try_pending_engage();
 	tap
