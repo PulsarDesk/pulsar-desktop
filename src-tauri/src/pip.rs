@@ -489,8 +489,19 @@ pub(crate) fn pip_resize(app: AppHandle, window: WebviewWindow, w: f64, h: f64) 
 		let (x, y, _, _) = resized(rect, (l, t, r, b), w * s + fw, h * s + fh);
 		tracing::debug!(?g, frame = ?(fw, fh), to = ?(x, y, w, h), "pip resize");
 		set_geom(&label, Geom { pos: (x, y), asked: (w, h) });
+		let to = tauri::PhysicalPosition::new(x.round() as i32, y.round() as i32);
+		let _ = win.set_position(to);
 		let _ = win.set_size(tauri::LogicalSize::new(w, h));
-		let _ = win.set_position(tauri::PhysicalPosition::new(x.round() as i32, y.round() as i32));
+		// GTK drops a move that races the resize (the window then shrinks from its top-left):
+		// put it where it belongs once more after the resize landed. Harmless elsewhere.
+		let again = win.clone();
+		tauri::async_runtime::spawn(async move {
+			tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+			let w2 = again.clone();
+			let _ = again.run_on_main_thread(move || {
+				let _ = w2.set_position(to);
+			});
+		});
 	});
 	Ok(())
 }
