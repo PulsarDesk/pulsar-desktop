@@ -703,7 +703,8 @@
 			}
 			streamW = e.w;
 			streamH = e.h;
-			if (fullscreen) return;
+			// A picture-in-picture window keeps the size it was given / the user gave it.
+			if (fullscreen || pip) return;
 			const landscape = e.w >= e.h;
 			// First frame, or an orientation flip → (re)size; otherwise leave the window alone
 			// so the user's manual resize sticks.

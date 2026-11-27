@@ -15,7 +15,7 @@ vi.mock('#lib/api.js', async () => {
 
 import { api } from '#lib/api.js';
 import { ui } from '#lib/settings.svelte.js';
-import { PipWindow, PIP_BAR_H } from './pipWindow.svelte';
+import { PipWindow, PIP_BAR_H, growFactor } from './pipWindow.svelte';
 
 function make() {
 	const deps = { restore: vi.fn(), takeControl: vi.fn(), playId: () => 7, ownsInput: () => true, engaged: () => false };
@@ -120,6 +120,17 @@ describe('picture-in-picture window (issue #18)', () => {
 		pw.enter();
 		vi.advanceTimersByTime(1000);
 		expect(pw.grown).toBe(false);
+	});
+
+	it('grows only while the grown PiP stays within half the screen', () => {
+		const screen = { w: 1920, h: 1040 };
+		expect(growFactor({ w: 480, h: 270 }, 1.5, screen)).toBe(1.5);
+		// 2x would pass half the height (520): capped there.
+		expect(growFactor({ w: 480, h: 270 }, 2, screen)).toBeCloseTo(1.926, 2);
+		expect(growFactor({ w: 600, h: 338 }, 2, screen)).toBeCloseTo(1.538, 2);
+		// Already big: no growth, only room for the control bar.
+		expect(growFactor({ w: 1000, h: 562 }, 1.5, screen)).toBe(1);
+		expect(growFactor({ w: 480, h: 270 }, 1.5, null)).toBe(1.5);
 	});
 
 	it('a press that moves is a drag, not a click', async () => {

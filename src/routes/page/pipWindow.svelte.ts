@@ -30,6 +30,21 @@ const DOUBLE_MS = 300;
 /** Pointer travel that turns a press into a window drag. */
 const DRAG_PX = 5;
 
+/** The work area the PiP lives on (logical px), from the webview's screen. */
+function screenSize(): { w: number; h: number } | null {
+	if (typeof window === 'undefined' || !window.screen) return null;
+	return { w: window.screen.availWidth, h: window.screen.availHeight };
+}
+
+/** How much a hovered PiP grows: the chosen ratio, but never past half the screen either way —
+ * a PiP the user already made big only makes room for its control bar (1). */
+export function growFactor(base: { w: number; h: number }, want: number, screen: { w: number; h: number } | null): number {
+	if (want <= 1) return 1;
+	if (!screen || screen.w <= 0 || screen.h <= 0) return want;
+	const k = Math.min(want, (screen.w * 0.5) / base.w, (screen.h * 0.5) / base.h);
+	return k < 1.05 ? 1 : k;
+}
+
 type Deps = {
 	/** Give the session back to its tab (TabWindows.pipReturn). */
 	restore: () => void;
@@ -151,7 +166,7 @@ export class PipWindow {
 	#grow() {
 		if (this.grown) return;
 		this.grown = true;
-		const k = ui.pipHoverGrow ? Math.max(1, ui.pipHoverScale / 100) : 1;
+		const k = growFactor(this.#base, ui.pipHoverGrow ? ui.pipHoverScale / 100 : 1, screenSize());
 		this.#resize(Math.round(this.#base.w * k), Math.round(this.#base.h * k) + PIP_BAR_H);
 	}
 

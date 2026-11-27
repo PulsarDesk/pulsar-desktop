@@ -202,8 +202,11 @@ fn place(app: &AppHandle, src: &WebviewWindow, last: Option<[f64; 4]>) -> (f64, 
 	let Some((l, t, r, b, s)) = work_area(app, Some(src)) else {
 		return (100.0, 100.0, W, H);
 	};
+	// A remembered spot, unless its size is no small window any more (over half the screen
+	// either way): then the default size in the default corner.
+	let fits = |w: f64, h: f64| w >= MIN_W && h >= MIN_H && w * s <= (r - l) / 2.0 && h * s <= (b - t) / 2.0;
 	let (mut x, mut y, w, h) = match last {
-		Some([x, y, w, h]) if w >= MIN_W && h >= MIN_H => (x * s, y * s, w * s, h * s),
+		Some([x, y, w, h]) if fits(w, h) => (x * s, y * s, w * s, h * s),
 		_ => (r - (W + MARGIN) * s, b - (H + MARGIN) * s, W * s, H * s),
 	};
 	// Keep it on this screen.
