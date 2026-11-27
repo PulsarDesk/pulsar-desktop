@@ -111,6 +111,18 @@ the Pulsar menu's Tools row (`pipwin <available> <on>` in, `ov set pip on|off` o
   Windows the renderer child takes the mouse. Presses: the Windows renderer reports them in PiP
   mode (`ov pipclick` / `ov pipdrag` → `pip-press`) instead of `ov engage`; Linux (embedded) and
   macOS pass the pointer to the webview (capture-phase handlers on `.stage`).
+- **The Pulsar menu of a PiP** opens in a window of its own beside the PiP (side with room,
+  inside the monitor), the video stays in the PiP: Windows `win/menu.rs` (WS_POPUP,
+  NOACTIVATE, owned by the PiP, own flip-model swapchain on the renderer's device), Linux
+  `PipMenuWin` in `linux.rs` (override-redirect X window, second EGL surface of the same GL
+  context, made current only for its pass), macOS `Panel::new_menu` + `Gpu::render_overlay_on`
+  (floating non-activating NSPanel, pointer polled — AppKit sends moves to the key window only).
+  Keys keep arriving over stdin (`kin …`) in every case. macOS UNTESTED on hardware.
+- Geometry: GTK reports/sets frameless windows inconsistently (builds ~37 px taller, drops a
+  move racing a resize, `outer_position` above what `set_position` moves), so `pip.rs` keeps its
+  own record of each PiP's rect (`GEOM`) and lays growth out from it; user moves/resizes (window
+  Moved/Resized outside a short window after our own) update it. Margins are on the client area.
+  A drag of a grown PiP shrinks it around the pointer first; no growth while it moves.
 - Hovering a PiP never takes control, also with the free cursor: Windows `handle_hover` and the
   macOS engine (`Arm::click_only`) skip PiP plays, the canvas path's `hoverBlocked` is true.
 

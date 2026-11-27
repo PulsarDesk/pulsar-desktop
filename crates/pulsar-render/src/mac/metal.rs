@@ -708,6 +708,31 @@ impl Gpu {
 		d
 	}
 
+	/// Configure another layer for this device (the PiP menu panel's).
+	pub fn attach_layer(&self, layer: &CAMetalLayer) {
+		layer.setDevice(Some(&self.device));
+		layer.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+		layer.setFramebufferOnly(true);
+		layer.setOpaque(true);
+	}
+
+	/// Draw egui `prims` alone on `layer`'s next drawable and present it (the PiP menu panel).
+	pub fn render_overlay_on(&mut self, layer: &CAMetalLayer, prims: &[egui::ClippedPrimitive], ppp: f32) -> bool {
+		let Some(drawable) = layer.nextDrawable() else { return false };
+		let Some(cb) = self.queue.commandBuffer() else { return false };
+		let target = drawable.texture();
+		let size = (target.width() as u32, target.height() as u32);
+		let Some(enc) = cb.renderCommandEncoderWithDescriptor(&Self::pass(&target, Some([0.05, 0.05, 0.07, 1.0]))) else {
+			return false;
+		};
+		self.paint_egui(&enc, prims, size, ppp);
+		enc.endEncoding();
+		cb.presentDrawable(ProtocolObject::from_ref(&*drawable));
+		cb.commit();
+		self.inflight.push_back((cb, Vec::new()));
+		true
+	}
+
 	/// Draw one frame on the next drawable and present it. `size` = the drawable size in
 	/// pixels. Returns false when no drawable was available (the frame is skipped, like a busy
 	/// swapchain on Windows) or nothing could be drawn. `upscale` = the upscale mode

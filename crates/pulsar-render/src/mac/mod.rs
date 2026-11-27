@@ -1108,9 +1108,43 @@ fn handle_mouse(ev: &NSEvent, win: &window::Panel) {
 	}
 }
 
+/// Pointer input of the PiP menu panel (its own coordinates), drained by its overlay pass.
+static MENU_EVENTS: Mutex<Vec<egui::Event>> = Mutex::new(Vec::new());
+
+/// A mouse event on the PiP menu panel → egui input for the menu.
+fn handle_menu_mouse(ev: &NSEvent, menu: &window::Panel) {
+	let pos = event_pos(ev, menu);
+	let mut q = MENU_EVENTS.lock().unwrap();
+	let m = egui::Modifiers::default();
+	match ev.r#type() {
+		NSEventType::LeftMouseDown | NSEventType::LeftMouseUp => q.push(egui::Event::PointerButton {
+			pos,
+			button: egui::PointerButton::Primary,
+			pressed: ev.r#type() == NSEventType::LeftMouseDown,
+			modifiers: m,
+		}),
+		NSEventType::RightMouseDown | NSEventType::RightMouseUp => q.push(egui::Event::PointerButton {
+			pos,
+			button: egui::PointerButton::Secondary,
+			pressed: ev.r#type() == NSEventType::RightMouseDown,
+			modifiers: m,
+		}),
+		NSEventType::LeftMouseDragged | NSEventType::MouseMoved => q.push(egui::Event::PointerMoved(pos)),
+		NSEventType::ScrollWheel => q.push(egui::Event::MouseWheel {
+			unit: egui::MouseWheelUnit::Point,
+			delta: egui::vec2(ev.scrollingDeltaX() as f32, ev.scrollingDeltaY() as f32),
+			phase: egui::TouchPhase::Move,
+			source: egui::MouseWheelSource::Wheel,
+			modifiers: m,
+		}),
+		_ => {}
+	}
+}
+
 /// Should the panel take the mouse right now (instead of letting it reach the app)?
 fn wants_mouse(win: &window::Panel) -> bool {
-	if OPEN.load(Ordering::SeqCst) || BTN_DRAG.lock().unwrap().is_some() {
+	// A picture-in-picture session's menu is in its own panel: the PiP keeps its pointer.
+	if (OPEN.load(Ordering::SeqCst) && !crate::overlay::pip_on()) || BTN_DRAG.lock().unwrap().is_some() {
 		return true;
 	}
 	if !win.shown {
@@ -1154,6 +1188,8 @@ fn watch_parent() {
 /// rebuild keeps the window).
 struct Renderer {
 	gpu: metal::Gpu,
+	// The Pulsar menu's own panel while a picture-in-picture session has it open (issue #18).
+	menu: Option<window::Panel>,
 	decoder: Option<decode::Decoder>,
 	codec: Codec,
 	// Decoded (unrotated) picture size; drives the placement + `vidsink-dims`.
@@ -1206,6 +1242,7 @@ impl Renderer {
 	fn new(gpu: metal::Gpu, codec: Codec, mode: crate::overlay::Mode, backing: f64) -> Self {
 		Self {
 			gpu,
+			menu: None,
 			decoder: None,
 			codec,
 			src_w: 0,
@@ -1336,7 +1373,15 @@ impl Renderer {
 
 	/// Run egui for this frame (the open menu, or the closed-state chrome) and return its
 	/// tessellated output, the textures already uploaded. None = nothing to draw.
-	fn overlay_prims(&mut self, size: (u32, u32)) -> Option<Vec<egui::ClippedPrimitive>> {
+	/// `draw_open`: draw the open menu here (false = the closed-state chrome even while it is
+	/// open — a PiP's menu is drawn in its own panel); `events`: that pass's input (None = the
+	/// video panel's queue).
+	fn overlay_prims(
+		&mut self,
+		size: (u32, u32),
+		draw_open: bool,
+		events: Option<Vec<egui::Event>>,
+	) -> Option<Vec<egui::ClippedPrimitive>> {
 		let open = OPEN.load(Ordering::SeqCst);
 		if open != self.was_open {
 			if open {
@@ -1360,7 +1405,7 @@ impl Renderer {
 		));
 		let stalled = STALLED.load(Ordering::Relaxed);
 		let recovering = !stalled && RECOVERING.load(Ordering::Relaxed);
-		let mut out = if open {
+		let mut out = if open && draw_open {
 			self.sync_stats();
 			self.ostate.open = true;
 			self.ostate.pace = PACE.load(Ordering::SeqCst);
@@ -1372,7 +1417,7 @@ impl Renderer {
 			self.ostate.audio_mute = AUDIO_MUTE.load(Ordering::SeqCst);
 			self.ostate.mic_on = MIC_ON.load(Ordering::SeqCst);
 			self.ostate.fit = view::fit_label().to_string();
-			let events = std::mem::take(&mut *EGUI_EVENTS.lock().unwrap());
+			let events = events.unwrap_or_else(|| std::mem::take(&mut *EGUI_EVENTS.lock().unwrap()));
 			let raw = egui::RawInput { screen_rect: screen, events, ..Default::default() };
 			let ostate = &mut self.ostate;
 			ostate.chat = CHAT_LOG.lock().unwrap().clone();
@@ -1481,7 +1526,37 @@ impl Renderer {
 	/// Draw `frame` (or the idle background) + the overlay on the panel's layer.
 	fn draw(&mut self, win: &window::Panel, frame: Option<&decode::Frame>) -> bool {
 		let size = win.size_px;
-		let prims = self.overlay_prims(size);
+		// A picture-in-picture session's menu: drawn in its own panel beside the PiP; the PiP
+		// keeps the video with the closed-state chrome.
+		let pip_menu = OPEN.load(Ordering::SeqCst) && crate::overlay::pip_on();
+		if pip_menu {
+			EGUI_EVENTS.lock().unwrap().clear();
+			if self.menu.is_none() {
+				if let Some(mtm) = MainThreadMarker::new() {
+					let m = window::Panel::new_menu(mtm, win.parent);
+					self.gpu.attach_layer(&m.layer);
+					self.menu = Some(m);
+				}
+			}
+			let ppp = overlay_ppp();
+			let menu_size = self.menu.as_mut().map(|m| {
+				m.parent = win.parent;
+				m.place_menu(600.0 * ppp as f64 / m.scale.max(1.0), 700.0 * ppp as f64 / m.scale.max(1.0));
+				m.size_px
+			});
+			if let Some(ms) = menu_size {
+				let events = std::mem::take(&mut *MENU_EVENTS.lock().unwrap());
+				if let Some(prims) = self.overlay_prims(ms, true, Some(events)) {
+					let ppp = self.egui_ctx.pixels_per_point();
+					if let Some(m) = self.menu.as_ref() {
+						self.gpu.render_overlay_on(&m.layer, &prims, ppp);
+					}
+				}
+			}
+		} else if let Some(m) = self.menu.as_mut() {
+			m.hide();
+		}
+		let prims = self.overlay_prims(size, !pip_menu, None);
 		let video = frame.map(|f| {
 			let (iw, ih) = f.size();
 			let (vw, vh) = view::displayed_dims(iw, ih);
@@ -1845,6 +1920,8 @@ fn event_loop(mtm: MainThreadMarker, parent: u32, port: u16, codec: Codec, mode:
 			) {
 				if ev.windowNumber() == win.number() {
 					handle_mouse(&ev, &win);
+				} else if let Some(m) = renderer.as_ref().and_then(|r| r.menu.as_ref()).filter(|m| ev.windowNumber() == m.number()) {
+					handle_menu_mouse(&ev, m);
 				}
 				app.sendEvent(&ev);
 			}
@@ -1883,6 +1960,13 @@ fn event_loop(mtm: MainThreadMarker, parent: u32, port: u16, codec: Codec, mode:
 						*last = (p.x, p.y);
 						EGUI_EVENTS.lock().unwrap().push(egui::Event::PointerMoved(p));
 					}
+				}
+			}
+			// The PiP menu panel never becomes key either: poll its pointer the same way.
+			if let Some(m) = renderer.as_ref().and_then(|r| r.menu.as_ref()).filter(|m| m.shown) {
+				if let Some((x, y)) = m.pointer() {
+					let k = m.scale as f32 / overlay_ppp();
+					MENU_EVENTS.lock().unwrap().push(egui::Event::PointerMoved(egui::pos2(x as f32 * k, y as f32 * k)));
 				}
 			}
 			if let Some(l) = link.as_mut() {
