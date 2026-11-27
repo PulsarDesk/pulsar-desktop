@@ -86,6 +86,8 @@
 	"tools.fullscreen": "Tam ekran aç/kapat",
 	"tools.pin": "Üstte tut",
 	"info.pin": "Bu Pulsar penceresini (tüm sekmeleriyle) diğer uygulamaların üstünde tutar. Özelliği Ayarlar → Genel'den kapatabilirsin.",
+	"tools.pip": "Küçük pencere",
+	"info.pip": "Bu oturumu kendi küçük penceresinde gösterir; sekmesi yerinde kalır. Özelliği Ayarlar → Genel'den kapatabilirsin.",
 	"chat.empty": "Bu oturumda henüz mesaj yok",
 	"chat.placeholder": "Mesaj yaz…",
 	"chat.new": "Yeni",

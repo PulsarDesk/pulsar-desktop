@@ -86,6 +86,8 @@
 	"tools.fullscreen": "Toggle fullscreen",
 	"tools.pin": "Keep on top",
 	"info.pin": "Keeps this Pulsar window above other apps (the window, with all its tabs). Turn the feature off in Settings → General.",
+	"tools.pip": "Small window",
+	"info.pip": "Shows this session in a small window of its own; its tab stays where it is. Turn the feature off in Settings → General.",
 	"chat.empty": "No messages in this session yet",
 	"chat.placeholder": "Type a message…",
 	"chat.new": "New",

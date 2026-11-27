@@ -84,6 +84,7 @@ mod pad_wake;
 mod link_hint;
 mod mobile_link;
 mod pinch;
+mod pip;
 mod play;
 mod pad_notice;
 mod input_notice;
@@ -676,7 +677,13 @@ pub fn run() {
 				// Only the MAIN window hides-to-tray; secondary windows (approval popup,
 				// connections manager) close NORMALLY so a host-side win.close() works
 				// (prevent_close + hide would otherwise leave them stuck hidden).
-				if tabwin::is_tab_window(window.label()) {
+				if pip::is_pip_window(window.label()) {
+					// A picture-in-picture window closed by the OS (Alt+F4, taskbar): its
+					// session goes back to its tab instead of ending — see pip.rs.
+					if pip::close_requested(window.app_handle(), window.label()) {
+						api.prevent_close();
+					}
+				} else if tabwin::is_tab_window(window.label()) {
 					// A detached session-tab window: its sessions end (like closing those tabs),
 					// their video moved out first — see tabwin::close_tab_window.
 					api.prevent_close();
@@ -766,6 +773,7 @@ pub fn run() {
 				}
 				// A pinned window that is gone must not stay in the pin set.
 				winpin::forget(window.label());
+				pip::forget(window.label());
 				// Deny the pending auth request if an approval popup was closed by the OS.
 				let label = window.label();
 				if let Some(id_str) = label.strip_prefix("approve-") {
@@ -930,6 +938,14 @@ pub fn run() {
 			winpin::play_pin_set,
 			winpin::set_window_pin_enabled,
 			winpin::window_pin_maybe_ignored,
+			pip::pip_open,
+			pip::pip_return,
+			pip::pip_restore,
+			pip::pip_focus,
+			pip::set_pip_enabled,
+			pip::pip_resize,
+			pip::pip_snap,
+			pip::pip_close,
 			toast::toast_list,
 			toast::toast_open,
 			toast::toast_close,

@@ -36,7 +36,8 @@ vi.mock('#lib/api.js', async () => {
 			runCommand: _vi.fn().mockResolvedValue(undefined),
 			setPaneCount: _vi.fn().mockResolvedValue(undefined),
 			setPlayResolution: _vi.fn().mockResolvedValue(undefined),
-			setActiveSession: _vi.fn().mockResolvedValue(undefined)
+			setActiveSession: _vi.fn().mockResolvedValue(undefined),
+			pipOpen: _vi.fn().mockResolvedValue('pip-1')
 		},
 		onPlayReady: _vi.fn(),
 		onPlayOptimizing: _vi.fn(),
@@ -428,6 +429,57 @@ describe('detachable tabs (release / adopt / reorder)', () => {
 		expect(mgr.sessions.map((x) => x.tabId)).toEqual([b, c, a]);
 		mgr.moveTab(a, b);
 		expect(mgr.sessions.map((x) => x.tabId)).toEqual([a, b, c]);
+	});
+});
+
+describe('picture-in-picture placeholder (issue #18)', () => {
+	beforeEach(() => {
+		vi.mocked(api.stopStream).mockClear();
+		vi.mocked(api.pipOpen).mockClear();
+		ui.pip = true;
+	});
+
+	it('the tab stays in place as a placeholder; the live record goes to the small window', async () => {
+		const mgr = makeManager('remote');
+		await mgr.startConnect(target, 'remote');
+		await mgr.startConnect({ name: 'B', id: '222 222 222' }, 'remote');
+		const [a, b] = mgr.sessions.map((x) => x.tabId);
+		expect(mgr.canPip(a)).toBe(true);
+		await mgr.toPip(a);
+		expect(mgr.sessions.map((x) => x.tabId)).toEqual([a, b]);
+		expect(mgr.sessions[0].pip).toBe('pip-1');
+		const [session, placeholder] = vi.mocked(api.pipOpen).mock.calls[0];
+		expect((session as { pip?: string }).pip).toBeUndefined();
+		expect((placeholder as { pip?: string }).pip).toBe('pending');
+		expect(api.stopStream).not.toHaveBeenCalled();
+		expect(mgr.canPip(a)).toBe(false);
+	});
+
+	it('the returned session takes the placeholder back, in place, and is shown', async () => {
+		const mgr = makeManager('remote');
+		await mgr.startConnect(target, 'remote');
+		await mgr.startConnect({ name: 'B', id: '222 222 222' }, 'remote');
+		const [a, b] = mgr.sessions.map((x) => x.tabId);
+		await mgr.toPip(a);
+		mgr.select(b);
+		const live = { ...mgr.sessions[0], pip: undefined, label: 'Renamed in PiP' };
+		mgr.fromPip(live.playId, live);
+		expect(mgr.sessions.map((x) => x.tabId)).toEqual([a, b]);
+		expect(mgr.sessions[0].pip).toBeUndefined();
+		expect(mgr.sessions[0].label).toBe('Renamed in PiP');
+		expect(mgr.activeTab).toBe(a);
+	});
+
+	it('is not offered while the setting is off, and a failed open keeps the session here', async () => {
+		const mgr = makeManager('remote');
+		await mgr.startConnect(target, 'remote');
+		const a = mgr.sessions[0].tabId;
+		ui.pip = false;
+		expect(mgr.canPip(a)).toBe(false);
+		ui.pip = true;
+		vi.mocked(api.pipOpen).mockRejectedValueOnce('off');
+		await mgr.toPip(a);
+		expect(mgr.sessions[0].pip).toBeUndefined();
 	});
 });
 

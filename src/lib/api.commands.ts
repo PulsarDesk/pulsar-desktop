@@ -535,6 +535,25 @@ export const api = {
 	playPinSet: (id: number, on: boolean) => invoke<boolean>('play_pin_set', { id, on }),
 	/** Settings → General → "Keep on top": off releases every pinned window. */
 	setWindowPinEnabled: (enabled: boolean) => invoke<void>('set_window_pin_enabled', { enabled }),
+	/** Picture-in-picture (issue #18): open play `play` in a small window of its own. `session`
+	 * goes there; `placeholder` is what this window keeps; `last` = where the previous PiP was
+	 * left (logical x, y, w, h). Resolves to the PiP window's label. */
+	pipOpen: (session: unknown, placeholder: unknown, play: number, last: number[] | null) =>
+		invoke<string>('pip_open', { session, placeholder, play, last }),
+	/** PiP window: give the session back to its placeholder tab (the window then closes). */
+	pipReturn: (session: unknown, play: number) => invoke<void>('pip_return', { session, play }),
+	/** Placeholder tab: ask the PiP window of `play` to bring it back. */
+	pipRestore: (play: number) => invoke<void>('pip_restore', { play }),
+	/** Placeholder tab: show the PiP window of `play`. */
+	pipFocus: (play: number) => invoke<void>('pip_focus', { play }),
+	/** PiP window: its session ended — close at once. */
+	pipClose: () => invoke<void>('pip_close'),
+	/** PiP window: resize (logical px), keeping the screen corner it sits in. */
+	pipResize: (w: number, h: number) => invoke<void>('pip_resize', { w, h }),
+	/** PiP window: after a drag, snap into a near corner; resolves to [x, y, w, h] (logical). */
+	pipSnap: () => invoke<number[] | null>('pip_snap'),
+	/** Settings → General → "Small window": off brings every PiP back. */
+	setPipEnabled: (enabled: boolean) => invoke<void>('set_pip_enabled', { enabled }),
 	/** Linux Wayland: the desktop may ignore keep-on-top (the pin's tooltip warns). */
 	windowPinMaybeIgnored: () => invoke<boolean>('window_pin_maybe_ignored'),
 	/** Background controller input (Settings → General): the pad keeps driving the host

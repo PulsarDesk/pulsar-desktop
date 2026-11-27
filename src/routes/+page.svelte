@@ -22,7 +22,7 @@
 		onNodeVersionError,
 		onSessionPassword
 	} from '#lib/api.js';
-	import { onRelayE2e, onSharedHost, onCliConnect } from '#lib/api.js';
+	import { onRelayE2e, onSharedHost, onCliConnect, onPipReturn } from '#lib/api.js';
 	import type { AutoConnectTarget, CliConnect } from '#lib/types.js';
 	import { setPeerIdentity, loadSharedPeers } from '#lib/peers.svelte.js';
 	import {
@@ -63,7 +63,10 @@
 	import Settings from '#lib/screens/Settings.svelte';
 	import Controllers from '#lib/Controllers.svelte';
 	import { SessionManager } from './page/sessions.svelte';
-	import { TabWindows, isTabWin } from './page/tabWindows.svelte';
+	import { TabWindows, isTabWin, isPip, myLabel } from './page/tabWindows.svelte';
+	import { PipWindow } from './page/pipWindow.svelte';
+	import PipPlaceholder from './page/PipPlaceholder.svelte';
+	import PipBar from './page/PipBar.svelte';
 	import { WindowPin } from './page/windowPin.svelte';
 	import { setLivePeers } from '#lib/presence.svelte.js';
 	import { setAuthDoneHandler } from '#lib/authDone.js';
@@ -196,6 +199,25 @@
 	const tw = new TabWindows(sm);
 	// "Keep on top" (issue #18) for this window.
 	const pin = new WindowPin();
+	// Picture-in-picture (issue #18). `sessionRefs`: the mounted session screens, by tab id —
+	// the PiP window's own controls drive its one session through them.
+	type PipControls = {
+		pipTakeControl: () => void;
+		pipToggleMenu: () => void;
+		pipToggleSpeaker: () => void;
+		pipSpeakerOn: () => boolean;
+		pipEngaged: () => boolean;
+	};
+	let sessionRefs = $state<Record<number, PipControls | undefined>>({});
+	const pipSession = () => (sm.sessions[0] ? sessionRefs[sm.sessions[0].tabId] : undefined);
+	const pipw = new PipWindow({
+		restore: () => void tw.pipReturn(),
+		takeControl: () => pipSession()?.pipTakeControl(),
+		playId: () => sm.sessions[0]?.playId ?? -1,
+		ownsInput: () => tw.ownsInput,
+		engaged: () => pipSession()?.pipEngaged() ?? false
+	});
+	let pipSpeaker = $state(true);
 	// Drag-to-split (IntelliJ-style): a tab dragged over the session area highlights the half
 	// it would take (nearest edge); the middle just shows that tab. The native video is hidden
 	// meanwhile so the highlight is visible over it.
@@ -760,6 +782,13 @@
 			if (hostOnly) mode = 'remote';
 		}
 		if (!isPopupOnly) void tw.init();
+		if (isPip) void pipw.init();
+		// The PiP window hands a session back: the placeholder tab here becomes it again.
+		if (!isPopupOnly && !isPip && isTauri) {
+			await onPipReturn((to, play, session) => {
+				if (to === myLabel) sm.fromPip(play, session);
+			});
+		}
 		if (isTabWin && isTauri) {
 			// The capture's fullscreen combo (Ctrl+Shift+F11) — for this window's session.
 			await onFullscreenToggle(() => {
@@ -831,6 +860,7 @@
 		// would otherwise hide-to-tray for a user who disabled it, leaving a ghost process.
 		api.setTray(ui.tray).catch(() => {});
 		api.setWindowPinEnabled(ui.windowPin).catch(() => {});
+		api.setPipEnabled(ui.pip).catch(() => {});
 		api.setPadWake(ui.padWake).catch(() => {});
 		api.setPadBackground(ui.padBackground).catch(() => {});
 		api.setClientAwake(ui.clientAwake).catch(() => {});
@@ -1286,7 +1316,7 @@
 		</div>
 	{/if}
 	<div class="desktop">
-	<div class="window" class:fullscreen={sm.fullscreen}>
+	<div class="window" class:fullscreen={sm.fullscreen} class:pip={isPip} class:pip-active={isPip && pipw.active}>
 		<ResizeEdges fullscreen={sm.fullscreen} />
 		{#if tw.dropHover}
 			<!-- A tab dragged from another Pulsar window is over this one's tab area. -->
@@ -1298,7 +1328,7 @@
 				<div class="splash-word">Pulsar</div>
 			</div>
 		{/if}
-		{#if !sm.fullscreen || (sm.splitMode === 'off' && sm.activeTab === 'home')}
+		{#if !isPip && (!sm.fullscreen || (sm.splitMode === 'off' && sm.activeTab === 'home'))}
 			<Chrome
 				title={sm.activeTab === 'home' && mode !== 'game' ? t('nav.' + view) : ''}
 				gaming={mode === 'game'}
@@ -1335,13 +1365,28 @@
 					canMove={sm.canMove}
 					onDragOut={tw.dragOut}
 					canSplit={isTabWin ? undefined : sm.canSplitWith}
+					canPip={sm.canPip}
+					onPip={(id) => void sm.toPip(id)}
+					onPipRestore={(id) => {
+						const s = sm.sessions.find((x) => x.tabId === id);
+						if (s) api.pipRestore(s.playId).catch(() => {});
+					}}
 					{onStageDrag}
 					{onStageDrop}
 				/>
 			{/if}
 		{/if}
 
-		<div class="stage" class:split={sm.splitMode !== 'off'} data-layout={sm.splitMode} bind:this={stageEl}>
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div
+			class="stage"
+			class:split={sm.splitMode !== 'off'}
+			data-layout={sm.splitMode}
+			bind:this={stageEl}
+			onpointerdowncapture={isPip ? pipw.down : undefined}
+			onpointermovecapture={isPip ? pipw.move : undefined}
+			onpointerupcapture={isPip ? pipw.up : undefined}
+		>
 		{#if splitDrop}
 			<div class="split-drop" data-zone={splitDrop} aria-hidden="true">
 				<span>{splitDrop === 'center' ? t('tab.dropShow') : splitDrop.startsWith('pane') ? t('tab.dropPane') : t('tab.dropSplit')}</span>
@@ -1396,7 +1441,14 @@
 				class:focused={paneIdx >= 0 && paneIdx === sm.focusedPane}
 				style={paneIdx >= 0 ? paneCellStyle(paneIdx) : ''}
 			>
-				{#if s.phase === 'connecting'}
+				{#if s.pip}
+					<PipPlaceholder
+						name={s.label || s.target.name}
+						pending={s.pip === 'pending'}
+						onRestore={() => api.pipRestore(s.playId).catch(() => {})}
+						onShow={() => api.pipFocus(s.playId).catch(() => {})}
+					/>
+				{:else if s.phase === 'connecting'}
 					<Connecting
 						target={s.target}
 						mode={s.mode}
@@ -1429,6 +1481,12 @@
 						occludeNative={webModalUp || splitDrop !== null || tw.dropHover}
 						joinPrompt={joinPromptFor(s.playId, paneIdx)}
 						onEnd={() => sm.endSession(s.tabId)}
+						pip={isPip}
+						onPip={(on) => {
+							if (isPip && !on) void tw.pipReturn();
+							else if (!isPip && on) void sm.toPip(s.tabId);
+						}}
+						bind:this={sessionRefs[s.tabId]}
 					/>
 				{/if}
 			</div>
@@ -1482,6 +1540,24 @@
 			{/each}
 		{/if}
 		</div>
+
+		{#if isPip && pipw.grown && sm.sessions[0]}
+			<PipBar
+				active={pipw.active}
+				pinned={pin.pinned}
+				speakerOn={pipSpeaker}
+				onMenu={() => pipSession()?.pipToggleMenu()}
+				onRestore={() => void tw.pipReturn()}
+				onTogglePin={pin.available ? () => void pin.toggle() : undefined}
+				onSpeaker={() => {
+					const ref = pipSession();
+					ref?.pipToggleSpeaker();
+					// The switch flips at once; read it back on the next tick.
+					setTimeout(() => (pipSpeaker = ref?.pipSpeakerOn() ?? pipSpeaker), 0);
+				}}
+				onEnd={() => sm.sessions[0] && sm.endSession(sm.sessions[0].tabId)}
+			/>
+		{/if}
 
 		{#if pwPrompt}
 			<PasswordModal

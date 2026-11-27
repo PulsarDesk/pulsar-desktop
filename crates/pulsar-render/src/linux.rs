@@ -631,6 +631,8 @@ pub fn run() {
 				Some("ptrfree") => crate::overlay::set_ptr_free(it.next() == Some("1")),
 				// "Keep on top" (issue #18): `pin <available> <on>`.
 				Some("pin") => crate::overlay::pin_line(&it.collect::<Vec<_>>().join(" ")),
+				// "Small window" (issue #18): `pipwin <available> <on>`.
+				Some("pipwin") => crate::overlay::pip_line(&it.collect::<Vec<_>>().join(" ")),
 				// "Otomatik ayar" state from the app (every stats window + on a change).
 				Some("autoadj") => crate::overlay::set_auto_adj(it.next() == Some("1")),
 				// Host pointer marker (issue #7): `hostptr 1 x y` / `hostptr 0`, the label name,

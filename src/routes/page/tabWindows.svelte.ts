@@ -14,7 +14,11 @@ export const tabWinNo: number | null = (() => {
 	return typeof n === 'number' ? n : null;
 })();
 export const isTabWin = tabWinNo !== null;
-export const myLabel = isTabWin ? `tabwin-${tabWinNo}` : 'main';
+/** A picture-in-picture window (`pip-<n>`, injected by pip.rs): a tab window that shows ONE
+ * session with no chrome and gives it back to its placeholder tab (issue #18). */
+export const isPip: boolean =
+	typeof window !== 'undefined' && !!(window as unknown as { __PIP__?: boolean }).__PIP__;
+export const myLabel = isTabWin ? `${isPip ? 'pip' : 'tabwin'}-${tabWinNo}` : 'main';
 
 /** Lets an old window's session screen unmount (its 0×0 video report) before the video
  * moves — so that report can't land after the new window's. */
@@ -71,8 +75,9 @@ export class TabWindows {
 			const payload = await api.tabTakeHandoff().catch(() => []);
 			this.#take(payload);
 			log(`new window: took ${this.#sm.sessions.length} tab(s)`);
-			// Opened focused: this window owns the input from the start.
-			this.inputWin = myLabel;
+			// Opened focused: this window owns the input from the start. Not a PiP window: it
+			// opens passive and gets the input only once clicked into (its focus says so).
+			if (!isPip) this.inputWin = myLabel;
 		}
 	}
 
@@ -119,6 +124,12 @@ export class TabWindows {
 		}
 		if (!this.#hadSessions || this.#moving > 0) return;
 		log('emptied → closing this tab window');
+		// A PiP window whose session ended goes at once (its close would otherwise ask to
+		// bring the session back).
+		if (isPip) {
+			api.pipClose().catch(() => {});
+			return;
+		}
 		void (async () => {
 			const { getCurrentWindow } = await import('@tauri-apps/api/window');
 			await getCurrentWindow().close();
@@ -173,6 +184,28 @@ export class TabWindows {
 			this.#moving--;
 			// Handed over: now an emptied tab window may close.
 			this.watchEmpty(this.#count);
+		}
+	};
+
+	/** PiP window: give the session back to its placeholder tab (pip.rs `pip_return`); the
+	 * window closes once the video is home. */
+	pipReturn = async () => {
+		const s = this.#sm.sessions[0];
+		if (!isPip || !s) return;
+		this.#moving++;
+		const rec = this.#sm.release(s.tabId);
+		if (!rec) {
+			this.#moving--;
+			return;
+		}
+		log(`pip return: play ${rec.playId}`);
+		await settle();
+		try {
+			await api.pipReturn(rec, rec.playId);
+		} catch (e) {
+			log(`pip return failed (${e}) — kept here`);
+			this.#sm.adopt([rec]);
+			this.#moving--;
 		}
 	};
 

@@ -609,6 +609,27 @@ pub fn set_pin_on(on: bool) {
 	PIN_ON.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// "Small window" (picture-in-picture, issue #18): `pipwin <available 0|1> <on 0|1>`, like `pin`.
+/// On = this session is shown in a PiP window; the row takes it in / brings it back.
+static PIP_AVAIL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static PIP_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn pip_line(rest: &str) {
+	let mut it = rest.split_whitespace();
+	PIP_AVAIL.store(it.next() == Some("1"), std::sync::atomic::Ordering::Relaxed);
+	PIP_ON.store(it.next() == Some("1"), std::sync::atomic::Ordering::Relaxed);
+}
+
+fn pip_avail() -> bool {
+	PIP_AVAIL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// This session is shown in a picture-in-picture window (the Windows renderer then turns a
+/// press on the video into a window drag or a `pipclick` instead of click-to-engage).
+pub fn pip_on() -> bool {
+	PIP_ON.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 fn pin_avail() -> bool {
 	PIN_AVAIL.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -2462,17 +2483,31 @@ fn draw_tools(ui: &mut egui::Ui, mode: Mode, input: RowsIn<'_>, cmds: &mut Vec<O
 			cmds.push(OverlayCmd::Set("pin", v));
 		}
 	};
+	// "Small window" (picture-in-picture): after the pin row, while the feature is on.
+	let pip_row = |rows: &mut Rows<'_>, ui: &mut egui::Ui, i: usize, cmds: &mut Vec<OverlayCmd>| {
+		let cur = if pip_on() { "on" } else { "off" };
+		if let Some(v) = rows.choice(ui, i, t("tools.pip"), cur, &onoff, Some(t("info.pip"))) {
+			PIP_ON.store(v == "on", std::sync::atomic::Ordering::Relaxed);
+			cmds.push(OverlayCmd::Set("pip", v));
+		}
+	};
+	let extra = usize::from(pin_avail()) + usize::from(pip_avail());
 	if mode == Mode::Game {
-		let mut rows = Rows::new(1 + usize::from(pin_avail()), input);
+		let mut rows = Rows::new(1 + extra, input);
 		if rows.action(ui, 0, t("tools.fullscreen"), CYAN, true) {
 			cmds.push(OverlayCmd::Set("fullscreen", "1".into()));
 		}
+		let mut i = 1;
 		if pin_avail() {
-			pin_row(&mut rows, ui, 1, cmds);
+			pin_row(&mut rows, ui, i, cmds);
+			i += 1;
+		}
+		if pip_avail() {
+			pip_row(&mut rows, ui, i, cmds);
 		}
 		return;
 	}
-	let mut rows = Rows::new(5 + usize::from(pin_avail()), input);
+	let mut rows = Rows::new(5 + extra, input);
 	let sync = if clip_sync() { "on" } else { "off" };
 	if let Some(v) = rows.choice(ui, 0, t("tools.clipsync"), sync, &onoff, None) {
 		set_clip_sync(v == "on");
@@ -2491,8 +2526,13 @@ fn draw_tools(ui: &mut egui::Ui, mode: Mode, input: RowsIn<'_>, cmds: &mut Vec<O
 	if rows.action(ui, 4, t("tools.fullscreen"), CYAN, true) {
 		cmds.push(OverlayCmd::Set("fullscreen", "1".into()));
 	}
+	let mut i = 5;
 	if pin_avail() {
-		pin_row(&mut rows, ui, 5, cmds);
+		pin_row(&mut rows, ui, i, cmds);
+		i += 1;
+	}
+	if pip_avail() {
+		pip_row(&mut rows, ui, i, cmds);
 	}
 }
 

@@ -114,6 +114,8 @@ static OVERLAY_BTN: AtomicBool = AtomicBool::new(true);
 static OVBTN_POS: Mutex<(f32, f32)> = Mutex::new(crate::overlay::BTN_POS_DEFAULT);
 /// Live engage state from the app (`engaged 0|1`) — drives cursor visibility.
 static ENGAGED_R: AtomicBool = AtomicBool::new(false);
+/// Picture-in-picture: the press on the video not yet decided (drag vs click), in points.
+static PIP_PRESS: Mutex<Option<(f32, f32)>> = Mutex::new(None);
 /// `--mode remote` (the host-pointer marker and its cursor un-hide are remote-only).
 static REMOTE_MODE: AtomicBool = AtomicBool::new(false);
 
@@ -528,6 +530,9 @@ fn stdin_control() {
 		} else if let Some(rest) = l.strip_prefix("pin ") {
 			// "Keep on top" (issue #18): `pin <available> <on>`.
 			crate::overlay::pin_line(rest);
+		} else if let Some(rest) = l.strip_prefix("pipwin ") {
+			// "Small window" (issue #18): `pipwin <available> <on>`.
+			crate::overlay::pip_line(rest);
 		} else if let Some(rest) = l.strip_prefix("hostptr ") {
 			crate::overlay::host_ptr_line(rest);
 		} else if let Some(rest) = l.strip_prefix("hostptrshow ") {
@@ -1150,6 +1155,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
 				use windows::Win32::UI::Input::KeyboardAndMouse::SetCapture;
 				unsafe { SetCapture(hwnd) };
 				*BTN_DRAG.lock().unwrap() = Some((p.x, p.y, bx, by, false));
+			} else if crate::overlay::pip_on() && !ENGAGED_R.load(Ordering::SeqCst) {
+				// Picture-in-picture (issue #18): a press is a window drag or a click the app
+				// turns into "take control" / "bring back" (double click) — decided below.
+				use windows::Win32::UI::Input::KeyboardAndMouse::SetCapture;
+				unsafe { SetCapture(hwnd) };
+				*PIP_PRESS.lock().unwrap() = Some((p.x, p.y));
 			} else if !STALLED.load(Ordering::Relaxed) {
 				// Click-to-engage; the engaging click is not forwarded to the host. Not while
 				// the stream is stopped: there is no picture to control.
@@ -1157,6 +1168,26 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
 				let _ = std::io::stdout().flush();
 			}
 			return unsafe { DefWindowProcW(hwnd, msg, wp, lp) };
+		}
+		// Picture-in-picture press: moved past a few points → the app drags the window (it
+		// still holds the button); let go in place → `pipclick`.
+		if msg == WM_MOUSEMOVE || msg == WM_LBUTTONUP {
+			let press = *PIP_PRESS.lock().unwrap();
+			if let Some((x0, y0)) = press {
+				use std::io::Write as _;
+				use windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
+				let p = lparam_xy(lp);
+				let moved = (p.x - x0).abs() + (p.y - y0).abs() > 5.0;
+				if msg == WM_LBUTTONUP || moved {
+					*PIP_PRESS.lock().unwrap() = None;
+					unsafe {
+						let _ = ReleaseCapture();
+					}
+					println!("{}", if msg == WM_LBUTTONUP { "ov pipclick" } else { "ov pipdrag" });
+					let _ = std::io::stdout().flush();
+				}
+				return unsafe { DefWindowProcW(hwnd, msg, wp, lp) };
+			}
 		}
 		if msg == WM_MOUSEMOVE {
 			let mut g = BTN_DRAG.lock().unwrap();

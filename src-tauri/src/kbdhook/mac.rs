@@ -105,6 +105,7 @@ pub fn enable(app: AppHandle, tx: Sender<InputEvent>, mouse: bool, id: u64, _sta
 		mouse,
 		remote: super::SESSION_REMOTE.load(Ordering::SeqCst),
 		free_cursor: super::pointer_free(),
+		click_only: crate::pip::is_pip_play(id),
 	};
 	if mi::enable(Arc::new(TauriSink { app: app.clone(), tx }), arm) {
 		return;

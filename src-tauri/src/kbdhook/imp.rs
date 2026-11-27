@@ -433,6 +433,11 @@ fn handle_hover() {
 		HOVER_ARMED.store(true, Ordering::SeqCst);
 		return;
 	}
+	// A picture-in-picture session is taken with a click only (issue #18): the pointer
+	// crosses a small window on its way to other apps all the time.
+	if crate::pip::is_pip_play(LAST_PLAY.load(Ordering::SeqCst)) {
+		return;
+	}
 	if !HOVER_ARMED.load(Ordering::SeqCst)
 		|| OVERLAY_OPEN.load(Ordering::SeqCst)
 		|| STREAM_STALLED.load(Ordering::SeqCst)

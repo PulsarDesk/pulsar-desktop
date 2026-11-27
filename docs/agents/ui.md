@@ -86,6 +86,34 @@ Window-level: the main window or a tab window, with all its tabs. Settings → G
 - Setting off: every pinned window is released, `window_pin_set(true)` is refused.
 - Linux Wayland (XWayland): the compositor may ignore keep-above; the tooltip says so.
 
+## Picture-in-picture (small window, issue #18)
+
+Session-level: a session goes to a frameless window of its own (`pip-<n>`), its tab STAYS where
+it was as a placeholder (`Session.pip` = the PiP label; `PipPlaceholder.svelte`: "Bring back" /
+"Show"). Settings → Genel: "Küçük pencere" (`ui.pip`, default on, `set_pip_enabled`; off brings
+every PiP back), "Üzerine gelince büyüt" (`ui.pipHoverGrow`, on) and its ratio
+(`ui.pipHoverScale` 125/150/200). Entries: tab right-click (`Tabs.svelte`), the status bar's ⧉,
+the Pulsar menu's Tools row (`pipwin <available> <on>` in, `ov set pip on|off` out).
+
+- Rust `src-tauri/src/pip.rs`: opens the window (bottom-right of the source monitor, stacked
+  above other PiPs, or `ui.pipLast`), hands the record over like a tear-off
+  (`tabwin::handoff_insert` + `move_video`), `pip_return` sends the video back to the
+  placeholder's window (`pip-return`) and closes the PiP. A moved placeholder only re-homes
+  (`rehome` in `tab_move`/`tab_detach`); a closing tab window hands its placeholders to main
+  (`home_closed`). Alt+F4 on a live PiP = bring back; an ended session closes it (`pip_close`).
+- Frontend `routes/page/pipWindow.svelte.ts`: passive → hover (400 ms, grows keeping its corner
+  via `pip_resize`, shows `PipBar.svelte`) → active (a click: focus + take control, the click
+  never reaches the host; stays grown until the focus leaves). Double click = bring back; a
+  press that moves drags the window; a drag's end snaps into a near corner (`pip_snap`) and is
+  remembered. The PiP window has no chrome/tabs/status bar and opens unpinned, unfocused, and
+  without the input (`tabWindows` does not claim `inputWin` for it).
+- Where the events come from: hover is POLLED Rust-side (`pip-hover`, 100 ms) on every OS — on
+  Windows the renderer child takes the mouse. Presses: the Windows renderer reports them in PiP
+  mode (`ov pipclick` / `ov pipdrag` → `pip-press`) instead of `ov engage`; Linux (embedded) and
+  macOS pass the pointer to the webview (capture-phase handlers on `.stage`).
+- Hovering a PiP never takes control, also with the free cursor: Windows `handle_hover` and the
+  macOS engine (`Arm::click_only`) skip PiP plays, the canvas path's `hoverBlocked` is true.
+
 ## Theming
 
 Tokens live in `src/app.css` (ported from `../design/project/assets/tokens.css`, which has **no

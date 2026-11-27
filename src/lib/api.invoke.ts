@@ -265,7 +265,17 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 		case 'window_pin_maybe_ignored':
 			return Promise.resolve(false as unknown as T);
 		case 'set_window_pin_enabled':
+		case 'pip_return':
+		case 'pip_restore':
+		case 'pip_focus':
+		case 'pip_close':
+		case 'pip_resize':
+		case 'set_pip_enabled':
 			return Promise.resolve(undefined as unknown as T);
+		case 'pip_open':
+			return Promise.resolve('pip-1' as unknown as T);
+		case 'pip_snap':
+			return Promise.resolve(null as unknown as T);
 		case 'show_connections':
 		case 'relaunch_to_home':
 			return Promise.resolve(undefined as unknown as T);

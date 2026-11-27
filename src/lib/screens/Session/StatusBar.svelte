@@ -41,7 +41,8 @@
 		hostMuted = false,
 		onSpeaker,
 		onMic,
-		onHostMute
+		onHostMute,
+		onPip
 	}: {
 		fields: readonly string[];
 		conn: 'direct' | 'relay';
@@ -67,6 +68,8 @@
 		onSpeaker?: () => void;
 		onMic?: () => void;
 		onHostMute?: () => void;
+		/** Open this session in a small window (issue #18); absent = no button. */
+		onPip?: () => void;
 	} = $props();
 
 	type Btn = { key: string; icon: string; on: boolean; label: string; run?: () => void };
@@ -122,6 +125,11 @@
 			{#if !b.on}<span class="slash" aria-hidden="true"></span>{/if}
 		</button>
 	{/each}
+	{#if onPip}
+		<button class="qbtn" aria-label={t('pip.open')} title={t('pip.open')} onclick={() => onPip?.()}>
+			<Icon name="pip" size={14} />
+		</button>
+	{/if}
 	{#if menu}
 		<button class="menu" aria-label={t('session.overlayBtn')} title={t('session.overlayBtn')} onclick={() => onMenu?.()}>
 			<Icon name="menu" size={15} />

@@ -94,6 +94,11 @@
 		/** The session moved here from another window (a dragged tab): it's already running,
 		 * so the connect-time auto-engage must not fire again. */
 		adopted?: boolean;
+		/** Shown in a picture-in-picture window (issue #18): no status bar, and hovering the
+		 * video never takes control (a click does). */
+		pip?: boolean;
+		/** Pulsar menu → "Small window" (`ov set pip on|off`): open / leave the PiP window. */
+		onPip?: (on: boolean) => void;
 	};
 	let {
 		playId,
@@ -116,7 +121,9 @@
 		joinPrompt = '',
 		onToggleFullscreen,
 		onEnd = () => {},
-		adopted = false
+		adopted = false,
+		pip = false,
+		onPip
 	}: Props = $props();
 
 	// Reverse direction: ask the host to connect back to us so roles swap.
@@ -150,7 +157,9 @@
 	// its menu button goes back onto the video (`ovbtnShown`).
 	// Split panes get one each (under their own video). Only the Linux single-surface mode has
 	// none (its video isn't positioned over `.screen`; split never uses it).
-	const showBar = $derived(ui.statusBar && !(embedded && !split) && (!fullscreen || ui.statusBarFullscreen));
+	const showBar = $derived(
+		!pip && ui.statusBar && !(embedded && !split) && (!fullscreen || ui.statusBarFullscreen)
+	);
 	// The menu button sits in the bar → hide the one the renderer draws on the video (the
 	// saved overlay-button setting itself is untouched). Pushed on change only; the initial
 	// state rides the renderer's one-shot seed in controls.svelte.ts.
@@ -703,7 +712,7 @@
 		// Windows (and macOS with its event tap) do the free cursor in the native capture
 		// (kbdhook/imp.rs, pulsar-macinput); this is the canvas path — remote mode only.
 		pointerFree: () => ui.pointerFree && mode === 'remote' && caps.v?.platform !== 'windows',
-		hoverBlocked: () => dock.overlayOpen || media.stalled,
+		hoverBlocked: () => pip || dock.overlayOpen || media.stalled,
 		osCapture: () => isMac && macCapture,
 		osEngaged: () => nativeEngaged
 	});
@@ -726,6 +735,24 @@
 	// OS-level capture on Windows native, on macOS with the Accessibility permission and in game
 	// mode, the canvas path otherwise. Used when
 	// the Pulsar menu closes by the combo that opened it, or by a click on the video beside it.
+	// The picture-in-picture window's own controls (issue #18) drive these from outside.
+	export function pipTakeControl() {
+		takeControl();
+	}
+	export function pipToggleMenu() {
+		dock.toggleOverlay();
+	}
+	export function pipToggleSpeaker() {
+		controls.toggleTransmit();
+	}
+	export function pipSpeakerOn(): boolean {
+		return controls.transmitAudio;
+	}
+	/** Keyboard/mouse are captured for the host (the OS hook engaged, or the canvas controls). */
+	export function pipEngaged(): boolean {
+		return nativeEngaged || input.controlling;
+	}
+
 	function takeControl() {
 		if (!active || playId < 0) return;
 		if (native && (isWindows || macCapture || mode === 'game')) {
@@ -1171,6 +1198,8 @@
 				case 'fullscreen': onToggleFullscreen(); break;
 				// Tools → "Keep on top" (issue #18): pins the window showing this session.
 				case 'pin': api.playPinSet(playId, val === 'on').catch(() => {}); break;
+				// Tools → "Small window" (issue #18): into / out of picture-in-picture.
+				case 'pip': onPip?.(val === 'on'); break;
 				// Overlay "Ekran uyarlama" (screen adaptation): `ov set adapt <w>x<h>` turns it on
 				// with the pane's pixel size, `ov set adapt off` turns it off. The host switches the
 				// captured monitor to the best-fit mode (and reverts on exit).
@@ -1356,6 +1385,7 @@
 		micAvailable={mode === 'remote'}
 		hostMuted={controls.muteHost}
 		onSpeaker={controls.toggleTransmit}
+		onPip={ui.pip && onPip ? () => onPip?.(true) : undefined}
 		onMic={sidechan.toggleMic}
 		onHostMute={controls.toggleMute}
 	/>

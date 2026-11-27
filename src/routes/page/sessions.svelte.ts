@@ -53,6 +53,10 @@ export type Session = {
 	stopCmd?: string;
 	/** Moved here from another window (a dragged tab) — already running there. */
 	adopted?: boolean;
+	/** Picture-in-picture (issue #18): this tab is a PLACEHOLDER — the session runs in the PiP
+	 * window with this label ('pending' while it opens). The tab keeps its place (strip, split
+	 * pane); its screen offers "Bring back". */
+	pip?: string;
 };
 
 /** A whole split group handed between windows (tab_detach / tab_move payload). */
@@ -969,6 +973,48 @@ export class SessionManager {
 		}
 		// Shown at once — over a shown split too (the group parks; its tab brings it back).
 		if (last !== null) this.select(last);
+	};
+
+	/** Picture-in-picture is possible for this tab: a live session not already in one. */
+	canPip = (tabId: number): boolean => {
+		const s = this.sessions.find((x) => x.tabId === tabId);
+		return ui.pip && !!s && s.phase === 'active' && s.playId >= 0 && !s.embedded && !s.pip;
+	};
+
+	/** Send tab `tabId`'s session to a small window of its own; the tab stays as a placeholder. */
+	toPip = async (tabId: number) => {
+		if (!this.canPip(tabId)) return;
+		const s = this.sessions.find((x) => x.tabId === tabId)!;
+		const rec = $state.snapshot(s) as Session;
+		// The placeholder first: the session screen here unmounts (its 0×0 video report) before
+		// the video moves, so that report can't land after the PiP window's.
+		this.#patch(tabId, { pip: 'pending' });
+		await new Promise((r) => setTimeout(r, 60));
+		try {
+			const label = await api.pipOpen(
+				{ ...rec, pip: undefined },
+				{ ...rec, pip: 'pending', adopted: true },
+				rec.playId,
+				ui.pipLast
+			);
+			this.#patch(tabId, { pip: label });
+		} catch (e) {
+			console.warn('[pip] open failed', e);
+			this.#patch(tabId, { pip: undefined, adopted: true });
+		}
+	};
+
+	/** The PiP window gave play `playId` back (`session` = its live record): the placeholder
+	 * becomes the session again, in place, and is shown. */
+	fromPip = (playId: number, session: unknown) => {
+		const live = session as Session;
+		const s = this.sessions.find((x) => x.playId === playId);
+		if (!s) {
+			this.adopt([{ ...live, pip: undefined }]);
+			return;
+		}
+		this.#patch(s.tabId, { ...live, tabId: s.tabId, pip: undefined, adopted: true });
+		this.select(s.tabId);
 	};
 
 	/** A tab dragged onto the session area can split it there (live sessions only). */

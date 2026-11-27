@@ -511,6 +511,9 @@ fn stdin_control() {
 		} else if let Some(rest) = l.strip_prefix("pin ") {
 			// "Keep on top" (issue #18): `pin <available> <on>`.
 			crate::overlay::pin_line(rest);
+		} else if let Some(rest) = l.strip_prefix("pipwin ") {
+			// "Small window" (issue #18): `pipwin <available> <on>`.
+			crate::overlay::pip_line(rest);
 		} else if let Some(rest) = l.strip_prefix("hostptr ") {
 			crate::overlay::host_ptr_line(rest);
 		} else if let Some(rest) = l.strip_prefix("hostptrshow ") {

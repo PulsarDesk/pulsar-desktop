@@ -40,9 +40,14 @@ pub(crate) fn is_tab_window(label: &str) -> bool {
 	label.starts_with(PREFIX)
 }
 
-/// Main window or a tab window — the windows that show sessions.
+/// Main window, a tab window or a picture-in-picture window — the windows that show sessions.
 pub(crate) fn is_session_window(label: &str) -> bool {
-	label == MAIN || is_tab_window(label)
+	label == MAIN || is_tab_window(label) || crate::pip::is_pip_window(label)
+}
+
+/// Park `payload` (tab records) for window `label` to pick up with `tab_take_handoff`.
+pub(crate) fn handoff_insert(label: &str, payload: serde_json::Value) {
+	HANDOFF.lock().unwrap().get_or_insert_with(HashMap::new).insert(label.to_string(), payload);
 }
 
 /// Label of the window showing play `id` (the main window unless it was moved).
@@ -117,7 +122,7 @@ pub(crate) fn note_focus(app: &AppHandle, label: &str) {
 
 /// Move play `id`'s native video into window `label`. Its new place is hidden until that
 /// window's session screen reports a rect (`native_view_rect`).
-fn move_video(app: &AppHandle, id: u64, label: &str) {
+pub(crate) fn move_video(app: &AppHandle, id: u64, label: &str) {
 	{
 		let mut g = PLAY_WIN.lock().unwrap();
 		let m = g.get_or_insert_with(HashMap::new);
@@ -155,6 +160,7 @@ fn move_video(app: &AppHandle, id: u64, label: &str) {
 /// back under the main window first (hidden), then the window is destroyed.
 pub(crate) fn close_tab_window(app: &AppHandle, window: &WebviewWindow) {
 	let label = window.label().to_string();
+	crate::pip::home_closed(app, &label);
 	let plays = plays_in(&label);
 	for id in &plays {
 		move_video(app, *id, MAIN);
@@ -577,6 +583,11 @@ pub(crate) async fn tab_detach(
 	}
 	rx.await.map_err(|e| e.to_string())??;
 	for id in plays {
+		// A picture-in-picture session's tab is a placeholder: its video stays in the PiP
+		// window, which now returns it HERE.
+		if crate::pip::rehome(id, &label) {
+			continue;
+		}
 		move_video(&app, id, &label);
 	}
 	Ok(label)
@@ -591,6 +602,9 @@ pub(crate) fn tab_move(app: AppHandle, to: String, sessions: serde_json::Value, 
 	};
 	tracing::info!(%to, ?plays, n = sessions.as_array().map(|a| a.len()).unwrap_or(0), "tab move");
 	for id in plays {
+		if crate::pip::rehome(id, &to) {
+			continue;
+		}
 		move_video(&app, id, &to);
 	}
 	let _ = app.emit_to(&to, "tab-adopt", (to.clone(), sessions));

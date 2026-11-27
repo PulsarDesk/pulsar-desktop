@@ -13,6 +13,8 @@
 		mode?: 'remote' | 'game';
 		/** Moved in from another window: plays an arrival animation once. */
 		adopted?: boolean;
+		/** Picture-in-picture placeholder: the session runs in a small window (issue #18). */
+		pip?: string;
 	};
 	type Props = {
 		sessions: Tab[];
@@ -44,6 +46,11 @@
 		onGroupSelect?: () => void;
 		/** The group tab was dragged out of the window (the whole split moves). */
 		onGroupDragOut?: (grab: [number, number], screen: [number, number]) => void;
+		/** Picture-in-picture (issue #18), from the tab's right-click menu: whether tab `tabId`
+		 * can go to a small window, sending it, and bringing a placeholder's session back. */
+		canPip?: (tabId: number) => boolean;
+		onPip?: (tabId: number) => void;
+		onPipRestore?: (tabId: number) => void;
 	};
 	let {
 		sessions,
@@ -61,8 +68,36 @@
 		onStripDrop,
 		group = null,
 		onGroupSelect,
-		onGroupDragOut
+		onGroupDragOut,
+		canPip = () => false,
+		onPip,
+		onPipRestore
 	}: Props = $props();
+
+	// The tab's right-click menu (issue #18: "Open in a small window" / "Bring back").
+	let menu = $state<{ tabId: number; x: number; y: number; pip: boolean } | null>(null);
+	function openMenu(e: MouseEvent, s: Tab) {
+		const pip = !!s.pip;
+		if (!(pip ? onPipRestore : onPip && canPip(s.tabId))) return;
+		e.preventDefault();
+		menu = { tabId: s.tabId, x: e.clientX, y: e.clientY, pip };
+	}
+	$effect(() => {
+		if (!menu) return;
+		const close = () => (menu = null);
+		const onKey = (e: KeyboardEvent) => e.key === 'Escape' && close();
+		const t = setTimeout(() => {
+			window.addEventListener('pointerdown', close);
+			window.addEventListener('blur', close);
+			window.addEventListener('keydown', onKey);
+		}, 0);
+		return () => {
+			clearTimeout(t);
+			window.removeEventListener('pointerdown', close);
+			window.removeEventListener('blur', close);
+			window.removeEventListener('keydown', onKey);
+		};
+	});
 
 	// Group members sit inside the group tab; the rest are ordinary tabs (reorderable).
 	const members = $derived(
@@ -346,8 +381,12 @@
 			if (!justDragged) onSelect(s.tabId);
 		}}
 		onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && onSelect(s.tabId)}
+		oncontextmenu={(e) => openMenu(e, s)}
 	>
 		<span class="tdot" class:live={s.phase === 'active'}></span>
+		{#if s.pip}
+			<span class="tpip" title={t('pip.inWindow')} aria-label={t('pip.inWindow')}><Icon name="pip" size={12} /></span>
+		{/if}
 		{#if editing === s.tabId}
 			<!-- svelte-ignore a11y_no_static_element_interactions -->
 			<input
@@ -388,6 +427,23 @@
 		</button>
 	</div>
 {/snippet}
+
+{#if menu}
+	{@const m = menu}
+	<div class="tmenu" role="menu" style="left:{m.x}px;top:{m.y}px">
+		<button
+			role="menuitem"
+			onpointerdown={(e) => e.stopPropagation()}
+			onclick={() => {
+				menu = null;
+				if (m.pip) onPipRestore?.(m.tabId);
+				else onPip?.(m.tabId);
+			}}
+		>
+			<Icon name={m.pip ? 'expand' : 'pip'} size={14} />{m.pip ? t('pip.restore') : t('pip.open')}
+		</button>
+	</div>
+{/if}
 
 <div class="tabs" bind:this={stripEl}>
 	{#if showHome}
@@ -437,6 +493,39 @@
 
 
 <style>
+	.tpip {
+		display: inline-grid;
+		place-items: center;
+		color: var(--accent);
+		margin-right: 2px;
+	}
+	.tmenu {
+		position: fixed;
+		z-index: 400;
+		min-width: 190px;
+		padding: 4px;
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		background: var(--surface);
+		box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+	}
+	.tmenu button {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		width: 100%;
+		padding: 7px 10px;
+		border: 0;
+		border-radius: 6px;
+		background: transparent;
+		color: var(--text);
+		font-size: 13px;
+		text-align: left;
+		cursor: pointer;
+	}
+	.tmenu button:hover {
+		background: var(--surface-2, rgba(127, 127, 127, 0.15));
+	}
 	/* tab strip (home + connected hosts) */
 	.tabs {
 		flex: none;

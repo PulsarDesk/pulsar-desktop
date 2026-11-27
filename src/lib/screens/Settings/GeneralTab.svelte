@@ -228,6 +228,22 @@
 	<button class="toggle" aria-label={t('settings.windowPin')} class:on={ui.windowPin} aria-pressed={ui.windowPin} onclick={() => { ui.windowPin = !ui.windowPin; saveUi(); api.setWindowPinEnabled(ui.windowPin).catch(() => {}); }}><span class="knob"></span></button>
 </div>
 <div class="srow">
+	<div class="st"><b>{t('settings.pip')}</b><span>{t('settings.pipDesc')}</span></div>
+	<button class="toggle" aria-label={t('settings.pip')} class:on={ui.pip} aria-pressed={ui.pip} onclick={() => { ui.pip = !ui.pip; saveUi(); api.setPipEnabled(ui.pip).catch(() => {}); }}><span class="knob"></span></button>
+</div>
+<div class="srow" class:dim={!ui.pip}>
+	<div class="st"><b>{t('settings.pipHoverGrow')}</b><span>{t('settings.pipHoverGrowDesc')}</span></div>
+	<button class="toggle" aria-label={t('settings.pipHoverGrow')} class:on={ui.pipHoverGrow} aria-pressed={ui.pipHoverGrow} disabled={!ui.pip} onclick={() => { ui.pipHoverGrow = !ui.pipHoverGrow; saveUi(); }}><span class="knob"></span></button>
+</div>
+<div class="srow" class:dim={!ui.pip || !ui.pipHoverGrow}>
+	<div class="st"><b>{t('settings.pipHoverScale')}</b><span>{t('settings.pipHoverScaleDesc')}</span></div>
+	<div class="seg">
+		{#each [125, 150, 200] as v (v)}
+			<button class:active={ui.pipHoverScale === v} disabled={!ui.pip || !ui.pipHoverGrow} onclick={() => { ui.pipHoverScale = v; saveUi(); }}>%{v}</button>
+		{/each}
+	</div>
+</div>
+<div class="srow">
 	<div class="st"><b>{t('settings.tray')}</b><span>{t('settings.trayDesc')}</span></div>
 	<button class="toggle" aria-label={t('settings.tray')} class:on={ui.tray} aria-pressed={ui.tray} onclick={() => { ui.tray = !ui.tray; saveUi(); api.setTray(ui.tray).catch(() => {}); }}><span class="knob"></span></button>
 </div>

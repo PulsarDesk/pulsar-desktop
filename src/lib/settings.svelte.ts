@@ -139,6 +139,15 @@ export interface UiSettings {
 	/** "Keep on top" (issue #18): the title bar's pin and the Pulsar menu's row keep a window
 	 * above other apps. On by default; off hides both and releases every pinned window. */
 	windowPin: boolean;
+	/** "Small window" (picture-in-picture, issue #18): a session can go to a small window of its
+	 * own while its tab stays. On by default; off brings every PiP back and hides the entries. */
+	pip: boolean;
+	/** The PiP grows while the pointer rests on it (its controls get room). On by default. */
+	pipHoverGrow: boolean;
+	/** How much it grows, in % of its size (125 / 150 / 200). */
+	pipHoverScale: number;
+	/** Where the last PiP was left (logical x, y, w, h): the next one opens there. */
+	pipLast: number[] | null;
 	/** Session status bar under the video (issue #5). Off by default. */
 	statusBar: boolean;
 	/** Which facts the status bar shows (`StatusBar.svelte` STATUS_FIELDS). */
@@ -299,6 +308,10 @@ const DEFAULTS: UiSettings = {
 	duplicateSessions: false,
 	upscale: 'auto',
 	windowPin: true,
+	pip: true,
+	pipHoverGrow: true,
+	pipHoverScale: 150,
+	pipLast: null,
 	statusBar: false,
 	// The always-on stats HUD's set (codec · fps · latency · decode · bitrate).
 	statusFields: ['codec', 'fps', 'latency', 'decode', 'bitrate'],

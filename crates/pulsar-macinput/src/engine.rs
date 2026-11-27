@@ -72,6 +72,9 @@ pub struct Arm {
 	pub remote: bool,
 	/// "Free cursor" setting (only acts in remote mode).
 	pub free_cursor: bool,
+	/// Taken with a click only, never by hovering (a picture-in-picture session: the pointer
+	/// crosses a small window on its way to other apps all the time). Leaving still releases.
+	pub click_only: bool,
 }
 
 // ───────────────────────────── state ─────────────────────────────
@@ -128,6 +131,8 @@ pub(crate) static ENGAGED: AtomicBool = AtomicBool::new(false);
 pub(crate) static MOUSE_CAPTURE: AtomicBool = AtomicBool::new(false);
 static REMOTE: AtomicBool = AtomicBool::new(true);
 static FREE_SETTING: AtomicBool = AtomicBool::new(false);
+/// The armed session is taken with a click only (`Arm::click_only`).
+static CLICK_ONLY: AtomicBool = AtomicBool::new(false);
 /// The OS capture (event tap) is running. Without it nothing engages: the webview path
 /// (canvas control) stays in charge, exactly as before this capture existed.
 pub(crate) static TAP_OK: AtomicBool = AtomicBool::new(false);
@@ -329,6 +334,7 @@ pub fn enable(new_sink: Arc<dyn Sink>, arm: Arm) -> bool {
 	MOUSE_CAPTURE.store(arm.mouse, SeqCst);
 	REMOTE.store(arm.remote, SeqCst);
 	FREE_SETTING.store(arm.free_cursor, SeqCst);
+	CLICK_ONLY.store(arm.click_only, SeqCst);
 	{
 		let mut g = state();
 		g.sink = Some(new_sink);
@@ -1062,7 +1068,8 @@ fn handle_hover() {
 		HOVER_ARMED.store(true, SeqCst);
 		return;
 	}
-	if !HOVER_ARMED.load(SeqCst)
+	if CLICK_ONLY.load(SeqCst)
+		|| !HOVER_ARMED.load(SeqCst)
 		|| OVERLAY_OPEN.load(SeqCst)
 		|| STREAM_STALLED.load(SeqCst)
 		|| os::buttons_down()
@@ -1120,7 +1127,7 @@ pub(crate) mod tests {
 		POINTER_LOCK_REPORTED.store(false, SeqCst);
 		APP_FOCUSED.store(true, SeqCst);
 		*lock(&OVBTN_FRAC) = None;
-		enable(rec.clone(), Arm { id, mouse: true, remote, free_cursor: free });
+		enable(rec.clone(), Arm { id, mouse: true, remote, free_cursor: free, click_only: false });
 		// The stub OS layer has no tap; pretend it runs.
 		TAP_OK.store(true, SeqCst);
 		set_geo(Geo { video: Some((100.0, 100.0, 201.0, 201.0)), render: Some((100.0, 100.0, 201.0, 201.0)) });
@@ -1419,12 +1426,12 @@ pub(crate) mod tests {
 		// Tab switch: disable() then enable() for the same id restores control.
 		disable();
 		assert!(!is_engaged());
-		enable(rec.clone(), Arm { id: 7, mouse: true, remote: true, free_cursor: false });
+		enable(rec.clone(), Arm { id: 7, mouse: true, remote: true, free_cursor: false, click_only: false });
 		assert!(is_engaged());
 		// A different session starts disengaged.
 		disable();
 		*lock(&ENGAGED_AT) = None;
-		enable(rec.clone(), Arm { id: 8, mouse: true, remote: true, free_cursor: false });
+		enable(rec.clone(), Arm { id: 8, mouse: true, remote: true, free_cursor: false, click_only: false });
 		assert!(!is_engaged());
 		disable();
 	}

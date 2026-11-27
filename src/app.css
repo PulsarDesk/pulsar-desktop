@@ -333,6 +333,15 @@ h4 {
 	border: none;
 	border-radius: 0;
 }
+/* Picture-in-picture window (issue #18): video only, a thin ring while it has the input. */
+.window.pip {
+	background: #000;
+}
+/* The native video sits over the webview, so the ring is room around it, not a border over it. */
+.window.pip.pip-active {
+	background: var(--accent);
+	padding: 2px;
+}
 /* Launch splash: covers the window (clipped by its overflow:hidden + radius) while the
    app boots, so the first visible frame is branded, not an empty frame. Fades out. */
 .splash {

@@ -211,6 +211,18 @@ export const onOverlayFiles = (cb: (id: number) => void) =>
  * Every window hears it: compare the label with your own. */
 export const onWindowPin = (cb: (label: string, on: boolean) => void) =>
 	listenTo<[string, boolean]>('window-pin', (p) => cb(p[0], p[1]));
+/** Picture-in-picture (issue #18): window `to` gets play `play`'s live record back from its
+ * PiP window (swap the placeholder for it). Every window hears it: compare `to`. */
+export const onPipReturn = (cb: (to: string, play: number, session: unknown) => void) =>
+	listenTo<[string, number, unknown]>('pip-return', (p) => cb(p[0], p[1], p[2]));
+/** PiP window `label`: the pointer came over it / left it (polled Rust-side). */
+export const onPipHover = (cb: (label: string, on: boolean) => void) =>
+	listenTo<[string, boolean]>('pip-hover', (p) => cb(p[0], p[1]));
+/** Windows renderer: a press on a PiP's passive video — a click, or a drag (`drag`). */
+export const onPipPress = (cb: (play: number, drag: boolean) => void) =>
+	listenTo<[number, boolean]>('pip-press', (p) => cb(p[0], p[1]));
+/** PiP window `label`: bring your session back (placeholder's "Bring back", setting off, Alt+F4). */
+export const onPipRestore = (cb: (label: string) => void) => listenTo<string>('pip-restore', (l) => cb(l));
 /** The Pulsar window lost focus — close the overlay so the focus-gated combo can't strand it. */
 export const onWindowBlur = (cb: () => void) => listenTo<null>('window-blur', () => cb());
 /** Client: the stream is REALLY up (first decoded frames/bitrate) — the Connecting
