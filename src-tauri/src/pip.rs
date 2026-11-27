@@ -526,6 +526,41 @@ fn client_off(win: &WebviewWindow) -> (f64, f64) {
 	}
 }
 
+/// Move and resize in one step: `pos` the `set_position` origin (physical), `size` the client size
+/// (logical). On Windows a move and then a resize showed every animation step twice — first at
+/// the new place with the old size, then resized — and a PiP growing from a right or bottom
+/// corner shook. Elsewhere the two calls stay.
+fn set_bounds(win: &WebviewWindow, pos: (f64, f64), size: (f64, f64), scale: f64) {
+	#[cfg(windows)]
+	{
+		use windows_sys::Win32::Foundation::HWND;
+		use windows_sys::Win32::UI::WindowsAndMessaging::{SetWindowPos, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOZORDER};
+		if let (Ok(h), Ok(o), Ok(i)) = (win.hwnd(), win.outer_size(), win.inner_size()) {
+			// The frame around the client area (0 for our frameless windows, kept exact anyway).
+			let (fw, fh) = (o.width as f64 - i.width as f64, o.height as f64 - i.height as f64);
+			let (w, h2) = ((size.0 * scale + fw).round() as i32, (size.1 * scale + fh).round() as i32);
+			// SAFETY: our own top-level window, on the UI thread.
+			let ok = unsafe {
+				SetWindowPos(
+					h.0 as HWND,
+					std::ptr::null_mut(),
+					pos.0.round() as i32,
+					pos.1.round() as i32,
+					w,
+					h2,
+					SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE,
+				)
+			};
+			if ok != 0 {
+				return;
+			}
+		}
+	}
+	let _ = scale;
+	let _ = win.set_position(tauri::PhysicalPosition::new(pos.0.round() as i32, pos.1.round() as i32));
+	let _ = win.set_size(tauri::LogicalSize::new(size.0, size.1));
+}
+
 /// The PiP's own size (logical, as asked): the frontend's base for hover growth. `user`: the user
 /// resized it by hand — take its client size now as the asked one.
 #[tauri::command]
@@ -607,8 +642,7 @@ pub(crate) async fn pip_resize(app: AppHandle, window: WebviewWindow, w: f64, h:
 		// drag before the window ever followed the pointer).
 		let (tx, rx) = tokio::sync::oneshot::channel::<()>();
 		let posted = window.run_on_main_thread(move || {
-			let _ = win.set_position(tauri::PhysicalPosition::new(sx.round() as i32, sy.round() as i32));
-			let _ = win.set_size(tauri::LogicalSize::new(sw, sh));
+			set_bounds(&win, (sx, sy), (sw, sh), s);
 			let _ = tx.send(());
 		});
 		if posted.is_ok() {
