@@ -86,22 +86,20 @@ export class PipWindow {
 		});
 		const { getCurrentWindow } = await import('@tauri-apps/api/window');
 		const w = getCurrentWindow();
-		try {
-			const [sz, sf] = [await w.innerSize(), await w.scaleFactor()];
-			this.#base = { w: sz.width / sf, h: sz.height / sf };
-		} catch {
-			/* keep the default */
-		}
+		// The size the window was opened with, as asked (the toolkit may report more: GTK).
+		const asked = await api.pipSize(false).catch(() => null);
+		if (asked && asked.length === 2) this.#base = { w: asked[0], h: asked[1] };
 		// Focus left the window: no longer active — unless the input is captured, which on Windows
 		// moves the focus into the renderer child (still ours). The watch below then ends it once
 		// neither holds.
 		await w.onFocusChanged(({ payload: focused }) => {
 			if (!focused && !this.#deps.engaged()) this.deactivate();
 		});
-		await w.onResized(async ({ payload }) => {
+		// Resized by hand (not by us, not while grown): that is its size now.
+		await w.onResized(async () => {
 			if (this.#selfResize > 0 || this.grown) return;
-			const sf = await w.scaleFactor().catch(() => 1);
-			this.#base = { w: payload.width / sf, h: payload.height / sf };
+			const asked = await api.pipSize(true).catch(() => null);
+			if (asked && asked.length === 2) this.#base = { w: asked[0], h: asked[1] };
 			this.#remember();
 		});
 		// Dragged and let go: snap into a near corner, and open the next PiP there.

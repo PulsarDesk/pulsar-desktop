@@ -548,6 +548,8 @@ export const api = {
 	pipFocus: (play: number) => invoke<void>('pip_focus', { play }),
 	/** PiP window: its session ended — close at once. */
 	pipClose: () => invoke<void>('pip_close'),
+	/** PiP window: its own size as asked (logical [w, h]); `user` = the user resized it by hand. */
+	pipSize: (user: boolean) => invoke<number[] | null>('pip_size', { user }),
 	/** PiP window: resize (logical px), keeping the screen corner it sits in. */
 	pipResize: (w: number, h: number) => invoke<void>('pip_resize', { w, h }),
 	/** PiP window: after a drag, snap into a near corner; resolves to [x, y, w, h] (logical). */

@@ -947,6 +947,7 @@ pub fn run() {
 			pip::set_pip_enabled,
 			pip::pip_resize,
 			pip::pip_snap,
+			pip::pip_size,
 			pip::pip_close,
 			winalpha::set_window_alpha_prefs,
 			winalpha::play_alpha_set,

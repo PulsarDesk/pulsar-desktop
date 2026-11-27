@@ -278,6 +278,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 		case 'pip_open':
 			return Promise.resolve('pip-1' as unknown as T);
 		case 'pip_snap':
+		case 'pip_size':
 			return Promise.resolve(null as unknown as T);
 		case 'show_connections':
 		case 'relaunch_to_home':

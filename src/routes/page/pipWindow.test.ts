@@ -5,7 +5,7 @@ vi.mock('#lib/api.js', async () => {
 	const { vi: _vi } = await import('vitest');
 	return {
 		isTauri: false,
-		api: { pipResize: _vi.fn().mockResolvedValue(undefined), pipSnap: _vi.fn().mockResolvedValue(null) },
+		api: { pipResize: _vi.fn().mockResolvedValue(undefined), pipSnap: _vi.fn().mockResolvedValue(null), pipSize: _vi.fn().mockResolvedValue(null) },
 		onPipRestore: _vi.fn(),
 		onPipHover: _vi.fn(),
 		onPipPress: _vi.fn(),
