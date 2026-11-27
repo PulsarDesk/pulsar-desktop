@@ -116,8 +116,14 @@ fn set_alpha(w: &WebviewWindow, pct: u8) {
 #[cfg(all(unix, not(target_os = "macos")))]
 fn set_alpha(w: &WebviewWindow, pct: u8) {
 	use gtk::prelude::WidgetExt;
-	if let Ok(g) = w.gtk_window() {
-		g.set_opacity(pct as f64 / 100.0);
+	let Ok(g) = w.gtk_window() else { return };
+	let a = pct as f64 / 100.0;
+	g.set_opacity(a);
+	// Set before the window was mapped, GTK keeps the value but never writes the X property
+	// (`_NET_WM_WINDOW_OPACITY`), and setting the same value again is a no-op: write it on the
+	// GDK window directly once there is one.
+	if let Some(gw) = g.window() {
+		gw.set_opacity(a);
 	}
 }
 
