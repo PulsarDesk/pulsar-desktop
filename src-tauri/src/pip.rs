@@ -118,6 +118,9 @@ pub(crate) fn forget(label: &str) {
 	if let Some(m) = GEOM.lock().unwrap().as_mut() {
 		m.remove(label);
 	}
+	if let Some(m) = OURS_UNTIL.lock().unwrap().as_mut() {
+		m.remove(label);
+	}
 }
 
 /// The work area (physical LTRB) of the monitor holding `w`, else the primary one.
@@ -280,6 +283,8 @@ pub(crate) async fn pip_open(
 	let scale = window.scale_factor().unwrap_or(1.0);
 	set_geom(&label, Geom { pos: (x * scale, y * scale), asked: (w, h) });
 	if let Some(pw) = app.get_webview_window(&label) {
+		// The settle below is ours too (size, then the corner).
+		ours_for(&label, 1200);
 		let _ = snap_now(&app, &pw);
 		// GTK builds a frameless window ~37 px taller than asked and ignores a resize until the
 		// window is on screen: give it its asked size (and corner) again once it is.
@@ -445,6 +450,47 @@ fn set_geom(label: &str, g: Geom) {
 	GEOM.lock().unwrap().get_or_insert_with(HashMap::new).insert(label.to_string(), g);
 }
 
+/// Until when a PiP window's moves are our own (a resize, a snap, the settle after opening): the
+/// user's moves update the record, ours never do.
+static OURS_UNTIL: Mutex<Option<HashMap<String, std::time::Instant>>> = Mutex::new(None);
+
+fn ours_for(label: &str, ms: u64) {
+	OURS_UNTIL
+		.lock()
+		.unwrap()
+		.get_or_insert_with(HashMap::new)
+		.insert(label.to_string(), std::time::Instant::now() + std::time::Duration::from_millis(ms));
+}
+
+fn is_ours(label: &str) -> bool {
+	OURS_UNTIL.lock().unwrap().as_ref().and_then(|m| m.get(label)).is_some_and(|t| std::time::Instant::now() < *t)
+}
+
+/// A PiP window moved. The user dragged it (not one of our own moves): record where it is now,
+/// grown or not — the way back from a hover growth is laid out from this record, and a stale one
+/// sent a PiP dragged while grown (always: the pointer is on it) back to where it first opened.
+pub(crate) fn note_moved(window: &tauri::Window) {
+	let label = window.label().to_string();
+	if is_ours(&label) {
+		return;
+	}
+	let Some(w) = window.app_handle().get_webview_window(&label) else { return };
+	let (Some(pos), Some(g)) = (set_position_origin(&w), geom(&label)) else { return };
+	set_geom(&label, Geom { pos, asked: g.asked });
+}
+
+/// A PiP window was resized by the user (an edge drag, not our hover growth): its client size now
+/// is the size it is asked to have.
+pub(crate) fn note_resized(window: &tauri::Window) {
+	let label = window.label().to_string();
+	if is_ours(&label) {
+		return;
+	}
+	let Some(w) = window.app_handle().get_webview_window(&label) else { return };
+	let (Ok(s), Ok(i), Some(pos)) = (w.scale_factor(), w.inner_size(), set_position_origin(&w)) else { return };
+	set_geom(&label, Geom { pos, asked: (i.width as f64 / s, i.height as f64 / s) });
+}
+
 /// What `set_position` moves, read from the window (only after the user moved it).
 fn set_position_origin(win: &WebviewWindow) -> Option<(f64, f64)> {
 	#[cfg(all(unix, not(target_os = "macos")))]
@@ -488,9 +534,10 @@ pub(crate) fn pip_size(window: WebviewWindow, user: bool) -> Option<[f64; 2]> {
 }
 
 /// Resize the calling PiP window to `w`×`h` (logical client size) — hover growth and its way
-/// back — keeping the screen corner it sits in.
+/// back — keeping the screen corner it sits in. `around_cursor`: keep the point under the pointer
+/// where it is instead (a grown PiP shrinking as the user starts to drag it).
 #[tauri::command]
-pub(crate) fn pip_resize(app: AppHandle, window: WebviewWindow, w: f64, h: f64) -> Result<(), String> {
+pub(crate) fn pip_resize(app: AppHandle, window: WebviewWindow, w: f64, h: f64, around_cursor: Option<bool>) -> Result<(), String> {
 	if !is_pip_window(window.label()) {
 		return Err("not a small window".into());
 	}
@@ -510,10 +557,22 @@ pub(crate) fn pip_resize(app: AppHandle, window: WebviewWindow, w: f64, h: f64) 
 		// Laid out on the client rect (our record), converted back to `set_position` terms.
 		let (cx, cy) = (g.pos.0 + off.0, g.pos.1 + off.1);
 		let rect = (cx, cy, cx + g.asked.0 * s, cy + g.asked.1 * s);
-		let (nx, ny, _, _) = resized(rect, (l, t, r, b), w * s, h * s);
+		let (nx, ny) = match app.cursor_position().ok().filter(|_| around_cursor == Some(true)) {
+			Some(c) => {
+				let fx = ((c.x - cx) / (g.asked.0 * s)).clamp(0.0, 1.0);
+				let fy = ((c.y - cy) / (g.asked.1 * s)).clamp(0.0, 1.0);
+				(c.x - fx * w * s, c.y - fy * h * s)
+			}
+			None => {
+				let (nx, ny, _, _) = resized(rect, (l, t, r, b), w * s, h * s);
+				(nx, ny)
+			}
+		};
 		let (x, y) = (nx - off.0, ny - off.1);
 		tracing::debug!(?g, ?off, to = ?(x, y, w, h), "pip resize");
 		set_geom(&label, Geom { pos: (x, y), asked: (w, h) });
+		// Covers the re-applied move below too.
+		ours_for(&label, 700);
 		let to = tauri::PhysicalPosition::new(x.round() as i32, y.round() as i32);
 		let _ = win.set_position(to);
 		let _ = win.set_size(tauri::LogicalSize::new(w, h));
@@ -561,6 +620,7 @@ fn snap_now(app: &AppHandle, window: &WebviewWindow) -> Option<[f64; 4]> {
 	}
 	let (x, y) = (x - off.0, y - off.1);
 	if (x, y) != (x0 - off.0, y0 - off.1) {
+		ours_for(&label, 400);
 		let _ = window.set_position(tauri::PhysicalPosition::new(x.round() as i32, y.round() as i32));
 	}
 	set_geom(&label, Geom { pos: (x, y), asked });

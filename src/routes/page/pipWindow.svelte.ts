@@ -61,6 +61,9 @@ export class PipWindow {
 	/** Our own resize is in flight: its resize events are not the user's. */
 	#selfResize = 0;
 	#lastUp = 0;
+	/** A drag is moving the window (cleared once it stops moving): no hover growth meanwhile. */
+	#dragging = false;
+	#dragQuiet: ReturnType<typeof setTimeout> | undefined;
 	#press: { x: number; y: number; dragged: boolean } | null = null;
 
 	constructor(deps: Deps) {
@@ -97,15 +100,26 @@ export class PipWindow {
 		await w.onFocusChanged(({ payload: focused }) => {
 			if (!focused && this.#letGo()) this.deactivate();
 		});
-		// Resized by hand (not by us, not while grown): that is its size now.
+		// Resized by hand (not by us): that is its size now — also while grown (the pointer is on
+		// it while the user drags an edge): it then stays at that size, not grown any more.
 		await w.onResized(async () => {
-			if (this.#selfResize > 0 || this.grown) return;
+			if (this.#selfResize > 0) return;
 			const asked = await api.pipSize(true).catch(() => null);
 			if (asked && asked.length === 2) this.#base = { w: asked[0], h: asked[1] };
+			this.grown = false;
 			this.#remember();
 		});
 		// Dragged and let go: snap into a near corner, and open the next PiP there.
 		await w.onMoved(() => {
+			if (this.#dragging) {
+				// The drag ends when the window stops moving.
+				clearTimeout(this.#dragQuiet);
+				this.#dragQuiet = setTimeout(() => {
+					this.#dragging = false;
+					this.#remember();
+				}, 400);
+				return;
+			}
 			if (this.#selfResize === 0) this.#remember();
 		});
 	}
@@ -127,9 +141,9 @@ export class PipWindow {
 		}, 450);
 	}
 
-	#resize(w: number, h: number) {
+	#resize(w: number, h: number, aroundCursor = false) {
 		this.#selfResize++;
-		api.pipResize(w, h)
+		api.pipResize(w, h, aroundCursor)
 			.catch(() => {})
 			.finally(() => setTimeout(() => this.#selfResize--, 300));
 	}
@@ -154,6 +168,7 @@ export class PipWindow {
 	/** The pointer entered the window. */
 	enter = () => {
 		this.hover = true;
+		if (this.#dragging) return;
 		clearTimeout(this.#leaveTimer);
 		clearTimeout(this.#hoverTimer);
 		this.#hoverTimer = setTimeout(() => {
@@ -190,6 +205,14 @@ export class PipWindow {
 	};
 
 	async #drag() {
+		// Grown by the hover: back to its own size first, around the pointer, so the user drags
+		// the PiP they meant to place — and no growth while it moves.
+		clearTimeout(this.#hoverTimer);
+		this.#dragging = true;
+		if (this.grown) {
+			this.grown = false;
+			this.#resize(this.#base.w, this.#base.h, true);
+		}
 		if (!isTauri) return;
 		const { getCurrentWindow } = await import('@tauri-apps/api/window');
 		await getCurrentWindow().startDragging().catch(() => {});

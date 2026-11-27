@@ -551,7 +551,8 @@ export const api = {
 	/** PiP window: its own size as asked (logical [w, h]); `user` = the user resized it by hand. */
 	pipSize: (user: boolean) => invoke<number[] | null>('pip_size', { user }),
 	/** PiP window: resize (logical px), keeping the screen corner it sits in. */
-	pipResize: (w: number, h: number) => invoke<void>('pip_resize', { w, h }),
+	pipResize: (w: number, h: number, aroundCursor = false) =>
+		invoke<void>('pip_resize', { w, h, aroundCursor }),
 	/** PiP window: after a drag, snap into a near corner; resolves to [x, y, w, h] (logical). */
 	pipSnap: () => invoke<number[] | null>('pip_snap'),
 	/** Settings → General → transparency on/off and the default opacity (%) of every window. */

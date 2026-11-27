@@ -40,7 +40,7 @@ describe('picture-in-picture window (issue #18)', () => {
 		expect(pw.grown).toBe(false);
 		vi.advanceTimersByTime(1);
 		expect(pw.grown).toBe(true);
-		expect(api.pipResize).toHaveBeenCalledWith(720, 405 + PIP_BAR_H);
+		expect(api.pipResize).toHaveBeenCalledWith(720, 405 + PIP_BAR_H, false);
 	});
 
 	it('a quick pass does not grow it; leaving shrinks it back', () => {
@@ -55,7 +55,7 @@ describe('picture-in-picture window (issue #18)', () => {
 		pw.leave();
 		vi.advanceTimersByTime(250);
 		expect(pw.grown).toBe(false);
-		expect(api.pipResize).toHaveBeenLastCalledWith(480, 270);
+		expect(api.pipResize).toHaveBeenLastCalledWith(480, 270, false);
 	});
 
 	it('growth off: it only makes room for the controls', () => {
@@ -63,7 +63,7 @@ describe('picture-in-picture window (issue #18)', () => {
 		const { pw } = make();
 		pw.enter();
 		vi.advanceTimersByTime(400);
-		expect(api.pipResize).toHaveBeenCalledWith(480, 270 + PIP_BAR_H);
+		expect(api.pipResize).toHaveBeenCalledWith(480, 270 + PIP_BAR_H, false);
 	});
 
 	it('a click activates (the click itself never reaches the session) and keeps it grown', async () => {
@@ -105,6 +105,21 @@ describe('picture-in-picture window (issue #18)', () => {
 		await vi.advanceTimersByTimeAsync(600);
 		expect(deps.restore).toHaveBeenCalledOnce();
 		expect(deps.takeControl).not.toHaveBeenCalled();
+	});
+
+	it('a grown PiP shrinks around the pointer as the drag starts, and does not regrow meanwhile', async () => {
+		const { pw } = make();
+		pw.enter();
+		vi.advanceTimersByTime(400);
+		expect(pw.grown).toBe(true);
+		vi.mocked(api.pipResize).mockClear();
+		pw.down(press(10, 10));
+		pw.move(press(40, 10));
+		expect(pw.grown).toBe(false);
+		expect(api.pipResize).toHaveBeenCalledWith(480, 270, true);
+		pw.enter();
+		vi.advanceTimersByTime(1000);
+		expect(pw.grown).toBe(false);
 	});
 
 	it('a press that moves is a drag, not a click', async () => {

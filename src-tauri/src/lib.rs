@@ -712,6 +712,9 @@ pub fn run() {
 			// frontend, which tracks the video AREA, not the whole window.
 			#[cfg(windows)]
 			WindowEvent::Resized(_) => {
+				if pip::is_pip_window(window.label()) {
+					pip::note_resized(window);
+				}
 				if tabwin::is_session_window(window.label()) && window.is_fullscreen().unwrap_or(false) {
 					if let Ok(h) = window.hwnd() {
 						unsafe { crate::io_cmds::fill_children_to_client(h.0 as _) };
@@ -723,6 +726,14 @@ pub fn run() {
 			// arm no longer manages fullscreen z-order - it only tracks per-window focus below.
 			WindowEvent::Moved(_) if tabwin::is_tab_window(window.label()) => {
 				tabwin::note_moved(window.app_handle(), window.label());
+			}
+			// A picture-in-picture window the user dragged / resized: its record follows (pip.rs).
+			WindowEvent::Moved(_) if pip::is_pip_window(window.label()) => {
+				pip::note_moved(window);
+			}
+			#[cfg(not(windows))]
+			WindowEvent::Resized(_) if pip::is_pip_window(window.label()) => {
+				pip::note_resized(window);
 			}
 			WindowEvent::ScaleFactorChanged { scale_factor, .. } if window.label() == "main" => {
 				#[cfg(windows)]
