@@ -684,13 +684,20 @@
 	.tx {
 		display: grid;
 		place-items: center;
+		flex: none;
 		width: 18px;
 		height: 18px;
+		/* No UA button padding: it narrowed the 18 px box and pushed the icon off its hover
+		   background. */
+		padding: 0;
 		border: none;
 		border-radius: 5px;
 		background: transparent;
 		color: var(--text-faint);
 		cursor: pointer;
+	}
+	.tx :global(svg) {
+		display: block;
 	}
 	.tx:hover {
 		background: var(--surface-3);
