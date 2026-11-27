@@ -3919,31 +3919,40 @@ pub fn draw_hud(ctx: &egui::Context, st: &OverlayState) {
 		Some(j) => format!("{:.0} ms {j}", st.latency_ms),
 		None => format!("{:.0} ms", st.latency_ms),
 	};
+	let text = format!(
+		"{codec} · {:.0} fps · {latency} · {} {:.1} ms · {bw} Mbps",
+		st.fps,
+		t("hud.decode"),
+		st.decode_ms
+	);
+	let color = egui::Color32::from_rgb(180, 220, 240);
+	// Its natural width (12 pt text + margins), measured; then the scale for this window.
+	let natural = ctx.fonts_mut(|f| f.layout_no_wrap(text.clone(), egui::FontId::monospace(12.0), color).size().x) + 20.0;
+	let k = hud_scale(ctx.viewport_rect().width(), natural, pip_on());
 	egui::Area::new(egui::Id::unique("pulsar_hud"))
 		.order(egui::Order::Foreground)
-		.anchor(egui::Align2::RIGHT_TOP, egui::vec2(-10.0, 10.0))
+		.anchor(egui::Align2::RIGHT_TOP, egui::vec2(-10.0 * k, 10.0 * k))
 		.show(ctx, |ui| {
 			egui::Frame::NONE
 				.fill(egui::Color32::from_rgba_premultiplied(10, 11, 16, 200))
-				.corner_radius(6.0)
-				.inner_margin(egui::Margin::symmetric(10, 6))
+				.corner_radius(6.0 * k)
+				.inner_margin(egui::Margin::symmetric((10.0 * k).round() as i8, (6.0 * k).round() as i8))
 				.show(ui, |ui| {
 					ui.add(
-						egui::Label::new(
-							egui::RichText::new(format!(
-								"{codec} · {:.0} fps · {latency} · {} {:.1} ms · {bw} Mbps",
-								st.fps,
-								t("hud.decode"),
-								st.decode_ms
-							))
-							.monospace()
-							.size(12.0)
-							.color(egui::Color32::from_rgb(180, 220, 240)),
-						)
-						.wrap_mode(egui::TextWrapMode::Extend),
+						egui::Label::new(egui::RichText::new(text).monospace().size(12.0 * k).color(color))
+							.wrap_mode(egui::TextWrapMode::Extend),
 					);
 				});
 		});
+}
+
+/// The stats HUD's scale on a surface `width` pt wide, its natural width `natural` pt: in a
+/// picture-in-picture window it follows the window (full size from 900 pt down to 45 %), and it
+/// always shrinks to fit (10 pt from each side) instead of running off the window.
+fn hud_scale(width: f32, natural: f32, pip: bool) -> f32 {
+	let fit = ((width - 20.0) / natural.max(1.0)).min(1.0);
+	let k = if pip { (width / 900.0).min(1.0) } else { 1.0 };
+	k.min(fit).max(0.45)
 }
 
 /// Default overlay-open button offset from the top-left, in egui points (the webview
@@ -5049,6 +5058,19 @@ mod rows_tests {
 		for (_, _, v) in categories(Mode::Game) {
 			assert!(has_rows(*v), "every game-mode section is made of rows");
 		}
+	}
+
+	#[test]
+	fn the_stats_hud_follows_a_pip_window() {
+		// A normal window keeps it at full size while it fits.
+		assert_eq!(hud_scale(1600.0, 430.0, false), 1.0);
+		// A PiP follows its width…
+		assert!((hud_scale(600.0, 430.0, true) - 0.666).abs() < 0.01);
+		// …never below 45 %.
+		assert_eq!(hud_scale(300.0, 430.0, true), 0.45);
+		assert_eq!(hud_scale(120.0, 430.0, true), 0.45);
+		// A too narrow normal window shrinks it to fit as well.
+		assert!(hud_scale(400.0, 430.0, false) < 1.0);
 	}
 
 	#[test]
