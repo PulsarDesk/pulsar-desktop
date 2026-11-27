@@ -281,6 +281,22 @@ pub(crate) async fn pip_open(
 	set_geom(&label, Geom { pos: (x * scale, y * scale), asked: (w, h) });
 	if let Some(pw) = app.get_webview_window(&label) {
 		let _ = snap_now(&app, &pw);
+		// GTK builds a frameless window ~37 px taller than asked and ignores a resize until the
+		// window is on screen: give it its asked size (and corner) again once it is.
+		let (app2, pw2) = (app.clone(), pw.clone());
+		tauri::async_runtime::spawn(async move {
+			tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+			let p = pw2.clone();
+			let _ = pw2.run_on_main_thread(move || {
+				let _ = p.set_size(tauri::LogicalSize::new(w, h));
+			});
+			// The move in its own step: GTK drops one that races the resize.
+			tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+			let (a, p) = (app2.clone(), pw2.clone());
+			let _ = pw2.run_on_main_thread(move || {
+				let _ = snap_now(&a, &p);
+			});
+		});
 	}
 	crate::tabwin::move_video(&app, play, &label);
 	push_line(&app, play);
